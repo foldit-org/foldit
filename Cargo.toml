@@ -1,0 +1,40 @@
+[package]
+name = "foldit-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML"
+
+[dependencies]
+# Local dependencies
+foldit-render = { path = "../foldit-render" }
+
+# foldit-ml as embedded library (orchestrator spawns worker processes, no pyo3 needed here)
+foldit-ml = { path = "../foldit/rosetta-interactive/source/foldit_external/foldit-ml", default-features = false }
+
+# COORDS format conversion library
+foldit-conv = { git = "https://github.com/petridecus/foldit-conv" }
+
+# Async for background ML tasks
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+
+# Core
+glam = "0.30"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+wgpu = "28"
+
+# Direct mmCIF parsing for atom names and residue info
+pdbtbx = "0.12"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+
+# HTTP client for downloading from RCSB
+reqwest = { version = "0.11", features = ["blocking"] }
+
+[features]
+default = []
+# Enable when foldit-ml is available and compiles
+# ml = ["foldit-ml"]
