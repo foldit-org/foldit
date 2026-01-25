@@ -1,0 +1,9 @@
+[submodule "crates/foldit-ml"]
+	path = crates/foldit-ml
+	url = https://github.com/petridecus/foldit-ml
+[submodule "crates/foldit-render"]
+	path = crates/foldit-render
+	url = https://github.com/petridecus/foldit-render
+[submodule "crates/foldit-conv"]
+	path = crates/foldit-conv
+	url = https://github.com/petridecus/foldit-conv
