@@ -72,6 +72,9 @@ pub struct Structure {
     /// Multiple chains, each is a sequence of N-CA-C positions
     pub backbone_chains: Vec<Vec<Vec3>>,
 
+    /// Chain IDs for each backbone chain (parallel to backbone_chains)
+    pub backbone_chain_ids: Vec<u8>,
+
     /// Sidechain atoms (for sphere rendering)
     pub sidechain_atoms: Vec<Atom>,
 
@@ -81,8 +84,11 @@ pub struct Structure {
     /// Bonds connecting backbone CA to sidechain CB
     pub backbone_sidechain_bonds: Vec<BackboneSidechainBond>,
 
-    /// Amino acid sequence
+    /// Amino acid sequence (concatenation of all chains)
     pub sequence: String,
+
+    /// Per-chain sequences: (chain_id, sequence)
+    pub chain_sequences: Vec<(u8, String)>,
 
     /// Whether this structure is visible
     pub visible: bool,
@@ -99,10 +105,12 @@ impl Structure {
             name: name.into(),
             source: StructureSource::Manual,
             backbone_chains: Vec::new(),
+            backbone_chain_ids: Vec::new(),
             sidechain_atoms: Vec::new(),
             sidechain_bonds: Vec::new(),
             backbone_sidechain_bonds: Vec::new(),
             sequence: String::new(),
+            chain_sequences: Vec::new(),
             visible: true,
             coords_bytes: None,
         }
@@ -215,9 +223,13 @@ impl Structure {
             std::collections::HashMap::new();
 
         let mut current_chain: Vec<Vec3> = Vec::new();
+        let mut current_chain_id: Option<u8> = None;
         let mut last_chain_id: Option<u8> = None;
         let mut last_res_num: Option<i32> = None;
-        let mut sequence_chars: Vec<char> = Vec::new();
+
+        // Track per-chain sequences
+        let mut current_chain_seq: String = String::new();
+        let mut all_sequence_chars: Vec<char> = Vec::new();
 
         for i in 0..coords.num_atoms {
             let atom_name = std::str::from_utf8(&coords.atom_names[i])
@@ -236,24 +248,31 @@ impl Structure {
             let is_sequence_gap = last_res_num.map_or(false, |r| (res_num - r).abs() > 1);
 
             if (is_chain_break || is_sequence_gap) && !current_chain.is_empty() {
+                // Save current chain
                 structure.backbone_chains.push(std::mem::take(&mut current_chain));
+                if let Some(cid) = current_chain_id {
+                    structure.backbone_chain_ids.push(cid);
+                    if !current_chain_seq.is_empty() {
+                        structure.chain_sequences.push((cid, std::mem::take(&mut current_chain_seq)));
+                    }
+                }
+                current_chain_id = None;
             }
 
             // Track CA for sequence extraction (one per residue)
             if atom_name == "CA" {
                 if last_res_num != Some(res_num) || last_chain_id != Some(chain_id) {
-                    sequence_chars.push(three_to_one(res_name));
+                    let aa = three_to_one(res_name);
+                    current_chain_seq.push(aa);
+                    all_sequence_chars.push(aa);
                 }
             }
 
             // Backbone atoms go to chains (N, CA, C - skip O for spline)
             if atom_name == "N" || atom_name == "CA" || atom_name == "C" {
                 current_chain.push(pos);
-
-                // Track CA position for CA-CB bonds
-                if atom_name == "CA" {
-                    // Look for CB in subsequent atoms of same residue
-                    // (we'll link them after processing all atoms)
+                if current_chain_id.is_none() {
+                    current_chain_id = Some(chain_id);
                 }
             } else if atom_name != "O" {
                 // Skip hydrogen atoms (H, HA, HB, 1H, 2H, etc.)
@@ -267,6 +286,17 @@ impl Structure {
                 if !is_hydrogen {
                     // Sidechain atom (heavy atoms only)
                     let sidechain_idx = structure.sidechain_atoms.len();
+                    // Debug: log first few sidechain atom names
+                    if sidechain_idx < 15 {
+                        log::info!(
+                            "Sidechain atom {}: chain={}, res={}, name='{}' (bytes: {:?})",
+                            sidechain_idx,
+                            chain_id as char,
+                            res_num,
+                            atom_name,
+                            atom_name.as_bytes()
+                        );
+                    }
                     atom_index_map.insert((chain_id, res_num, atom_name.clone()), sidechain_idx);
 
                     structure.sidechain_atoms.push(Atom {
@@ -288,12 +318,34 @@ impl Structure {
         // Don't forget the last chain
         if !current_chain.is_empty() {
             structure.backbone_chains.push(current_chain);
+            if let Some(cid) = current_chain_id {
+                structure.backbone_chain_ids.push(cid);
+                if !current_chain_seq.is_empty() {
+                    structure.chain_sequences.push((cid, current_chain_seq));
+                }
+            }
         }
 
-        structure.sequence = sequence_chars.into_iter().collect();
+        structure.sequence = all_sequence_chars.into_iter().collect();
 
         // Generate sidechain bonds from topology
         // First, build reverse lookup for residue info
+        // Debug: log first few atom names in the map
+        let mut debug_count = 0;
+        for ((cid, rnum, aname), idx) in &atom_index_map {
+            if debug_count < 10 {
+                log::debug!(
+                    "atom_index_map: chain={}, res={}, atom='{}' -> idx={}",
+                    *cid as char, rnum, aname, idx
+                );
+                debug_count += 1;
+            }
+        }
+
+        let mut bonds_attempted = 0;
+        let mut bonds_found = 0;
+        let mut ca_found = 0;
+        let mut first_atoms_logged = 0;
         for i in 0..coords.num_atoms {
             let atom_name = std::str::from_utf8(&coords.atom_names[i])
                 .unwrap_or("")
@@ -305,16 +357,28 @@ impl Structure {
                 .unwrap_or("UNK")
                 .trim();
 
+            // Debug: log first few atoms from coords to see what we're iterating
+            if first_atoms_logged < 10 {
+                log::info!(
+                    "Bond loop atom {}: name='{}', res={}, res_name='{}'",
+                    i, atom_name, res_num, res_name
+                );
+                first_atoms_logged += 1;
+            }
+
             // Generate bonds for this residue's topology
             if atom_name == "CA" {
+                ca_found += 1;
                 if let Some(bonds) = get_residue_bonds(res_name) {
                     for (a1, a2) in bonds {
+                        bonds_attempted += 1;
                         let key1 = (chain_id, res_num, a1.to_string());
                         let key2 = (chain_id, res_num, a2.to_string());
 
                         if let (Some(&idx1), Some(&idx2)) =
                             (atom_index_map.get(&key1), atom_index_map.get(&key2))
                         {
+                            bonds_found += 1;
                             structure.sidechain_bonds.push(Bond {
                                 atom_a: idx1 as u32,
                                 atom_b: idx2 as u32,
@@ -334,6 +398,10 @@ impl Structure {
                 }
             }
         }
+        log::info!(
+            "Bond generation: found {} CA atoms, attempted {} bonds, found {} matches",
+            ca_found, bonds_attempted, bonds_found
+        );
 
         structure.source = StructureSource::MLPredict {
             sequence: structure.sequence.clone(),
@@ -468,6 +536,7 @@ impl Structure {
         structure.source = StructureSource::File { path };
 
         let mut current_segment: Vec<Vec3> = Vec::new();
+        let mut current_segment_chain_id: Option<u8> = None;
         let mut prev_c_pos: Option<Vec3> = None;
         let mut prev_res_serial: Option<isize> = None;
 
@@ -485,6 +554,9 @@ impl Structure {
             let chain_id = chain.id().to_string();
             let chain_id_byte = chain_id.as_bytes().first().copied().unwrap_or(b'A');
 
+            // Track per-chain sequence
+            let mut this_chain_seq = String::new();
+
             for residue in chain.residues() {
                 let res_serial = residue.serial_number();
                 let res_name = residue.name().unwrap_or("UNK");
@@ -495,14 +567,6 @@ impl Structure {
                 for (i, c) in res_name.bytes().take(3).enumerate() {
                     res_name_bytes[i] = c;
                 }
-
-                // Add to sequence
-                structure.sequence.push(three_to_one(res_name));
-
-                let mut n_pos: Option<Vec3> = None;
-                let mut ca_pos: Option<Vec3> = None;
-                let mut c_pos: Option<Vec3> = None;
-                let mut cb_idx: Option<usize> = None;
 
                 // Skip non-protein residues (water, ligands, etc.)
                 let is_water = matches!(res_name, "HOH" | "WAT" | "TP3" | "TIP" | "SOL");
@@ -515,6 +579,16 @@ impl Structure {
                 if is_water || !is_standard_aa {
                     continue;
                 }
+
+                // Add to sequence (both global and per-chain)
+                let aa_char = three_to_one(res_name);
+                structure.sequence.push(aa_char);
+                this_chain_seq.push(aa_char);
+
+                let mut n_pos: Option<Vec3> = None;
+                let mut ca_pos: Option<Vec3> = None;
+                let mut c_pos: Option<Vec3> = None;
+                let mut cb_idx: Option<usize> = None;
 
                 for atom in residue.atoms() {
                     let atom_name = atom.name().trim().to_string();
@@ -594,14 +668,18 @@ impl Structure {
                 };
 
                 if (is_chain_break || has_sequence_gap) && !current_segment.is_empty() {
-                    structure
-                        .backbone_chains
-                        .push(std::mem::take(&mut current_segment));
+                    structure.backbone_chains.push(std::mem::take(&mut current_segment));
+                    if let Some(cid) = current_segment_chain_id.take() {
+                        structure.backbone_chain_ids.push(cid);
+                    }
                 }
 
                 // Add backbone atoms
                 if let Some(n) = n_pos {
                     current_segment.push(n);
+                    if current_segment_chain_id.is_none() {
+                        current_segment_chain_id = Some(chain_id_byte);
+                    }
                 }
                 if let Some(ca) = ca_pos {
                     current_segment.push(ca);
@@ -624,11 +702,17 @@ impl Structure {
                 prev_res_serial = Some(res_serial);
             }
 
-            // Save last segment
+            // Save last segment for this chain
             if !current_segment.is_empty() {
-                structure
-                    .backbone_chains
-                    .push(std::mem::take(&mut current_segment));
+                structure.backbone_chains.push(std::mem::take(&mut current_segment));
+                if let Some(cid) = current_segment_chain_id.take() {
+                    structure.backbone_chain_ids.push(cid);
+                }
+            }
+
+            // Save chain sequence
+            if !this_chain_seq.is_empty() {
+                structure.chain_sequences.push((chain_id_byte, this_chain_seq));
             }
         }
 

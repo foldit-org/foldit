@@ -1,30 +1,33 @@
 [workspace]
-name = "foldit-ml-render"
+name = "foldit-rs"
 version = "0.1.0"
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64", "win-64"]
 
 [tasks]
 # Build foldit-ml and create its bundle
-build-ml-bundle = { cmd = "pixi run --environment foundry bundle", cwd = "../foldit/rosetta-interactive/source/foldit_external/foldit-ml" }
+build-ml-bundle = { cmd = "pixi run --environment foundry bundle", cwd = "crates/foldit-ml" }
 
 # Pull the bundle into this project
-pull-bundle = { depends-on = ["build-ml-bundle"], cmd = "rm -rf bundle && cp -r ../foldit/rosetta-interactive/source/foldit_external/foldit-ml/bundle ." }
+pull-bundle = { depends-on = ["build-ml-bundle"], cmd = "rm -rf bundle && cp -r crates/foldit-ml/bundle ." }
+
+# Copy worker binary from workspace target (cargo outputs here in workspace mode)
+copy-ml-worker = { depends-on = ["pull-bundle"], cmd = "cp target/release/foldit-ml-worker bundle/" }
 
 # Build rosetta-interactive FFI library
 build-rosetta = { cmd = "ROSETTA_SOURCE=$HOME/rosetta/source zig build --release=fast", cwd = "rosetta-interacitve" }
 
 # Copy rosetta libraries to bundle
-copy-rosetta = { depends-on = ["pull-bundle", "build-rosetta"], cmd = "cp rosetta-interacitve/zig-out/lib/librosetta_interactive.dylib bundle/ && cp rosetta-interacitve/lib/*.dylib bundle/" }
+copy-rosetta = { depends-on = ["copy-ml-worker", "build-rosetta"], cmd = "cp rosetta-interacitve/zig-out/lib/librosetta_interactive.dylib bundle/ && cp rosetta-interacitve/lib/*.dylib bundle/" }
 
 # Copy rosetta database to bundle (large, ~1.8GB)
-copy-rosetta-db = { depends-on = ["pull-bundle"], cmd = "rm -rf bundle/rosetta_database && cp -r $HOME/rosetta/database bundle/rosetta_database" }
+copy-rosetta-db = { depends-on = ["copy-ml-worker"], cmd = "rm -rf bundle/rosetta_database && cp -r $HOME/rosetta/database bundle/rosetta_database" }
 
 # Build this app
 build = "cargo build --release"
 
 # Full setup: pull bundle + build app + copy binary and rosetta libs into bundle
-setup = { depends-on = ["copy-rosetta", "copy-rosetta-db", "build"], cmd = "cp target/release/foldit-ml-render bundle/" }
+setup = { depends-on = ["copy-rosetta", "copy-rosetta-db", "build"], cmd = "cp target/release/foldit-rs bundle/" }
 
 # Run from the bundle directory
-run = { depends-on = ["setup"], cmd = "./bundle/foldit-ml-render" }
+run = { depends-on = ["setup"], cmd = "./bundle/foldit-rs" }

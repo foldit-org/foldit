@@ -9,6 +9,7 @@
 //!   P - Predict (SimpleFold structure prediction)
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
+//!   V - Toggle view mode (tube/ribbon)
 //!   H - Toggle visibility of designed structures
 //!   Delete - Remove last added structure
 //!   Esc - Cancel current operation
@@ -18,6 +19,7 @@ use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
 use foldit_rs::rosetta_runner::{RosettaRunner, RosettaUpdate};
 use foldit_rs::scene::{Scene, Structure, StructureId};
 use foldit_rs::visual_effects::VisualEffect;
+use foldit_conv::coords::{deserialize_coords_internal, serialize_coords};
 use glam::Vec3;
 
 use foldit_render::engine::ProteinRenderEngine;
@@ -44,6 +46,8 @@ struct App {
     rfd3_design_id: Option<StructureId>,
     /// Pending MPNN structure waiting for Rosetta to finish applying sequence
     mpnn_pending: bool,
+    /// Original backbone CA positions for Kabsch alignment
+    original_backbone_ca: Option<Vec<Vec3>>,
     ml_runner: Option<MLRunner>,
     ml_updates: Option<mpsc::Receiver<IntermediateUpdate>>,
     ml_results: Option<mpsc::Receiver<MLResult>>,
@@ -67,6 +71,7 @@ impl App {
             mpnn_structure_id: None,
             rfd3_design_id: None,
             mpnn_pending: false,
+            original_backbone_ca: None,
             ml_runner: None,
             ml_updates: None,
             ml_results: None,
@@ -128,7 +133,7 @@ impl App {
         }
     }
 
-    /// Update animation structure with intermediate ML positions
+    /// Update structure with intermediate ML positions
     fn update_animation_structure(&mut self, update: &IntermediateUpdate) {
         log::debug!(
             "update_animation_structure: step {}/{}, has_coords={}, backbone_positions={}",
@@ -138,50 +143,86 @@ impl App {
             update.backbone_positions.len()
         );
 
-        // Get backbone chains from either coords_bytes (SimpleFold) or backbone_positions (RFD3)
-        let backbone_chains = if let Some(ref coords_bytes) = update.coords_bytes {
-            // SimpleFold: extract backbone from full COORDS
-            Self::coords_to_backbone_chains(coords_bytes)
-        } else if !update.backbone_positions.is_empty() {
-            // RFD3: convert flat backbone positions
-            Self::positions_to_backbone_chains(&update.backbone_positions)
-        } else {
-            log::warn!("No coordinates in update, skipping");
-            return;
-        };
+        // SimpleFold: update full structure including sidechains, with scale correction
+        if let Some(ref coords_bytes) = update.coords_bytes {
+            if let Some(orig_id) = self.original_structure_id {
+                // Parse full structure first
+                match Structure::from_coords_bytes(
+                    format!("Predicting... ({}/{})", update.step, update.total_steps),
+                    coords_bytes,
+                    update.confidence,
+                ) {
+                    Ok(mut new_data) => {
+                        // Compute scale + alignment from CA positions
+                        if let Some(ref original_ca) = self.original_backbone_ca {
+                            let predicted_ca = Self::extract_ca_from_chains(&new_data.backbone_chains);
+                            if let Some((rotation, translation, scale)) = Self::kabsch_alignment_with_scale(original_ca, &predicted_ca) {
+                                // Apply scale, rotation, translation to backbone
+                                for chain in &mut new_data.backbone_chains {
+                                    for pos in chain.iter_mut() {
+                                        *pos = rotation * (*pos * scale) + translation;
+                                    }
+                                }
+                                // Apply to sidechain atoms
+                                for atom in &mut new_data.sidechain_atoms {
+                                    atom.position = rotation * (atom.position * scale) + translation;
+                                }
+                                // Apply to backbone-sidechain bond CA positions
+                                for bond in &mut new_data.backbone_sidechain_bonds {
+                                    bond.ca_position = rotation * (bond.ca_position * scale) + translation;
+                                }
+                                log::debug!("Applied Kabsch+scale ({:.3}) for frame {}", scale, update.step);
+                            }
+                        }
 
-        log::debug!(
-            "Converted to {} chains, first chain has {} points",
-            backbone_chains.len(),
-            backbone_chains.first().map(|c| c.len()).unwrap_or(0)
-        );
-
-        if backbone_chains.is_empty() || backbone_chains[0].is_empty() {
-            log::warn!("Empty backbone chains, skipping update");
-            return;
-        }
-
-        // Create or update the animation structure
-        if let Some(anim_id) = self.animation_structure_id {
-            // Update existing animation structure
-            if let Some(structure) = self.scene.get_mut(anim_id) {
-                structure.backbone_chains = backbone_chains;
-                structure.name = format!("Predicting... ({}/{})", update.step, update.total_steps);
-                log::info!("Updated animation frame {}/{}", update.step, update.total_steps);
+                        if let Some(structure) = self.scene.get_mut(orig_id) {
+                            structure.backbone_chains = new_data.backbone_chains;
+                            structure.sidechain_atoms = new_data.sidechain_atoms;
+                            structure.sidechain_bonds = new_data.sidechain_bonds;
+                            structure.backbone_sidechain_bonds = new_data.backbone_sidechain_bonds;
+                            structure.name = new_data.name;
+                            log::info!("Updated frame {}/{} ({} sidechains)",
+                                update.step, update.total_steps, structure.sidechain_atoms.len());
+                        }
+                        self.scene_dirty = true;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse intermediate: {}", e);
+                    }
+                }
             }
-        } else {
-            // Create new animation structure
-            let structure = Structure::from_backbone_design(
-                format!("Predicting... ({}/{})", update.step, update.total_steps),
-                backbone_chains,
-                update.confidence,
-            );
-            let id = self.scene.add(structure);
-            self.animation_structure_id = Some(id);
-            log::info!("Created animation structure {:?}", id);
+            return;
         }
 
-        self.scene_dirty = true;
+        // RFD3: uses backbone_positions and needs animation structure (new design)
+        if !update.backbone_positions.is_empty() {
+            let backbone_chains = Self::positions_to_backbone_chains(&update.backbone_positions);
+            if backbone_chains.is_empty() || backbone_chains[0].is_empty() {
+                log::warn!("Empty backbone chains, skipping update");
+                return;
+            }
+
+            if let Some(anim_id) = self.animation_structure_id {
+                if let Some(structure) = self.scene.get_mut(anim_id) {
+                    structure.backbone_chains = backbone_chains;
+                    structure.name = format!("Designing... ({}/{})", update.step, update.total_steps);
+                    log::info!("Updated animation frame {}/{}", update.step, update.total_steps);
+                }
+            } else {
+                let structure = Structure::from_backbone_design(
+                    format!("Designing... ({}/{})", update.step, update.total_steps),
+                    backbone_chains,
+                    update.confidence,
+                );
+                let id = self.scene.add(structure);
+                self.animation_structure_id = Some(id);
+                log::info!("Created animation structure {:?}", id);
+            }
+            self.scene_dirty = true;
+            return;
+        }
+
+        log::warn!("No coordinates in update, skipping");
     }
 
     /// Extract backbone chains from COORDS bytes (for SimpleFold intermediates)
@@ -238,6 +279,258 @@ impl App {
         chains
     }
 
+    /// Extract CA positions from COORDS bytes for Kabsch alignment
+    fn extract_ca_positions(coords_bytes: &[u8]) -> Vec<Vec3> {
+        use foldit_conv::coords::binary::deserialize;
+
+        let coords = match deserialize(coords_bytes) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let mut ca_positions = Vec::new();
+        for i in 0..coords.num_atoms {
+            let atom_name = std::str::from_utf8(&coords.atom_names[i])
+                .unwrap_or("")
+                .trim();
+            if atom_name == "CA" {
+                ca_positions.push(Vec3::new(
+                    coords.atoms[i].x,
+                    coords.atoms[i].y,
+                    coords.atoms[i].z,
+                ));
+            }
+        }
+        ca_positions
+    }
+
+    /// Extract CA positions from backbone chains (every 2nd element if N-CA-C pattern)
+    fn extract_ca_from_chains(chains: &[Vec<Vec3>]) -> Vec<Vec3> {
+        let mut ca_positions = Vec::new();
+        for chain in chains {
+            // Backbone chains are N-CA-C pattern, so CA is every 3rd atom starting at index 1
+            for (i, pos) in chain.iter().enumerate() {
+                if i % 3 == 1 {
+                    // CA position
+                    ca_positions.push(*pos);
+                }
+            }
+        }
+        ca_positions
+    }
+
+    /// Compute centroid of a point set
+    fn centroid(points: &[Vec3]) -> Vec3 {
+        if points.is_empty() {
+            return Vec3::ZERO;
+        }
+        let sum: Vec3 = points.iter().copied().sum();
+        sum / points.len() as f32
+    }
+
+    /// Kabsch algorithm: find optimal rotation and translation to align target to reference
+    /// Returns (rotation_matrix, translation) such that: aligned = rotation * target + translation
+    fn kabsch_alignment(reference: &[Vec3], target: &[Vec3]) -> Option<(glam::Mat3, Vec3)> {
+        use glam::Mat3;
+
+        if reference.len() != target.len() || reference.len() < 3 {
+            return None;
+        }
+
+        // 1. Center both point sets
+        let ref_centroid = Self::centroid(reference);
+        let tgt_centroid = Self::centroid(target);
+
+        let ref_centered: Vec<Vec3> = reference.iter().map(|p| *p - ref_centroid).collect();
+        let tgt_centered: Vec<Vec3> = target.iter().map(|p| *p - tgt_centroid).collect();
+
+        // 2. Compute covariance matrix H = sum(tgt * ref^T)
+        // H[i][j] = sum_k(tgt_centered[k][i] * ref_centered[k][j])
+        let mut h = [[0.0f32; 3]; 3];
+        for k in 0..reference.len() {
+            let t = tgt_centered[k];
+            let r = ref_centered[k];
+            for i in 0..3 {
+                for j in 0..3 {
+                    h[i][j] += t[i] * r[j];
+                }
+            }
+        }
+
+        // 3. SVD: H = U * S * V^T
+        // Using simple Jacobi iteration for SVD of 3x3 matrix
+        let (u, _s, v) = svd_3x3(h);
+
+        // 4. Rotation R = V * U^T
+        let u_mat = Mat3::from_cols(
+            Vec3::new(u[0][0], u[1][0], u[2][0]),
+            Vec3::new(u[0][1], u[1][1], u[2][1]),
+            Vec3::new(u[0][2], u[1][2], u[2][2]),
+        );
+        let v_mat = Mat3::from_cols(
+            Vec3::new(v[0][0], v[1][0], v[2][0]),
+            Vec3::new(v[0][1], v[1][1], v[2][1]),
+            Vec3::new(v[0][2], v[1][2], v[2][2]),
+        );
+
+        let mut rotation = v_mat * u_mat.transpose();
+
+        // Handle reflection (if det(R) < 0)
+        if rotation.determinant() < 0.0 {
+            // Flip the sign of the third column of V
+            let v_flipped = Mat3::from_cols(
+                v_mat.col(0),
+                v_mat.col(1),
+                -v_mat.col(2),
+            );
+            rotation = v_flipped * u_mat.transpose();
+        }
+
+        // 5. Translation t = ref_centroid - R * tgt_centroid
+        let translation = ref_centroid - rotation * tgt_centroid;
+
+        Some((rotation, translation))
+    }
+
+    /// Kabsch-Umeyama algorithm: find optimal rotation, translation, AND SCALE
+    /// Returns (rotation_matrix, translation, scale) such that: aligned = rotation * (target * scale) + translation
+    fn kabsch_alignment_with_scale(reference: &[Vec3], target: &[Vec3]) -> Option<(glam::Mat3, Vec3, f32)> {
+        use glam::Mat3;
+
+        if reference.len() != target.len() || reference.len() < 3 {
+            return None;
+        }
+
+        // 1. Center both point sets
+        let ref_centroid = Self::centroid(reference);
+        let tgt_centroid = Self::centroid(target);
+
+        let ref_centered: Vec<Vec3> = reference.iter().map(|p| *p - ref_centroid).collect();
+        let tgt_centered: Vec<Vec3> = target.iter().map(|p| *p - tgt_centroid).collect();
+
+        // 2. Compute variances for scale estimation
+        let ref_var: f32 = ref_centered.iter().map(|p| p.length_squared()).sum::<f32>() / reference.len() as f32;
+        let tgt_var: f32 = tgt_centered.iter().map(|p| p.length_squared()).sum::<f32>() / target.len() as f32;
+
+        // Avoid division by zero
+        if tgt_var < 1e-10 {
+            return None;
+        }
+
+        // 3. Compute covariance matrix H = sum(tgt * ref^T)
+        let mut h = [[0.0f32; 3]; 3];
+        for k in 0..reference.len() {
+            let t = tgt_centered[k];
+            let r = ref_centered[k];
+            for i in 0..3 {
+                for j in 0..3 {
+                    h[i][j] += t[i] * r[j];
+                }
+            }
+        }
+
+        // 4. SVD: H = U * S * V^T
+        let (u, s, v) = svd_3x3(h);
+
+        // 5. Rotation R = V * U^T
+        let u_mat = Mat3::from_cols(
+            Vec3::new(u[0][0], u[1][0], u[2][0]),
+            Vec3::new(u[0][1], u[1][1], u[2][1]),
+            Vec3::new(u[0][2], u[1][2], u[2][2]),
+        );
+        let v_mat = Mat3::from_cols(
+            Vec3::new(v[0][0], v[1][0], v[2][0]),
+            Vec3::new(v[0][1], v[1][1], v[2][1]),
+            Vec3::new(v[0][2], v[1][2], v[2][2]),
+        );
+
+        let mut rotation = v_mat * u_mat.transpose();
+        let mut sign = 1.0f32;
+
+        // Handle reflection (if det(R) < 0)
+        if rotation.determinant() < 0.0 {
+            let v_flipped = Mat3::from_cols(
+                v_mat.col(0),
+                v_mat.col(1),
+                -v_mat.col(2),
+            );
+            rotation = v_flipped * u_mat.transpose();
+            sign = -1.0;
+        }
+
+        // 6. Compute optimal scale: c = trace(S * D) / var(target)
+        // where D = diag(1, 1, sign)
+        let trace_sd = s[0] + s[1] + sign * s[2];
+        let scale = trace_sd / (tgt_var * reference.len() as f32);
+
+        // Clamp scale to reasonable range (0.1x to 10x)
+        let scale = scale.clamp(0.1, 10.0);
+
+        // 7. Translation t = ref_centroid - scale * R * tgt_centroid
+        let translation = ref_centroid - scale * (rotation * tgt_centroid);
+
+        Some((rotation, translation, scale))
+    }
+
+    /// Apply rotation and translation to backbone chains
+    fn apply_transform_to_chains(
+        chains: &mut [Vec<Vec3>],
+        rotation: glam::Mat3,
+        translation: Vec3,
+    ) {
+        for chain in chains.iter_mut() {
+            for pos in chain.iter_mut() {
+                *pos = rotation * *pos + translation;
+            }
+        }
+    }
+
+    /// Align coords_bytes to match original CA positions using Kabsch algorithm.
+    /// This transforms ALL atoms in the COORDS data, ensuring coords_bytes and
+    /// visual representation stay in sync.
+    fn align_coords_bytes(coords_bytes: &[u8], original_ca: &[Vec3]) -> Result<Vec<u8>, String> {
+        // Deserialize the COORDS
+        let mut coords = deserialize_coords_internal(coords_bytes)
+            .map_err(|e| format!("Failed to deserialize coords: {:?}", e))?;
+
+        // Extract CA positions from coords for alignment
+        let predicted_ca: Vec<Vec3> = coords.atoms.iter()
+            .zip(coords.atom_names.iter())
+            .filter_map(|(atom, name)| {
+                let name_str = std::str::from_utf8(name).ok()?.trim();
+                if name_str == "CA" {
+                    Some(Vec3::new(atom.x, atom.y, atom.z))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if predicted_ca.len() != original_ca.len() {
+            return Err(format!(
+                "CA count mismatch: original={}, predicted={}",
+                original_ca.len(), predicted_ca.len()
+            ));
+        }
+
+        // Compute Kabsch alignment
+        let (rotation, translation) = Self::kabsch_alignment(original_ca, &predicted_ca)
+            .ok_or_else(|| "Kabsch alignment failed".to_string())?;
+
+        // Apply transformation to ALL atoms in coords
+        for atom in &mut coords.atoms {
+            let pos = Vec3::new(atom.x, atom.y, atom.z);
+            let transformed = rotation * pos + translation;
+            atom.x = transformed.x;
+            atom.y = transformed.y;
+            atom.z = transformed.z;
+        }
+
+        // Re-serialize the aligned coords
+        serialize_coords(&coords)
+            .map_err(|e| format!("Failed to serialize aligned coords: {:?}", e))
+    }
+
     /// Process pending ML updates (non-blocking)
     fn process_ml_updates(&mut self) {
         // Collect intermediate updates first (to avoid borrow issues)
@@ -283,33 +576,60 @@ impl App {
                     MLResult::Predict { coords_bytes, confidence } => {
                         log::info!("Prediction complete! Confidence: {:.2}", confidence);
 
-                        // Create structure from COORDS (includes sidechains)
-                        match Structure::from_coords_bytes(
-                            format!("SimpleFold ({:.0}%)", confidence * 100.0),
-                            &coords_bytes,
-                            confidence,
-                        ) {
-                            Ok(structure) => {
-                                log::info!(
-                                    "Created predicted structure: {} residues, {} sidechain atoms",
-                                    structure.sequence.len(),
-                                    structure.sidechain_atoms.len()
-                                );
+                        // Remove animation structure if exists
+                        if let Some(anim_id) = self.animation_structure_id.take() {
+                            self.scene.remove(anim_id);
+                        }
 
-                                // Remove the animation structure if it exists (replace with final)
-                                if let Some(anim_id) = self.animation_structure_id.take() {
-                                    if self.scene.remove(anim_id).is_some() {
-                                        log::info!("Removed intermediate animation structure");
+                        // Update original structure in place with predicted coords
+                        if let Some(orig_id) = self.original_structure_id {
+                            // Apply Kabsch alignment to the raw COORDS before parsing
+                            // This ensures coords_bytes and visual representation are in sync
+                            let aligned_coords_bytes = if let Some(ref original_ca) = self.original_backbone_ca {
+                                match Self::align_coords_bytes(&coords_bytes, original_ca) {
+                                    Ok(aligned) => {
+                                        log::info!("Applied Kabsch alignment to COORDS data");
+                                        aligned
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Failed to align coords: {}, using original", e);
+                                        coords_bytes.clone()
                                     }
                                 }
+                            } else {
+                                coords_bytes.clone()
+                            };
 
-                                // Add the predicted structure
-                                let id = self.scene.add(structure);
-                                log::info!("Added predicted structure {:?} to scene", id);
-                                self.scene_dirty = true;
-                            }
-                            Err(e) => {
-                                log::error!("Failed to create structure from prediction: {}", e);
+                            match Structure::from_coords_bytes(
+                                format!("SimpleFold ({:.0}%)", confidence * 100.0),
+                                &aligned_coords_bytes,
+                                confidence,
+                            ) {
+                                Ok(new_data) => {
+                                    if let Some(structure) = self.scene.get_mut(orig_id) {
+                                        structure.name = new_data.name;
+                                        structure.backbone_chains = new_data.backbone_chains;
+                                        structure.sidechain_atoms = new_data.sidechain_atoms;
+                                        structure.sidechain_bonds = new_data.sidechain_bonds;
+                                        structure.backbone_sidechain_bonds = new_data.backbone_sidechain_bonds;
+                                        structure.sequence = new_data.sequence;
+                                        structure.coords_bytes = new_data.coords_bytes;
+                                        structure.visible = true;
+                                        log::info!(
+                                            "Updated structure with prediction: {} residues, {} sidechain atoms",
+                                            structure.sequence.len(),
+                                            structure.sidechain_atoms.len()
+                                        );
+                                    }
+                                    self.scene_dirty = true;
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to parse prediction: {}", e);
+                                    // Show original again on error
+                                    if let Some(structure) = self.scene.get_mut(orig_id) {
+                                        structure.visible = true;
+                                    }
+                                }
                             }
                         }
 
@@ -603,10 +923,10 @@ impl App {
             }
 
             KeyCode::KeyP => {
-                // SimpleFold: predict structure from sequence
-                let sequence = self.get_original_sequence();
-                if sequence.is_empty() {
-                    log::warn!("No sequence available");
+                // SimpleFold: predict structure from sequence (multi-chain aware)
+                let chains = self.get_structure_chains();
+                if chains.is_empty() {
+                    log::warn!("No sequence/chains available");
                     return;
                 }
 
@@ -618,13 +938,23 @@ impl App {
                     }
                 };
 
-                log::info!(
-                    "Starting SimpleFold prediction for {} residues...",
-                    sequence.len()
-                );
+                let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
+                if chains.len() == 1 {
+                    log::info!(
+                        "Starting SimpleFold prediction for {} residues...",
+                        total_residues
+                    );
+                } else {
+                    log::info!(
+                        "Starting SimpleFold prediction for {} chains ({} total residues)...",
+                        chains.len(),
+                        total_residues
+                    );
+                }
 
                 if let Err(e) = ml_runner.submit(MLTask::Predict {
-                    sequence,
+                    sequence: None,
+                    chains,
                     num_recycles: 3,
                 }) {
                     log::error!("Failed to submit prediction task: {}", e);
@@ -698,6 +1028,14 @@ impl App {
                 self.effect = VisualEffect::design_highlight(Vec::new());
             }
 
+            KeyCode::KeyV => {
+                // Toggle view mode (tube vs ribbon)
+                if let Some(engine) = &mut self.engine {
+                    engine.toggle_view_mode();
+                    log::info!("View mode: {:?}", engine.view_mode);
+                }
+            }
+
             KeyCode::KeyH => {
                 // Toggle visibility of designed structures (all except original)
                 let ids: Vec<StructureId> = self.scene.structure_ids().to_vec();
@@ -765,6 +1103,26 @@ impl App {
         }
         String::new()
     }
+
+    /// Get chains from the original structure for multi-chain prediction
+    /// Returns Vec<(chain_id, sequence)>
+    fn get_structure_chains(&self) -> Vec<(String, String)> {
+        if let Some(id) = self.original_structure_id {
+            if let Some(structure) = self.scene.get(id) {
+                if !structure.chain_sequences.is_empty() {
+                    return structure.chain_sequences
+                        .iter()
+                        .map(|(cid, seq)| (format!("{}", *cid as char), seq.clone()))
+                        .collect();
+                }
+                // Fallback: if no chain_sequences, use the full sequence as chain A
+                if !structure.sequence.is_empty() {
+                    return vec![("A".to_string(), structure.sequence.clone())];
+                }
+            }
+        }
+        vec![]
+    }
 }
 
 impl ApplicationHandler for App {
@@ -794,6 +1152,14 @@ impl ApplicationHandler for App {
                         structure.sidechain_atoms.len(),
                         structure.backbone_chains.len()
                     );
+
+                    // Store original CA positions for Kabsch alignment
+                    self.original_backbone_ca = Some(Self::extract_ca_from_chains(&structure.backbone_chains));
+                    log::info!(
+                        "Stored {} original CA positions for alignment",
+                        self.original_backbone_ca.as_ref().map(|v| v.len()).unwrap_or(0)
+                    );
+
                     let id = self.scene.add(structure);
                     self.original_structure_id = Some(id);
 
@@ -904,7 +1270,7 @@ impl ApplicationHandler for App {
 
                 if let Some(engine) = &mut self.engine {
                     engine.handle_mouse_move(delta_x, delta_y);
-                    engine.handle_mouse_position((position.x as f32, position.y as f32));
+                    // engine.handle_mouse_position((position.x as f32, position.y as f32));
                 }
 
                 self.last_mouse_pos = (position.x as f32, position.y as f32);
@@ -938,6 +1304,175 @@ impl ApplicationHandler for App {
             _ => (),
         }
     }
+}
+
+/// Simple SVD decomposition for 3x3 matrices using Jacobi iteration
+/// Returns (U, S, V) where A = U * diag(S) * V^T
+fn svd_3x3(a: [[f32; 3]; 3]) -> ([[f32; 3]; 3], [f32; 3], [[f32; 3]; 3]) {
+    // Compute A^T * A
+    let mut ata = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                ata[i][j] += a[k][i] * a[k][j];
+            }
+        }
+    }
+
+    // Find eigenvalues and eigenvectors of A^T * A using Jacobi iteration
+    let (eigenvalues, v) = jacobi_eigendecomposition(ata);
+
+    // Singular values are sqrt of eigenvalues
+    let s = [
+        eigenvalues[0].max(0.0).sqrt(),
+        eigenvalues[1].max(0.0).sqrt(),
+        eigenvalues[2].max(0.0).sqrt(),
+    ];
+
+    // Compute U = A * V * S^-1
+    let mut u = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            if s[j] > 1e-10 {
+                let mut sum = 0.0;
+                for k in 0..3 {
+                    sum += a[i][k] * v[k][j];
+                }
+                u[i][j] = sum / s[j];
+            }
+        }
+    }
+
+    // Orthonormalize U using Gram-Schmidt
+    orthonormalize(&mut u);
+
+    (u, s, v)
+}
+
+/// Jacobi eigendecomposition for symmetric 3x3 matrix
+fn jacobi_eigendecomposition(mut a: [[f32; 3]; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
+    let mut v = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        v[i][i] = 1.0;
+    }
+
+    const MAX_ITER: usize = 50;
+    for _ in 0..MAX_ITER {
+        // Find largest off-diagonal element
+        let mut max_val = 0.0f32;
+        let mut p = 0;
+        let mut q = 1;
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                if a[i][j].abs() > max_val {
+                    max_val = a[i][j].abs();
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if max_val < 1e-10 {
+            break;
+        }
+
+        // Compute rotation angle
+        let diff = a[q][q] - a[p][p];
+        let theta = if diff.abs() < 1e-10 {
+            std::f32::consts::FRAC_PI_4
+        } else {
+            0.5 * (2.0 * a[p][q] / diff).atan()
+        };
+
+        let c = theta.cos();
+        let s = theta.sin();
+
+        // Apply rotation to A
+        let mut new_a = a;
+        new_a[p][p] = c * c * a[p][p] - 2.0 * s * c * a[p][q] + s * s * a[q][q];
+        new_a[q][q] = s * s * a[p][p] + 2.0 * s * c * a[p][q] + c * c * a[q][q];
+        new_a[p][q] = 0.0;
+        new_a[q][p] = 0.0;
+
+        for i in 0..3 {
+            if i != p && i != q {
+                new_a[i][p] = c * a[i][p] - s * a[i][q];
+                new_a[p][i] = new_a[i][p];
+                new_a[i][q] = s * a[i][p] + c * a[i][q];
+                new_a[q][i] = new_a[i][q];
+            }
+        }
+        a = new_a;
+
+        // Apply rotation to V
+        for i in 0..3 {
+            let vip = v[i][p];
+            let viq = v[i][q];
+            v[i][p] = c * vip - s * viq;
+            v[i][q] = s * vip + c * viq;
+        }
+    }
+
+    // Extract eigenvalues (diagonal of A)
+    let eigenvalues = [a[0][0], a[1][1], a[2][2]];
+
+    // Sort by decreasing eigenvalue
+    let mut indices = [0usize, 1, 2];
+    indices.sort_by(|&i, &j| eigenvalues[j].partial_cmp(&eigenvalues[i]).unwrap());
+
+    let sorted_eigenvalues = [
+        eigenvalues[indices[0]],
+        eigenvalues[indices[1]],
+        eigenvalues[indices[2]],
+    ];
+
+    let mut sorted_v = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            sorted_v[i][j] = v[i][indices[j]];
+        }
+    }
+
+    (sorted_eigenvalues, sorted_v)
+}
+
+/// Gram-Schmidt orthonormalization for 3x3 matrix (columns as vectors)
+fn orthonormalize(m: &mut [[f32; 3]; 3]) {
+    // Normalize first column
+    let mut norm = 0.0f32;
+    for i in 0..3 {
+        norm += m[i][0] * m[i][0];
+    }
+    norm = norm.sqrt();
+    if norm > 1e-10 {
+        for i in 0..3 {
+            m[i][0] /= norm;
+        }
+    }
+
+    // Second column: subtract projection onto first, normalize
+    let mut dot = 0.0f32;
+    for i in 0..3 {
+        dot += m[i][1] * m[i][0];
+    }
+    for i in 0..3 {
+        m[i][1] -= dot * m[i][0];
+    }
+    norm = 0.0;
+    for i in 0..3 {
+        norm += m[i][1] * m[i][1];
+    }
+    norm = norm.sqrt();
+    if norm > 1e-10 {
+        for i in 0..3 {
+            m[i][1] /= norm;
+        }
+    }
+
+    // Third column: cross product of first two
+    m[0][2] = m[1][0] * m[2][1] - m[2][0] * m[1][1];
+    m[1][2] = m[2][0] * m[0][1] - m[0][0] * m[2][1];
+    m[2][2] = m[0][0] * m[1][1] - m[1][0] * m[0][1];
 }
 
 /// Check if a string looks like a PDB ID (4 alphanumeric characters)
@@ -1027,6 +1562,7 @@ fn main() {
     log::info!("  P - Predict (SimpleFold structure prediction)");
     log::info!("  M - MPNN (design sequence for structure)");
     log::info!("  R - RFDiffusion3 (design new structure)");
+    log::info!("  V - Toggle view mode (tube/ribbon)");
     log::info!("  H - Toggle visibility of designed structures");
     log::info!("  Delete - Remove last added structure");
     log::info!("  Esc - Cancel current operation");

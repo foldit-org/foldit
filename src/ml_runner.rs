@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 // Import foldit-ml types
 use foldit_ml::{
     MLClient, PredictOptions, DesignOptions, SequenceDesignOptions,
-    StreamUpdate as MLStreamUpdate,
+    StreamUpdate as MLStreamUpdate, ChainInput,
 };
 
 /// Intermediate update from ML model during inference
@@ -35,8 +35,12 @@ pub struct IntermediateUpdate {
 #[derive(Debug, Clone)]
 pub enum MLTask {
     /// Predict structure from sequence (SimpleFold/ESMFold)
+    /// For multi-chain complexes, provide chains instead of sequence
     Predict {
-        sequence: String,
+        /// Single sequence (legacy, for single-chain proteins)
+        sequence: Option<String>,
+        /// Multi-chain: list of (chain_id, sequence) tuples
+        chains: Vec<(String, String)>,
         num_recycles: u32,
     },
     /// Design sequence from structure (LigandMPNN)
@@ -172,9 +176,24 @@ impl MLRunner {
         update_tx: &mpsc::Sender<IntermediateUpdate>,
     ) -> MLResult {
         match task {
-            MLTask::Predict { sequence, num_recycles } => {
-                log::info!("Running SimpleFold prediction for sequence of {} residues", sequence.len());
-                Self::run_predict(client, &sequence, num_recycles, update_tx).await
+            MLTask::Predict { sequence, chains, num_recycles } => {
+                // For single chain, use the simpler single-sequence API
+                // Multi-chain path is only used when there are 2+ chains
+                if chains.len() > 1 {
+                    let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
+                    log::info!("Running SimpleFold prediction for {} chains ({} total residues)", chains.len(), total_residues);
+                    Self::run_predict_chains(client, &chains, num_recycles, update_tx).await
+                } else if chains.len() == 1 {
+                    // Single chain provided via chains field - extract sequence
+                    let seq = &chains[0].1;
+                    log::info!("Running SimpleFold prediction for sequence of {} residues", seq.len());
+                    Self::run_predict(client, seq, num_recycles, update_tx).await
+                } else if let Some(seq) = sequence {
+                    log::info!("Running SimpleFold prediction for sequence of {} residues", seq.len());
+                    Self::run_predict(client, &seq, num_recycles, update_tx).await
+                } else {
+                    MLResult::Error("Either sequence or chains must be provided".to_string())
+                }
             }
             MLTask::SequenceDesign { coords, temperature, num_sequences } => {
                 log::info!("Running LigandMPNN sequence design, T={}, num={}", temperature, num_sequences);
@@ -198,6 +217,7 @@ impl MLRunner {
             model: Some("simplefold".to_string()),
             num_recycles,
             stream: true,
+            chains: vec![], // Single-chain prediction
         };
 
         // Clone sender for the callback
@@ -226,6 +246,53 @@ impl MLRunner {
                 }
             }
             Err(e) => MLResult::Error(format!("Prediction failed: {}", e)),
+        }
+    }
+
+    /// Run structure prediction for multi-chain complexes with streaming
+    async fn run_predict_chains(
+        client: &MLClient,
+        chains: &[(String, String)],
+        num_recycles: u32,
+        update_tx: &mpsc::Sender<IntermediateUpdate>,
+    ) -> MLResult {
+        let options = PredictOptions {
+            model: Some("simplefold".to_string()),
+            num_recycles,
+            stream: true,
+            chains: chains.iter()
+                .map(|(id, seq)| ChainInput {
+                    chain_id: id.clone(),
+                    sequence: seq.clone(),
+                })
+                .collect(),
+        };
+
+        // Clone sender for the callback
+        let tx = update_tx.clone();
+
+        let callback: Box<dyn FnMut(MLStreamUpdate) + Send> = Box::new(move |update: MLStreamUpdate| {
+            let intermediate = IntermediateUpdate {
+                coords_bytes: update.intermediate_coords.clone(),
+                backbone_positions: vec![],
+                step: update.step,
+                total_steps: update.total_steps,
+                confidence: update.confidence,
+                message: Some(format!("{} ({}/{})", update.stage, update.step, update.total_steps)),
+            };
+
+            let _ = tx.try_send(intermediate);
+        });
+
+        // For multi-chain, we pass empty string as sequence (chains field takes precedence)
+        match client.predict_streaming("", options, callback) {
+            Ok(result) => {
+                MLResult::Predict {
+                    coords_bytes: result.coords,
+                    confidence: result.confidence,
+                }
+            }
+            Err(e) => MLResult::Error(format!("Multi-chain prediction failed: {}", e)),
         }
     }
 

@@ -1,3 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/foldit-render",
+    "crates/foldit-conv",
+    "crates/foldit-ml",
+]
+
 [package]
 name = "foldit-rs"
 version = "0.1.0"
@@ -5,14 +13,10 @@ edition = "2021"
 description = "A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML"
 
 [dependencies]
-# Local dependencies
-foldit-render = { path = "../foldit-render" }
-
-# foldit-ml as embedded library (orchestrator spawns worker processes, no pyo3 needed here)
-foldit-ml = { path = "../foldit/rosetta-interactive/source/foldit_external/foldit-ml", default-features = false }
-
-# COORDS format conversion library
-foldit-conv = { git = "https://github.com/petridecus/foldit-conv" }
+# Workspace crates
+foldit-render = { path = "crates/foldit-render" }
+foldit-conv = { path = "crates/foldit-conv" }
+foldit-ml = { path = "crates/foldit-ml", default-features = false }
 
 # Async for background ML tasks
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
@@ -38,3 +42,6 @@ reqwest = { version = "0.11", features = ["blocking"] }
 default = []
 # Enable when foldit-ml is available and compiles
 # ml = ["foldit-ml"]
+
+[patch."https://github.com/petridecus/foldit-conv"]
+foldit-conv = { path = "crates/foldit-conv" }
