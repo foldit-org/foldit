@@ -1,6 +1,6 @@
-[submodule "crates/foldit-ml"]
-	path = crates/foldit-ml
-	url = https://github.com/petridecus/foldit-ml
+[submodule "crates/foldit-runner"]
+	path = crates/foldit-runner
+	url = https://github.com/petridecus/foldit-runner
 [submodule "crates/foldit-render"]
 	path = crates/foldit-render
 	url = https://github.com/petridecus/foldit-render
