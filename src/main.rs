@@ -96,6 +96,14 @@ impl App {
 
         if let Some(engine) = &mut self.engine {
             let data = self.scene.aggregated();
+
+            // Trigger smooth animation for backbone changes
+            // This sets up interpolation from current visual position to new target
+            engine.animate_to_pose(&data.backbone_chains);
+
+            // Update sidechains and other data
+            // Note: backbone gets set to target here, but update_animations() in render()
+            // will override it with the interpolated position before drawing
             engine.update_from_aggregated(
                 &data.backbone_chains,
                 &data.sidechain_positions,
