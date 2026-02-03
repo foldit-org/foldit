@@ -247,6 +247,12 @@ impl Structure {
         let mut current_chain_seq: String = String::new();
         let mut all_sequence_chars: Vec<char> = Vec::new();
 
+        // Track 0-based residue index (matching tube_renderer's global_residue_idx)
+        // Map (chain_id, res_num) -> 0-based residue index
+        let mut residue_idx_map: std::collections::HashMap<(u8, i32), u32> =
+            std::collections::HashMap::new();
+        let mut next_residue_idx: u32 = 0;
+
         for i in 0..coords.num_atoms {
             let atom_name = std::str::from_utf8(&coords.atom_names[i])
                 .unwrap_or("")
@@ -275,12 +281,17 @@ impl Structure {
                 current_chain_id = None;
             }
 
-            // Track CA for sequence extraction (one per residue)
+            // Track CA for sequence extraction and assign 0-based residue index
+            // Only assign index when we see CA (backbone residue is complete)
+            // This matches tube_renderer's counting: one index per backbone residue
             if atom_name == "CA" {
                 if last_res_num != Some(res_num) || last_chain_id != Some(chain_id) {
                     let aa = three_to_one(res_name);
                     current_chain_seq.push(aa);
                     all_sequence_chars.push(aa);
+                    // Assign 0-based residue index when we see CA
+                    residue_idx_map.insert((chain_id, res_num), next_residue_idx);
+                    next_residue_idx += 1;
                 }
             }
 
@@ -315,11 +326,25 @@ impl Structure {
                     }
                     atom_index_map.insert((chain_id, res_num, atom_name.clone()), sidechain_idx);
 
+                    // Look up 0-based residue index (assigned when we saw CA)
+                    // If CA hasn't been seen yet for this residue, this sidechain won't
+                    // have matching highlighting - but this is rare in standard PDB files
+                    let residue_idx = residue_idx_map
+                        .get(&(chain_id, res_num))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            log::warn!(
+                                "Sidechain atom {} for residue {} has no CA yet",
+                                atom_name, res_num
+                            );
+                            0  // Fallback, but this shouldn't happen in normal structures
+                        });
+
                     structure.sidechain_atoms.push(Atom {
                         position: pos,
                         is_hydrophobic: is_hydrophobic(res_name),
                         atom_name: atom_name.clone(),
-                        residue_index: res_num as u32,
+                        residue_index: residue_idx,
                         chain_id: format!("{}", chain_id as char),
                     });
                 }
@@ -711,6 +736,7 @@ impl Scene {
 
     fn compute_aggregated(&self) -> AggregatedData {
         let mut data = AggregatedData::default();
+        let mut global_residue_offset: u32 = 0;
 
         for structure in self.iter() {
             if !structure.visible {
@@ -719,6 +745,13 @@ impl Scene {
 
             let atom_offset = data.sidechain_positions.len() as u32;
 
+            // Count residues in this structure (backbone has 3 atoms per residue: N, CA, C)
+            let structure_residue_count: u32 = structure
+                .backbone_chains
+                .iter()
+                .map(|c| (c.len() / 3) as u32)
+                .sum();
+
             // Aggregate backbone chains
             for chain in &structure.backbone_chains {
                 data.backbone_chains.push(chain.clone());
@@ -726,10 +759,12 @@ impl Scene {
                 data.all_positions.extend(chain);
             }
 
-            // Aggregate sidechain atoms
+            // Aggregate sidechain atoms with global residue indices
             for atom in &structure.sidechain_atoms {
                 data.sidechain_positions.push(atom.position);
                 data.sidechain_hydrophobicity.push(atom.is_hydrophobic);
+                // Map local residue_index to global residue index
+                data.sidechain_residue_indices.push(atom.residue_index + global_residue_offset);
                 data.atom_to_structure.push(structure.id);
                 data.all_positions.push(atom.position);
             }
@@ -745,6 +780,9 @@ impl Scene {
                 data.backbone_sidechain_bonds
                     .push((bond.ca_position, bond.cb_atom_index + atom_offset));
             }
+
+            // Update global residue offset for next structure
+            global_residue_offset += structure_residue_count;
         }
 
         data

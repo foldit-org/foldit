@@ -971,9 +971,9 @@ impl ApplicationHandler for App {
                     let pressed = state == ElementState::Pressed;
                     engine.handle_mouse_button(button, pressed);
 
-                    // Handle click for selection on left button release
+                    // Handle selection logic on left button release
                     if button == winit::event::MouseButton::Left && !pressed {
-                        engine.handle_click(self.last_mouse_pos.0, self.last_mouse_pos.1);
+                        engine.handle_mouse_up();
                     }
                 }
             }
