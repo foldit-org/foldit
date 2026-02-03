@@ -1,7 +1,10 @@
 pub mod animation;
 pub mod ml_runner;
 pub mod molecule_state;
-pub mod rosetta_ffi;
-pub mod rosetta_runner;
 pub mod scene;
 pub mod visual_effects;
+
+// Re-export modular rosetta backend from foldit-runner
+pub mod rosetta {
+    pub use foldit_runner::backends::rosetta::*;
+}

@@ -10,16 +10,19 @@
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
 //!   V - Toggle view mode (tube/ribbon)
+//!   Q - Toggle backbone quality (high/low)
 //!   H - Toggle visibility of designed structures
 //!   Delete - Remove last added structure
-//!   Esc - Cancel current operation
+//!   Esc - Cancel operation / clear selection
 //!   Mouse - Rotate/zoom camera
 
 use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
-use foldit_rs::rosetta_runner::{RosettaRunner, RosettaUpdate};
+use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate};
 use foldit_rs::scene::{Scene, Structure, StructureId};
 use foldit_rs::visual_effects::VisualEffect;
-use foldit_conv::coords::{deserialize_coords_internal, serialize_coords};
+use foldit_conv::coords::{
+    align_coords_bytes, extract_ca_from_chains, kabsch_alignment_with_scale,
+};
 use glam::Vec3;
 
 use foldit_render::engine::ProteinRenderEngine;
@@ -51,7 +54,7 @@ struct App {
     ml_runner: Option<MLRunner>,
     ml_updates: Option<mpsc::Receiver<IntermediateUpdate>>,
     ml_results: Option<mpsc::Receiver<MLResult>>,
-    rosetta_runner: Option<RosettaRunner>,
+    rosetta_executor: Option<RosettaExecutor>,
     rosetta_updates: Option<mpsc::Receiver<RosettaUpdate>>,
     effect: VisualEffect,
     last_frame: Instant,
@@ -75,7 +78,7 @@ impl App {
             ml_runner: None,
             ml_updates: None,
             ml_results: None,
-            rosetta_runner: None,
+            rosetta_executor: None,
             rosetta_updates: None,
             effect: VisualEffect::None,
             last_frame: Instant::now(),
@@ -97,6 +100,7 @@ impl App {
                 &data.backbone_chains,
                 &data.sidechain_positions,
                 &data.sidechain_hydrophobicity,
+                &data.sidechain_residue_indices,
                 &data.sidechain_bonds,
                 &data.backbone_sidechain_bonds,
                 &data.all_positions,
@@ -155,8 +159,8 @@ impl App {
                     Ok(mut new_data) => {
                         // Compute scale + alignment from CA positions
                         if let Some(ref original_ca) = self.original_backbone_ca {
-                            let predicted_ca = Self::extract_ca_from_chains(&new_data.backbone_chains);
-                            if let Some((rotation, translation, scale)) = Self::kabsch_alignment_with_scale(original_ca, &predicted_ca) {
+                            let predicted_ca = extract_ca_from_chains(&new_data.backbone_chains);
+                            if let Some((rotation, translation, scale)) = kabsch_alignment_with_scale(original_ca, &predicted_ca) {
                                 // Apply scale, rotation, translation to backbone
                                 for chain in &mut new_data.backbone_chains {
                                     for pos in chain.iter_mut() {
@@ -225,312 +229,6 @@ impl App {
         log::warn!("No coordinates in update, skipping");
     }
 
-    /// Extract backbone chains from COORDS bytes (for SimpleFold intermediates)
-    fn coords_to_backbone_chains(coords_bytes: &[u8]) -> Vec<Vec<Vec3>> {
-        use foldit_conv::coords::binary::deserialize;
-
-        let coords = match deserialize(coords_bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("Failed to parse COORDS: {:?}", e);
-                return vec![];
-            }
-        };
-
-        let mut chains: Vec<Vec<Vec3>> = Vec::new();
-        let mut current_chain: Vec<Vec3> = Vec::new();
-        let mut last_chain_id: Option<u8> = None;
-        let mut last_res_num: Option<i32> = None;
-
-        for i in 0..coords.num_atoms {
-            let atom_name = std::str::from_utf8(&coords.atom_names[i])
-                .unwrap_or("")
-                .trim();
-
-            // Only include N, CA, C for backbone spline (skip O and sidechains)
-            if atom_name != "N" && atom_name != "CA" && atom_name != "C" {
-                continue;
-            }
-
-            let chain_id = coords.chain_ids[i];
-            let res_num = coords.res_nums[i];
-            let pos = Vec3::new(coords.atoms[i].x, coords.atoms[i].y, coords.atoms[i].z);
-
-            // Check for chain break
-            let is_chain_break = last_chain_id.map_or(false, |c| c != chain_id);
-            let is_sequence_gap = last_res_num.map_or(false, |r| (res_num - r).abs() > 1);
-
-            if (is_chain_break || is_sequence_gap) && !current_chain.is_empty() {
-                chains.push(std::mem::take(&mut current_chain));
-            }
-
-            current_chain.push(pos);
-            last_chain_id = Some(chain_id);
-
-            if atom_name == "CA" {
-                last_res_num = Some(res_num);
-            }
-        }
-
-        if !current_chain.is_empty() {
-            chains.push(current_chain);
-        }
-
-        chains
-    }
-
-    /// Extract CA positions from COORDS bytes for Kabsch alignment
-    fn extract_ca_positions(coords_bytes: &[u8]) -> Vec<Vec3> {
-        use foldit_conv::coords::binary::deserialize;
-
-        let coords = match deserialize(coords_bytes) {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let mut ca_positions = Vec::new();
-        for i in 0..coords.num_atoms {
-            let atom_name = std::str::from_utf8(&coords.atom_names[i])
-                .unwrap_or("")
-                .trim();
-            if atom_name == "CA" {
-                ca_positions.push(Vec3::new(
-                    coords.atoms[i].x,
-                    coords.atoms[i].y,
-                    coords.atoms[i].z,
-                ));
-            }
-        }
-        ca_positions
-    }
-
-    /// Extract CA positions from backbone chains (every 2nd element if N-CA-C pattern)
-    fn extract_ca_from_chains(chains: &[Vec<Vec3>]) -> Vec<Vec3> {
-        let mut ca_positions = Vec::new();
-        for chain in chains {
-            // Backbone chains are N-CA-C pattern, so CA is every 3rd atom starting at index 1
-            for (i, pos) in chain.iter().enumerate() {
-                if i % 3 == 1 {
-                    // CA position
-                    ca_positions.push(*pos);
-                }
-            }
-        }
-        ca_positions
-    }
-
-    /// Compute centroid of a point set
-    fn centroid(points: &[Vec3]) -> Vec3 {
-        if points.is_empty() {
-            return Vec3::ZERO;
-        }
-        let sum: Vec3 = points.iter().copied().sum();
-        sum / points.len() as f32
-    }
-
-    /// Kabsch algorithm: find optimal rotation and translation to align target to reference
-    /// Returns (rotation_matrix, translation) such that: aligned = rotation * target + translation
-    fn kabsch_alignment(reference: &[Vec3], target: &[Vec3]) -> Option<(glam::Mat3, Vec3)> {
-        use glam::Mat3;
-
-        if reference.len() != target.len() || reference.len() < 3 {
-            return None;
-        }
-
-        // 1. Center both point sets
-        let ref_centroid = Self::centroid(reference);
-        let tgt_centroid = Self::centroid(target);
-
-        let ref_centered: Vec<Vec3> = reference.iter().map(|p| *p - ref_centroid).collect();
-        let tgt_centered: Vec<Vec3> = target.iter().map(|p| *p - tgt_centroid).collect();
-
-        // 2. Compute covariance matrix H = sum(tgt * ref^T)
-        // H[i][j] = sum_k(tgt_centered[k][i] * ref_centered[k][j])
-        let mut h = [[0.0f32; 3]; 3];
-        for k in 0..reference.len() {
-            let t = tgt_centered[k];
-            let r = ref_centered[k];
-            for i in 0..3 {
-                for j in 0..3 {
-                    h[i][j] += t[i] * r[j];
-                }
-            }
-        }
-
-        // 3. SVD: H = U * S * V^T
-        // Using simple Jacobi iteration for SVD of 3x3 matrix
-        let (u, _s, v) = svd_3x3(h);
-
-        // 4. Rotation R = V * U^T
-        let u_mat = Mat3::from_cols(
-            Vec3::new(u[0][0], u[1][0], u[2][0]),
-            Vec3::new(u[0][1], u[1][1], u[2][1]),
-            Vec3::new(u[0][2], u[1][2], u[2][2]),
-        );
-        let v_mat = Mat3::from_cols(
-            Vec3::new(v[0][0], v[1][0], v[2][0]),
-            Vec3::new(v[0][1], v[1][1], v[2][1]),
-            Vec3::new(v[0][2], v[1][2], v[2][2]),
-        );
-
-        let mut rotation = v_mat * u_mat.transpose();
-
-        // Handle reflection (if det(R) < 0)
-        if rotation.determinant() < 0.0 {
-            // Flip the sign of the third column of V
-            let v_flipped = Mat3::from_cols(
-                v_mat.col(0),
-                v_mat.col(1),
-                -v_mat.col(2),
-            );
-            rotation = v_flipped * u_mat.transpose();
-        }
-
-        // 5. Translation t = ref_centroid - R * tgt_centroid
-        let translation = ref_centroid - rotation * tgt_centroid;
-
-        Some((rotation, translation))
-    }
-
-    /// Kabsch-Umeyama algorithm: find optimal rotation, translation, AND SCALE
-    /// Returns (rotation_matrix, translation, scale) such that: aligned = rotation * (target * scale) + translation
-    fn kabsch_alignment_with_scale(reference: &[Vec3], target: &[Vec3]) -> Option<(glam::Mat3, Vec3, f32)> {
-        use glam::Mat3;
-
-        if reference.len() != target.len() || reference.len() < 3 {
-            return None;
-        }
-
-        // 1. Center both point sets
-        let ref_centroid = Self::centroid(reference);
-        let tgt_centroid = Self::centroid(target);
-
-        let ref_centered: Vec<Vec3> = reference.iter().map(|p| *p - ref_centroid).collect();
-        let tgt_centered: Vec<Vec3> = target.iter().map(|p| *p - tgt_centroid).collect();
-
-        // 2. Compute variances for scale estimation
-        let ref_var: f32 = ref_centered.iter().map(|p| p.length_squared()).sum::<f32>() / reference.len() as f32;
-        let tgt_var: f32 = tgt_centered.iter().map(|p| p.length_squared()).sum::<f32>() / target.len() as f32;
-
-        // Avoid division by zero
-        if tgt_var < 1e-10 {
-            return None;
-        }
-
-        // 3. Compute covariance matrix H = sum(tgt * ref^T)
-        let mut h = [[0.0f32; 3]; 3];
-        for k in 0..reference.len() {
-            let t = tgt_centered[k];
-            let r = ref_centered[k];
-            for i in 0..3 {
-                for j in 0..3 {
-                    h[i][j] += t[i] * r[j];
-                }
-            }
-        }
-
-        // 4. SVD: H = U * S * V^T
-        let (u, s, v) = svd_3x3(h);
-
-        // 5. Rotation R = V * U^T
-        let u_mat = Mat3::from_cols(
-            Vec3::new(u[0][0], u[1][0], u[2][0]),
-            Vec3::new(u[0][1], u[1][1], u[2][1]),
-            Vec3::new(u[0][2], u[1][2], u[2][2]),
-        );
-        let v_mat = Mat3::from_cols(
-            Vec3::new(v[0][0], v[1][0], v[2][0]),
-            Vec3::new(v[0][1], v[1][1], v[2][1]),
-            Vec3::new(v[0][2], v[1][2], v[2][2]),
-        );
-
-        let mut rotation = v_mat * u_mat.transpose();
-        let mut sign = 1.0f32;
-
-        // Handle reflection (if det(R) < 0)
-        if rotation.determinant() < 0.0 {
-            let v_flipped = Mat3::from_cols(
-                v_mat.col(0),
-                v_mat.col(1),
-                -v_mat.col(2),
-            );
-            rotation = v_flipped * u_mat.transpose();
-            sign = -1.0;
-        }
-
-        // 6. Compute optimal scale: c = trace(S * D) / var(target)
-        // where D = diag(1, 1, sign)
-        let trace_sd = s[0] + s[1] + sign * s[2];
-        let scale = trace_sd / (tgt_var * reference.len() as f32);
-
-        // Clamp scale to reasonable range (0.1x to 10x)
-        let scale = scale.clamp(0.1, 10.0);
-
-        // 7. Translation t = ref_centroid - scale * R * tgt_centroid
-        let translation = ref_centroid - scale * (rotation * tgt_centroid);
-
-        Some((rotation, translation, scale))
-    }
-
-    /// Apply rotation and translation to backbone chains
-    fn apply_transform_to_chains(
-        chains: &mut [Vec<Vec3>],
-        rotation: glam::Mat3,
-        translation: Vec3,
-    ) {
-        for chain in chains.iter_mut() {
-            for pos in chain.iter_mut() {
-                *pos = rotation * *pos + translation;
-            }
-        }
-    }
-
-    /// Align coords_bytes to match original CA positions using Kabsch algorithm.
-    /// This transforms ALL atoms in the COORDS data, ensuring coords_bytes and
-    /// visual representation stay in sync.
-    fn align_coords_bytes(coords_bytes: &[u8], original_ca: &[Vec3]) -> Result<Vec<u8>, String> {
-        // Deserialize the COORDS
-        let mut coords = deserialize_coords_internal(coords_bytes)
-            .map_err(|e| format!("Failed to deserialize coords: {:?}", e))?;
-
-        // Extract CA positions from coords for alignment
-        let predicted_ca: Vec<Vec3> = coords.atoms.iter()
-            .zip(coords.atom_names.iter())
-            .filter_map(|(atom, name)| {
-                let name_str = std::str::from_utf8(name).ok()?.trim();
-                if name_str == "CA" {
-                    Some(Vec3::new(atom.x, atom.y, atom.z))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if predicted_ca.len() != original_ca.len() {
-            return Err(format!(
-                "CA count mismatch: original={}, predicted={}",
-                original_ca.len(), predicted_ca.len()
-            ));
-        }
-
-        // Compute Kabsch alignment
-        let (rotation, translation) = Self::kabsch_alignment(original_ca, &predicted_ca)
-            .ok_or_else(|| "Kabsch alignment failed".to_string())?;
-
-        // Apply transformation to ALL atoms in coords
-        for atom in &mut coords.atoms {
-            let pos = Vec3::new(atom.x, atom.y, atom.z);
-            let transformed = rotation * pos + translation;
-            atom.x = transformed.x;
-            atom.y = transformed.y;
-            atom.z = transformed.z;
-        }
-
-        // Re-serialize the aligned coords
-        serialize_coords(&coords)
-            .map_err(|e| format!("Failed to serialize aligned coords: {:?}", e))
-    }
-
     /// Process pending ML updates (non-blocking)
     fn process_ml_updates(&mut self) {
         // Collect intermediate updates first (to avoid borrow issues)
@@ -586,7 +284,7 @@ impl App {
                             // Apply Kabsch alignment to the raw COORDS before parsing
                             // This ensures coords_bytes and visual representation are in sync
                             let aligned_coords_bytes = if let Some(ref original_ca) = self.original_backbone_ca {
-                                match Self::align_coords_bytes(&coords_bytes, original_ca) {
+                                match align_coords_bytes(&coords_bytes, original_ca) {
                                     Ok(aligned) => {
                                         log::info!("Applied Kabsch alignment to COORDS data");
                                         aligned
@@ -668,9 +366,9 @@ impl App {
                             if let Some(coords) = coords {
                                 // Apply the sequence and pack rotamers via Rosetta
                                 // This will create a NEW structure (not modify original)
-                                if let Some(ref runner) = self.rosetta_runner {
+                                if let Some(ref executor) = self.rosetta_executor {
                                     // Stop any running operation and drain stale updates
-                                    runner.stop();
+                                    executor.stop();
                                     if let Some(ref mut updates) = self.rosetta_updates {
                                         while updates.try_recv().is_ok() {
                                             // Drain stale updates
@@ -679,12 +377,12 @@ impl App {
 
                                     log::info!("Applying designed sequence via Rosetta and packing sidechains...");
                                     self.mpnn_pending = true;
-                                    if let Err(e) = runner.apply_sequence_and_pack(coords, best_seq.clone()) {
+                                    if let Err(e) = executor.apply_sequence_and_pack(coords, best_seq.clone()) {
                                         log::error!("Failed to apply sequence: {}", e);
                                         self.mpnn_pending = false;
                                     }
                                 } else {
-                                    log::warn!("No Rosetta runner available for sidechain placement");
+                                    log::warn!("No Rosetta executor available for sidechain placement");
                                 }
                             } else {
                                 log::warn!("No coords available from original structure");
@@ -843,18 +541,18 @@ impl App {
             KeyCode::KeyW => {
                 // Wiggle: pure minimization (no packing)
                 // Converges when score change < 0.0002
-                let rosetta_runner = match &self.rosetta_runner {
+                let rosetta_executor = match &self.rosetta_executor {
                     Some(r) => r,
                     None => {
-                        log::warn!("Rosetta runner not initialized");
+                        log::warn!("Rosetta executor not initialized");
                         return;
                     }
                 };
 
                 // Toggle wiggle on/off
-                if rosetta_runner.is_running() {
+                if rosetta_executor.is_running() {
                     log::info!("Stopping operation...");
-                    rosetta_runner.stop();
+                    rosetta_executor.stop();
                     self.effect = VisualEffect::None;
                 } else {
                     // Get coords from active structure (MPNN design if exists, else original)
@@ -868,7 +566,7 @@ impl App {
                         Some(coords) => {
                             let target = if self.mpnn_structure_id.is_some() { "MPNN design" } else { "original" };
                             log::info!("Starting wiggle on {} ({} bytes)...", target, coords.len());
-                            if let Err(e) = rosetta_runner.start_wiggle(coords) {
+                            if let Err(e) = rosetta_executor.start_wiggle(coords) {
                                 log::error!("Failed to start wiggle: {}", e);
                                 return;
                             }
@@ -884,18 +582,18 @@ impl App {
             KeyCode::KeyS => {
                 // Shake: pure packing (rotamer optimization, no minimization)
                 // Runs continuously until stopped
-                let rosetta_runner = match &self.rosetta_runner {
+                let rosetta_executor = match &self.rosetta_executor {
                     Some(r) => r,
                     None => {
-                        log::warn!("Rosetta runner not initialized");
+                        log::warn!("Rosetta executor not initialized");
                         return;
                     }
                 };
 
                 // Toggle shake on/off
-                if rosetta_runner.is_running() {
+                if rosetta_executor.is_running() {
                     log::info!("Stopping operation...");
-                    rosetta_runner.stop();
+                    rosetta_executor.stop();
                     self.effect = VisualEffect::None;
                 } else {
                     // Get coords from active structure (MPNN design if exists, else original)
@@ -909,7 +607,7 @@ impl App {
                         Some(coords) => {
                             let target = if self.mpnn_structure_id.is_some() { "MPNN design" } else { "original" };
                             log::info!("Starting shake on {} ({} bytes)...", target, coords.len());
-                            if let Err(e) = rosetta_runner.start_shake(coords) {
+                            if let Err(e) = rosetta_executor.start_shake(coords) {
                                 log::error!("Failed to start shake: {}", e);
                                 return;
                             }
@@ -1068,13 +766,18 @@ impl App {
             }
 
             KeyCode::Escape => {
-                // Cancel current operation
+                // Cancel current operation and clear selection
                 log::info!("Cancelling current operation");
 
+                // Clear selection
+                if let Some(engine) = &mut self.engine {
+                    engine.picking.clear_selection();
+                }
+
                 // Stop Rosetta operation if running
-                if let Some(ref runner) = self.rosetta_runner {
-                    if runner.is_running() {
-                        runner.stop();
+                if let Some(ref executor) = self.rosetta_executor {
+                    if executor.is_running() {
+                        executor.stop();
                         log::info!("Stopped Rosetta operation");
                     }
                 }
@@ -1095,15 +798,6 @@ impl App {
     }
 
     /// Get the sequence from the original structure
-    fn get_original_sequence(&self) -> String {
-        if let Some(id) = self.original_structure_id {
-            if let Some(structure) = self.scene.get(id) {
-                return structure.sequence.clone();
-            }
-        }
-        String::new()
-    }
-
     /// Get chains from the original structure for multi-chain prediction
     /// Returns Vec<(chain_id, sequence)>
     fn get_structure_chains(&self) -> Vec<(String, String)> {
@@ -1154,7 +848,7 @@ impl ApplicationHandler for App {
                     );
 
                     // Store original CA positions for Kabsch alignment
-                    self.original_backbone_ca = Some(Self::extract_ca_from_chains(&structure.backbone_chains));
+                    self.original_backbone_ca = Some(extract_ca_from_chains(&structure.backbone_chains));
                     log::info!(
                         "Stored {} original CA positions for alignment",
                         self.original_backbone_ca.as_ref().map(|v| v.len()).unwrap_or(0)
@@ -1169,6 +863,7 @@ impl ApplicationHandler for App {
                         &data.backbone_chains,
                         &data.sidechain_positions,
                         &data.sidechain_hydrophobicity,
+                        &data.sidechain_residue_indices,
                         &data.sidechain_bonds,
                         &data.backbone_sidechain_bonds,
                         &data.all_positions,
@@ -1186,9 +881,9 @@ impl ApplicationHandler for App {
             self.ml_updates = Some(ml_updates);
             self.ml_results = Some(ml_results);
 
-            // Initialize Rosetta runner
-            let (rosetta_runner, rosetta_updates) = RosettaRunner::new();
-            self.rosetta_runner = Some(rosetta_runner);
+            // Initialize Rosetta executor (uses action-based API: ActionCartGlobalWiggle, etc.)
+            let (rosetta_executor, rosetta_updates) = RosettaExecutor::new();
+            self.rosetta_executor = Some(rosetta_executor);
             self.rosetta_updates = Some(rosetta_updates);
 
             window.request_redraw();
@@ -1204,8 +899,8 @@ impl ApplicationHandler for App {
                 if let Some(ref runner) = self.ml_runner {
                     runner.shutdown();
                 }
-                if let Some(ref runner) = self.rosetta_runner {
-                    runner.shutdown();
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.shutdown();
                 }
                 event_loop.exit();
             }
@@ -1260,7 +955,13 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { button, state, .. } => {
                 if let Some(engine) = &mut self.engine {
-                    engine.handle_mouse_button(button, state == ElementState::Pressed);
+                    let pressed = state == ElementState::Pressed;
+                    engine.handle_mouse_button(button, pressed);
+
+                    // Handle click for selection on left button release
+                    if button == winit::event::MouseButton::Left && !pressed {
+                        engine.handle_click(self.last_mouse_pos.0, self.last_mouse_pos.1);
+                    }
                 }
             }
 
@@ -1270,7 +971,7 @@ impl ApplicationHandler for App {
 
                 if let Some(engine) = &mut self.engine {
                     engine.handle_mouse_move(delta_x, delta_y);
-                    // engine.handle_mouse_position((position.x as f32, position.y as f32));
+                    engine.handle_mouse_position(position.x as f32, position.y as f32);
                 }
 
                 self.last_mouse_pos = (position.x as f32, position.y as f32);
@@ -1304,175 +1005,6 @@ impl ApplicationHandler for App {
             _ => (),
         }
     }
-}
-
-/// Simple SVD decomposition for 3x3 matrices using Jacobi iteration
-/// Returns (U, S, V) where A = U * diag(S) * V^T
-fn svd_3x3(a: [[f32; 3]; 3]) -> ([[f32; 3]; 3], [f32; 3], [[f32; 3]; 3]) {
-    // Compute A^T * A
-    let mut ata = [[0.0f32; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            for k in 0..3 {
-                ata[i][j] += a[k][i] * a[k][j];
-            }
-        }
-    }
-
-    // Find eigenvalues and eigenvectors of A^T * A using Jacobi iteration
-    let (eigenvalues, v) = jacobi_eigendecomposition(ata);
-
-    // Singular values are sqrt of eigenvalues
-    let s = [
-        eigenvalues[0].max(0.0).sqrt(),
-        eigenvalues[1].max(0.0).sqrt(),
-        eigenvalues[2].max(0.0).sqrt(),
-    ];
-
-    // Compute U = A * V * S^-1
-    let mut u = [[0.0f32; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            if s[j] > 1e-10 {
-                let mut sum = 0.0;
-                for k in 0..3 {
-                    sum += a[i][k] * v[k][j];
-                }
-                u[i][j] = sum / s[j];
-            }
-        }
-    }
-
-    // Orthonormalize U using Gram-Schmidt
-    orthonormalize(&mut u);
-
-    (u, s, v)
-}
-
-/// Jacobi eigendecomposition for symmetric 3x3 matrix
-fn jacobi_eigendecomposition(mut a: [[f32; 3]; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
-    let mut v = [[0.0f32; 3]; 3];
-    for i in 0..3 {
-        v[i][i] = 1.0;
-    }
-
-    const MAX_ITER: usize = 50;
-    for _ in 0..MAX_ITER {
-        // Find largest off-diagonal element
-        let mut max_val = 0.0f32;
-        let mut p = 0;
-        let mut q = 1;
-        for i in 0..3 {
-            for j in (i + 1)..3 {
-                if a[i][j].abs() > max_val {
-                    max_val = a[i][j].abs();
-                    p = i;
-                    q = j;
-                }
-            }
-        }
-
-        if max_val < 1e-10 {
-            break;
-        }
-
-        // Compute rotation angle
-        let diff = a[q][q] - a[p][p];
-        let theta = if diff.abs() < 1e-10 {
-            std::f32::consts::FRAC_PI_4
-        } else {
-            0.5 * (2.0 * a[p][q] / diff).atan()
-        };
-
-        let c = theta.cos();
-        let s = theta.sin();
-
-        // Apply rotation to A
-        let mut new_a = a;
-        new_a[p][p] = c * c * a[p][p] - 2.0 * s * c * a[p][q] + s * s * a[q][q];
-        new_a[q][q] = s * s * a[p][p] + 2.0 * s * c * a[p][q] + c * c * a[q][q];
-        new_a[p][q] = 0.0;
-        new_a[q][p] = 0.0;
-
-        for i in 0..3 {
-            if i != p && i != q {
-                new_a[i][p] = c * a[i][p] - s * a[i][q];
-                new_a[p][i] = new_a[i][p];
-                new_a[i][q] = s * a[i][p] + c * a[i][q];
-                new_a[q][i] = new_a[i][q];
-            }
-        }
-        a = new_a;
-
-        // Apply rotation to V
-        for i in 0..3 {
-            let vip = v[i][p];
-            let viq = v[i][q];
-            v[i][p] = c * vip - s * viq;
-            v[i][q] = s * vip + c * viq;
-        }
-    }
-
-    // Extract eigenvalues (diagonal of A)
-    let eigenvalues = [a[0][0], a[1][1], a[2][2]];
-
-    // Sort by decreasing eigenvalue
-    let mut indices = [0usize, 1, 2];
-    indices.sort_by(|&i, &j| eigenvalues[j].partial_cmp(&eigenvalues[i]).unwrap());
-
-    let sorted_eigenvalues = [
-        eigenvalues[indices[0]],
-        eigenvalues[indices[1]],
-        eigenvalues[indices[2]],
-    ];
-
-    let mut sorted_v = [[0.0f32; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            sorted_v[i][j] = v[i][indices[j]];
-        }
-    }
-
-    (sorted_eigenvalues, sorted_v)
-}
-
-/// Gram-Schmidt orthonormalization for 3x3 matrix (columns as vectors)
-fn orthonormalize(m: &mut [[f32; 3]; 3]) {
-    // Normalize first column
-    let mut norm = 0.0f32;
-    for i in 0..3 {
-        norm += m[i][0] * m[i][0];
-    }
-    norm = norm.sqrt();
-    if norm > 1e-10 {
-        for i in 0..3 {
-            m[i][0] /= norm;
-        }
-    }
-
-    // Second column: subtract projection onto first, normalize
-    let mut dot = 0.0f32;
-    for i in 0..3 {
-        dot += m[i][1] * m[i][0];
-    }
-    for i in 0..3 {
-        m[i][1] -= dot * m[i][0];
-    }
-    norm = 0.0;
-    for i in 0..3 {
-        norm += m[i][1] * m[i][1];
-    }
-    norm = norm.sqrt();
-    if norm > 1e-10 {
-        for i in 0..3 {
-            m[i][1] /= norm;
-        }
-    }
-
-    // Third column: cross product of first two
-    m[0][2] = m[1][0] * m[2][1] - m[2][0] * m[1][1];
-    m[1][2] = m[2][0] * m[0][1] - m[0][0] * m[2][1];
-    m[2][2] = m[0][0] * m[1][1] - m[1][0] * m[0][1];
 }
 
 /// Check if a string looks like a PDB ID (4 alphanumeric characters)
@@ -1542,7 +1074,7 @@ fn main() {
     // Get PDB ID or path from command line
     let input = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "6ta1".to_string());
+        .unwrap_or_else(|| "1bfe".to_string());
 
     log::info!("Foldit ML Render starting...");
 
@@ -1563,9 +1095,10 @@ fn main() {
     log::info!("  M - MPNN (design sequence for structure)");
     log::info!("  R - RFDiffusion3 (design new structure)");
     log::info!("  V - Toggle view mode (tube/ribbon)");
+    log::info!("  Q - Toggle backbone quality (high/low)");
     log::info!("  H - Toggle visibility of designed structures");
     log::info!("  Delete - Remove last added structure");
-    log::info!("  Esc - Cancel current operation");
+    log::info!("  Esc - Cancel operation / clear selection");
     log::info!("  Mouse - Rotate/zoom camera");
 
     let mut app = App::new(pdb_path);

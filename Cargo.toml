@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "crates/foldit-render",
     "crates/foldit-conv",
-    "crates/foldit-ml",
+    "crates/foldit-runner",
+    "xtask",
 ]
 
 [package]
@@ -11,12 +12,27 @@ name = "foldit-rs"
 version = "0.1.0"
 edition = "2021"
 description = "A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML"
+default-run = "foldit-rs"
+
+# Main application binary
+[[bin]]
+name = "foldit-rs"
+path = "src/main.rs"
+
+# Runner worker binary - source lives in foldit-runner, but defined here so
+# `cargo build` from workspace root builds it automatically
+[[bin]]
+name = "foldit-runner-worker"
+path = "crates/foldit-runner/src/bin/worker.rs"
 
 [dependencies]
 # Workspace crates
 foldit-render = { path = "crates/foldit-render" }
 foldit-conv = { path = "crates/foldit-conv" }
-foldit-ml = { path = "crates/foldit-ml", default-features = false }
+foldit-runner = { path = "crates/foldit-runner", default-features = false, features = ["python"] }
+
+# Required for foldit-ml-worker binary
+anyhow = "1.0"
 
 # Async for background ML tasks
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
@@ -34,6 +50,7 @@ pdbtbx = "0.12"
 # Utilities
 log = "0.4"
 env_logger = "0.11"
+lazy_static = "1.4"
 
 # HTTP client for downloading from RCSB
 reqwest = { version = "0.11", features = ["blocking"] }

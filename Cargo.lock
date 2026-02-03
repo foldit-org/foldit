@@ -518,6 +518,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6e6ff9dcd79cff5cd969a17a545d79e84ab086e444102a591e288a8aa3ce394"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -530,6 +531,18 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.5.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a0b5487afeab2deb2ff4e03a807ad1a03ac532ff5a2cee5d86884440c7f7671"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2 1.0.106",
+ "quote 1.0.44",
+ "syn",
 ]
 
 [[package]]
@@ -970,6 +983,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 name = "foldit-conv"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "ndarray",
  "numpy",
  "pdbtbx",
@@ -979,7 +993,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "foldit-ml"
+name = "foldit-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "foldit-conv",
+ "glam",
+ "glyphon",
+ "instant",
+ "pdbtbx",
+ "pollster",
+ "rand 0.9.2",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "foldit-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "env_logger",
+ "foldit-conv",
+ "foldit-render",
+ "foldit-runner",
+ "glam",
+ "lazy_static",
+ "log",
+ "pdbtbx",
+ "pollster",
+ "reqwest",
+ "tokio",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "foldit-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1017,41 +1068,6 @@ dependencies = [
  "tonic-build",
  "tonic-reflection",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "foldit-render"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "foldit-conv",
- "glam",
- "glyphon",
- "instant",
- "pdbtbx",
- "pollster",
- "rand 0.9.2",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "foldit-rs"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "env_logger",
- "foldit-conv",
- "foldit-ml",
- "foldit-render",
- "glam",
- "log",
- "pdbtbx",
- "pollster",
- "reqwest",
- "tokio",
- "wgpu",
- "winit",
 ]
 
 [[package]]
@@ -5525,6 +5541,14 @@ name = "xml-rs"
 version = "0.8.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
 
 [[package]]
 name = "yansi"

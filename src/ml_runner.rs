@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-// Import foldit-ml types
-use foldit_ml::{
+// Import foldit-runner types
+use foldit_runner::{
     MLClient, PredictOptions, DesignOptions, SequenceDesignOptions,
     StreamUpdate as MLStreamUpdate, ChainInput,
 };

@@ -5,8 +5,8 @@
 //! for efficient rendering.
 
 use foldit_conv::coords::{Coords, CoordsAtom, serialize_coords};
+use foldit_render::bond_topology::get_residue_bonds;
 use glam::Vec3;
-use pdbtbx::{Format, ReadOptions, PDB};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,41 +117,57 @@ impl Structure {
     }
 
     /// Load structure from a PDB file
+    /// Uses foldit-conv for parsing to ensure consistent COORDS handling.
     pub fn from_pdb_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let path_ref = path.as_ref();
-        let path_str = path_ref.to_string_lossy();
-        let (pdb, _errors) = ReadOptions::default()
-            .set_format(Format::Pdb)
-            .set_level(pdbtbx::StrictnessLevel::Loose)
-            .read(&*path_str)
-            .map_err(|e| format!("Failed to parse PDB: {:?}", e))?;
+        use foldit_conv::coords::pdb::pdb_to_coords;
 
+        let path_ref = path.as_ref();
         let name = path_ref
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
             .to_string();
 
-        Self::from_pdb(&pdb, name, path_str.to_string())
+        // Read file and parse through foldit-conv
+        let content = std::fs::read_to_string(path_ref)
+            .map_err(|e| format!("Failed to read PDB file: {}", e))?;
+
+        let coords_bytes = pdb_to_coords(&content)
+            .map_err(|e| format!("Failed to parse PDB: {:?}", e))?;
+
+        let mut structure = Self::from_coords_bytes(&name, &coords_bytes, 1.0)?;
+        structure.source = StructureSource::File {
+            path: path_ref.to_string_lossy().to_string(),
+        };
+
+        Ok(structure)
     }
 
     /// Load structure from an mmCIF file
+    /// Uses foldit-conv for parsing to ensure consistent COORDS handling.
     pub fn from_mmcif_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let path_ref = path.as_ref();
-        let path_str = path_ref.to_string_lossy();
-        let (pdb, _errors) = ReadOptions::default()
-            .set_format(Format::Mmcif)
-            .set_level(pdbtbx::StrictnessLevel::Loose)
-            .read(&*path_str)
-            .map_err(|e| format!("Failed to parse mmCIF: {:?}", e))?;
+        use foldit_conv::coords::pdb::mmcif_to_coords;
 
+        let path_ref = path.as_ref();
         let name = path_ref
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Unknown")
             .to_string();
 
-        Self::from_pdb(&pdb, name, path_str.to_string())
+        // Read file and parse through foldit-conv
+        let content = std::fs::read_to_string(path_ref)
+            .map_err(|e| format!("Failed to read mmCIF file: {}", e))?;
+
+        let coords_bytes = mmcif_to_coords(&content)
+            .map_err(|e| format!("Failed to parse mmCIF: {:?}", e))?;
+
+        let mut structure = Self::from_coords_bytes(&name, &coords_bytes, 1.0)?;
+        structure.source = StructureSource::File {
+            path: path_ref.to_string_lossy().to_string(),
+        };
+
+        Ok(structure)
     }
 
     /// Load structure from file, auto-detecting format
@@ -530,216 +546,6 @@ impl Structure {
         serialize_coords(&coords).ok()
     }
 
-    /// Parse structure from pdbtbx PDB
-    fn from_pdb(pdb: &PDB, name: String, path: String) -> Result<Self, String> {
-        let mut structure = Self::new(name);
-        structure.source = StructureSource::File { path };
-
-        let mut current_segment: Vec<Vec3> = Vec::new();
-        let mut current_segment_chain_id: Option<u8> = None;
-        let mut prev_c_pos: Option<Vec3> = None;
-        let mut prev_res_serial: Option<isize> = None;
-
-        // Track atoms by (chain_id, residue_serial, atom_name) for bond lookup
-        let mut atom_index_map: HashMap<(String, isize, String), usize> = HashMap::new();
-
-        // Collect ALL atoms for COORDS generation (including sidechains)
-        let mut coords_atoms: Vec<CoordsAtom> = Vec::new();
-        let mut coords_chain_ids: Vec<u8> = Vec::new();
-        let mut coords_res_names: Vec<[u8; 3]> = Vec::new();
-        let mut coords_res_nums: Vec<i32> = Vec::new();
-        let mut coords_atom_names: Vec<[u8; 4]> = Vec::new();
-
-        for chain in pdb.chains() {
-            let chain_id = chain.id().to_string();
-            let chain_id_byte = chain_id.as_bytes().first().copied().unwrap_or(b'A');
-
-            // Track per-chain sequence
-            let mut this_chain_seq = String::new();
-
-            for residue in chain.residues() {
-                let res_serial = residue.serial_number();
-                let res_name = residue.name().unwrap_or("UNK");
-                let hydrophobic = is_hydrophobic(res_name);
-
-                // Prepare residue name as 3-byte array
-                let mut res_name_bytes = [b' '; 3];
-                for (i, c) in res_name.bytes().take(3).enumerate() {
-                    res_name_bytes[i] = c;
-                }
-
-                // Skip non-protein residues (water, ligands, etc.)
-                let is_water = matches!(res_name, "HOH" | "WAT" | "TP3" | "TIP" | "SOL");
-                let is_standard_aa = matches!(
-                    res_name,
-                    "ALA" | "ARG" | "ASN" | "ASP" | "CYS" | "GLN" | "GLU" | "GLY" | "HIS"
-                    | "ILE" | "LEU" | "LYS" | "MET" | "PHE" | "PRO" | "SER" | "THR" | "TRP"
-                    | "TYR" | "VAL"
-                );
-                if is_water || !is_standard_aa {
-                    continue;
-                }
-
-                // Add to sequence (both global and per-chain)
-                let aa_char = three_to_one(res_name);
-                structure.sequence.push(aa_char);
-                this_chain_seq.push(aa_char);
-
-                let mut n_pos: Option<Vec3> = None;
-                let mut ca_pos: Option<Vec3> = None;
-                let mut c_pos: Option<Vec3> = None;
-                let mut cb_idx: Option<usize> = None;
-
-                for atom in residue.atoms() {
-                    let atom_name = atom.name().trim().to_string();
-                    let pos = Vec3::new(atom.x() as f32, atom.y() as f32, atom.z() as f32);
-
-                    // Skip hydrogens for COORDS
-                    if atom_name.starts_with('H') {
-                        continue;
-                    }
-
-                    // Add to COORDS (all heavy atoms)
-                    let mut atom_name_bytes = [b' '; 4];
-                    for (i, c) in atom_name.bytes().take(4).enumerate() {
-                        atom_name_bytes[i] = c;
-                    }
-                    coords_atoms.push(CoordsAtom {
-                        x: pos.x,
-                        y: pos.y,
-                        z: pos.z,
-                        occupancy: 1.0,
-                        b_factor: 0.0,
-                    });
-                    coords_chain_ids.push(chain_id_byte);
-                    coords_res_names.push(res_name_bytes);
-                    coords_res_nums.push(res_serial as i32);
-                    coords_atom_names.push(atom_name_bytes);
-
-                    match atom_name.as_str() {
-                        "N" => n_pos = Some(pos),
-                        "CA" => ca_pos = Some(pos),
-                        "C" => c_pos = Some(pos),
-                        "O" => {} // Skip O for spline (but still in COORDS)
-                        _ => {
-                            // Skip hydrogen atoms
-                            let is_hydrogen = atom_name.starts_with('H')
-                                || atom_name.starts_with("1H")
-                                || atom_name.starts_with("2H")
-                                || atom_name.starts_with("3H")
-                                || (atom_name.len() >= 2 && atom_name.chars().next().unwrap().is_ascii_digit()
-                                    && atom_name.chars().nth(1) == Some('H'));
-
-                            if !is_hydrogen {
-                                // Sidechain atom (heavy atoms only)
-                                let sidechain_idx = structure.sidechain_atoms.len();
-                                atom_index_map.insert(
-                                    (chain_id.clone(), res_serial, atom_name.clone()),
-                                    sidechain_idx,
-                                );
-
-                                if atom_name == "CB" {
-                                    cb_idx = Some(sidechain_idx);
-                                }
-
-                                structure.sidechain_atoms.push(Atom {
-                                    position: pos,
-                                    is_hydrophobic: hydrophobic,
-                                    atom_name,
-                                    residue_index: structure.backbone_chains.len() as u32,
-                                    chain_id: chain_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Check for chain break
-                let is_chain_break = if let (Some(prev_c), Some(n)) = (prev_c_pos, n_pos) {
-                    (n - prev_c).length() > MAX_PEPTIDE_BOND_DISTANCE
-                } else {
-                    false
-                };
-
-                let has_sequence_gap = if let Some(prev_serial) = prev_res_serial {
-                    (res_serial - prev_serial).abs() > 1
-                } else {
-                    false
-                };
-
-                if (is_chain_break || has_sequence_gap) && !current_segment.is_empty() {
-                    structure.backbone_chains.push(std::mem::take(&mut current_segment));
-                    if let Some(cid) = current_segment_chain_id.take() {
-                        structure.backbone_chain_ids.push(cid);
-                    }
-                }
-
-                // Add backbone atoms
-                if let Some(n) = n_pos {
-                    current_segment.push(n);
-                    if current_segment_chain_id.is_none() {
-                        current_segment_chain_id = Some(chain_id_byte);
-                    }
-                }
-                if let Some(ca) = ca_pos {
-                    current_segment.push(ca);
-
-                    // Add CA-CB bond
-                    if let Some(cb_i) = cb_idx {
-                        structure.backbone_sidechain_bonds.push(BackboneSidechainBond {
-                            ca_position: ca,
-                            cb_atom_index: cb_i as u32,
-                        });
-                    }
-                }
-                if let Some(c) = c_pos {
-                    current_segment.push(c);
-                    prev_c_pos = Some(c);
-                } else {
-                    prev_c_pos = None;
-                }
-
-                prev_res_serial = Some(res_serial);
-            }
-
-            // Save last segment for this chain
-            if !current_segment.is_empty() {
-                structure.backbone_chains.push(std::mem::take(&mut current_segment));
-                if let Some(cid) = current_segment_chain_id.take() {
-                    structure.backbone_chain_ids.push(cid);
-                }
-            }
-
-            // Save chain sequence
-            if !this_chain_seq.is_empty() {
-                structure.chain_sequences.push((chain_id_byte, this_chain_seq));
-            }
-        }
-
-        // Generate sidechain bonds from topology
-        structure.sidechain_bonds = generate_sidechain_bonds(pdb, &atom_index_map);
-
-        // Cache COORDS including all heavy atoms (backbone + sidechains)
-        if !coords_atoms.is_empty() {
-            let coords = Coords {
-                num_atoms: coords_atoms.len(),
-                atoms: coords_atoms,
-                chain_ids: coords_chain_ids,
-                res_names: coords_res_names,
-                res_nums: coords_res_nums,
-                atom_names: coords_atom_names,
-            };
-            structure.coords_bytes = serialize_coords(&coords).ok();
-            log::info!(
-                "Cached COORDS with {} atoms for {}",
-                coords.num_atoms,
-                structure.name
-            );
-        }
-
-        Ok(structure)
-    }
-
     /// Get total atom count (backbone + sidechain)
     pub fn atom_count(&self) -> usize {
         let backbone_atoms: usize = self.backbone_chains.iter().map(|c| c.len()).sum();
@@ -763,6 +569,7 @@ pub struct AggregatedData {
     pub backbone_chains: Vec<Vec<Vec3>>,
     pub sidechain_positions: Vec<Vec3>,
     pub sidechain_hydrophobicity: Vec<bool>,
+    pub sidechain_residue_indices: Vec<u32>,
     pub sidechain_bonds: Vec<(u32, u32)>,
     pub backbone_sidechain_bonds: Vec<(Vec3, u32)>,
     pub all_positions: Vec<Vec3>,
@@ -771,6 +578,32 @@ pub struct AggregatedData {
     pub atom_to_structure: Vec<StructureId>,
     /// Mapping chain index back to structure
     pub chain_to_structure: Vec<StructureId>,
+
+    /// Per-residue render data from controllers (Rama, Blueprint, etc.)
+    pub residue_render_data: ResidueRenderData,
+}
+
+/// Per-residue render data aggregated from controllers
+#[derive(Debug, Clone, Default)]
+pub struct ResidueRenderData {
+    /// Rama-based colors per residue (if Rama coloring is active)
+    pub rama_colors: Option<Vec<[f32; 3]>>,
+    /// Blueprint-based colors per residue (if SS coloring is active)
+    pub blueprint_colors: Option<Vec<[f32; 3]>>,
+    /// Currently selected residue indices (1-indexed)
+    pub selection: Vec<u32>,
+    /// Active coloring mode
+    pub color_mode: ResidueColorMode,
+}
+
+/// Which controller provides the current residue coloring
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ResidueColorMode {
+    #[default]
+    Default,      // Use default hydrophobicity coloring
+    Rama,         // Use Rama-based coloring
+    Blueprint,    // Use SS-based coloring
+    Alignment,    // Use alignment quality coloring
 }
 
 /// The complete scene containing all structures
@@ -926,8 +759,6 @@ impl Default for Scene {
 
 // Helper functions
 
-const MAX_PEPTIDE_BOND_DISTANCE: f32 = 2.5;
-
 fn is_hydrophobic(res_name: &str) -> bool {
     matches!(
         res_name,
@@ -958,111 +789,5 @@ fn three_to_one(three: &str) -> char {
         "TYR" => 'Y',
         "VAL" => 'V',
         _ => 'X',
-    }
-}
-
-/// Generate sidechain bonds from residue topology
-fn generate_sidechain_bonds(
-    pdb: &PDB,
-    atom_index_map: &HashMap<(String, isize, String), usize>,
-) -> Vec<Bond> {
-    let mut bonds = Vec::new();
-
-    for chain in pdb.chains() {
-        let chain_id = chain.id().to_string();
-
-        for residue in chain.residues() {
-            let res_name = residue.name().unwrap_or("UNK");
-            let res_serial = residue.serial_number();
-
-            // Get bond topology for this residue type
-            if let Some(residue_bonds) = get_residue_bonds(res_name) {
-                for (atom1, atom2) in residue_bonds {
-                    let key1 = (chain_id.clone(), res_serial, atom1.to_string());
-                    let key2 = (chain_id.clone(), res_serial, atom2.to_string());
-
-                    if let (Some(&idx1), Some(&idx2)) =
-                        (atom_index_map.get(&key1), atom_index_map.get(&key2))
-                    {
-                        bonds.push(Bond {
-                            atom_a: idx1 as u32,
-                            atom_b: idx2 as u32,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    bonds
-}
-
-/// Get bond topology for a residue type (sidechain bonds only, excluding backbone)
-fn get_residue_bonds(res_name: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    match res_name {
-        "ALA" => Some(&[]),
-        "ARG" => Some(&[
-            ("CB", "CG"),
-            ("CG", "CD"),
-            ("CD", "NE"),
-            ("NE", "CZ"),
-            ("CZ", "NH1"),
-            ("CZ", "NH2"),
-        ]),
-        "ASN" => Some(&[("CB", "CG"), ("CG", "OD1"), ("CG", "ND2")]),
-        "ASP" => Some(&[("CB", "CG"), ("CG", "OD1"), ("CG", "OD2")]),
-        "CYS" => Some(&[("CB", "SG")]),
-        "GLN" => Some(&[("CB", "CG"), ("CG", "CD"), ("CD", "OE1"), ("CD", "NE2")]),
-        "GLU" => Some(&[("CB", "CG"), ("CG", "CD"), ("CD", "OE1"), ("CD", "OE2")]),
-        "GLY" => Some(&[]),
-        "HIS" => Some(&[
-            ("CB", "CG"),
-            ("CG", "ND1"),
-            ("CG", "CD2"),
-            ("ND1", "CE1"),
-            ("CD2", "NE2"),
-            ("CE1", "NE2"),
-        ]),
-        "ILE" => Some(&[("CB", "CG1"), ("CB", "CG2"), ("CG1", "CD1")]),
-        "LEU" => Some(&[("CB", "CG"), ("CG", "CD1"), ("CG", "CD2")]),
-        "LYS" => Some(&[("CB", "CG"), ("CG", "CD"), ("CD", "CE"), ("CE", "NZ")]),
-        "MET" => Some(&[("CB", "CG"), ("CG", "SD"), ("SD", "CE")]),
-        "PHE" => Some(&[
-            ("CB", "CG"),
-            ("CG", "CD1"),
-            ("CG", "CD2"),
-            ("CD1", "CE1"),
-            ("CD2", "CE2"),
-            ("CE1", "CZ"),
-            ("CE2", "CZ"),
-        ]),
-        "PRO" => Some(&[("CB", "CG"), ("CG", "CD")]),
-        "SER" => Some(&[("CB", "OG")]),
-        "THR" => Some(&[("CB", "OG1"), ("CB", "CG2")]),
-        "TRP" => Some(&[
-            ("CB", "CG"),
-            ("CG", "CD1"),
-            ("CG", "CD2"),
-            ("CD1", "NE1"),
-            ("CD2", "CE2"),
-            ("CD2", "CE3"),
-            ("NE1", "CE2"),
-            ("CE2", "CZ2"),
-            ("CE3", "CZ3"),
-            ("CZ2", "CH2"),
-            ("CZ3", "CH2"),
-        ]),
-        "TYR" => Some(&[
-            ("CB", "CG"),
-            ("CG", "CD1"),
-            ("CG", "CD2"),
-            ("CD1", "CE1"),
-            ("CD2", "CE2"),
-            ("CE1", "CZ"),
-            ("CE2", "CZ"),
-            ("CZ", "OH"),
-        ]),
-        "VAL" => Some(&[("CB", "CG1"), ("CB", "CG2")]),
-        _ => None,
     }
 }
