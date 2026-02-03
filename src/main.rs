@@ -914,7 +914,7 @@ impl ApplicationHandler for App {
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let (Some(window), Some(engine)) = (&self.window, &mut self.engine) {
                     let newsize = window.inner_size();
-                    engine.context.resize(newsize);
+                    engine.resize(newsize); // Full resize including camera aspect ratio
                 }
             }
 
