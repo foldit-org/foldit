@@ -25,6 +25,7 @@ use foldit_conv::coords::{
 };
 use glam::Vec3;
 
+use foldit_render::animation::AnimationAction;
 use foldit_render::engine::ProteinRenderEngine;
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,7 +61,8 @@ struct App {
     last_frame: Instant,
     last_mouse_pos: (f32, f32),
     pdb_path: String,
-    scene_dirty: bool,
+    /// Pending animation action (None = no update needed)
+    pending_action: Option<AnimationAction>,
 }
 
 impl App {
@@ -84,26 +86,31 @@ impl App {
             last_frame: Instant::now(),
             last_mouse_pos: (0.0, 0.0),
             pdb_path,
-            scene_dirty: false,
+            pending_action: None,
         }
     }
 
-    /// Update engine from scene data
+    /// Update engine from scene data with appropriate animation action.
     fn sync_engine_with_scene(&mut self) {
-        if !self.scene_dirty {
+        let Some(action) = self.pending_action.take() else {
             return;
-        }
+        };
 
         if let Some(engine) = &mut self.engine {
             let data = self.scene.aggregated();
 
-            // Trigger smooth animation for backbone changes
-            // This sets up interpolation from current visual position to new target
-            engine.animate_to_pose(&data.backbone_chains);
+            // Trigger animation with the appropriate action type
+            engine.animate_to_full_pose_with_action(
+                &data.backbone_chains,
+                &data.sidechain_positions,
+                &data.sidechain_bonds,
+                &data.sidechain_hydrophobicity,
+                &data.sidechain_residue_indices,
+                &data.backbone_sidechain_bonds,
+                action,
+            );
 
-            // Update sidechains and other data
-            // Note: backbone gets set to target here, but update_animations() in render()
-            // will override it with the interpolated position before drawing
+            // Update renderers with target positions
             engine.update_from_aggregated(
                 &data.backbone_chains,
                 &data.sidechain_positions,
@@ -115,8 +122,6 @@ impl App {
                 false, // Don't fit camera on every update
             );
         }
-
-        self.scene_dirty = false;
     }
 
     /// Convert flat backbone positions (N, CA, C, O per residue) to backbone chains
@@ -196,7 +201,7 @@ impl App {
                             log::info!("Updated frame {}/{} ({} sidechains)",
                                 update.step, update.total_steps, structure.sidechain_atoms.len());
                         }
-                        self.scene_dirty = true;
+                        self.pending_action = Some(AnimationAction::Diffusion);
                     }
                     Err(e) => {
                         log::warn!("Failed to parse intermediate: {}", e);
@@ -230,7 +235,7 @@ impl App {
                 self.animation_structure_id = Some(id);
                 log::info!("Created animation structure {:?}", id);
             }
-            self.scene_dirty = true;
+            self.pending_action = Some(AnimationAction::Diffusion);
             return;
         }
 
@@ -327,7 +332,7 @@ impl App {
                                             structure.sidechain_atoms.len()
                                         );
                                     }
-                                    self.scene_dirty = true;
+                                    self.pending_action = Some(AnimationAction::Diffusion);
                                 }
                                 Err(e) => {
                                     log::error!("Failed to parse prediction: {}", e);
@@ -430,7 +435,7 @@ impl App {
                             self.rfd3_design_id = Some(id);
                         }
 
-                        self.scene_dirty = true;
+                        self.pending_action = Some(AnimationAction::Diffusion);
                         self.effect = VisualEffect::None;
                     }
 
@@ -498,7 +503,7 @@ impl App {
                         let id = self.scene.add(new_structure);
                         self.mpnn_structure_id = Some(id);
                         log::info!("Created MPNN design structure {:?}", id);
-                        self.scene_dirty = true;
+                        self.pending_action = Some(AnimationAction::Mutation);
                     }
                     Err(e) => {
                         log::error!("Failed to create MPNN structure: {}", e);
@@ -528,7 +533,7 @@ impl App {
                                 structure.name = name;
                             }
                         }
-                        self.scene_dirty = true;
+                        self.pending_action = Some(AnimationAction::Wiggle);
                     }
                     Err(e) => {
                         log::warn!("Failed to update structure from Rosetta: {}", e);
@@ -755,7 +760,7 @@ impl App {
                         }
                     }
                 }
-                self.scene_dirty = true;
+                self.pending_action = Some(AnimationAction::Load);
             }
 
             KeyCode::Delete | KeyCode::Backspace => {
@@ -766,7 +771,7 @@ impl App {
                         if Some(last_id) != self.original_structure_id {
                             if let Some(removed) = self.scene.remove(last_id) {
                                 log::info!("Removed structure: {}", removed.name);
-                                self.scene_dirty = true;
+                                self.pending_action = Some(AnimationAction::Load);
                             }
                         }
                     }
@@ -794,7 +799,7 @@ impl App {
                 if let Some(anim_id) = self.animation_structure_id.take() {
                     if self.scene.remove(anim_id).is_some() {
                         log::info!("Removed in-progress animation structure");
-                        self.scene_dirty = true;
+                        self.pending_action = Some(AnimationAction::Load);
                     }
                 }
 
