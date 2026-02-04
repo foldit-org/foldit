@@ -12,14 +12,18 @@
 //!   V - Toggle view mode (tube/ribbon)
 //!   Q - Toggle backbone quality (high/low)
 //!   H - Toggle visibility of designed structures
+//!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
 //!   Delete - Remove last added structure
 //!   Esc - Cancel operation / clear selection
 //!   Mouse - Rotate/zoom camera
 
+use foldit_rs::action_manager::{ActionManager, ActionType};
 use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
-use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate};
-use foldit_rs::scene::{Scene, Structure, StructureId};
+use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate, RosettaSessionState, RosettaStructureId};
+use foldit_rs::scene::{Scene, Structure, StructureId, CombinedCoordsResult};
+use foldit_rs::session::Session;
 use foldit_rs::visual_effects::VisualEffect;
+use std::collections::HashMap;
 use foldit_conv::coords::{
     align_coords_bytes, extract_ca_from_chains, kabsch_alignment_with_scale,
 };
@@ -41,22 +45,17 @@ struct App {
     window: Option<Arc<Window>>,
     engine: Option<ProteinRenderEngine>,
     scene: Scene,
-    original_structure_id: Option<StructureId>,
-    /// Structure ID for in-flight ML animation (created on first intermediate, updated on each)
-    animation_structure_id: Option<StructureId>,
-    /// Structure ID for MPNN design (separate from original)
-    mpnn_structure_id: Option<StructureId>,
-    /// Structure ID for RFD3 design (the backbone we want to design sequence for)
-    rfd3_design_id: Option<StructureId>,
-    /// Pending MPNN structure waiting for Rosetta to finish applying sequence
-    mpnn_pending: bool,
-    /// Original backbone CA positions for Kabsch alignment
-    original_backbone_ca: Option<Vec<Vec3>>,
+    /// Session tracks structure relationships and operation targeting
+    session: Session,
     ml_runner: Option<MLRunner>,
     ml_updates: Option<mpsc::Receiver<IntermediateUpdate>>,
     ml_results: Option<mpsc::Receiver<MLResult>>,
     rosetta_executor: Option<RosettaExecutor>,
     rosetta_updates: Option<mpsc::Receiver<RosettaUpdate>>,
+    /// Per-structure action locking (used for BOTH Rosetta AND ML operations)
+    action_manager: ActionManager,
+    /// Unified Rosetta session state: tracks structures, residue ranges, and focus locks
+    rosetta_state: Option<RosettaSessionState>,
     effect: VisualEffect,
     last_frame: Instant,
     last_mouse_pos: (f32, f32),
@@ -71,17 +70,14 @@ impl App {
             window: None,
             engine: None,
             scene: Scene::new(),
-            original_structure_id: None,
-            animation_structure_id: None,
-            mpnn_structure_id: None,
-            rfd3_design_id: None,
-            mpnn_pending: false,
-            original_backbone_ca: None,
+            session: Session::new(),
             ml_runner: None,
             ml_updates: None,
             ml_results: None,
             rosetta_executor: None,
             rosetta_updates: None,
+            action_manager: ActionManager::new(),
+            rosetta_state: None,
             effect: VisualEffect::None,
             last_frame: Instant::now(),
             last_mouse_pos: (0.0, 0.0),
@@ -162,7 +158,7 @@ impl App {
 
         // SimpleFold: update full structure including sidechains, with scale correction
         if let Some(ref coords_bytes) = update.coords_bytes {
-            if let Some(orig_id) = self.original_structure_id {
+            if let Some(orig_id) = self.session.original {
                 // Parse full structure first
                 match Structure::from_coords_bytes(
                     format!("Predicting... ({}/{})", update.step, update.total_steps),
@@ -171,7 +167,7 @@ impl App {
                 ) {
                     Ok(mut new_data) => {
                         // Compute scale + alignment from CA positions
-                        if let Some(ref original_ca) = self.original_backbone_ca {
+                        if let Some(ref original_ca) = self.session.original_backbone_ca {
                             let predicted_ca = extract_ca_from_chains(&new_data.backbone_chains);
                             if let Some((rotation, translation, scale)) = kabsch_alignment_with_scale(original_ca, &predicted_ca) {
                                 // Apply scale, rotation, translation to backbone
@@ -219,7 +215,7 @@ impl App {
                 return;
             }
 
-            if let Some(anim_id) = self.animation_structure_id {
+            if let Some(anim_id) = self.session.animation_structure {
                 if let Some(structure) = self.scene.get_mut(anim_id) {
                     structure.backbone_chains = backbone_chains;
                     structure.name = format!("Designing... ({}/{})", update.step, update.total_steps);
@@ -232,8 +228,14 @@ impl App {
                     update.confidence,
                 );
                 let id = self.scene.add(structure);
-                self.animation_structure_id = Some(id);
+                self.session.on_animation_structure_created(id);
                 log::info!("Created animation structure {:?}", id);
+
+                // Smoothly animate camera to show all structures
+                if let Some(engine) = &mut self.engine {
+                    let data = self.scene.aggregated();
+                    engine.fit_camera_to_positions_animated(&data.all_positions);
+                }
             }
             self.pending_action = Some(AnimationAction::Diffusion);
             return;
@@ -288,15 +290,16 @@ impl App {
                         log::info!("Prediction complete! Confidence: {:.2}", confidence);
 
                         // Remove animation structure if exists
-                        if let Some(anim_id) = self.animation_structure_id.take() {
+                        if let Some(anim_id) = self.session.animation_structure {
                             self.scene.remove(anim_id);
+                            self.session.on_animation_structure_removed();
                         }
 
                         // Update original structure in place with predicted coords
-                        if let Some(orig_id) = self.original_structure_id {
+                        if let Some(orig_id) = self.session.original {
                             // Apply Kabsch alignment to the raw COORDS before parsing
                             // This ensures coords_bytes and visual representation are in sync
-                            let aligned_coords_bytes = if let Some(ref original_ca) = self.original_backbone_ca {
+                            let aligned_coords_bytes = if let Some(ref original_ca) = self.session.original_backbone_ca {
                                 match align_coords_bytes(&coords_bytes, original_ca) {
                                     Ok(aligned) => {
                                         log::info!("Applied Kabsch alignment to COORDS data");
@@ -342,6 +345,8 @@ impl App {
                                     }
                                 }
                             }
+                            // Unlock the structure now that prediction is complete
+                            self.action_manager.unlock(orig_id);
                         }
 
                         self.effect = VisualEffect::None;
@@ -353,6 +358,9 @@ impl App {
                             log::info!("  {}: {} (score: {:.3})", i + 1, seq, score);
                         }
 
+                        // Track the locked structure for potential unlock on failure
+                        let locked_target = self.session.mpnn_target();
+
                         // Find best sequence (highest score, or first if all equal)
                         let best_idx = scores
                             .iter()
@@ -361,16 +369,18 @@ impl App {
                             .map(|(i, _)| i)
                             .unwrap_or(0);
 
+                        let mut unlock_needed = true; // Will be set to false if we successfully hand off to Rosetta
+
                         if let Some(best_seq) = sequences.get(best_idx) {
                             log::info!("Using sequence {} (score: {:.3})", best_idx + 1, scores[best_idx]);
 
-                            // Get coords from the RFD3 design if it exists, otherwise original
-                            let target_id = self.rfd3_design_id.or(self.original_structure_id);
+                            // Get coords from the MPNN target (RFD3 design if exists, otherwise original)
+                            let target_id = self.session.mpnn_apply_target();
                             let coords = target_id
                                 .and_then(|id| self.scene.get(id))
                                 .and_then(|s| s.get_coords_bytes());
 
-                            if self.rfd3_design_id.is_some() {
+                            if self.session.rfd3_design.is_some() {
                                 log::info!("Using RFD3 design structure for MPNN");
                             } else {
                                 log::info!("Using original structure for MPNN");
@@ -387,18 +397,30 @@ impl App {
                                             // Drain stale updates
                                         }
                                     }
+                                    // Clear session state - sequence change will need fresh session
+                                    self.rosetta_state = None;
 
                                     log::info!("Applying designed sequence via Rosetta and packing sidechains...");
-                                    self.mpnn_pending = true;
+                                    self.session.on_mpnn_start();
                                     if let Err(e) = executor.apply_sequence_and_pack(coords, best_seq.clone()) {
                                         log::error!("Failed to apply sequence: {}", e);
-                                        self.mpnn_pending = false;
+                                        self.session.mpnn_pending = false;
+                                    } else {
+                                        // Successfully handed off to Rosetta, keep lock until Rosetta completes
+                                        unlock_needed = false;
                                     }
                                 } else {
                                     log::warn!("No Rosetta executor available for sidechain placement");
                                 }
                             } else {
                                 log::warn!("No coords available from original structure");
+                            }
+                        }
+
+                        // Unlock on failure (Rosetta will unlock on success in process_rosetta_updates)
+                        if unlock_needed {
+                            if let Some(id) = locked_target {
+                                self.action_manager.unlock(id);
                             }
                         }
 
@@ -412,16 +434,19 @@ impl App {
                             confidence
                         );
 
+                        // Invalidate Rosetta session - topology has changed with new structure
+                        self.rosetta_state = None;
+
                         // If we have an animation structure, update it to the final result
                         // Otherwise create a new one
-                        if let Some(anim_id) = self.animation_structure_id.take() {
+                        if let Some(anim_id) = self.session.animation_structure {
                             if let Some(structure) = self.scene.get_mut(anim_id) {
                                 structure.name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
                                 structure.backbone_chains = backbone_chains;
                                 log::info!("Updated animation structure {:?} to final result", anim_id);
                             }
                             // Track this as the RFD3 design for MPNN
-                            self.rfd3_design_id = Some(anim_id);
+                            self.session.on_rfd3_complete(anim_id);
                         } else {
                             // No animation structure, create new one
                             let structure = Structure::from_backbone_design(
@@ -432,7 +457,18 @@ impl App {
                             let id = self.scene.add(structure);
                             log::info!("Added designed structure {:?} to scene", id);
                             // Track this as the RFD3 design for MPNN
-                            self.rfd3_design_id = Some(id);
+                            self.session.on_rfd3_complete(id);
+                        }
+
+                        // Unlock the original structure now that RFD3 is complete
+                        if let Some(orig_id) = self.session.original {
+                            self.action_manager.unlock(orig_id);
+                        }
+
+                        // Smoothly animate camera to show all structures including new design
+                        if let Some(engine) = &mut self.engine {
+                            let data = self.scene.aggregated();
+                            engine.fit_camera_to_positions_animated(&data.all_positions);
                         }
 
                         self.pending_action = Some(AnimationAction::Diffusion);
@@ -441,6 +477,10 @@ impl App {
 
                     MLResult::Error(error) => {
                         log::error!("ML error: {}", error);
+                        // Unlock any locked structures on error
+                        for lock_id in self.action_manager.locked_structures() {
+                            self.action_manager.unlock(lock_id);
+                        }
                         self.effect = VisualEffect::None;
                     }
                 }
@@ -470,12 +510,16 @@ impl App {
                 update.converged
             );
 
-            // Check if this is an MPNN result (create new structure) or wiggle/shake (update existing)
-            if self.mpnn_pending && update.converged {
-                // MPNN apply completed - create a new structure for the design
-                self.mpnn_pending = false;
+            // Check if this is an MPNN result or wiggle/shake update
+            if self.session.mpnn_pending {
+                log::info!("MPNN update received: {} bytes, score: {:.1}",
+                    update.coords_bytes.len(), update.score);
 
-                log::info!("MPNN update received: {} bytes", update.coords_bytes.len());
+                // Target structure is RFD3 design if exists, otherwise original
+                let target_id = self.session.mpnn_apply_target();
+                // Structure that was locked when MPNN started
+                let locked_id = self.session.mpnn_target();
+
                 match Structure::from_coords_bytes(
                     format!("MPNN Design (score {:.1})", update.score),
                     &update.coords_bytes,
@@ -487,30 +531,62 @@ impl App {
                             new_structure.backbone_chains.len(),
                             new_structure.sidechain_atoms.len()
                         );
-                        // Remove old MPNN structure if it exists
-                        if let Some(old_id) = self.mpnn_structure_id.take() {
-                            self.scene.remove(old_id);
-                        }
-                        // Hide only the RFD3 design (backbone-only) to avoid overlap
-                        // Never hide the original structure
-                        if let Some(rfd3_id) = self.rfd3_design_id {
-                            if let Some(rfd3) = self.scene.get_mut(rfd3_id) {
-                                rfd3.visible = false;
-                                log::info!("Hiding RFD3 design {:?} to show MPNN design", rfd3_id);
+
+                        if let Some(id) = target_id {
+                            if let Some(structure) = self.scene.get_mut(id) {
+                                structure.backbone_chains = new_structure.backbone_chains;
+                                structure.sidechain_atoms = new_structure.sidechain_atoms;
+                                structure.sidechain_bonds = new_structure.sidechain_bonds;
+                                structure.backbone_sidechain_bonds = new_structure.backbone_sidechain_bonds;
+                                structure.coords_bytes = new_structure.coords_bytes;
+                                structure.name = format!("MPNN Design (score {:.1})", update.score);
+                                log::info!("Updated structure {:?} with MPNN design", id);
+                                self.pending_action = Some(AnimationAction::Mutation);
                             }
+                            // Track this as the MPNN design
+                            self.session.on_mpnn_complete(id);
+                        } else {
+                            self.session.mpnn_pending = false;
                         }
-                        // Add the new MPNN design as a separate structure
-                        let id = self.scene.add(new_structure);
-                        self.mpnn_structure_id = Some(id);
-                        log::info!("Created MPNN design structure {:?}", id);
-                        self.pending_action = Some(AnimationAction::Mutation);
+                        // Unlock the structure now that MPNN is complete
+                        if let Some(id) = locked_id {
+                            self.action_manager.unlock(id);
+                        }
                     }
                     Err(e) => {
-                        log::error!("Failed to create MPNN structure: {}", e);
+                        log::error!("Failed to parse MPNN structure: {}", e);
+                        self.session.mpnn_pending = false;
+                        // Unlock on error
+                        if let Some(id) = locked_id {
+                            self.action_manager.unlock(id);
+                        }
                     }
                 }
-            } else if let Some(id) = self.mpnn_structure_id.or(self.original_structure_id) {
-                // Wiggle/shake update - update the active structure (MPNN if exists, else original)
+            } else if let Some(ref state) = self.rosetta_state {
+                // Full session update - apply to all structures using the session mapping
+                log::info!("Applying full session update ({} structures, {} bytes)",
+                    state.structure_count(), update.coords_bytes.len());
+
+                // Convert RosettaStructureId back to StructureId for scene update
+                let chain_ids: Vec<(StructureId, Vec<u8>)> = state.chain_ids_per_structure
+                    .iter()
+                    .map(|(id, chains)| (StructureId::from_raw(id.0), chains.clone()))
+                    .collect();
+
+                match self.scene.apply_combined_update(&update.coords_bytes, &chain_ids) {
+                    Ok(()) => {
+                        log::info!("Successfully updated all structures in session");
+                        self.pending_action = Some(AnimationAction::Wiggle);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to apply combined update: {}", e);
+                    }
+                }
+            } else if let Some(id) = self.session.operation_target().or(self.session.original) {
+                // Single structure update (focused structure or fallback to original)
+                let target_name = self.scene.get(id).map(|s| s.name.clone()).unwrap_or_else(|| format!("{:?}", id));
+                log::info!("Applying update to '{}' ({} bytes)", target_name, update.coords_bytes.len());
+
                 let name = update
                     .message
                     .clone()
@@ -522,6 +598,11 @@ impl App {
                     1.0,
                 ) {
                     Ok(new_structure) => {
+                        log::info!(
+                            "Parsed update: {} backbone chains, {} sidechain atoms",
+                            new_structure.backbone_chains.len(),
+                            new_structure.sidechain_atoms.len()
+                        );
                         if let Some(structure) = self.scene.get_mut(id) {
                             structure.backbone_chains = new_structure.backbone_chains;
                             structure.sidechain_atoms = new_structure.sidechain_atoms;
@@ -541,7 +622,10 @@ impl App {
                 }
             }
 
-            // Stop visual effect when operation converges
+            // Note: Wiggle/shake never auto-converge (like real Foldit).
+            // Operations only stop when user explicitly presses the key again.
+            // The converged flag is only true for one-shot operations like MPNN,
+            // which don't use the action_manager, so no unlock needed here.
             if update.converged {
                 self.effect = VisualEffect::None;
             }
@@ -553,88 +637,205 @@ impl App {
         match key {
             KeyCode::KeyW => {
                 // Wiggle: pure minimization (no packing)
-                // Converges when score change < 0.0002
-                let rosetta_executor = match &self.rosetta_executor {
-                    Some(r) => r,
-                    None => {
-                        log::warn!("Rosetta executor not initialized");
-                        return;
-                    }
-                };
+                if self.rosetta_executor.is_none() {
+                    log::warn!("Rosetta executor not initialized");
+                    return;
+                }
 
-                // Toggle wiggle on/off
-                if rosetta_executor.is_running() {
-                    log::info!("Stopping operation...");
-                    rosetta_executor.stop();
-                    self.effect = VisualEffect::None;
+                // Check if ANY structure has an active operation
+                let locked_ids = self.action_manager.locked_structures();
+                if !locked_ids.is_empty() {
+                    // Check what type of operation is running
+                    let has_rosetta_op = locked_ids.iter().any(|&id| {
+                        matches!(
+                            self.action_manager.get_action_type(id),
+                            Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                        )
+                    });
+
+                    if has_rosetta_op {
+                        // Rosetta operation running - stop it (toggle behavior)
+                        log::info!("Stopping Rosetta operation...");
+                        for lock_id in locked_ids {
+                            if matches!(
+                                self.action_manager.get_action_type(lock_id),
+                                Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                            ) {
+                                self.action_manager.request_cancel(lock_id);
+                                self.action_manager.unlock(lock_id);
+                            }
+                        }
+                        if let Some(ref executor) = self.rosetta_executor {
+                            executor.stop();
+                        }
+                        // Don't clear rosetta_state - topology hasn't changed
+                        self.effect = VisualEffect::None;
+                    } else {
+                        // ML operation running - can't start wiggle
+                        let action = locked_ids.first()
+                            .and_then(|&id| self.action_manager.get_action_type(id));
+                        log::warn!("Cannot start wiggle: {:?} is running", action);
+                    }
                 } else {
-                    // Get coords from active structure (MPNN design if exists, else original)
-                    let structure_id = self.mpnn_structure_id.or(self.original_structure_id);
-                    let coords_bytes = match structure_id {
-                        Some(id) => self.scene.get(id).and_then(|s| s.get_coords_bytes()),
-                        None => None,
+                    // Use session's lock target (original in session mode, focused in single mode)
+                    let Some(lock_id) = self.session.lock_target() else {
+                        log::warn!("No structure available for wiggle");
+                        return;
                     };
 
-                    match coords_bytes {
-                        Some(coords) => {
-                            let target = if self.mpnn_structure_id.is_some() { "MPNN design" } else { "original" };
-                            log::info!("Starting wiggle on {} ({} bytes)...", target, coords.len());
-                            if let Err(e) = rosetta_executor.start_wiggle(coords) {
+                    // Get combined coords - used for session creation AND operations
+                    // The combined session approach uses locks to control which residues move
+                    let Some(combined) = self.scene.get_combined_coords_bytes() else {
+                        log::warn!("No coords available for wiggle");
+                        return;
+                    };
+                    let coords = combined.bytes.clone();
+
+                    // Ensure session exists with correct topology
+                    if self.ensure_rosetta_session().is_none() {
+                        log::warn!("Failed to ensure Rosetta session for wiggle");
+                        return;
+                    }
+
+                    // Update locks based on current focus
+                    self.update_rosetta_locks();
+
+                    if let Some(_cancel_flag) = self.action_manager.try_lock(lock_id, ActionType::RosettaWiggle) {
+                        let target_desc = if self.session.is_session_mode() {
+                            format!("full session ({} structures)", self.scene.len())
+                        } else {
+                            self.session.operation_target()
+                                .and_then(|id| self.scene.get(id))
+                                .map(|s| s.name.clone())
+                                .unwrap_or_default()
+                        };
+                        log::info!("Starting wiggle on {} ({} bytes)...", target_desc, coords.len());
+                        // Get executor reference in this scope where we need it
+                        if let Some(ref executor) = self.rosetta_executor {
+                            if let Err(e) = executor.start_wiggle(coords) {
                                 log::error!("Failed to start wiggle: {}", e);
+                                self.action_manager.unlock(lock_id);
                                 return;
                             }
-                            self.effect = VisualEffect::pulsing();
                         }
-                        None => {
-                            log::warn!("No structure available for wiggle");
-                        }
+                        self.effect = VisualEffect::pulsing();
+                    } else {
+                        log::warn!("Structure is already locked by another operation");
                     }
                 }
             }
 
             KeyCode::KeyS => {
                 // Shake: pure packing (rotamer optimization, no minimization)
-                // Runs continuously until stopped
-                let rosetta_executor = match &self.rosetta_executor {
-                    Some(r) => r,
-                    None => {
-                        log::warn!("Rosetta executor not initialized");
-                        return;
-                    }
-                };
+                if self.rosetta_executor.is_none() {
+                    log::warn!("Rosetta executor not initialized");
+                    return;
+                }
 
-                // Toggle shake on/off
-                if rosetta_executor.is_running() {
-                    log::info!("Stopping operation...");
-                    rosetta_executor.stop();
-                    self.effect = VisualEffect::None;
+                // Check if ANY structure has an active operation
+                let locked_ids = self.action_manager.locked_structures();
+                if !locked_ids.is_empty() {
+                    // Check what type of operation is running
+                    let has_rosetta_op = locked_ids.iter().any(|&id| {
+                        matches!(
+                            self.action_manager.get_action_type(id),
+                            Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                        )
+                    });
+
+                    if has_rosetta_op {
+                        // Rosetta operation running - stop it (toggle behavior)
+                        log::info!("Stopping Rosetta operation...");
+                        for lock_id in locked_ids {
+                            if matches!(
+                                self.action_manager.get_action_type(lock_id),
+                                Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                            ) {
+                                self.action_manager.request_cancel(lock_id);
+                                self.action_manager.unlock(lock_id);
+                            }
+                        }
+                        if let Some(ref executor) = self.rosetta_executor {
+                            executor.stop();
+                        }
+                        // Don't clear rosetta_state - topology hasn't changed
+                        self.effect = VisualEffect::None;
+                    } else {
+                        // ML operation running - can't start shake
+                        let action = locked_ids.first()
+                            .and_then(|&id| self.action_manager.get_action_type(id));
+                        log::warn!("Cannot start shake: {:?} is running", action);
+                    }
                 } else {
-                    // Get coords from active structure (MPNN design if exists, else original)
-                    let structure_id = self.mpnn_structure_id.or(self.original_structure_id);
-                    let coords_bytes = match structure_id {
-                        Some(id) => self.scene.get(id).and_then(|s| s.get_coords_bytes()),
-                        None => None,
+                    // Use session's lock target (original in session mode, focused in single mode)
+                    let Some(lock_id) = self.session.lock_target() else {
+                        log::warn!("No structure available for shake");
+                        return;
                     };
 
-                    match coords_bytes {
-                        Some(coords) => {
-                            let target = if self.mpnn_structure_id.is_some() { "MPNN design" } else { "original" };
-                            log::info!("Starting shake on {} ({} bytes)...", target, coords.len());
-                            if let Err(e) = rosetta_executor.start_shake(coords) {
+                    // Get combined coords - used for session creation AND operations
+                    // The combined session approach uses locks to control which residues move
+                    let Some(combined) = self.scene.get_combined_coords_bytes() else {
+                        log::warn!("No coords available for shake");
+                        return;
+                    };
+                    let coords = combined.bytes.clone();
+
+                    // Ensure session exists with correct topology
+                    if self.ensure_rosetta_session().is_none() {
+                        log::warn!("Failed to ensure Rosetta session for shake");
+                        return;
+                    }
+
+                    // Update locks based on current focus
+                    self.update_rosetta_locks();
+
+                    if let Some(_cancel_flag) = self.action_manager.try_lock(lock_id, ActionType::RosettaShake) {
+                        let target_desc = if self.session.is_session_mode() {
+                            format!("full session ({} structures)", self.scene.len())
+                        } else {
+                            self.session.operation_target()
+                                .and_then(|id| self.scene.get(id))
+                                .map(|s| s.name.clone())
+                                .unwrap_or_default()
+                        };
+                        log::info!("Starting shake on {} ({} bytes)...", target_desc, coords.len());
+                        // Get executor reference in this scope where we need it
+                        if let Some(ref executor) = self.rosetta_executor {
+                            if let Err(e) = executor.start_shake(coords) {
                                 log::error!("Failed to start shake: {}", e);
+                                self.action_manager.unlock(lock_id);
                                 return;
                             }
-                            self.effect = VisualEffect::pulsing();
                         }
-                        None => {
-                            log::warn!("No structure available for shake");
-                        }
+                        self.effect = VisualEffect::pulsing();
+                    } else {
+                        log::warn!("Structure is already locked by another operation");
                     }
                 }
             }
 
             KeyCode::KeyP => {
                 // SimpleFold: predict structure from sequence (multi-chain aware)
+                // Target is the original structure (we update it in-place with prediction)
+                let Some(target_id) = self.session.original else {
+                    log::warn!("No structure loaded for prediction");
+                    return;
+                };
+
+                // Check if target structure is already locked
+                if self.action_manager.is_locked(target_id) {
+                    let action = self.action_manager.get_action_type(target_id);
+                    log::warn!("Structure is locked by {:?}, cannot start SimpleFold", action);
+                    return;
+                }
+
+                // Stop any Rosetta operations and clear session (they may affect other structures)
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.rosetta_state = None;
+
                 let chains = self.get_structure_chains();
                 if chains.is_empty() {
                     log::warn!("No sequence/chains available");
@@ -648,6 +849,12 @@ impl App {
                         return;
                     }
                 };
+
+                // Lock the target structure for ML prediction
+                if self.action_manager.try_lock(target_id, ActionType::MLPredict).is_none() {
+                    log::warn!("Failed to acquire lock for SimpleFold");
+                    return;
+                }
 
                 let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
                 if chains.len() == 1 {
@@ -669,6 +876,7 @@ impl App {
                     num_recycles: 3,
                 }) {
                     log::error!("Failed to submit prediction task: {}", e);
+                    self.action_manager.unlock(target_id);
                     return;
                 }
 
@@ -677,6 +885,25 @@ impl App {
 
             KeyCode::KeyM => {
                 // MPNN: design sequence for current structure
+                // Target is the structure we'll design a sequence for
+                let Some(target_id) = self.session.mpnn_target() else {
+                    log::warn!("No structure available for sequence design");
+                    return;
+                };
+
+                // Check if target structure is already locked
+                if self.action_manager.is_locked(target_id) {
+                    let action = self.action_manager.get_action_type(target_id);
+                    log::warn!("Structure is locked by {:?}, cannot start MPNN", action);
+                    return;
+                }
+
+                // Stop any Rosetta operations and clear session
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.rosetta_state = None;
+
                 let ml_runner = match &self.ml_runner {
                     Some(r) => r,
                     None => {
@@ -685,19 +912,18 @@ impl App {
                     }
                 };
 
-                // Get the structure to design sequence for
-                // Use the most recently added design, or the original structure
-                let structure_id = self.animation_structure_id
-                    .or(self.original_structure_id);
+                let target_name = self.scene.get(target_id).map(|s| s.name.clone()).unwrap_or_default();
+                let coords = self.scene.get(target_id).and_then(|s| s.get_coords_bytes());
 
-                let coords_bytes = match structure_id {
-                    Some(id) => self.scene.get(id).and_then(|s| s.get_coords_bytes()),
-                    None => None,
-                };
-
-                match coords_bytes {
+                match coords {
                     Some(coords) => {
-                        log::info!("Starting MPNN sequence design ({} bytes)...", coords.len());
+                        // Lock the target structure for ML sequence design
+                        if self.action_manager.try_lock(target_id, ActionType::MLSequenceDesign).is_none() {
+                            log::warn!("Failed to acquire lock for MPNN");
+                            return;
+                        }
+
+                        log::info!("Starting MPNN sequence design on '{}' ({} bytes)...", target_name, coords.len());
 
                         if let Err(e) = ml_runner.submit(MLTask::SequenceDesign {
                             coords,
@@ -705,19 +931,39 @@ impl App {
                             num_sequences: 4,
                         }) {
                             log::error!("Failed to submit sequence design task: {}", e);
+                            self.action_manager.unlock(target_id);
                             return;
                         }
 
                         self.effect = VisualEffect::pulsing();
                     }
                     None => {
-                        log::warn!("No structure available for sequence design");
+                        log::warn!("No coords available for sequence design");
                     }
                 }
             }
 
             KeyCode::KeyR => {
                 // RFDiffusion3: design new structure
+                // Lock the original structure to indicate ML operation in progress
+                let Some(lock_id) = self.session.original else {
+                    log::warn!("No structure loaded, cannot start RFD3");
+                    return;
+                };
+
+                // Check if any structure is already locked
+                if self.action_manager.is_locked(lock_id) {
+                    let action = self.action_manager.get_action_type(lock_id);
+                    log::warn!("Structure is locked by {:?}, cannot start RFD3", action);
+                    return;
+                }
+
+                // Stop any Rosetta operations and clear session
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.rosetta_state = None;
+
                 let ml_runner = match &self.ml_runner {
                     Some(r) => r,
                     None => {
@@ -725,6 +971,12 @@ impl App {
                         return;
                     }
                 };
+
+                // Lock the structure for ML structure design
+                if self.action_manager.try_lock(lock_id, ActionType::MLStructureDesign).is_none() {
+                    log::warn!("Failed to acquire lock for RFD3");
+                    return;
+                }
 
                 log::info!("Starting RFDiffusion3 structure design...");
 
@@ -733,6 +985,7 @@ impl App {
                     num_steps: 50,
                 }) {
                     log::error!("Failed to submit structure design task: {}", e);
+                    self.action_manager.unlock(lock_id);
                     return;
                 }
 
@@ -749,9 +1002,16 @@ impl App {
 
             KeyCode::KeyH => {
                 // Toggle visibility of designed structures (all except original)
+                // Stop any running Rosetta operation and invalidate session
+                // since changing visibility changes the combined structure set
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.rosetta_state = None;
+
                 let ids: Vec<StructureId> = self.scene.structure_ids().to_vec();
                 for id in ids {
-                    if Some(id) != self.original_structure_id {
+                    if Some(id) != self.session.original {
                         // Extract info before mutable borrow
                         let toggle_info = self.scene.get(id).map(|s| (s.name.clone(), !s.visible));
                         if let Some((name, new_visible)) = toggle_info {
@@ -768,9 +1028,18 @@ impl App {
                 if self.scene.len() > 1 {
                     let ids: Vec<StructureId> = self.scene.structure_ids().to_vec();
                     if let Some(&last_id) = ids.last() {
-                        if Some(last_id) != self.original_structure_id {
+                        if Some(last_id) != self.session.original {
+                            // Stop any running Rosetta operation and invalidate session
+                            // since removing a structure changes the topology
+                            if let Some(ref executor) = self.rosetta_executor {
+                                executor.stop();
+                            }
+                            self.rosetta_state = None;
+
                             if let Some(removed) = self.scene.remove(last_id) {
                                 log::info!("Removed structure: {}", removed.name);
+                                // Validate focus in case removed structure was focused
+                                self.session.validate_focus(self.scene.structure_ids());
                                 self.pending_action = Some(AnimationAction::Load);
                             }
                         }
@@ -787,18 +1056,24 @@ impl App {
                     engine.picking.clear_selection();
                 }
 
-                // Stop Rosetta operation if running
-                if let Some(ref executor) = self.rosetta_executor {
-                    if executor.is_running() {
+                // Stop any locked operations and release locks
+                let locked_ids: Vec<StructureId> = self.action_manager.locked_structures();
+                for structure_id in locked_ids {
+                    self.action_manager.request_cancel(structure_id);
+                    if let Some(ref executor) = self.rosetta_executor {
                         executor.stop();
-                        log::info!("Stopped Rosetta operation");
                     }
+                    self.action_manager.unlock(structure_id);
+                    log::info!("Stopped operation on structure {:?}", structure_id);
                 }
 
+                // Don't clear rosetta_state - topology hasn't changed, just operation stopped
+
                 // Remove animation structure if one exists
-                if let Some(anim_id) = self.animation_structure_id.take() {
+                if let Some(anim_id) = self.session.animation_structure {
                     if self.scene.remove(anim_id).is_some() {
                         log::info!("Removed in-progress animation structure");
+                        self.session.on_animation_structure_removed();
                         self.pending_action = Some(AnimationAction::Load);
                     }
                 }
@@ -806,15 +1081,50 @@ impl App {
                 self.effect = VisualEffect::None;
             }
 
+            KeyCode::Tab => {
+                // Cycle focus: Session -> Structure 1 -> Structure 2 -> ... -> Session
+                let structure_ids = self.scene.structure_ids().to_vec();
+                self.session.cycle_focus(&structure_ids);
+                let focus_name = self.session.focus_description(&self.scene);
+                log::info!("Focus: {}", focus_name);
+
+                // Update Rosetta locks to match new focus
+                // This only takes effect if there's an active session
+                self.update_rosetta_locks();
+
+                // Update camera based on new focus
+                if let Some(engine) = &mut self.engine {
+                    match self.session.operation_target() {
+                        None => {
+                            // Session view: fit all structures
+                            let data = self.scene.aggregated();
+                            engine.fit_camera_to_positions_animated(&data.all_positions);
+                        }
+                        Some(id) => {
+                            // Structure view: fit just this structure
+                            if let Some(structure) = self.scene.get(id) {
+                                let positions: Vec<Vec3> = structure.backbone_chains
+                                    .iter()
+                                    .flat_map(|c| c.iter().copied())
+                                    .chain(structure.sidechain_atoms.iter().map(|a| a.position))
+                                    .collect();
+                                engine.fit_camera_to_positions_animated(&positions);
+                            }
+                        }
+                    }
+                }
+            }
+
             _ => {}
         }
     }
 
-    /// Get the sequence from the original structure
-    /// Get chains from the original structure for multi-chain prediction
+    /// Get chains from the focused structure (or original) for multi-chain prediction
     /// Returns Vec<(chain_id, sequence)>
     fn get_structure_chains(&self) -> Vec<(String, String)> {
-        if let Some(id) = self.original_structure_id {
+        // Use focused structure if set, otherwise fall back to original
+        let structure_id = self.session.operation_target().or(self.session.original);
+        if let Some(id) = structure_id {
             if let Some(structure) = self.scene.get(id) {
                 if !structure.chain_sequences.is_empty() {
                     return structure.chain_sequences
@@ -829,6 +1139,138 @@ impl App {
             }
         }
         vec![]
+    }
+
+    /// Get coords for backend operations.
+    /// If focused on a structure, returns that structure's coords.
+    /// Otherwise returns combined session coords.
+    fn get_operation_coords(&self) -> Option<(Vec<u8>, Option<CombinedCoordsResult>)> {
+        match self.session.operation_target() {
+            Some(id) => {
+                // Single structure mode
+                self.scene.get(id)
+                    .and_then(|s| s.get_coords_bytes())
+                    .map(|bytes| (bytes, None))
+            }
+            None => {
+                // Session mode: combined coords
+                self.scene.get_combined_coords_bytes()
+                    .map(|result| (result.bytes.clone(), Some(result)))
+            }
+        }
+    }
+
+    /// Ensure a Rosetta session exists with current topology.
+    /// Creates a new session or returns the existing one if topology matches.
+    /// Returns None if no structures are visible or executor is unavailable.
+    fn ensure_rosetta_session(&mut self) -> Option<&RosettaSessionState> {
+        let combined = self.scene.get_combined_coords_bytes()?;
+        let executor = self.rosetta_executor.as_ref()?;
+
+        // Check if we need to recreate the session
+        let needs_recreation = match &self.rosetta_state {
+            None => true,
+            Some(state) => {
+                let (visible_ids, residue_counts) = self.scene.get_visible_structure_residue_counts();
+                // Convert StructureId to RosettaStructureId for comparison
+                let visible_rosetta_ids: Vec<RosettaStructureId> = visible_ids
+                    .iter()
+                    .map(|id| RosettaStructureId(id.0))
+                    .collect();
+                let residue_counts_rosetta: HashMap<RosettaStructureId, usize> = residue_counts
+                    .iter()
+                    .map(|(id, count)| (RosettaStructureId(id.0), *count))
+                    .collect();
+                state.topology_changed(&visible_rosetta_ids, &residue_counts_rosetta)
+            }
+        };
+
+        if needs_recreation {
+            log::info!("Recreating Rosetta session (topology changed)");
+            if let Err(e) = executor.recreate_session(combined.bytes.clone()) {
+                log::error!("Failed to recreate Rosetta session: {}", e);
+                return None;
+            }
+
+            // Build RosettaSessionState from CombinedCoordsResult
+            let chain_ids_per_structure: Vec<(RosettaStructureId, Vec<u8>)> = combined
+                .chain_ids_per_structure
+                .iter()
+                .map(|(id, chains)| (RosettaStructureId(id.0), chains.clone()))
+                .collect();
+            let residue_ranges: HashMap<RosettaStructureId, (usize, usize)> = combined
+                .residue_ranges
+                .iter()
+                .map(|(id, range)| (RosettaStructureId(id.0), *range))
+                .collect();
+
+            self.rosetta_state = Some(RosettaSessionState::new(chain_ids_per_structure, residue_ranges));
+            log::info!(
+                "Session created with {} structures, {} total residues",
+                combined.chain_ids_per_structure.len(),
+                self.rosetta_state.as_ref().map(|s| s.total_residues).unwrap_or(0)
+            );
+        }
+
+        self.rosetta_state.as_ref()
+    }
+
+    /// Update Rosetta locks to match current focus.
+    /// In session mode, all residues are unlocked.
+    /// In single structure mode, only the focused structure's residues are unlocked.
+    fn update_rosetta_locks(&mut self) {
+        let Some(state) = self.rosetta_state.as_ref() else {
+            log::debug!("update_rosetta_locks: no rosetta_state, skipping");
+            return;
+        };
+
+        // Get new focus as RosettaStructureId
+        let new_focus = self.session.operation_target()
+            .map(|id| RosettaStructureId(id.0));
+
+        // Check if focus has changed
+        if state.focused_structure == new_focus {
+            log::debug!("update_rosetta_locks: focus unchanged ({:?}), skipping", new_focus);
+            return;
+        }
+
+        log::info!("update_rosetta_locks: focus changing from {:?} to {:?}",
+            state.focused_structure, new_focus);
+
+        let Some(executor) = self.rosetta_executor.as_ref() else {
+            return;
+        };
+
+        let total_residues = state.total_residues;
+
+        match new_focus {
+            None => {
+                // Session mode: unlock all residues
+                if let Err(e) = executor.clear_all_locks(total_residues) {
+                    log::warn!("Failed to clear locks: {}", e);
+                } else {
+                    log::info!("Cleared all locks (session mode)");
+                }
+            }
+            Some(focus_id) => {
+                // Single structure mode: lock residues not in focused structure
+                let locked_residues = state.residues_to_lock(focus_id);
+                if let Err(e) = executor.set_focus_locks(locked_residues.clone(), total_residues) {
+                    log::warn!("Failed to set focus locks: {}", e);
+                } else {
+                    log::info!(
+                        "Locked {} residues (focusing on structure {:?})",
+                        locked_residues.len(),
+                        focus_id
+                    );
+                }
+            }
+        }
+
+        // Update focus in state
+        if let Some(state) = self.rosetta_state.as_mut() {
+            state.set_focus(new_focus);
+        }
     }
 }
 
@@ -860,15 +1302,15 @@ impl ApplicationHandler for App {
                         structure.backbone_chains.len()
                     );
 
-                    // Store original CA positions for Kabsch alignment
-                    self.original_backbone_ca = Some(extract_ca_from_chains(&structure.backbone_chains));
+                    // Store original CA positions for Kabsch alignment in session
+                    let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
                     log::info!(
                         "Stored {} original CA positions for alignment",
-                        self.original_backbone_ca.as_ref().map(|v| v.len()).unwrap_or(0)
+                        backbone_ca.len()
                     );
 
                     let id = self.scene.add(structure);
-                    self.original_structure_id = Some(id);
+                    self.session.on_original_loaded(id, backbone_ca);
 
                     // Initial sync with engine
                     let data = self.scene.aggregated();
@@ -954,6 +1396,11 @@ impl ApplicationHandler for App {
                 // Update visual effect
                 let _intensity = self.effect.tick(dt.as_secs_f32());
                 // TODO: Pass intensity to shader for pulsing effect
+
+                // Update camera animation
+                if let Some(engine) = &mut self.engine {
+                    engine.update_camera_animation(dt.as_secs_f32());
+                }
 
                 // Render
                 if let Some(engine) = &mut self.engine {
@@ -1110,6 +1557,7 @@ fn main() {
     log::info!("  V - Toggle view mode (tube/ribbon)");
     log::info!("  Q - Toggle backbone quality (high/low)");
     log::info!("  H - Toggle visibility of designed structures");
+    log::info!("  Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)");
     log::info!("  Delete - Remove last added structure");
     log::info!("  Esc - Cancel operation / clear selection");
     log::info!("  Mouse - Rotate/zoom camera");

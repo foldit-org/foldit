@@ -4,7 +4,7 @@
 //! (from files, ML predictions, or designs) and aggregates their data
 //! for efficient rendering.
 
-use foldit_conv::coords::{Coords, CoordsAtom, serialize_coords};
+use foldit_conv::coords::{Coords, CoordsAtom, protein_only, serialize_coords};
 use foldit_render::bond_topology::get_residue_bonds;
 use glam::Vec3;
 use std::collections::HashMap;
@@ -13,12 +13,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for structures in the scene
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StructureId(u64);
+pub struct StructureId(pub u64);
 
 impl StructureId {
     pub fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Create a StructureId from a raw u64 value.
+    /// Used for converting from RosettaStructureId.
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
     }
 }
 
@@ -226,13 +232,19 @@ impl Structure {
         coords_bytes: &[u8],
         confidence: f32,
     ) -> Result<Self, String> {
-        use foldit_conv::coords::binary::deserialize;
+        use foldit_conv::coords::binary::{deserialize, serialize};
 
         let coords = deserialize(coords_bytes)
             .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
 
+        // Filter to protein-only residues (exclude water, ligands, etc.)
+        // This is important for MPNN/Rosetta which can't handle non-protein residues
+        let coords = protein_only(&coords);
+        let protein_coords_bytes = serialize(&coords)
+            .map_err(|e| format!("Failed to serialize protein coords: {:?}", e))?;
+
         let mut structure = Self::new(name);
-        structure.coords_bytes = Some(coords_bytes.to_vec());
+        structure.coords_bytes = Some(protein_coords_bytes);
 
         // Track atoms by (chain_id, res_num, atom_name) for bond lookup
         let mut atom_index_map: std::collections::HashMap<(u8, i32, String), usize> =
@@ -253,6 +265,7 @@ impl Structure {
             std::collections::HashMap::new();
         let mut next_residue_idx: u32 = 0;
 
+        // Use filtered protein coords for building the structure
         for i in 0..coords.num_atoms {
             let atom_name = std::str::from_utf8(&coords.atom_names[i])
                 .unwrap_or("")
@@ -313,17 +326,6 @@ impl Structure {
                 if !is_hydrogen {
                     // Sidechain atom (heavy atoms only)
                     let sidechain_idx = structure.sidechain_atoms.len();
-                    // Debug: log first few sidechain atom names
-                    if sidechain_idx < 15 {
-                        log::info!(
-                            "Sidechain atom {}: chain={}, res={}, name='{}' (bytes: {:?})",
-                            sidechain_idx,
-                            chain_id as char,
-                            res_num,
-                            atom_name,
-                            atom_name.as_bytes()
-                        );
-                    }
                     atom_index_map.insert((chain_id, res_num, atom_name.clone()), sidechain_idx);
 
                     // Look up 0-based residue index (assigned when we saw CA)
@@ -370,23 +372,9 @@ impl Structure {
         structure.sequence = all_sequence_chars.into_iter().collect();
 
         // Generate sidechain bonds from topology
-        // First, build reverse lookup for residue info
-        // Debug: log first few atom names in the map
-        let mut debug_count = 0;
-        for ((cid, rnum, aname), idx) in &atom_index_map {
-            if debug_count < 10 {
-                log::debug!(
-                    "atom_index_map: chain={}, res={}, atom='{}' -> idx={}",
-                    *cid as char, rnum, aname, idx
-                );
-                debug_count += 1;
-            }
-        }
-
+        let mut ca_found = 0;
         let mut bonds_attempted = 0;
         let mut bonds_found = 0;
-        let mut ca_found = 0;
-        let mut first_atoms_logged = 0;
         for i in 0..coords.num_atoms {
             let atom_name = std::str::from_utf8(&coords.atom_names[i])
                 .unwrap_or("")
@@ -397,15 +385,6 @@ impl Structure {
             let res_name = std::str::from_utf8(&coords.res_names[i])
                 .unwrap_or("UNK")
                 .trim();
-
-            // Debug: log first few atoms from coords to see what we're iterating
-            if first_atoms_logged < 10 {
-                log::info!(
-                    "Bond loop atom {}: name='{}', res={}, res_name='{}'",
-                    i, atom_name, res_num, res_name
-                );
-                first_atoms_logged += 1;
-            }
 
             // Generate bonds for this residue's topology
             if atom_name == "CA" {
@@ -501,6 +480,17 @@ impl Structure {
                 let ca_to_c = (*c_pos - *ca_pos).normalize();
                 let o_pos = *c_pos + ca_to_c * 1.23;
 
+                // Estimate CB position using ideal tetrahedral geometry
+                // Standard formula from protein structure analysis:
+                // CB is positioned at tetrahedral angle from CA, opposite to the N-CA-C plane
+                let ca_n = (*n_pos - *ca_pos).normalize();
+                let ca_c = (*c_pos - *ca_pos).normalize();
+                let n_vec = ca_c.cross(ca_n).normalize(); // Normal to backbone plane
+
+                // Ideal tetrahedral geometry coefficients (from crystallography)
+                let cb_dir = ca_n * 0.56802827 + ca_c * (-0.58273431) + n_vec * (-0.54067466);
+                let cb_pos = *ca_pos + cb_dir.normalize() * 1.521; // CA-CB bond length
+
                 // N atom
                 atoms.push(CoordsAtom {
                     x: n_pos.x,
@@ -552,6 +542,19 @@ impl Structure {
                 res_names.push(*b"ALA");
                 res_nums.push((res_idx + 1) as i32);
                 atom_names.push(*b"O   ");
+
+                // CB atom (estimated from tetrahedral geometry)
+                atoms.push(CoordsAtom {
+                    x: cb_pos.x,
+                    y: cb_pos.y,
+                    z: cb_pos.z,
+                    occupancy: 1.0,
+                    b_factor: 0.0,
+                });
+                chain_ids.push(chain_id);
+                res_names.push(*b"ALA");
+                res_nums.push((res_idx + 1) as i32);
+                atom_names.push(*b"CB  ");
             }
         }
 
@@ -629,6 +632,23 @@ pub enum ResidueColorMode {
     Rama,         // Use Rama-based coloring
     Blueprint,    // Use SS-based coloring
     Alignment,    // Use alignment quality coloring
+}
+
+/// Result of combining coords from all visible structures.
+/// Used for Rosetta session management with multi-structure support.
+#[derive(Debug, Clone)]
+pub struct CombinedCoordsResult {
+    /// Serialized COORDS bytes containing all structures
+    pub bytes: Vec<u8>,
+    /// Atom ranges for splitting updates: (StructureId, start_atom, end_atom) - 0-indexed
+    /// NOTE: These are only valid for the INPUT coords. After Rosetta processes them,
+    /// atom counts may change due to rebuilt atoms. Use chain_ids_per_structure for splitting exports.
+    pub atom_ranges: Vec<(StructureId, usize, usize)>,
+    /// Residue ranges per structure: StructureId -> (start_residue, end_residue) - 1-indexed, inclusive
+    pub residue_ranges: HashMap<StructureId, (usize, usize)>,
+    /// Chain IDs assigned to each structure (for splitting Rosetta exports by chain)
+    /// This is the reliable way to split exports since Rosetta may add/remove atoms
+    pub chain_ids_per_structure: Vec<(StructureId, Vec<u8>)>,
 }
 
 /// The complete scene containing all structures
@@ -732,6 +752,209 @@ impl Scene {
 
     fn invalidate_cache(&mut self) {
         self.cache = None;
+    }
+
+    /// Get visible structure IDs and their residue counts.
+    /// Used for checking if Rosetta session topology has changed.
+    pub fn get_visible_structure_residue_counts(&self) -> (Vec<StructureId>, HashMap<StructureId, usize>) {
+        let mut ids = Vec::new();
+        let mut counts = HashMap::new();
+
+        for structure in self.iter() {
+            if !structure.visible {
+                continue;
+            }
+
+            let residue_count: usize = structure
+                .backbone_chains
+                .iter()
+                .map(|c| c.len() / 3)
+                .sum();
+
+            ids.push(structure.id);
+            counts.insert(structure.id, residue_count);
+        }
+
+        (ids, counts)
+    }
+
+    /// Get combined COORDS bytes from all visible structures for Rosetta operations.
+    /// Returns the combined coords with atom and residue range mappings.
+    /// This creates a single COORDS buffer with all structures merged, using unique
+    /// chain IDs for each structure.
+    pub fn get_combined_coords_bytes(&self) -> Option<CombinedCoordsResult> {
+        use foldit_conv::coords::{Coords, deserialize_coords_internal as deserialize, serialize_coords as serialize};
+
+        let mut combined_atoms = Vec::new();
+        let mut combined_chain_ids = Vec::new();
+        let mut combined_res_names = Vec::new();
+        let mut combined_res_nums = Vec::new();
+        let mut combined_atom_names = Vec::new();
+
+        // Track which atom ranges belong to which structure: (structure_id, start_idx, end_idx)
+        let mut atom_ranges: Vec<(StructureId, usize, usize)> = Vec::new();
+        // Track residue ranges per structure: StructureId -> (start_residue, end_residue) 1-indexed
+        let mut residue_ranges: HashMap<StructureId, (usize, usize)> = HashMap::new();
+        // Track chain IDs assigned to each structure (for splitting exports)
+        let mut chain_ids_per_structure: Vec<(StructureId, Vec<u8>)> = Vec::new();
+
+        let mut next_chain_id = b'A';
+        let mut global_residue_offset: usize = 0;
+
+        for structure in self.iter() {
+            if !structure.visible {
+                continue;
+            }
+
+            // Count residues for this structure (backbone has 3 atoms per residue: N, CA, C)
+            let structure_residue_count: usize = structure
+                .backbone_chains
+                .iter()
+                .map(|c| c.len() / 3)
+                .sum();
+
+            // Get coords for this structure (cached or generated from backbone)
+            let coords_bytes = match structure.get_coords_bytes() {
+                Some(bytes) => bytes,
+                None => continue,
+            };
+
+            // Deserialize to access individual atoms
+            let coords: Coords = match deserialize(&coords_bytes) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let start_idx = combined_atoms.len();
+
+            // Map original chain IDs to new unique IDs
+            let mut chain_id_map = std::collections::HashMap::new();
+
+            for i in 0..coords.num_atoms {
+                let orig_chain = coords.chain_ids[i];
+                let mapped_chain = *chain_id_map.entry(orig_chain).or_insert_with(|| {
+                    let id = next_chain_id;
+                    next_chain_id = if next_chain_id == b'Z' { b'a' } else { next_chain_id + 1 };
+                    id
+                });
+
+                combined_atoms.push(coords.atoms[i].clone());
+                combined_chain_ids.push(mapped_chain);
+                combined_res_names.push(coords.res_names[i]);
+                combined_res_nums.push(coords.res_nums[i]);
+                combined_atom_names.push(coords.atom_names[i]);
+            }
+
+            let end_idx = combined_atoms.len();
+            if end_idx > start_idx {
+                atom_ranges.push((structure.id, start_idx, end_idx));
+
+                // Store the chain IDs assigned to this structure
+                let assigned_chain_ids: Vec<u8> = chain_id_map.values().copied().collect();
+                chain_ids_per_structure.push((structure.id, assigned_chain_ids));
+
+                // Calculate 1-indexed residue range for this structure
+                if structure_residue_count > 0 {
+                    let start_residue = global_residue_offset + 1; // 1-indexed
+                    let end_residue = global_residue_offset + structure_residue_count;
+                    residue_ranges.insert(structure.id, (start_residue, end_residue));
+                    global_residue_offset = end_residue;
+                }
+            }
+        }
+
+        if combined_atoms.is_empty() {
+            return None;
+        }
+
+        let num_atoms = combined_atoms.len();
+        let combined = Coords {
+            atoms: combined_atoms,
+            chain_ids: combined_chain_ids,
+            res_names: combined_res_names,
+            res_nums: combined_res_nums,
+            atom_names: combined_atom_names,
+            num_atoms,
+        };
+
+        serialize(&combined).ok().map(|bytes| CombinedCoordsResult {
+            bytes,
+            atom_ranges,
+            residue_ranges,
+            chain_ids_per_structure,
+        })
+    }
+
+    /// Apply combined Rosetta update to all structures in the session.
+    /// Splits the exported coords by chain ID since Rosetta may add/remove atoms.
+    pub fn apply_combined_update(
+        &mut self,
+        coords_bytes: &[u8],
+        chain_ids_per_structure: &[(StructureId, Vec<u8>)],
+    ) -> Result<(), String> {
+        use foldit_conv::coords::{Coords, CoordsAtom, deserialize_coords_internal as deserialize, serialize_coords as serialize};
+
+        let coords: Coords = deserialize(coords_bytes)
+            .map_err(|e| format!("Failed to deserialize combined coords: {:?}", e))?;
+
+        for (structure_id, chain_ids) in chain_ids_per_structure {
+            // Filter atoms belonging to this structure by chain ID
+            let mut structure_atoms: Vec<CoordsAtom> = Vec::new();
+            let mut structure_chain_ids: Vec<u8> = Vec::new();
+            let mut structure_res_names: Vec<[u8; 3]> = Vec::new();
+            let mut structure_res_nums: Vec<i32> = Vec::new();
+            let mut structure_atom_names: Vec<[u8; 4]> = Vec::new();
+
+            for i in 0..coords.num_atoms {
+                if chain_ids.contains(&coords.chain_ids[i]) {
+                    structure_atoms.push(coords.atoms[i].clone());
+                    structure_chain_ids.push(coords.chain_ids[i]);
+                    structure_res_names.push(coords.res_names[i]);
+                    structure_res_nums.push(coords.res_nums[i]);
+                    structure_atom_names.push(coords.atom_names[i]);
+                }
+            }
+
+            if structure_atoms.is_empty() {
+                log::warn!("No atoms found for structure {:?} with chain IDs {:?}",
+                    structure_id, chain_ids);
+                continue;
+            }
+
+            let structure_coords = Coords {
+                num_atoms: structure_atoms.len(),
+                atoms: structure_atoms,
+                chain_ids: structure_chain_ids,
+                res_names: structure_res_names,
+                res_nums: structure_res_nums,
+                atom_names: structure_atom_names,
+            };
+
+            // Serialize back to bytes for this structure
+            let structure_bytes = serialize(&structure_coords)
+                .map_err(|e| format!("Failed to serialize structure coords: {:?}", e))?;
+
+            // Parse into a Structure and update
+            match Structure::from_coords_bytes("temp", &structure_bytes, 1.0) {
+                Ok(new_data) => {
+                    if let Some(structure) = self.structures.get_mut(structure_id) {
+                        structure.backbone_chains = new_data.backbone_chains;
+                        structure.sidechain_atoms = new_data.sidechain_atoms;
+                        structure.sidechain_bonds = new_data.sidechain_bonds;
+                        structure.backbone_sidechain_bonds = new_data.backbone_sidechain_bonds;
+                        structure.coords_bytes = Some(structure_bytes);
+                        log::info!("Updated structure {:?} from combined session ({} atoms)",
+                            structure_id, structure_coords.num_atoms);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse structure {:?} from combined update: {}", structure_id, e);
+                }
+            }
+        }
+
+        self.invalidate_cache();
+        Ok(())
     }
 
     fn compute_aggregated(&self) -> AggregatedData {
