@@ -27,6 +27,7 @@ use foldit_rs::session::Session;
 use foldit_rs::visual_effects::VisualEffect;
 use std::collections::HashMap;
 use foldit_render::band_renderer::BandRenderInfo;
+use foldit_render::pull_renderer::PullRenderInfo;
 use foldit_conv::coords::{
     align_coords_bytes, extract_ca_from_chains, get_closest_atom_for_residue,
     get_closest_atom_with_name, kabsch_alignment_with_scale,
@@ -85,7 +86,13 @@ struct PullDragState {
     target_pos: Vec3,
     /// Initial mouse position when drag started (for absolute positioning)
     initial_mouse_pos: (f32, f32),
+    /// Whether the pull is active (user dragged past threshold)
+    /// If false, this is just a potential pull that may become a click
+    is_active: bool,
 }
+
+/// Minimum drag distance in pixels to activate a pull (vs treating as click)
+const PULL_DRAG_THRESHOLD: f32 = 5.0;
 
 /// Main application state
 struct App {
@@ -158,27 +165,18 @@ impl App {
             let data = self.scene.aggregated();
 
             // Trigger animation with the appropriate action type
+            // This sets up start/target positions and begins interpolation
+            // Do NOT call update_from_aggregated after this - it would overwrite
+            // the sidechain renderer with target positions, defeating animation
             engine.animate_to_full_pose_with_action(
                 &data.backbone_chains,
                 &data.sidechain_positions,
                 &data.sidechain_bonds,
                 &data.sidechain_hydrophobicity,
                 &data.sidechain_residue_indices,
+                &data.sidechain_atom_names,
                 &data.backbone_sidechain_bonds,
                 action,
-            );
-
-            // Update renderers with target positions
-            engine.update_from_aggregated(
-                &data.backbone_chains,
-                &data.sidechain_positions,
-                &data.sidechain_hydrophobicity,
-                &data.sidechain_residue_indices,
-                &data.sidechain_atom_names,
-                &data.sidechain_bonds,
-                &data.backbone_sidechain_bonds,
-                &data.all_positions,
-                false, // Don't fit camera on every update
             );
         }
     }
@@ -1380,7 +1378,11 @@ impl App {
                     is_pull: band.is_pull,
                     is_push: band.is_push,
                     is_disabled: band.is_disabled,
+                    strength: band.strength as f32,
+                    target_length: band.length as f32,
                     residue_idx: idx1 as u32,
+                    is_space_pull: false,
+                    ..Default::default()
                 })
             })
             .collect();
@@ -1422,36 +1424,39 @@ impl App {
                     is_pull: band.is_pull,
                     is_push: band.is_push,
                     is_disabled: band.is_disabled,
+                    strength: band.strength as f32,
+                    target_length: band.length as f32,
                     residue_idx: idx1 as u32,
+                    is_space_pull: false,
+                    ..Default::default()
                 })
             })
             .collect();
-
-        // Add pull visualization if active
-        if let Some((start_pos, target_pos, residue_idx)) = pull_info {
-            band_infos.push(BandRenderInfo {
-                endpoint_a: start_pos,
-                endpoint_b: target_pos,
-                is_pull: true,  // Show as green (pull color)
-                is_push: false,
-                is_disabled: false,
-                residue_idx,
-            });
-        }
 
         // Add band preview if active (shows during right-drag)
         if let Some((start_pos, target_pos, residue_idx)) = band_preview {
             band_infos.push(BandRenderInfo {
                 endpoint_a: start_pos,
                 endpoint_b: target_pos,
-                is_pull: true,  // Show as band color (same as pull for now)
-                is_push: false,
-                is_disabled: false,
+                is_pull: true,
                 residue_idx,
+                is_space_pull: false,
+                ..Default::default()
             });
         }
 
         engine.update_bands(&band_infos);
+
+        // Update pull visualization separately (uses PullRenderer with cone at mouse end)
+        if let Some((atom_pos, target_pos, residue_idx)) = pull_info {
+            engine.update_pull(Some(&PullRenderInfo {
+                atom_pos,
+                target_pos,
+                residue_idx,
+            }));
+        } else {
+            engine.clear_pull();
+        }
     }
 
     /// Update pull visualization during drag.
@@ -1714,6 +1719,21 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // Update pull visualization during animation so it tracks the moving residue
+                // First scope: update start_pos from current animated position
+                if let Some(ref mut pull) = self.pull_drag {
+                    if let Some(engine) = &self.engine {
+                        if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
+                            pull.start_pos = current_ca;
+                        }
+                    }
+                }
+                // Second scope: update visualization (separate to avoid borrow conflict)
+                if let Some(ref pull) = self.pull_drag {
+                    let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                    self.update_pull_visualization(pull_info);
+                }
+
                 // Render
                 if let Some(engine) = &mut self.engine {
                     let _ = engine.render();
@@ -1756,31 +1776,49 @@ impl ApplicationHandler for App {
                                             click_world_pos,
                                         ).unwrap_or(ca_pos);
 
+                                        // Create potential pull state (not active until drag threshold)
                                         self.pull_drag = Some(PullDragState {
                                             residue: hovered,
                                             start_pos,
                                             target_pos: click_world_pos,
                                             initial_mouse_pos: self.last_mouse_pos,
+                                            is_active: false,
                                         });
-                                        log::info!("Started pull drag on residue {} at {:?}", hovered, start_pos);
+                                        log::debug!("Potential pull on residue {} at {:?}", hovered, start_pos);
                                     }
                                 }
                             }
 
-                            // Only let engine handle camera if not starting a pull
-                            if self.pull_drag.is_none() {
-                                if let Some(engine) = &mut self.engine {
-                                    engine.handle_mouse_button(button, pressed);
-                                }
+                            // Always let engine handle mouse button for tracking
+                            if let Some(engine) = &mut self.engine {
+                                engine.handle_mouse_button(button, pressed);
                             }
                         } else {
                             // Left button released
                             if let Some(pull) = self.pull_drag.take() {
-                                log::info!("Pull released - residue {} pulled to {:?}", pull.residue, pull.target_pos);
-                                // Clear pull visualization
-                                self.update_pull_visualization(None);
+                                // Always reset engine mouse state
+                                if let Some(engine) = &mut self.engine {
+                                    engine.handle_mouse_button(button, false);
+                                }
+
+                                if pull.is_active {
+                                    // Pull was active - finish it
+                                    log::info!("Pull released - residue {} pulled to {:?}", pull.residue, pull.target_pos);
+                                    // Clear pull visualization
+                                    self.update_pull_visualization(None);
+
+                                    // Cancel the Rosetta pull operation (non-blocking)
+                                    if let Some(rosetta) = &self.rosetta_executor {
+                                        rosetta.cancel();
+                                    }
+                                } else {
+                                    // Pull was not active (no drag) - treat as selection click
+                                    if let Some(engine) = &mut self.engine {
+                                        engine.handle_mouse_up();
+                                    }
+                                }
                             } else {
-                                // No pull was active, handle as normal click
+                                // No pull state at all, handle as normal click
                                 if let Some(engine) = &mut self.engine {
                                     engine.handle_mouse_button(button, false);
                                     engine.handle_mouse_up();
@@ -1879,23 +1917,77 @@ impl ApplicationHandler for App {
                 let delta_y = position.y as f32 - self.last_mouse_pos.1;
 
                 // Handle pull drag movement
+                let mut pull_became_active = false;
                 if let Some(ref mut pull) = self.pull_drag {
-                    // Use absolute positioning: project current mouse to world space at residue depth
-                    if let Some(engine) = &self.engine {
-                        pull.target_pos = engine.screen_to_world_at_depth(
-                            position.x as f32,
-                            position.y as f32,
-                            pull.start_pos,  // Use start_pos as reference depth
-                        );
+                    // Check if we should activate the pull (moved past threshold)
+                    if !pull.is_active {
+                        let dx = position.x as f32 - pull.initial_mouse_pos.0;
+                        let dy = position.y as f32 - pull.initial_mouse_pos.1;
+                        let distance = (dx * dx + dy * dy).sqrt();
+                        if distance > PULL_DRAG_THRESHOLD {
+                            pull.is_active = true;
+                            pull_became_active = true;
+                            log::info!("Pull activated on residue {} (moved {} pixels)", pull.residue, distance);
+                        }
                     }
 
-                    // Capture pull info for visualization
-                    let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
-                    self.update_pull_visualization(pull_info);
+                    if pull.is_active {
+                        if let Some(engine) = &self.engine {
+                            // Update start_pos from current animated CA position of the pulled residue
+                            if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
+                                pull.start_pos = current_ca;
+                            }
 
-                    // Update hover position (for picking) but don't move camera
-                    if let Some(engine) = &mut self.engine {
-                        engine.handle_mouse_position(position.x as f32, position.y as f32);
+                            // Use absolute positioning: project current mouse to world space at residue depth
+                            pull.target_pos = engine.screen_to_world_at_depth(
+                                position.x as f32,
+                                position.y as f32,
+                                pull.start_pos,
+                            );
+                        }
+                    }
+                }
+
+                // Start Rosetta pull when pull becomes active
+                if pull_became_active {
+                    if let Some(ref pull) = self.pull_drag {
+                        if let Some(rosetta) = &self.rosetta_executor {
+                            if let Some(combined) = self.scene.get_combined_coords_bytes() {
+                                let residue_1indexed = (pull.residue + 1) as u32;
+                                let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+                                if let Err(e) = rosetta.start_pull(combined.bytes, residue_1indexed, target) {
+                                    log::warn!("Failed to start pull: {}", e);
+                                } else {
+                                    log::info!("Started Rosetta pull operation for residue {}", residue_1indexed);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Extract pull info for visualization and Rosetta update (separate scope to avoid borrow conflict)
+                if let Some(ref pull) = self.pull_drag {
+                    if pull.is_active {
+                        let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                        let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+
+                        self.update_pull_visualization(pull_info);
+
+                        // Update Rosetta pull target position
+                        if let Some(rosetta) = &self.rosetta_executor {
+                            let _ = rosetta.update_pull_target(target);
+                        }
+
+                        // Update hover position (for picking) but don't move camera
+                        if let Some(engine) = &mut self.engine {
+                            engine.handle_mouse_position(position.x as f32, position.y as f32);
+                        }
+                    } else {
+                        // Pull not yet active - do normal camera handling
+                        if let Some(engine) = &mut self.engine {
+                            engine.handle_mouse_move(delta_x, delta_y);
+                            engine.handle_mouse_position(position.x as f32, position.y as f32);
+                        }
                     }
                 } else {
                     // Normal mouse move - camera and hover
