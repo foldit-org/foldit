@@ -14,7 +14,9 @@
 //!   H - Toggle visibility of designed structures
 //!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
 //!   Delete - Remove last added structure
-//!   Esc - Cancel operation / clear selection
+//!   Esc - Cancel operation / clear selection / clear bands
+//!   Left-drag on residue - Pull (coming soon)
+//!   Right-drag residue to residue - Create band
 //!   Mouse - Rotate/zoom camera
 
 use foldit_rs::action_manager::{ActionManager, ActionType};
@@ -24,8 +26,10 @@ use foldit_rs::scene::{Scene, Structure, StructureId, CombinedCoordsResult};
 use foldit_rs::session::Session;
 use foldit_rs::visual_effects::VisualEffect;
 use std::collections::HashMap;
+use foldit_render::band_renderer::BandRenderInfo;
 use foldit_conv::coords::{
-    align_coords_bytes, extract_ca_from_chains, kabsch_alignment_with_scale,
+    align_coords_bytes, extract_ca_from_chains, get_closest_atom_for_residue,
+    get_closest_atom_with_name, kabsch_alignment_with_scale,
 };
 use glam::Vec3;
 
@@ -39,6 +43,49 @@ use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+/// Information about an active band for UI tracking
+#[derive(Debug, Clone)]
+struct ActiveBand {
+    band_id: u32,
+    res1: u32,
+    /// Atom name for first endpoint (e.g., "CA", "CB", "CG")
+    atom1_name: String,
+    res2: u32,
+    /// Atom name for second endpoint
+    atom2_name: String,
+    length: f64,
+    strength: f64,
+    is_pull: bool,
+    is_push: bool,
+    is_disabled: bool,
+}
+
+/// State for band creation via right-click drag
+#[derive(Debug, Clone)]
+struct BandDragState {
+    /// Residue where drag started (0-indexed)
+    start_residue: i32,
+    /// Name of the closest atom at drag start (e.g., "CA", "CB")
+    start_atom_name: String,
+    /// World position of closest atom at drag start
+    start_atom_pos: Vec3,
+    /// Current mouse position during drag
+    current_mouse_pos: (f32, f32),
+}
+
+/// State for pull action via left-click drag
+#[derive(Debug, Clone)]
+struct PullDragState {
+    /// Residue being pulled (0-indexed)
+    residue: i32,
+    /// Starting position (closest backbone atom to click)
+    start_pos: Vec3,
+    /// Current pull target position (world space)
+    target_pos: Vec3,
+    /// Initial mouse position when drag started (for absolute positioning)
+    initial_mouse_pos: (f32, f32),
+}
 
 /// Main application state
 struct App {
@@ -62,6 +109,16 @@ struct App {
     pdb_path: String,
     /// Pending animation action (None = no update needed)
     pending_action: Option<AnimationAction>,
+    /// Active bands for visualization and management
+    active_bands: HashMap<u32, ActiveBand>,
+    /// Right-click drag state for band creation
+    band_drag: Option<BandDragState>,
+    /// Whether right mouse button is currently pressed
+    right_mouse_pressed: bool,
+    /// Left-click drag state for pull action
+    pull_drag: Option<PullDragState>,
+    /// Whether left mouse button is currently pressed
+    left_mouse_pressed: bool,
 }
 
 impl App {
@@ -83,6 +140,11 @@ impl App {
             last_mouse_pos: (0.0, 0.0),
             pdb_path,
             pending_action: None,
+            active_bands: HashMap::new(),
+            band_drag: None,
+            right_mouse_pressed: false,
+            pull_drag: None,
+            left_mouse_pressed: false,
         }
     }
 
@@ -112,6 +174,7 @@ impl App {
                 &data.sidechain_positions,
                 &data.sidechain_hydrophobicity,
                 &data.sidechain_residue_indices,
+                &data.sidechain_atom_names,
                 &data.sidechain_bonds,
                 &data.backbone_sidechain_bonds,
                 &data.all_positions,
@@ -327,7 +390,7 @@ impl App {
                                         structure.sidechain_bonds = new_data.sidechain_bonds;
                                         structure.backbone_sidechain_bonds = new_data.backbone_sidechain_bonds;
                                         structure.sequence = new_data.sequence;
-                                        structure.coords_bytes = new_data.coords_bytes;
+                                        structure.coords = new_data.coords;
                                         structure.visible = true;
                                         log::info!(
                                             "Updated structure with prediction: {} residues, {} sidechain atoms",
@@ -538,7 +601,7 @@ impl App {
                                 structure.sidechain_atoms = new_structure.sidechain_atoms;
                                 structure.sidechain_bonds = new_structure.sidechain_bonds;
                                 structure.backbone_sidechain_bonds = new_structure.backbone_sidechain_bonds;
-                                structure.coords_bytes = new_structure.coords_bytes;
+                                structure.coords = new_structure.coords;
                                 structure.name = format!("MPNN Design (score {:.1})", update.score);
                                 log::info!("Updated structure {:?} with MPNN design", id);
                                 self.pending_action = Some(AnimationAction::Mutation);
@@ -608,7 +671,7 @@ impl App {
                             structure.sidechain_atoms = new_structure.sidechain_atoms;
                             structure.sidechain_bonds = new_structure.sidechain_bonds;
                             structure.backbone_sidechain_bonds = new_structure.backbone_sidechain_bonds;
-                            structure.coords_bytes = new_structure.coords_bytes;
+                            structure.coords = new_structure.coords;
                             // Keep the existing name for wiggle/shake updates
                             if !update.converged {
                                 structure.name = name;
@@ -1079,6 +1142,19 @@ impl App {
                 }
 
                 self.effect = VisualEffect::None;
+
+                // Also clear all bands on Escape
+                if !self.active_bands.is_empty() {
+                    if let Some(ref executor) = self.rosetta_executor {
+                        let _ = executor.clear_all_bands();
+                    }
+                    log::info!("Cleared {} bands", self.active_bands.len());
+                    self.active_bands.clear();
+                    self.update_band_visualization();
+                }
+
+                // Cancel any band drag in progress
+                self.band_drag = None;
             }
 
             KeyCode::Tab => {
@@ -1272,6 +1348,234 @@ impl App {
             state.set_focus(new_focus);
         }
     }
+
+    /// Update band visualization based on current active bands.
+    /// Uses stored atom names to look up the same atom's interpolated position during animation.
+    fn update_band_visualization(&mut self) {
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
+
+        if self.active_bands.is_empty() {
+            engine.clear_bands();
+            return;
+        }
+
+        // Convert active bands to render info using interpolated atom positions
+        // Use the stored atom names to reliably track the same atom during animation
+        let band_infos: Vec<BandRenderInfo> = self.active_bands
+            .values()
+            .filter_map(|band| {
+                // Convert from 1-indexed Rosetta to 0-indexed
+                let idx1 = (band.res1 as usize).checked_sub(1)?;
+                let idx2 = (band.res2 as usize).checked_sub(1)?;
+
+                // Look up atoms by name to track them during animation
+                let pos1 = engine.get_atom_position_by_name(idx1, &band.atom1_name)?;
+                let pos2 = engine.get_atom_position_by_name(idx2, &band.atom2_name)?;
+
+                Some(BandRenderInfo {
+                    endpoint_a: pos1,
+                    endpoint_b: pos2,
+                    is_pull: band.is_pull,
+                    is_push: band.is_push,
+                    is_disabled: band.is_disabled,
+                    residue_idx: idx1 as u32,
+                })
+            })
+            .collect();
+
+        engine.update_bands(&band_infos);
+        log::debug!("Updated {} band visualizations", band_infos.len());
+    }
+
+    /// Update visualization with optional pull or band preview during drag.
+    /// Pass pull_info for pull preview, band_preview for band preview, or None for both to clear.
+    /// Uses interpolated CA positions so bands follow animated atoms.
+    fn update_drag_visualization(
+        &mut self,
+        pull_info: Option<(Vec3, Vec3, u32)>,
+        band_preview: Option<(Vec3, Vec3, u32)>,
+    ) {
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
+
+        // Get interpolated CA positions from engine (follows animation)
+        let ca_positions = engine.get_current_ca_positions();
+
+        // Start with existing bands using interpolated CA positions
+        let mut band_infos: Vec<BandRenderInfo> = self.active_bands
+            .values()
+            .filter_map(|band| {
+                // Convert from 1-indexed Rosetta to 0-indexed
+                let idx1 = (band.res1 as usize).checked_sub(1)?;
+                let idx2 = (band.res2 as usize).checked_sub(1)?;
+
+                // Get interpolated CA positions (bands follow animated atoms)
+                let pos1 = ca_positions.get(idx1).copied()?;
+                let pos2 = ca_positions.get(idx2).copied()?;
+
+                Some(BandRenderInfo {
+                    endpoint_a: pos1,
+                    endpoint_b: pos2,
+                    is_pull: band.is_pull,
+                    is_push: band.is_push,
+                    is_disabled: band.is_disabled,
+                    residue_idx: idx1 as u32,
+                })
+            })
+            .collect();
+
+        // Add pull visualization if active
+        if let Some((start_pos, target_pos, residue_idx)) = pull_info {
+            band_infos.push(BandRenderInfo {
+                endpoint_a: start_pos,
+                endpoint_b: target_pos,
+                is_pull: true,  // Show as green (pull color)
+                is_push: false,
+                is_disabled: false,
+                residue_idx,
+            });
+        }
+
+        // Add band preview if active (shows during right-drag)
+        if let Some((start_pos, target_pos, residue_idx)) = band_preview {
+            band_infos.push(BandRenderInfo {
+                endpoint_a: start_pos,
+                endpoint_b: target_pos,
+                is_pull: true,  // Show as band color (same as pull for now)
+                is_push: false,
+                is_disabled: false,
+                residue_idx,
+            });
+        }
+
+        engine.update_bands(&band_infos);
+    }
+
+    /// Update pull visualization during drag.
+    /// Pass None to clear the pull visualization.
+    fn update_pull_visualization(&mut self, pull_info: Option<(Vec3, Vec3, u32)>) {
+        self.update_drag_visualization(pull_info, None);
+    }
+
+    /// Update band preview visualization during right-drag.
+    /// Pass None to clear the band preview.
+    fn update_band_preview(&mut self, band_preview: Option<(Vec3, Vec3, u32)>) {
+        self.update_drag_visualization(None, band_preview);
+    }
+
+    /// Create a band between two residues via right-click drag (legacy, uses CA atoms).
+    /// Both residue indices are 0-indexed (from the render engine).
+    #[allow(dead_code)]
+    fn create_band(&mut self, start_residue: i32, end_residue: i32) {
+        // Get CA positions for visualization
+        let data = self.scene.aggregated();
+        let pos1 = foldit_conv::coords::get_ca_position_from_chains(
+            &data.backbone_chains,
+            start_residue as usize,
+        );
+        let pos2 = foldit_conv::coords::get_ca_position_from_chains(
+            &data.backbone_chains,
+            end_residue as usize,
+        );
+
+        match (pos1, pos2) {
+            (Some(p1), Some(p2)) => {
+                self.create_band_with_atoms(start_residue, p1, "CA", end_residue, p2, "CA");
+            }
+            _ => {
+                log::warn!("Could not get CA positions for band creation");
+            }
+        }
+    }
+
+    /// Create a band with specific atom positions and names for visualization.
+    /// Uses the provided positions to calculate band length and atom names to track during animation.
+    fn create_band_with_atoms(
+        &mut self,
+        start_residue: i32,
+        start_pos: Vec3,
+        start_atom_name: &str,
+        end_residue: i32,
+        end_pos: Vec3,
+        end_atom_name: &str,
+    ) {
+        // Ensure we have a Rosetta session
+        if self.ensure_rosetta_session().is_none() {
+            log::warn!("No Rosetta session available for band creation");
+            return;
+        }
+
+        if self.rosetta_executor.is_none() {
+            log::warn!("No Rosetta executor available");
+            return;
+        }
+
+        // Convert from 0-indexed to 1-indexed for Rosetta
+        let res1 = (start_residue + 1) as u32;
+        let res2 = (end_residue + 1) as u32;
+
+        // Use CA atom for Rosetta (atom 2 in 1-indexed)
+        // TODO: Could be enhanced to determine actual atom index based on atom name
+        let atom1 = 2u32;
+        let atom2 = 2u32;
+
+        // Calculate length from the actual clicked atom positions
+        let length = start_pos.distance(end_pos) as f64;
+
+        let strength = 1.0;
+
+        let executor = self.rosetta_executor.as_ref().unwrap();
+        match executor.add_band(res1, atom1, res2, atom2, length, strength) {
+            Ok(band_id) => {
+                log::info!(
+                    "Created band {} between {}:{} and {}:{} (length: {:.1}Å)",
+                    band_id, res1, start_atom_name, res2, end_atom_name, length
+                );
+
+                self.active_bands.insert(band_id, ActiveBand {
+                    band_id,
+                    res1,
+                    atom1_name: start_atom_name.to_string(),
+                    res2,
+                    atom2_name: end_atom_name.to_string(),
+                    length,
+                    strength,
+                    is_pull: true,
+                    is_push: false,
+                    is_disabled: false,
+                });
+
+                self.update_band_visualization();
+            }
+            Err(e) => {
+                log::error!("Failed to create band: {}", e);
+            }
+        }
+    }
+
+    /// Calculate distance between CA atoms of two residues.
+    /// Residue indices are 0-indexed.
+    fn calculate_ca_distance(&mut self, res1: usize, res2: usize) -> Option<f64> {
+        let data = self.scene.aggregated();
+
+        // Build CA positions from backbone chains
+        let mut ca_positions: Vec<Vec3> = Vec::new();
+        for chain in &data.backbone_chains {
+            for chunk in chain.chunks(3) {
+                if chunk.len() >= 2 {
+                    ca_positions.push(chunk[1]); // CA is at index 1
+                }
+            }
+        }
+
+        let pos1 = ca_positions.get(res1)?;
+        let pos2 = ca_positions.get(res2)?;
+
+        Some(pos1.distance(*pos2) as f64)
+    }
 }
 
 impl ApplicationHandler for App {
@@ -1319,6 +1623,7 @@ impl ApplicationHandler for App {
                         &data.sidechain_positions,
                         &data.sidechain_hydrophobicity,
                         &data.sidechain_residue_indices,
+                        &data.sidechain_atom_names,
                         &data.sidechain_bonds,
                         &data.backbone_sidechain_bonds,
                         &data.all_positions,
@@ -1402,6 +1707,13 @@ impl ApplicationHandler for App {
                     engine.update_camera_animation(dt.as_secs_f32());
                 }
 
+                // Update bands during structure animation so they follow the interpolated positions
+                if let Some(engine) = &self.engine {
+                    if engine.needs_band_update() && !self.active_bands.is_empty() {
+                        self.update_band_visualization();
+                    }
+                }
+
                 // Render
                 if let Some(engine) = &mut self.engine {
                     let _ = engine.render();
@@ -1414,14 +1726,151 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { button, state, .. } => {
-                if let Some(engine) = &mut self.engine {
-                    let pressed = state == ElementState::Pressed;
-                    engine.handle_mouse_button(button, pressed);
+                let pressed = state == ElementState::Pressed;
 
-                    // Handle selection logic on left button release
-                    if button == winit::event::MouseButton::Left && !pressed {
-                        engine.handle_mouse_up();
+                match button {
+                    winit::event::MouseButton::Left => {
+                        self.left_mouse_pressed = pressed;
+
+                        if pressed {
+                            // Left button pressed - check if over a residue to start pull
+                            if let Some(engine) = &self.engine {
+                                let hovered = engine.hovered_residue();
+                                if hovered >= 0 {
+                                    // Get CA position first (needed as reference for depth calculation)
+                                    if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
+                                        // Project mouse click to world space at residue depth
+                                        let click_world_pos = engine.screen_to_world_at_depth(
+                                            self.last_mouse_pos.0,
+                                            self.last_mouse_pos.1,
+                                            ca_pos,
+                                        );
+
+                                        // Find the closest atom (backbone or sidechain) to the click
+                                        let data = self.scene.aggregated();
+                                        let start_pos = get_closest_atom_for_residue(
+                                            &data.backbone_chains,
+                                            &data.sidechain_positions,
+                                            &data.sidechain_residue_indices,
+                                            hovered as usize,
+                                            click_world_pos,
+                                        ).unwrap_or(ca_pos);
+
+                                        self.pull_drag = Some(PullDragState {
+                                            residue: hovered,
+                                            start_pos,
+                                            target_pos: click_world_pos,
+                                            initial_mouse_pos: self.last_mouse_pos,
+                                        });
+                                        log::info!("Started pull drag on residue {} at {:?}", hovered, start_pos);
+                                    }
+                                }
+                            }
+
+                            // Only let engine handle camera if not starting a pull
+                            if self.pull_drag.is_none() {
+                                if let Some(engine) = &mut self.engine {
+                                    engine.handle_mouse_button(button, pressed);
+                                }
+                            }
+                        } else {
+                            // Left button released
+                            if let Some(pull) = self.pull_drag.take() {
+                                log::info!("Pull released - residue {} pulled to {:?}", pull.residue, pull.target_pos);
+                                // Clear pull visualization
+                                self.update_pull_visualization(None);
+                            } else {
+                                // No pull was active, handle as normal click
+                                if let Some(engine) = &mut self.engine {
+                                    engine.handle_mouse_button(button, false);
+                                    engine.handle_mouse_up();
+                                }
+                            }
+                        }
                     }
+                    winit::event::MouseButton::Right => {
+                        self.right_mouse_pressed = pressed;
+
+                        if pressed {
+                            // Right button pressed - start band drag if over a residue
+                            if let Some(engine) = &self.engine {
+                                let hovered = engine.hovered_residue();
+                                if hovered >= 0 {
+                                    // Get CA position for depth reference
+                                    if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
+                                        // Project click to world space
+                                        let click_world_pos = engine.screen_to_world_at_depth(
+                                            self.last_mouse_pos.0,
+                                            self.last_mouse_pos.1,
+                                            ca_pos,
+                                        );
+                                        // Find closest atom to click (with name for tracking)
+                                        let data = self.scene.aggregated();
+                                        let (start_atom_pos, start_atom_name) = get_closest_atom_with_name(
+                                            &data.backbone_chains,
+                                            &data.sidechain_positions,
+                                            &data.sidechain_residue_indices,
+                                            &data.sidechain_atom_names,
+                                            hovered as usize,
+                                            click_world_pos,
+                                        ).unwrap_or((ca_pos, "CA".to_string()));
+
+                                        self.band_drag = Some(BandDragState {
+                                            start_residue: hovered,
+                                            start_atom_pos,
+                                            start_atom_name,
+                                            current_mouse_pos: self.last_mouse_pos,
+                                        });
+                                        log::info!("Started band drag from residue {} at {:?}", hovered, start_atom_pos);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Right button released - complete band creation if valid
+                            if let Some(drag) = self.band_drag.take() {
+                                // Clear band preview first
+                                self.update_band_preview(None);
+
+                                if let Some(engine) = &self.engine {
+                                    let end_residue = engine.hovered_residue();
+                                    if end_residue >= 0 && end_residue != drag.start_residue {
+                                        // Find closest atom at end position (with name for tracking)
+                                        if let Some(ca_pos) = engine.get_residue_ca_position(end_residue as usize) {
+                                            let click_world_pos = engine.screen_to_world_at_depth(
+                                                self.last_mouse_pos.0,
+                                                self.last_mouse_pos.1,
+                                                ca_pos,
+                                            );
+                                            let data = self.scene.aggregated();
+                                            let (end_atom_pos, end_atom_name) = get_closest_atom_with_name(
+                                                &data.backbone_chains,
+                                                &data.sidechain_positions,
+                                                &data.sidechain_residue_indices,
+                                                &data.sidechain_atom_names,
+                                                end_residue as usize,
+                                                click_world_pos,
+                                            ).unwrap_or((ca_pos, "CA".to_string()));
+
+                                            // Create band with specific atoms
+                                            self.create_band_with_atoms(
+                                                drag.start_residue,
+                                                drag.start_atom_pos,
+                                                &drag.start_atom_name,
+                                                end_residue,
+                                                end_atom_pos,
+                                                &end_atom_name,
+                                            );
+                                        }
+                                    } else if end_residue == drag.start_residue {
+                                        log::info!("Band drag ended on same residue - cancelled");
+                                    } else {
+                                        log::info!("Band drag ended on background - cancelled");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -1429,12 +1878,50 @@ impl ApplicationHandler for App {
                 let delta_x = position.x as f32 - self.last_mouse_pos.0;
                 let delta_y = position.y as f32 - self.last_mouse_pos.1;
 
-                if let Some(engine) = &mut self.engine {
-                    engine.handle_mouse_move(delta_x, delta_y);
-                    engine.handle_mouse_position(position.x as f32, position.y as f32);
+                // Handle pull drag movement
+                if let Some(ref mut pull) = self.pull_drag {
+                    // Use absolute positioning: project current mouse to world space at residue depth
+                    if let Some(engine) = &self.engine {
+                        pull.target_pos = engine.screen_to_world_at_depth(
+                            position.x as f32,
+                            position.y as f32,
+                            pull.start_pos,  // Use start_pos as reference depth
+                        );
+                    }
+
+                    // Capture pull info for visualization
+                    let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                    self.update_pull_visualization(pull_info);
+
+                    // Update hover position (for picking) but don't move camera
+                    if let Some(engine) = &mut self.engine {
+                        engine.handle_mouse_position(position.x as f32, position.y as f32);
+                    }
+                } else {
+                    // Normal mouse move - camera and hover
+                    if let Some(engine) = &mut self.engine {
+                        engine.handle_mouse_move(delta_x, delta_y);
+                        engine.handle_mouse_position(position.x as f32, position.y as f32);
+                    }
                 }
 
                 self.last_mouse_pos = (position.x as f32, position.y as f32);
+
+                // Update band drag state during right-click drag
+                if let Some(ref mut drag) = self.band_drag {
+                    drag.current_mouse_pos = self.last_mouse_pos;
+
+                    // Show band preview - project mouse to world space at start atom depth
+                    if let Some(engine) = &self.engine {
+                        let target_pos = engine.screen_to_world_at_depth(
+                            position.x as f32,
+                            position.y as f32,
+                            drag.start_atom_pos,
+                        );
+                        let preview = Some((drag.start_atom_pos, target_pos, drag.start_residue as u32));
+                        self.update_band_preview(preview);
+                    }
+                }
 
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -1555,12 +2042,12 @@ fn main() {
     log::info!("  M - MPNN (design sequence for structure)");
     log::info!("  R - RFDiffusion3 (design new structure)");
     log::info!("  V - Toggle view mode (tube/ribbon)");
-    log::info!("  Q - Toggle backbone quality (high/low)");
     log::info!("  H - Toggle visibility of designed structures");
     log::info!("  Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)");
     log::info!("  Delete - Remove last added structure");
-    log::info!("  Esc - Cancel operation / clear selection");
-    log::info!("  Mouse - Rotate/zoom camera");
+    log::info!("  Esc - Cancel operation / clear selection / clear bands");
+    log::info!("  Right-drag residue to residue - Create band");
+    log::info!("  Left-drag - Rotate camera / Pan (with Shift)");
 
     let mut app = App::new(pdb_path);
     let event_loop = EventLoop::new().expect("Failed to create event loop");

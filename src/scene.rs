@@ -4,7 +4,7 @@
 //! (from files, ML predictions, or designs) and aggregates their data
 //! for efficient rendering.
 
-use foldit_conv::coords::{Coords, CoordsAtom, protein_only, serialize_coords};
+use foldit_conv::coords::{Coords, CoordsAtom, protein_only, serialize_coords, deserialize_coords_internal};
 use foldit_render::bond_topology::get_residue_bonds;
 use glam::Vec3;
 use std::collections::HashMap;
@@ -99,8 +99,9 @@ pub struct Structure {
     /// Whether this structure is visible
     pub visible: bool,
 
-    /// Cached COORDS binary data (for ML operations like MPNN)
-    pub coords_bytes: Option<Vec<u8>>,
+    /// Canonical coordinate data (source of truth for atom positions)
+    /// This replaces coords_bytes as the primary storage format
+    pub coords: Option<Coords>,
 }
 
 impl Structure {
@@ -118,7 +119,7 @@ impl Structure {
             sequence: String::new(),
             chain_sequences: Vec::new(),
             visible: true,
-            coords_bytes: None,
+            coords: None,
         }
     }
 
@@ -232,7 +233,8 @@ impl Structure {
         coords_bytes: &[u8],
         confidence: f32,
     ) -> Result<Self, String> {
-        use foldit_conv::coords::binary::{deserialize, serialize};
+        use foldit_conv::coords::binary::deserialize;
+        use foldit_conv::coords::{extract_sequences, RenderCoords};
 
         let coords = deserialize(coords_bytes)
             .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
@@ -240,191 +242,51 @@ impl Structure {
         // Filter to protein-only residues (exclude water, ligands, etc.)
         // This is important for MPNN/Rosetta which can't handle non-protein residues
         let coords = protein_only(&coords);
-        let protein_coords_bytes = serialize(&coords)
-            .map_err(|e| format!("Failed to serialize protein coords: {:?}", e))?;
 
-        let mut structure = Self::new(name);
-        structure.coords_bytes = Some(protein_coords_bytes);
-
-        // Track atoms by (chain_id, res_num, atom_name) for bond lookup
-        let mut atom_index_map: std::collections::HashMap<(u8, i32, String), usize> =
-            std::collections::HashMap::new();
-
-        let mut current_chain: Vec<Vec3> = Vec::new();
-        let mut current_chain_id: Option<u8> = None;
-        let mut last_chain_id: Option<u8> = None;
-        let mut last_res_num: Option<i32> = None;
-
-        // Track per-chain sequences
-        let mut current_chain_seq: String = String::new();
-        let mut all_sequence_chars: Vec<char> = Vec::new();
-
-        // Track 0-based residue index (matching tube_renderer's global_residue_idx)
-        // Map (chain_id, res_num) -> 0-based residue index
-        let mut residue_idx_map: std::collections::HashMap<(u8, i32), u32> =
-            std::collections::HashMap::new();
-        let mut next_residue_idx: u32 = 0;
-
-        // Use filtered protein coords for building the structure
-        for i in 0..coords.num_atoms {
-            let atom_name = std::str::from_utf8(&coords.atom_names[i])
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let chain_id = coords.chain_ids[i];
-            let res_num = coords.res_nums[i];
-            let res_name = std::str::from_utf8(&coords.res_names[i])
-                .unwrap_or("UNK")
-                .trim();
-            let pos = Vec3::new(coords.atoms[i].x, coords.atoms[i].y, coords.atoms[i].z);
-
-            // Check for chain/residue break
-            let is_chain_break = last_chain_id.map_or(false, |c| c != chain_id);
-            let is_sequence_gap = last_res_num.map_or(false, |r| (res_num - r).abs() > 1);
-
-            if (is_chain_break || is_sequence_gap) && !current_chain.is_empty() {
-                // Save current chain
-                structure.backbone_chains.push(std::mem::take(&mut current_chain));
-                if let Some(cid) = current_chain_id {
-                    structure.backbone_chain_ids.push(cid);
-                    if !current_chain_seq.is_empty() {
-                        structure.chain_sequences.push((cid, std::mem::take(&mut current_chain_seq)));
-                    }
-                }
-                current_chain_id = None;
-            }
-
-            // Track CA for sequence extraction and assign 0-based residue index
-            // Only assign index when we see CA (backbone residue is complete)
-            // This matches tube_renderer's counting: one index per backbone residue
-            if atom_name == "CA" {
-                if last_res_num != Some(res_num) || last_chain_id != Some(chain_id) {
-                    let aa = three_to_one(res_name);
-                    current_chain_seq.push(aa);
-                    all_sequence_chars.push(aa);
-                    // Assign 0-based residue index when we see CA
-                    residue_idx_map.insert((chain_id, res_num), next_residue_idx);
-                    next_residue_idx += 1;
-                }
-            }
-
-            // Backbone atoms go to chains (N, CA, C - skip O for spline)
-            if atom_name == "N" || atom_name == "CA" || atom_name == "C" {
-                current_chain.push(pos);
-                if current_chain_id.is_none() {
-                    current_chain_id = Some(chain_id);
-                }
-            } else if atom_name != "O" {
-                // Skip hydrogen atoms (H, HA, HB, 1H, 2H, etc.)
-                let is_hydrogen = atom_name.starts_with('H')
-                    || atom_name.starts_with("1H")
-                    || atom_name.starts_with("2H")
-                    || atom_name.starts_with("3H")
-                    || (atom_name.len() >= 2 && atom_name.chars().next().unwrap().is_ascii_digit()
-                        && atom_name.chars().nth(1) == Some('H'));
-
-                if !is_hydrogen {
-                    // Sidechain atom (heavy atoms only)
-                    let sidechain_idx = structure.sidechain_atoms.len();
-                    atom_index_map.insert((chain_id, res_num, atom_name.clone()), sidechain_idx);
-
-                    // Look up 0-based residue index (assigned when we saw CA)
-                    // If CA hasn't been seen yet for this residue, this sidechain won't
-                    // have matching highlighting - but this is rare in standard PDB files
-                    let residue_idx = residue_idx_map
-                        .get(&(chain_id, res_num))
-                        .copied()
-                        .unwrap_or_else(|| {
-                            log::warn!(
-                                "Sidechain atom {} for residue {} has no CA yet",
-                                atom_name, res_num
-                            );
-                            0  // Fallback, but this shouldn't happen in normal structures
-                        });
-
-                    structure.sidechain_atoms.push(Atom {
-                        position: pos,
-                        is_hydrophobic: is_hydrophobic(res_name),
-                        atom_name: atom_name.clone(),
-                        residue_index: residue_idx,
-                        chain_id: format!("{}", chain_id as char),
-                    });
-                }
-            }
-
-            if atom_name == "CA" {
-                last_res_num = Some(res_num);
-            }
-            last_chain_id = Some(chain_id);
-        }
-
-        // Don't forget the last chain
-        if !current_chain.is_empty() {
-            structure.backbone_chains.push(current_chain);
-            if let Some(cid) = current_chain_id {
-                structure.backbone_chain_ids.push(cid);
-                if !current_chain_seq.is_empty() {
-                    structure.chain_sequences.push((cid, current_chain_seq));
-                }
-            }
-        }
-
-        structure.sequence = all_sequence_chars.into_iter().collect();
-
-        // Generate sidechain bonds from topology
-        let mut ca_found = 0;
-        let mut bonds_attempted = 0;
-        let mut bonds_found = 0;
-        for i in 0..coords.num_atoms {
-            let atom_name = std::str::from_utf8(&coords.atom_names[i])
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let chain_id = coords.chain_ids[i];
-            let res_num = coords.res_nums[i];
-            let res_name = std::str::from_utf8(&coords.res_names[i])
-                .unwrap_or("UNK")
-                .trim();
-
-            // Generate bonds for this residue's topology
-            if atom_name == "CA" {
-                ca_found += 1;
-                if let Some(bonds) = get_residue_bonds(res_name) {
-                    for (a1, a2) in bonds {
-                        bonds_attempted += 1;
-                        let key1 = (chain_id, res_num, a1.to_string());
-                        let key2 = (chain_id, res_num, a2.to_string());
-
-                        if let (Some(&idx1), Some(&idx2)) =
-                            (atom_index_map.get(&key1), atom_index_map.get(&key2))
-                        {
-                            bonds_found += 1;
-                            structure.sidechain_bonds.push(Bond {
-                                atom_a: idx1 as u32,
-                                atom_b: idx2 as u32,
-                            });
-                        }
-                    }
-                }
-
-                // Add CA-CB bond
-                let ca_pos = Vec3::new(coords.atoms[i].x, coords.atoms[i].y, coords.atoms[i].z);
-                let cb_key = (chain_id, res_num, "CB".to_string());
-                if let Some(&cb_idx) = atom_index_map.get(&cb_key) {
-                    structure.backbone_sidechain_bonds.push(BackboneSidechainBond {
-                        ca_position: ca_pos,
-                        cb_atom_index: cb_idx as u32,
-                    });
-                }
-            }
-        }
-        log::info!(
-            "Bond generation: found {} CA atoms, attempted {} bonds, found {} matches",
-            ca_found, bonds_attempted, bonds_found
+        // Use RenderCoords to extract all render-ready data
+        let render = RenderCoords::from_coords_with_topology(
+            &coords,
+            is_hydrophobic,
+            |name| get_residue_bonds(name).map(|b| b.to_vec()),
         );
 
+        // Extract sequences
+        let (sequence, chain_sequences) = extract_sequences(&coords);
+
+        let mut structure = Self::new(name);
+        structure.coords = Some(coords);  // Store Coords as source of truth
+        structure.sequence = sequence.clone();
+        structure.chain_sequences = chain_sequences;
+
+        // Copy backbone data from RenderCoords
+        structure.backbone_chains = render.backbone_chains;
+        structure.backbone_chain_ids = render.backbone_chain_ids;
+
+        // Convert sidechain atoms from RenderCoords format to Structure format
+        structure.sidechain_atoms = render.sidechain_atoms.iter().map(|a| Atom {
+            position: a.position,
+            is_hydrophobic: a.is_hydrophobic,
+            atom_name: a.atom_name.clone(),
+            residue_index: a.residue_idx,
+            chain_id: format!("{}", a.chain_id as char),
+        }).collect();
+
+        // Convert bonds from RenderCoords format
+        structure.sidechain_bonds = render.sidechain_bonds.iter().map(|(a, b)| Bond {
+            atom_a: *a,
+            atom_b: *b,
+        }).collect();
+
+        // Convert backbone-sidechain bonds
+        structure.backbone_sidechain_bonds = render.backbone_sidechain_bonds.iter().map(|(ca_pos, cb_idx)| {
+            BackboneSidechainBond {
+                ca_position: *ca_pos,
+                cb_atom_index: *cb_idx,
+            }
+        }).collect();
+
         structure.source = StructureSource::MLPredict {
-            sequence: structure.sequence.clone(),
+            sequence,
             confidence,
         };
 
@@ -440,15 +302,20 @@ impl Structure {
     }
 
     /// Get COORDS bytes for this structure (for ML operations like MPNN)
-    /// Returns cached bytes if available, otherwise generates from backbone
+    /// Serializes from stored Coords if available, otherwise generates from backbone
     pub fn get_coords_bytes(&self) -> Option<Vec<u8>> {
-        if let Some(ref bytes) = self.coords_bytes {
-            return Some(bytes.clone());
+        if let Some(ref coords) = self.coords {
+            return serialize_coords(coords).ok();
         }
 
-        // Generate backbone-only COORDS from backbone_chains
+        // Fallback: Generate backbone-only COORDS from backbone_chains
         // Each chain has N, CA, C atoms per residue (3 atoms per residue)
         self.backbone_to_coords()
+    }
+
+    /// Get a reference to the Coords data if available
+    pub fn get_coords(&self) -> Option<&Coords> {
+        self.coords.as_ref()
     }
 
     /// Convert backbone chains to minimal COORDS format (backbone atoms only)
@@ -598,6 +465,7 @@ pub struct AggregatedData {
     pub sidechain_positions: Vec<Vec3>,
     pub sidechain_hydrophobicity: Vec<bool>,
     pub sidechain_residue_indices: Vec<u32>,
+    pub sidechain_atom_names: Vec<String>,
     pub sidechain_bonds: Vec<(u32, u32)>,
     pub backbone_sidechain_bonds: Vec<(Vec3, u32)>,
     pub all_positions: Vec<Vec3>,
@@ -942,9 +810,9 @@ impl Scene {
                         structure.sidechain_atoms = new_data.sidechain_atoms;
                         structure.sidechain_bonds = new_data.sidechain_bonds;
                         structure.backbone_sidechain_bonds = new_data.backbone_sidechain_bonds;
-                        structure.coords_bytes = Some(structure_bytes);
+                        structure.coords = Some(structure_coords);  // Store Coords directly
                         log::info!("Updated structure {:?} from combined session ({} atoms)",
-                            structure_id, structure_coords.num_atoms);
+                            structure_id, new_data.coords.as_ref().map_or(0, |c| c.num_atoms));
                     }
                 }
                 Err(e) => {
@@ -988,6 +856,7 @@ impl Scene {
                 data.sidechain_hydrophobicity.push(atom.is_hydrophobic);
                 // Map local residue_index to global residue index
                 data.sidechain_residue_indices.push(atom.residue_index + global_residue_offset);
+                data.sidechain_atom_names.push(atom.atom_name.clone());
                 data.atom_to_structure.push(structure.id);
                 data.all_positions.push(atom.position);
             }
