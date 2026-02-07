@@ -1,4 +1,7 @@
 fn main() {
+    // Tauri 2 build step (generates context for tauri::generate_context!())
+    tauri_build::build();
+
     // Bundle mode: libraries in same directory as the binary
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");

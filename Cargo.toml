@@ -55,8 +55,23 @@ lazy_static = "1.4"
 # HTTP client for downloading from RCSB
 reqwest = { version = "0.11", features = ["blocking"] }
 
+# Tauri 2 desktop framework
+tauri = { version = "2", features = ["devtools"] }
+
+# Serialization for Tauri IPC and FrontendState
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Dirty flags for state push
+bitflags = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [features]
 default = []
+# Standalone winit mode (no Tauri, original event loop)
+standalone = []
 # Enable when foldit-ml is available and compiles
 # ml = ["foldit-ml"]
 

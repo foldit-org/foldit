@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickkuk/tauri-v2-wgpu/main/src-tauri/tauri.conf.json",
+  "productName": "Foldit",
+  "version": "0.1.0",
+  "identifier": "com.foldit.app",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../crates/foldit-frontend/js/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Foldit",
+        "width": 1280,
+        "height": 720,
+        "transparent": true,
+        "decorations": true,
+        "resizable": true
+      }
+    ]
+  }
+}

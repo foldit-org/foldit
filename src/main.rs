@@ -19,6 +19,12 @@
 //!   Right-drag residue to residue - Create band
 //!   Mouse - Rotate/zoom camera
 
+#[cfg(not(feature = "standalone"))]
+mod commands;
+
+#[cfg(not(feature = "standalone"))]
+use tauri::Manager;
+
 use foldit_rs::action_manager::{ActionManager, ActionType};
 use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
 use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate, RosettaSessionState, RosettaStructureId};
@@ -39,11 +45,18 @@ use foldit_render::engine::ProteinRenderEngine;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use winit::keyboard::KeyCode;
+#[cfg(feature = "standalone")]
 use winit::application::ApplicationHandler;
+#[cfg(feature = "standalone")]
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+#[cfg(feature = "standalone")]
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+#[cfg(feature = "standalone")]
+use winit::keyboard::PhysicalKey;
+use winit::window::Window;
+#[cfg(feature = "standalone")]
+use winit::window::WindowId;
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
@@ -1581,8 +1594,56 @@ impl App {
 
         Some(pos1.distance(*pos2) as f64)
     }
+
+    /// Handle a key press by string name (for Tauri IPC).
+    /// Maps common key name strings to winit KeyCode values.
+    pub fn handle_key_by_name(&mut self, code: &str) {
+        let key = match code {
+            "KeyW" => KeyCode::KeyW,
+            "KeyS" => KeyCode::KeyS,
+            "KeyP" => KeyCode::KeyP,
+            "KeyM" => KeyCode::KeyM,
+            "KeyR" => KeyCode::KeyR,
+            "KeyV" => KeyCode::KeyV,
+            "KeyQ" => KeyCode::KeyQ,
+            "KeyH" => KeyCode::KeyH,
+            "Tab" => KeyCode::Tab,
+            "Delete" => KeyCode::Delete,
+            "Escape" => KeyCode::Escape,
+            _ => {
+                log::debug!("Unhandled key code from frontend: {}", code);
+                return;
+            }
+        };
+        self.handle_key(key);
+    }
+
+    /// Load a structure by path or PDB ID (for Tauri IPC).
+    pub fn handle_load_structure(&mut self, input: &str) {
+        let path = match resolve_structure_path(input) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("Failed to resolve structure: {}", e);
+                return;
+            }
+        };
+
+        match Structure::from_file(&path) {
+            Ok(structure) => {
+                log::info!("Loaded structure via IPC: {}", structure.name);
+                let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
+                let id = self.scene.add(structure);
+                self.session.on_original_loaded(id, backbone_ca);
+                self.pending_action = Some(AnimationAction::Load);
+            }
+            Err(e) => {
+                log::error!("Failed to load structure '{}': {}", path, e);
+            }
+        }
+    }
 }
 
+#[cfg(feature = "standalone")]
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
@@ -1598,8 +1659,9 @@ impl ApplicationHandler for App {
             );
 
             // Create render engine with the specified molecule path
+            let size = window.inner_size();
             let mut engine =
-                pollster::block_on(ProteinRenderEngine::new_with_path(window.clone(), &self.pdb_path));
+                pollster::block_on(ProteinRenderEngine::new_with_path(window.clone(), (size.width, size.height), &self.pdb_path));
 
             // Load initial structure into scene
             match Structure::from_file(&self.pdb_path) {
@@ -1672,14 +1734,14 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(newsize) => {
                 if let Some(engine) = &mut self.engine {
-                    engine.resize(newsize);
+                    engine.resize(newsize.width, newsize.height);
                 }
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let (Some(window), Some(engine)) = (&self.window, &mut self.engine) {
                     let newsize = window.inner_size();
-                    engine.resize(newsize); // Full resize including camera aspect ratio
+                    engine.resize(newsize.width, newsize.height);
                 }
             }
 
@@ -2106,18 +2168,19 @@ fn resolve_structure_path(input: &str) -> Result<String, String> {
     Err(format!("File not found: {}", input))
 }
 
+// ---------------------------------------------------------------------------
+// Standalone (winit) entry point
+// ---------------------------------------------------------------------------
+#[cfg(feature = "standalone")]
 fn main() {
-    // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Get PDB ID or path from command line
     let input = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "1bfe".to_string());
 
-    log::info!("Foldit ML Render starting...");
+    log::info!("Foldit ML Render starting (standalone mode)...");
 
-    // Resolve to actual file path (downloading if needed)
     let pdb_path = match resolve_structure_path(&input) {
         Ok(path) => path,
         Err(e) => {
@@ -2127,23 +2190,192 @@ fn main() {
     };
 
     log::info!("Loading structure from: {}", pdb_path);
-    log::info!("Controls:");
-    log::info!("  W - Wiggle (Rosetta minimize, toggle on/off)");
-    log::info!("  S - Shake (Rosetta repack sidechains, toggle on/off)");
-    log::info!("  P - Predict (SimpleFold structure prediction)");
-    log::info!("  M - MPNN (design sequence for structure)");
-    log::info!("  R - RFDiffusion3 (design new structure)");
-    log::info!("  V - Toggle view mode (tube/ribbon)");
-    log::info!("  H - Toggle visibility of designed structures");
-    log::info!("  Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)");
-    log::info!("  Delete - Remove last added structure");
-    log::info!("  Esc - Cancel operation / clear selection / clear bands");
-    log::info!("  Right-drag residue to residue - Create band");
-    log::info!("  Left-drag - Rotate camera / Pan (with Shift)");
 
     let mut app = App::new(pdb_path);
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app).expect("Event loop error");
+}
+
+// ---------------------------------------------------------------------------
+// Tauri entry point (default)
+// ---------------------------------------------------------------------------
+#[cfg(not(feature = "standalone"))]
+pub struct AppState {
+    pub app: std::sync::Mutex<App>,
+    pub frontend: std::sync::Mutex<foldit_rs::frontend::FrontendState>,
+}
+
+#[cfg(not(feature = "standalone"))]
+fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    log::info!("Foldit starting (Tauri mode)...");
+
+    let pdb_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "1bfe".to_string());
+
+    let pdb_path = match resolve_structure_path(&pdb_path) {
+        Ok(path) => path,
+        Err(e) => {
+            log::error!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let app = App::new(pdb_path.clone());
+    let frontend = foldit_rs::frontend::FrontendState::new();
+
+    let app_state = AppState {
+        app: std::sync::Mutex::new(app),
+        frontend: std::sync::Mutex::new(frontend),
+    };
+
+    tauri::Builder::default()
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            commands::viewport_input,
+            commands::trigger_action,
+            commands::parameterized_action,
+        ])
+        .setup(move |tauri_app| {
+            use tauri::Manager;
+
+            let window = tauri_app.get_webview_window("main")
+                .expect("Failed to get main webview window");
+            let size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(1280, 720));
+
+            // Create render engine with the Tauri window handle
+            let mut engine = pollster::block_on(
+                ProteinRenderEngine::new_with_path(window, (size.width, size.height), &pdb_path)
+            );
+
+            // Load initial structure
+            {
+                let state: tauri::State<'_, AppState> = tauri_app.state();
+                let mut app = state.app.lock().unwrap();
+                let mut frontend = state.frontend.lock().unwrap();
+
+                match Structure::from_file(&app.pdb_path) {
+                    Ok(structure) => {
+                        log::info!(
+                            "Loaded structure: {} ({} sidechain atoms, {} backbone chains)",
+                            structure.name,
+                            structure.sidechain_atoms.len(),
+                            structure.backbone_chains.len()
+                        );
+
+                        let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
+                        let id = app.scene.add(structure);
+                        app.session.on_original_loaded(id, backbone_ca);
+
+                        let data = app.scene.aggregated();
+                        engine.update_from_aggregated(
+                            &data.backbone_chains,
+                            &data.sidechain_positions,
+                            &data.sidechain_hydrophobicity,
+                            &data.sidechain_residue_indices,
+                            &data.sidechain_atom_names,
+                            &data.sidechain_bonds,
+                            &data.backbone_sidechain_bonds,
+                            &data.all_positions,
+                            true,
+                        );
+
+                        frontend.set_puzzle_loaded(true);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load structure: {}", e);
+                    }
+                }
+
+                // Initialize ML runner + Rosetta executor
+                let (ml_runner, ml_updates, ml_results) = MLRunner::new();
+                app.ml_runner = Some(ml_runner);
+                app.ml_updates = Some(ml_updates);
+                app.ml_results = Some(ml_results);
+
+                let (rosetta_executor, rosetta_updates) = RosettaExecutor::new();
+                app.rosetta_executor = Some(rosetta_executor);
+                app.rosetta_updates = Some(rosetta_updates);
+
+                app.engine = Some(engine);
+                frontend.mark_all_dirty();
+            }
+
+            // Set up render loop + state push via RunEvent in the .run() callback below
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("Failed to build Tauri application")
+        .run(|app_handle, event| {
+            use tauri::RunEvent;
+
+            match event {
+                RunEvent::MainEventsCleared => {
+                    let state: tauri::State<'_, AppState> = app_handle.state();
+
+                    // Render frame
+                    {
+                        let mut app = state.app.lock().unwrap();
+
+                        // Process ML updates
+                        app.process_ml_updates();
+
+                        // Process Rosetta updates
+                        app.process_rosetta_updates();
+
+                        // Sync engine with scene if dirty
+                        app.sync_engine_with_scene();
+
+                        // Render
+                        if let Some(engine) = &mut app.engine {
+                            let _: Result<(), wgpu::SurfaceError> = engine.render();
+                        }
+                    }
+
+                    // Push dirty state to frontend
+                    {
+                        let mut frontend = state.frontend.lock().unwrap();
+                        let dirty = frontend.take_dirty();
+                        if !dirty.is_empty() {
+                            use foldit_rs::frontend::DirtyFlags;
+                            use tauri::Emitter;
+
+                            // Build partial update with only dirty sections
+                            let mut update = serde_json::Map::new();
+                            let app = state.app.lock().unwrap();
+                            let _ = &app; // access app for score etc. in Phase 2
+
+                            if dirty.contains(DirtyFlags::SCORE) {
+                                update.insert("score".into(), serde_json::to_value(&frontend.score).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::SELECTION) {
+                                update.insert("selection".into(), serde_json::to_value(&frontend.selection).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::VIEW) {
+                                update.insert("view".into(), serde_json::to_value(&frontend.view).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::PANELS) {
+                                update.insert("panels".into(), serde_json::to_value(&frontend.panels).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::UI) {
+                                update.insert("ui".into(), serde_json::to_value(&frontend.ui).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::ACTIONS) {
+                                update.insert("actions".into(), serde_json::to_value(&frontend.actions).unwrap());
+                            }
+                            if dirty.contains(DirtyFlags::LOADING) {
+                                update.insert("loading".into(), serde_json::to_value(&frontend.loading).unwrap());
+                            }
+
+                            let payload = serde_json::Value::Object(update);
+                            let _ = app_handle.emit("state-update", payload);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
 }

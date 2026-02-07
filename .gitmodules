@@ -7,3 +7,6 @@
 [submodule "crates/foldit-conv"]
 	path = crates/foldit-conv
 	url = https://github.com/petridecus/foldit-conv
+[submodule "crates/foldit-frontend"]
+	path = crates/foldit-frontend
+	url = https://github.com/petridecus/foldit-frontend

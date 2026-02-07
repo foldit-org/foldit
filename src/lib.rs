@@ -1,5 +1,6 @@
 pub mod action_manager;
 pub mod animation;
+pub mod frontend;
 pub mod ml_runner;
 pub mod molecule_state;
 pub mod scene;
