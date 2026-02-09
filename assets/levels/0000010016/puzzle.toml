@@ -1,0 +1,128 @@
+[puzzle]
+title = "Idealizing Structure Angles"
+view_setup = "view_clashes_voids_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 89.464772
+completion_score = 8000.0
+min_moves = 3
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLLLLLLLHHHHHH"
+# original hash: 9110c0cf5c58707fc77e205cd283d7b6
+
+[puzzle.files]
+# puzzle_setup: dc65824d657cf3716657675ae99c4300
+
+[puzzle.camera]
+center = [41, 26, -32]
+eye = [110, 40, -8.8]
+up = [-0.017, 0.87, -0.48]
+
+[[sequence]]
+text = "It's often helpful to try different secondary structures."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "All of these amino acids should be helices."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "You can change secondary structures with the secondary structure tool. First select all the residues you want to change. (You can use SHIFT and Left Click to select a range of residues.)"
+color = "game"
+point_to = "backbone"
+
+[[sequence]]
+text = "Now click the the secondary structure tool, then select helix."
+color = "game"
+point_to = "structure"
+
+[[sequence]]
+text = "Once you've done that, the backbone will show it's a helix, but the protein still won't look helical. Why is that?"
+color = "science"
+point_to = "structure"
+
+[[sequence]]
+text = "What gives a helix its shape is the angles at which amino acids are rotated, or their 'torsion angles.'"
+color = "science"
+point_to = "structure"
+
+[[sequence]]
+text = "Let's take a closer look at these angles. Click the Rama Map button."
+color = "game"
+point_to = "rama"
+no_repeat = true
+
+[[on_event]]
+event = "rama_map"
+text = "This is the Ramachandran Map, or Rama Map. It shows the secondary structure of the protein in terms of the two different angles that make up the protein backbone, phi (x-axis) and psi (y-axis)."
+color = "science"
+point_to = "rama_panel"
+
+# Secondary bubble chain (originally starting at param 8)
+[[sequence_alt]]
+text = "Note that each axis represents a full 360 degrees of rotation, so the edges of the map 'wrap-around' to the other sides."
+color = "science"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "Each dot on the map corresponds to an amino acid in your protein. Try hovering over them and clicking on them to see where your amino acids are located on the map!"
+color = "game"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "The real power of the Rama map is that you can change these bond angles. Try dragging the dots around and watch what happens to that amino acid!"
+color = "game"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "Notice the colored regions when you click on a dot to select it. Each amino acid has a different range of preferred angles. The WHITE regions are NOT ideal!"
+color = "science"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "The COLOR itself is important too. The color scheme used here is called ABEGO coloring: SHEETS are usually BLUE or YELLOW, while HELICES are RED and GREEN. Not all of the colors are always visible, for example yellow is rarer."
+color = "science"
+point_to = "rama_panel"
+button = "Why are there two colors for each secondary structure?"
+alt_button = "   Next   "
+alt_skip = 1
+
+[[sequence_alt]]
+text = "Great question! Each secondary structure has a 'handedness', also called its 'chirality.' This image from Wikipedia shows how chirality represents two mirrored configurations for the structure. Returning to the colors, red and blue are right-handed, while yellow and green are left-handed."
+color = "science"
+point_to = "rama_panel"
+image = "images/big/chirality.png"
+
+[[sequence_alt]]
+text = "The colored regions are energetically favorable - amino acids in the white regions will be less stable."
+color = "science"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "Still confused? Take a look at this link for more information about the Rama map."
+color = "science"
+point_to = "rama_panel"
+link_name = "Learn about the Ramachandran Principle"
+link_url = "http://bioinformatics.org/molvis/phipsi/"
+
+[[sequence_alt]]
+text = "When the amino acid is in a favorable region, it's said to be IDEAL."
+color = "science"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "Fortunately, there's a quick way to IDEALIZE all of the amino acids in a secondary structure."
+color = "game"
+point_to = "rama_panel"
+
+[[sequence_alt]]
+text = "Select all the residues you're interested in idealizing, then click the Idealize Secondary Structure button to set every amino acid's torsion angles to be ideal. Check out what happens to the Rama map after you idealize!"
+color = "game"
+point_to = "idealize_ss"

@@ -1,0 +1,38 @@
+[puzzle]
+title = "HIV Protease"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 297.75
+completion_score = 10000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEEEELLLEEEEEEEEEEEEEELLLLLLLEEELLLLLLLLLEEEEELLLLLLLLLELEEEEEEEEEEEEEEEEEELLLLLLEEEEEEEEEEEEEELLEE"
+# original hash: c3a50936acb0a6e25171667a964df215
+
+[puzzle.files]
+# puzzle_setup: dc8df868be2f95d1c3d4a500fd7b017f
+
+[puzzle.camera]
+center = [50, 22, 46]
+eye = [37, -47, -37]
+up = [0.98, -0.2, 0.011]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "HIV replication depends on HIV protease, a protein-cleaving enzyme which is the target for protease-inhibitor drugs."
+color = "science"
+
+[[sequence]]
+text = "This is a challenge level! Good luck!"
+color = "game"

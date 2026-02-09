@@ -1,0 +1,47 @@
+[puzzle]
+title = "Shake!"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 3385.5225
+completion_score = 7700.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHHLLLLHHHHHHHH"
+# original hash: 0cc3b75fb484cdd41f136d01000a2324
+
+[puzzle.files]
+# puzzle_setup: 90cb15b5f0394494a4faed824f94c642
+
+[puzzle.camera]
+center = [10, -1.5, -0.89]
+eye = [-3.2, -46, 20]
+up = [-0.39, 0.49, 0.78]
+
+[[sequence]]
+text = "You've earned the SHAKE tool! You can use shake to fix clashes for you!"
+color = "game"
+point_to = "shake"
+
+[[sequence]]
+text = "The SHAKE tool optimizes all of the protein SIDECHAINS! The SIDECHAINS are rotated in different combinations to find the best-scoring position for each one."
+color = "science"
+point_to = "shake"
+
+[[sequence]]
+text = """
+In small proteins like this, SHAKE is very efficient.
+But in larger proteins, SHAKE can take a long time to find the optimal combination!"""
+color = "science"
+point_to = "shake"
+button = "Cool!"
+
+[[sequence]]
+text = "When you think SHAKE has done a good enough job, you can press it again to stop."
+color = "game"
+point_to = "shake"

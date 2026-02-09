@@ -1,0 +1,39 @@
+[puzzle]
+title = "E. Coli"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 264.866
+completion_score = 8500.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLEEEEEEELLLLLEEEEELLLHHHHHHHHHHHHHHHHHHHHHHHHLLLLLLLLLLL"
+# original hash: 6db067ea7135c8586ff604d39e59c92d
+
+[puzzle.files]
+# puzzle_setup: dc8df868be2f95d1c3d4a500fd7b017f
+# wts: 265c10beb72f7a2403b76845cb82bd20
+
+[puzzle.camera]
+center = [-17, 6.4, -0.18]
+eye = [54, 22, 11]
+up = [-0.022, -0.53, 0.85]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "This protein comes from the bacteria Escherichia coli, which is commonly found in the intestines of animals."
+color = "science"
+
+[[sequence]]
+text = "This is a challenge level! The highest score in the world ever achieved on this puzzle is 9,800. Can you get 8,500? Good luck!"
+color = "game"

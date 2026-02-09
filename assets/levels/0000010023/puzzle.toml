@@ -1,0 +1,53 @@
+[puzzle]
+title = "Tertiary Structure"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 1477.0957
+completion_score = 9300.0
+min_moves = 4
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLEEELLLLLHHHHHHHHHHHHHHHHHHLLLLLLLHHHHHHHHHHHHHHHHLLLEEEEEEEELLEEEEEEEEEEELLLLEEEEEEEEELHHHLLLLHHHHHHHHHHHHHHHHLLLLLLLL"
+# original hash: cb2fe54714b4c5be4c32cdb0d9fff390
+
+[puzzle.files]
+# puzzle_setup: 76f3bf7f9c445c6bcfcf9d6ef252adea
+
+[puzzle.camera]
+center = [20, 18, 9.8]
+eye = [-2.3, 140.0, -24]
+up = [-0.98, -0.17, 0.051]
+
+[puzzle.view_options]
+current_visor = "Cartoon"
+show_residue_burial = true
+show_other_hbonds = true
+show_sidechain_hbonds = true
+show_non_protein_hbonds = true
+show_voids = true
+
+[[sequence]]
+text = "TERTIARY STRUCTURE is formed by the combination of SECONDARY STRUCTURES."
+color = "science"
+point_to = "backbone"
+point_to_index = 90
+
+[[sequence]]
+text = "In this puzzle, the protein has formed its correct SECONDARY STRUCTURE, but doesn't have TERTIARY STRUCTURE yet."
+point_to = "backbone"
+point_to_index = 90
+
+[[sequence]]
+text = "Go ahead and form up the tertiary structure. Try to get the hydrophobics in the center core of the protein, and the hydrophilics on the outside."
+point_to = "backbone"
+point_to_index = 90
+
+[[sequence]]
+text = "Remember, rubber bands can be handy."
+point_to = "backbone"
+point_to_index = 90

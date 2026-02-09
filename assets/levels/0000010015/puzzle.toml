@@ -1,0 +1,63 @@
+[puzzle]
+title = "Lock and Lower"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 236.93449
+completion_score = 9000.0
+min_moves = 3
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+guide_align_residue = 45
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "EEEEEEEEEELLEEEEEEEEELLLHHHHHHHHHHHHHHHLLLLEEEEEEELLLLHHHHHHHHHHHHHHHHHLLLEEEEEEELLEEEEEEEE"
+# original hash: b2024e472f1e832ac3664c78181f7072
+
+[puzzle.files]
+# filters: c510d2396ec2f7c922e8d0f8ec668646
+# guide_pdb: d668531df8b01a0d0c61a2e51724f89d
+# puzzle_setup: 04f372dcb60a7c40d3f961da9828b59d
+
+[puzzle.camera]
+center = [-12, 6.5, 10]
+eye = [-45, 29, 41]
+up = [-0.52, -0.85, 0.07]
+
+[[sequence]]
+text = "Sheets like to be alongside each other. Remember, hydrogen bonds are great for your score."
+point_to = "sheet"
+
+[[sequence]]
+text = "You can FREEZE the sheets already in place. %%Right click action%% on the secondary structure you want to freeze."
+color = "game"
+point_to = "sheet"
+point_to_index = 17
+
+[[sequence]]
+text = "Pull this sheet so it lines up with the others. Shake and wiggle to finish up."
+color = "game"
+point_to = "sheet"
+
+[[sequence]]
+text = "Remember, you can always Undo."
+point_to = "undo"
+
+[[sequence]]
+text = "If you get stuck, you can ask here for a hint."
+point_to = "sheet"
+button = "Thanks but I don't need a hint yet."
+alt_button = "I need a hint, please!"
+alt_next = "branch_6"
+
+[[sequence]]
+text = "You can show these tips again with the Show Level Hints button."
+point_to = "reset_help"
+
+[[branch.branch_6]]
+text = "Remember that lining up sheets to form hydrogen bonds is great for your score. It seems like all of the sheets are lined up nice, except for the second one from the left. But how can you pull it into place without moving the others?"
+color = "game"
+point_to = "sheet"
+button = "Cool cool cool, thanks!"

@@ -1,0 +1,77 @@
+[puzzle]
+title = "Alpha Helix"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 428.20791
+completion_score = 9200.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LHHHHHHHHHHHHHHHHHHHHHHHHHHHLLLLLLHHHHHHHHHHHHHHHHHHHHLLLLHHHHHHHHHHHHHHHHHHHHHHHHHL"
+# original hash: 6a78ebc23ee0d949ed7f78a1690d073d
+
+[puzzle.files]
+# puzzle_setup: 6d0e630b09ec1f9f4402ffc7917b1d34
+
+[puzzle.camera]
+center = [19, -15, -24]
+eye = [-33, -6, 59]
+up = [0.085, 0.99, -0.055]
+
+[puzzle.view_options]
+show_helix_hbonds = true
+show_other_hbonds = true
+
+[[sequence]]
+text = "This protein is formed of three ALPHA HELICES, or HELICES for short."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "This is the first,"
+point_to = "backbone"
+point_to_index = 15
+
+[[sequence]]
+text = "the second,"
+point_to = "backbone"
+point_to_index = 43
+
+[[sequence]]
+text = "and the third alpha helix."
+point_to = "backbone"
+point_to_index = 73
+
+[[sequence]]
+text = "Hydrogen bonds aren't just formed by sidechains, they're also formed by the backbone."
+color = "science"
+point_to = "hbond"
+point_to_index = 73
+
+[[sequence]]
+text = "The center of the helix is held together by HYDROGEN BONDS between backbone atoms."
+color = "science"
+point_to = "hbond"
+point_to_index = 73
+
+[[sequence]]
+text = "The sidechains in a helix point away from the center of the helix."
+color = "science"
+point_to = "sidechain"
+point_to_index = 73
+
+[[sequence]]
+text = "HELICES are one of two major SECONDARY STRUCTURES in proteins (we'll get to the other one in a bit)."
+color = "science"
+point_to = "backbone"
+point_to_index = 73
+
+[[sequence]]
+text = "Shake and wiggle this set of HELICES to get them just right, and then we'll learn about the other form of SECONDARY STRUCTURE."
+point_to = "backbone"
+point_to_index = 73

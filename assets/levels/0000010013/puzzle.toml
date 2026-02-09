@@ -1,0 +1,30 @@
+[puzzle]
+title = "Lonely Sheets"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 457.3265
+completion_score = 9000.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEELLLLHHHHHHHHHHHLLLLLHHHHHHHLLEELLLLLLLLLLLL"
+# original hash: c4365723dbdf440814d8ba90e9df5a31
+
+[puzzle.files]
+# filters: c059e97cbafd33848ba999884421bf78
+# puzzle_setup: dd944526e00b73bcab6f7284a76c35ff
+
+[puzzle.camera]
+center = [9.6, 1.2, -3.1]
+eye = [50, 21, 27]
+up = [0.15, 0.71, -0.69]
+
+[[sequence]]
+text = "Time to match up some sheets! Try using rubber bands to connect up the two small sheets."
+point_to = "backbone"
+point_to_index = 34

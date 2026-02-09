@@ -1,0 +1,74 @@
+[puzzle]
+title = "Coronavirus"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 14719.909
+completion_score = 13500.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEEEEEEHHHHHHLLLLLLLHHHHHLLLLLLLLLLEEEEEELHHHHLLLLLELLLEEELLLLLLLLLLLLLLLLLLEELLLLLLLLLLELLEELLEEELLELLLLLHHHLEEEEEEELLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+# original hash: 3ae57a30e115602f1f153dca818057a6
+
+[puzzle.files]
+# puzzle_setup: ebae3c96d5a28f282e2cef7a4331deab
+# filters: a2d6dea3976e84db174ff16945e45c44
+# wts: d308b8428d699e09dcbb15dd435c4137
+# roscript: 373c37cc8d2108338d64bc8e1b6371fb
+
+[puzzle.camera]
+center = [-42, 28, 11]
+eye = [-58, 3.8, -100.0]
+up = [-0.56, -0.79, 0.25]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+sidechain_mode = "Don't Show (Fast)"
+
+[[sequence]]
+text = "In late 2019, a new highly-infections virus emerged out of Wuhan, China. This virus belongs to the coronavirus family, and is similar to the virus that caused the SARS epidemic in 2002."
+color = "science"
+
+[[sequence]]
+text = "Coronaviruses display a 'spike' protein on their surface, which binds tightly to a receptor protein found on the surface of human cells. Once the coronavirus spike binds to the human receptor, the virus can infect the human cell and replicate."
+color = "science"
+point_to = "sidechain"
+point_to_index = 53
+
+[[sequence]]
+text = "In early 2020, researchers determined the structure of the 2019 coronavirus spike protein and how it binds to human receptors. This early 2020 puzzle asked players to design a protein that binds to this coronavirus spike protein so that it could be used to block the interaction with human cells and halt infection."
+color = "science"
+point_to = "sidechain"
+point_to_index = 53
+
+[[sequence]]
+text = "This is the binding site of the coronavirus spike protein. The backbone and most of the sidechains are completely frozen, except for sidechains at the binding site, where the spike protein normally interacts with the human receptor protein."
+color = "science"
+point_to = "sidechain"
+point_to_index = 53
+
+[[sequence]]
+text = "Your goal is to design a new protein that binds to these sidechains, blocking interactions with the human receptor."
+color = "science"
+point_to = "sidechain"
+point_to_index = 143
+
+[[sequence]]
+text = "In order to bind the coronavirus target, your design will need to make lots of contacts and hydrogen bonds with the spike protein at this binding site. But your design will also need to have lots of secondary structure (helices or sheets) and a large core, so that it folds up correctly!"
+color = "science"
+point_to = "sidechain"
+point_to_index = 143
+
+[[sequence]]
+text = "When this puzzle was first launched, the highest score was nearly 17,000! In this challenge level, try to get at least 13,500 points for a good binder design!"
+color = "game"
+point_to = "sidechain"
+point_to_index = 143

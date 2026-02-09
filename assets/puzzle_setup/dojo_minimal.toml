@@ -1,0 +1,9 @@
+inherits = "dojo"
+move_tool_mode = "none"
+
+[gui]
+disable_pull_pie_menu = true
+simple_undo = true
+
+[actions]
+LocalMinimizePull = true

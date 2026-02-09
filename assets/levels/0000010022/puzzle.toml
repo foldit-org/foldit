@@ -1,0 +1,56 @@
+[puzzle]
+title = "Quest to the Native"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 224.14505
+completion_score = 7800.0
+min_moves = 4
+guide_visible = true
+can_align_guide = true
+use_dof_tethers = false
+guide_align_residue = 24
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLEEELLLLEELHHHHHHHHHHHHLLLLLEEEELLLLLLLLLLL"
+
+[puzzle.files]
+# guide_pdb: 88b0444b81e3412403462cce77e31295
+# puzzle_setup: 8a9444f4c8b75dc93cbeada0d6e739e0
+
+[puzzle.camera]
+center = [10, 4.6, 24]
+eye = [11, 43, 86]
+up = [-0.96, -0.23, 0.15]
+
+[[sequence]]
+text = "In this puzzle, the natural folded state of the protein, called a NATIVE, is known. Use the tools available to match the protein with the guide."
+point_to = "backbone"
+point_to_index = 3
+
+[[sequence]]
+text = "The native state of the protein is also the lowest in energy for that particular set of amino acids."
+point_to = "backbone"
+point_to_index = 3
+image = "images/big/native1.png"
+
+[[sequence]]
+text = "To align the guide with a specific section of the protein, select at least three adjacent residues and click ALIGN GUIDE. (Shift+Click can select a range quickly.)"
+color = "game"
+point_to = "align_guide"
+
+[[sequence]]
+text = "You can attach a rubber band from the protein to a point in empty space."
+color = "game"
+point_to = "helix"
+
+[[sequence]]
+text = "Rubber bands also affect the pull tool, not just Wiggle."
+color = "game"
+point_to = "helix"
+
+[[sequence]]
+text = "Remember to FREEZE parts of the protein that you don't want warped by Wiggle or Pull."
+color = "game"
+point_to = "freeze"

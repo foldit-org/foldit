@@ -1,0 +1,79 @@
+[puzzle]
+title = "Sequence Preference"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 477.14291
+completion_score = 8100.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHHHHHHHHHH"
+# original hash: d65c67871aed898b0fb5d56d2b939cf5
+
+[puzzle.files]
+# puzzle_setup: 596793a09864999fd6c4e3e2eb779035
+
+[puzzle.camera]
+center = [8.8, 8, -20]
+eye = [30, 8.1, 26]
+up = [0.28, 0.95, -0.14]
+
+[puzzle.view_options]
+current_visor = "Hydro"
+show_hbonds = true
+show_helix_hbonds = true
+show_other_hbonds = true
+show_sidechain_hbonds = true
+show_non_protein_hbonds = true
+
+[[sequence]]
+text = "Helices and sheets have different preferred amino acids."
+color = "science"
+point_to = "backbone"
+point_to_index = 3
+
+[[sequence]]
+text = "This is because certain amino acids fit better with the constraints of secondary structure."
+color = "science"
+point_to = "backbone"
+point_to_index = 3
+
+[[sequence]]
+text = "There are two amino acids to watch out for in helices and sheets:"
+color = "science"
+point_to = "backbone"
+point_to_index = 3
+
+[[sequence]]
+text = "PROLINE, because of its unusual backbone and inability to form the regular hydrogen bonding pattern in the helix."
+color = "science"
+point_to = "backbone"
+point_to_index = 8
+
+[[sequence]]
+text = "And GLYCINE, because its too flexible with its sidechain of just a single hydrogen."
+color = "science"
+point_to = "backbone"
+point_to_index = 9
+
+[[sequence]]
+text = "These two amino acids don't work well in regular secondary structures like helices or sheets."
+color = "science"
+point_to = "backbone"
+point_to_index = 9
+
+[[sequence]]
+text = "There are other small differences in how each amino acid prefers different secondary structures."
+color = "science"
+point_to = "backbone"
+point_to_index = 9
+
+[[sequence]]
+text = "Experiment with this amino acid sequence! Mutate the amino acids and find a sequence that works better!"
+color = "game"
+point_to = "design"

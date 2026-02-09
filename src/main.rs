@@ -9,7 +9,7 @@
 //!   P - Predict (SimpleFold structure prediction)
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
-//!   V - Toggle view mode (tube/ribbon)
+//!   V - Cycle sheet style (Ribbon/ClassicRibbon/RMF)
 //!   Q - Toggle backbone quality (high/low)
 //!   H - Toggle visibility of designed structures
 //!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
@@ -19,13 +19,10 @@
 //!   Right-drag residue to residue - Create band
 //!   Mouse - Rotate/zoom camera
 
-#[cfg(not(feature = "standalone"))]
-mod commands;
-
-#[cfg(not(feature = "standalone"))]
-use tauri::Manager;
+mod window;
 
 use foldit_rs::action_manager::{ActionManager, ActionType};
+use foldit_frontend::DirtyFlags;
 use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
 use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate, RosettaSessionState, RosettaStructureId};
 use foldit_rs::scene::{Scene, Structure, StructureId, CombinedCoordsResult};
@@ -42,21 +39,12 @@ use glam::Vec3;
 
 use foldit_render::animation::AnimationAction;
 use foldit_render::engine::ProteinRenderEngine;
+use foldit_rs::render_snapshot::{self, RenderSnapshot, SnapshotWriter, SnapshotReader};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
-use winit::keyboard::KeyCode;
-#[cfg(feature = "standalone")]
-use winit::application::ApplicationHandler;
-#[cfg(feature = "standalone")]
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
-#[cfg(feature = "standalone")]
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-#[cfg(feature = "standalone")]
-use winit::keyboard::PhysicalKey;
+use winit::event::MouseScrollDelta;
+use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
-#[cfg(feature = "standalone")]
-use winit::window::WindowId;
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
@@ -108,8 +96,7 @@ struct PullDragState {
 const PULL_DRAG_THRESHOLD: f32 = 5.0;
 
 /// Main application state
-struct App {
-    window: Option<Arc<Window>>,
+pub(crate) struct App {
     engine: Option<ProteinRenderEngine>,
     scene: Scene,
     /// Session tracks structure relationships and operation targeting
@@ -124,7 +111,6 @@ struct App {
     /// Unified Rosetta session state: tracks structures, residue ranges, and focus locks
     rosetta_state: Option<RosettaSessionState>,
     effect: VisualEffect,
-    last_frame: Instant,
     last_mouse_pos: (f32, f32),
     pdb_path: String,
     /// Pending animation action (None = no update needed)
@@ -139,12 +125,22 @@ struct App {
     pull_drag: Option<PullDragState>,
     /// Whether left mouse button is currently pressed
     left_mouse_pressed: bool,
+    /// Triple-buffer writer for render snapshots (mutation side)
+    snapshot_writer: SnapshotWriter,
+    /// Triple-buffer reader for render snapshots (render side)
+    snapshot_reader: SnapshotReader,
+    /// Accumulated dirty flags from mutations
+    ui_dirty: DirtyFlags,
+    /// Latest score from Rosetta updates (tracked for frontend push)
+    latest_score: Option<f64>,
+    /// Whether the next snapshot should trigger a camera fit
+    pending_fit_camera: bool,
 }
 
 impl App {
-    fn new(pdb_path: String) -> Self {
+    pub(crate) fn new(pdb_path: String) -> Self {
+        let (snapshot_writer, snapshot_reader) = render_snapshot::create_snapshot_buffer();
         Self {
-            window: None,
             engine: None,
             scene: Scene::new(),
             session: Session::new(),
@@ -156,7 +152,6 @@ impl App {
             action_manager: ActionManager::new(),
             rosetta_state: None,
             effect: VisualEffect::None,
-            last_frame: Instant::now(),
             last_mouse_pos: (0.0, 0.0),
             pdb_path,
             pending_action: None,
@@ -165,33 +160,216 @@ impl App {
             right_mouse_pressed: false,
             pull_drag: None,
             left_mouse_pressed: false,
+            snapshot_writer,
+            snapshot_reader,
+            ui_dirty: DirtyFlags::empty(),
+            latest_score: None,
+            pending_fit_camera: false,
         }
     }
 
-    /// Update engine from scene data with appropriate animation action.
-    fn sync_engine_with_scene(&mut self) {
-        let Some(action) = self.pending_action.take() else {
+    /// Build a RenderSnapshot from current App state and flush to the triple-buffer.
+    ///
+    /// Call this after processing mutations (ML updates, Rosetta updates, etc.).
+    /// The snapshot captures scene geometry + animation action + band/pull state.
+    fn flush_render_snapshot(&mut self) {
+        // Check if there's a scene geometry change (pending_action) or
+        // band/pull changes that need to be communicated to the render path.
+        let action = self.pending_action.take();
+        let has_geometry_change = action.is_some();
+
+        if !has_geometry_change && !self.snapshot_writer.is_dirty() {
             return;
+        }
+
+        // Build scene data only when geometry changed
+        let (backbone_chains, sidechain_positions, sidechain_hydrophobicity,
+             sidechain_residue_indices, sidechain_atom_names,
+             sidechain_bonds, backbone_sidechain_bonds, all_positions,
+             ss_types) = if has_geometry_change {
+            let data = self.scene.aggregated();
+            (
+                data.backbone_chains.clone(),
+                data.sidechain_positions.clone(),
+                data.sidechain_hydrophobicity.clone(),
+                data.sidechain_residue_indices.clone(),
+                data.sidechain_atom_names.clone(),
+                data.sidechain_bonds.clone(),
+                data.backbone_sidechain_bonds.clone(),
+                data.all_positions.clone(),
+                data.ss_types.clone(),
+            )
+        } else {
+            Default::default()
         };
 
-        if let Some(engine) = &mut self.engine {
-            let data = self.scene.aggregated();
+        let snapshot = RenderSnapshot {
+            pending_action: action,
+            backbone_chains,
+            sidechain_positions,
+            sidechain_hydrophobicity,
+            sidechain_residue_indices,
+            sidechain_atom_names,
+            sidechain_bonds,
+            backbone_sidechain_bonds,
+            all_positions,
+            ss_types,
+            bands: Vec::new(),
+            bands_dirty: false,
+            pull: None,
+            pull_dirty: false,
+            fit_camera: std::mem::take(&mut self.pending_fit_camera),
+            generation: 0, // set by writer
+        };
 
-            // Trigger animation with the appropriate action type
-            // This sets up start/target positions and begins interpolation
-            // Do NOT call update_from_aggregated after this - it would overwrite
-            // the sidechain renderer with target positions, defeating animation
+        self.snapshot_writer.force_write(snapshot);
+    }
+
+    /// Read the latest render snapshot and apply it to the engine.
+    ///
+    /// This is the render-side consumption of the triple-buffer. The engine
+    /// receives scene geometry via the snapshot rather than reading App state
+    /// directly, establishing the decoupling pattern.
+    fn apply_pending_snapshot(&mut self) {
+        let snapshot = match self.snapshot_reader.try_read() {
+            Some(snap) => snap,
+            None => return,
+        };
+
+        let engine = match &mut self.engine {
+            Some(e) => e,
+            None => return,
+        };
+
+        // Apply scene geometry change
+        if let Some(action) = snapshot.pending_action {
             engine.animate_to_full_pose_with_action(
-                &data.backbone_chains,
-                &data.sidechain_positions,
-                &data.sidechain_bonds,
-                &data.sidechain_hydrophobicity,
-                &data.sidechain_residue_indices,
-                &data.sidechain_atom_names,
-                &data.backbone_sidechain_bonds,
+                &snapshot.backbone_chains,
+                &snapshot.sidechain_positions,
+                &snapshot.sidechain_bonds,
+                &snapshot.sidechain_hydrophobicity,
+                &snapshot.sidechain_residue_indices,
+                &snapshot.sidechain_atom_names,
+                &snapshot.backbone_sidechain_bonds,
                 action,
             );
+
+            // Apply SS override if present
+            if let Some(ref ss) = snapshot.ss_types {
+                engine.set_ss_override(ss);
+            }
         }
+
+        // Fit camera to all positions when requested (e.g., structure load)
+        if snapshot.fit_camera {
+            engine.fit_camera_to_positions(&snapshot.all_positions);
+        }
+    }
+
+    /// Convenience: flush snapshot and immediately apply (single-threaded path).
+    ///
+    /// Used in the single-threaded path where mutations and rendering
+    /// happen on the same thread. When rendering moves to a separate thread,
+    /// flush and apply will be called independently.
+    fn sync_engine_with_scene(&mut self) {
+        self.flush_render_snapshot();
+        self.apply_pending_snapshot();
+    }
+
+    /// Take and clear accumulated UI dirty flags from mutations.
+    fn take_ui_dirty(&mut self) -> DirtyFlags {
+        let flags = self.ui_dirty;
+        self.ui_dirty = DirtyFlags::empty();
+        flags
+    }
+
+    /// Build the current actions list from the action manager state.
+    /// Each action reports whether it's enabled (can be started) and active (running).
+    fn build_actions_list(&self) -> Vec<foldit_frontend::state::ActionInfo> {
+        use foldit_frontend::state::ActionInfo;
+
+        let locked = self.action_manager.locked_structures();
+        let has_any_lock = !locked.is_empty();
+        let has_rosetta_op = locked.iter().any(|&id| {
+            matches!(
+                self.action_manager.get_action_type(id),
+                Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+            )
+        });
+        let has_ml_op = locked.iter().any(|&id| {
+            matches!(
+                self.action_manager.get_action_type(id),
+                Some(ActionType::MLPredict) | Some(ActionType::MLSequenceDesign) | Some(ActionType::MLStructureDesign)
+            )
+        });
+
+        vec![
+            ActionInfo {
+                id: 0, // ToggleWiggle
+                name: "Wiggle".into(),
+                enabled: !has_ml_op, // Can toggle off if Rosetta is running
+                active: has_rosetta_op && locked.iter().any(|&id|
+                    self.action_manager.get_action_type(id) == Some(ActionType::RosettaWiggle)),
+            },
+            ActionInfo {
+                id: 1, // ToggleShake
+                name: "Shake".into(),
+                enabled: !has_ml_op,
+                active: has_rosetta_op && locked.iter().any(|&id|
+                    self.action_manager.get_action_type(id) == Some(ActionType::RosettaShake)),
+            },
+            ActionInfo {
+                id: 2, // RunPrediction
+                name: "Predict".into(),
+                enabled: !has_any_lock,
+                active: locked.iter().any(|&id|
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLPredict)),
+            },
+            ActionInfo {
+                id: 3, // RunMPNN
+                name: "MPNN".into(),
+                enabled: !has_any_lock,
+                active: locked.iter().any(|&id|
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLSequenceDesign)),
+            },
+            ActionInfo {
+                id: 4, // RunDiffusion
+                name: "Diffusion".into(),
+                enabled: !has_any_lock,
+                active: locked.iter().any(|&id|
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLStructureDesign)),
+            },
+            ActionInfo {
+                id: 5, // ToggleViewMode
+                name: "View Mode".into(),
+                enabled: true,
+                active: false,
+            },
+            ActionInfo {
+                id: 7, // ToggleDesignedStructures
+                name: "Toggle Designs".into(),
+                enabled: self.scene.len() > 1,
+                active: false,
+            },
+            ActionInfo {
+                id: 8, // CycleFocus
+                name: "Cycle Focus".into(),
+                enabled: self.scene.len() > 1,
+                active: false,
+            },
+            ActionInfo {
+                id: 9, // RemoveStructure
+                name: "Remove".into(),
+                enabled: self.scene.len() > 1,
+                active: false,
+            },
+            ActionInfo {
+                id: 10, // Cancel
+                name: "Cancel".into(),
+                enabled: has_any_lock || !self.active_bands.is_empty(),
+                active: false,
+            },
+        ]
     }
 
     /// Convert flat backbone positions (N, CA, C, O per residue) to backbone chains
@@ -345,10 +523,11 @@ impl App {
                 update.backbone_positions.len()
             );
 
-            // Update progress effect
+            // Update progress effect and loading state for frontend
             if let VisualEffect::Progress { .. } = &mut self.effect {
                 self.effect.update_progress(update.step, update.total_steps);
             }
+            self.ui_dirty |= DirtyFlags::LOADING;
 
             // Animate intermediate structure if we have data
             if has_data {
@@ -424,6 +603,7 @@ impl App {
                         }
 
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
 
                     MLResult::SequenceDesign { sequences, scores } => {
@@ -499,6 +679,7 @@ impl App {
                         }
 
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
 
                     MLResult::StructureDesign { backbone_chains, confidence } => {
@@ -547,6 +728,7 @@ impl App {
 
                         self.pending_action = Some(AnimationAction::Diffusion);
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
 
                     MLResult::Error(error) => {
@@ -556,6 +738,7 @@ impl App {
                             self.action_manager.unlock(lock_id);
                         }
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
                 }
             }
@@ -583,6 +766,10 @@ impl App {
                 update.score,
                 update.converged
             );
+
+            // Track score and action state for frontend push
+            self.latest_score = Some(update.score);
+            self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
 
             // Check if this is an MPNN result or wiggle/shake update
             if self.session.mpnn_pending {
@@ -707,7 +894,7 @@ impl App {
     }
 
     /// Handle keyboard input for ML operations
-    fn handle_key(&mut self, key: KeyCode) {
+    pub(crate) fn handle_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::KeyW => {
                 // Wiggle: pure minimization (no packing)
@@ -744,6 +931,7 @@ impl App {
                         }
                         // Don't clear rosetta_state - topology hasn't changed
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::ACTIONS;
                     } else {
                         // ML operation running - can't start wiggle
                         let action = locked_ids.first()
@@ -793,6 +981,7 @@ impl App {
                             }
                         }
                         self.effect = VisualEffect::pulsing();
+                        self.ui_dirty |= DirtyFlags::ACTIONS;
                     } else {
                         log::warn!("Structure is already locked by another operation");
                     }
@@ -834,6 +1023,7 @@ impl App {
                         }
                         // Don't clear rosetta_state - topology hasn't changed
                         self.effect = VisualEffect::None;
+                        self.ui_dirty |= DirtyFlags::ACTIONS;
                     } else {
                         // ML operation running - can't start shake
                         let action = locked_ids.first()
@@ -883,6 +1073,7 @@ impl App {
                             }
                         }
                         self.effect = VisualEffect::pulsing();
+                        self.ui_dirty |= DirtyFlags::ACTIONS;
                     } else {
                         log::warn!("Structure is already locked by another operation");
                     }
@@ -955,6 +1146,7 @@ impl App {
                 }
 
                 self.effect = VisualEffect::pulsing();
+                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
             }
 
             KeyCode::KeyM => {
@@ -1010,6 +1202,7 @@ impl App {
                         }
 
                         self.effect = VisualEffect::pulsing();
+                        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
                     }
                     None => {
                         log::warn!("No coords available for sequence design");
@@ -1064,14 +1257,7 @@ impl App {
                 }
 
                 self.effect = VisualEffect::design_highlight(Vec::new());
-            }
-
-            KeyCode::KeyV => {
-                // Toggle view mode (tube vs ribbon)
-                if let Some(engine) = &mut self.engine {
-                    engine.toggle_view_mode();
-                    log::info!("View mode: {:?}", engine.view_mode);
-                }
+                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
             }
 
             KeyCode::KeyH => {
@@ -1095,6 +1281,7 @@ impl App {
                     }
                 }
                 self.pending_action = Some(AnimationAction::Load);
+                self.ui_dirty |= DirtyFlags::VIEW;
             }
 
             KeyCode::Delete | KeyCode::Backspace => {
@@ -1115,6 +1302,7 @@ impl App {
                                 // Validate focus in case removed structure was focused
                                 self.session.validate_focus(self.scene.structure_ids());
                                 self.pending_action = Some(AnimationAction::Load);
+                                self.ui_dirty |= DirtyFlags::ACTIONS;
                             }
                         }
                     }
@@ -1166,6 +1354,7 @@ impl App {
 
                 // Cancel any band drag in progress
                 self.band_drag = None;
+                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
             }
 
             KeyCode::Tab => {
@@ -1200,6 +1389,7 @@ impl App {
                         }
                     }
                 }
+                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
             }
 
             _ => {}
@@ -1595,7 +1785,7 @@ impl App {
         Some(pos1.distance(*pos2) as f64)
     }
 
-    /// Handle a key press by string name (for Tauri IPC).
+    /// Handle a key press by string name (for IPC).
     /// Maps common key name strings to winit KeyCode values.
     pub fn handle_key_by_name(&mut self, code: &str) {
         let key = match code {
@@ -1618,7 +1808,7 @@ impl App {
         self.handle_key(key);
     }
 
-    /// Load a structure by path or PDB ID (for Tauri IPC).
+    /// Load a structure by path or PDB ID (for IPC).
     pub fn handle_load_structure(&mut self, input: &str) {
         let path = match resolve_structure_path(input) {
             Ok(p) => p,
@@ -1635,479 +1825,608 @@ impl App {
                 let id = self.scene.add(structure);
                 self.session.on_original_loaded(id, backbone_ca);
                 self.pending_action = Some(AnimationAction::Load);
+                self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE;
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", path, e);
             }
         }
     }
-}
 
-#[cfg(feature = "standalone")]
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            // Create window
-            let window = Arc::new(
-                event_loop
-                    .create_window(
-                        Window::default_attributes()
-                            .with_title("Foldit ML Render")
-                            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
-                    )
-                    .expect("Failed to create window"),
-            );
+    /// Initialize domain state once a window is available (called from AppRunner::resumed).
+    pub(crate) fn initialize_with_window(&mut self, window: Arc<Window>) {
+        // Create render engine with the specified molecule path
+        let size = window.inner_size();
+        let scale = window.scale_factor();
+        let mut engine = pollster::block_on(ProteinRenderEngine::new_with_path(
+            window.clone(),
+            (size.width, size.height),
+            &self.pdb_path,
+        ));
 
-            // Create render engine with the specified molecule path
-            let size = window.inner_size();
-            let mut engine =
-                pollster::block_on(ProteinRenderEngine::new_with_path(window.clone(), (size.width, size.height), &self.pdb_path));
+        // Ensure the surface layer's scale matches the display for HiDPI
+        engine.context.set_surface_scale(scale);
 
-            // Load initial structure into scene
-            match Structure::from_file(&self.pdb_path) {
-                Ok(structure) => {
-                    log::info!(
-                        "Loaded structure: {} ({} sidechain atoms, {} backbone chains)",
-                        structure.name,
-                        structure.sidechain_atoms.len(),
-                        structure.backbone_chains.len()
-                    );
+        // Load initial structure into scene
+        match Structure::from_file(&self.pdb_path) {
+            Ok(structure) => {
+                log::info!(
+                    "Loaded structure: {} ({} sidechain atoms, {} backbone chains)",
+                    structure.name,
+                    structure.sidechain_atoms.len(),
+                    structure.backbone_chains.len()
+                );
 
-                    // Store original CA positions for Kabsch alignment in session
-                    let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
-                    log::info!(
-                        "Stored {} original CA positions for alignment",
-                        backbone_ca.len()
-                    );
+                // Store original CA positions for Kabsch alignment in session
+                let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
+                log::info!(
+                    "Stored {} original CA positions for alignment",
+                    backbone_ca.len()
+                );
 
-                    let id = self.scene.add(structure);
-                    self.session.on_original_loaded(id, backbone_ca);
+                let id = self.scene.add(structure);
+                self.session.on_original_loaded(id, backbone_ca);
 
-                    // Initial sync with engine
-                    let data = self.scene.aggregated();
-                    engine.update_from_aggregated(
-                        &data.backbone_chains,
-                        &data.sidechain_positions,
-                        &data.sidechain_hydrophobicity,
-                        &data.sidechain_residue_indices,
-                        &data.sidechain_atom_names,
-                        &data.sidechain_bonds,
-                        &data.backbone_sidechain_bonds,
-                        &data.all_positions,
-                        true, // Fit camera on initial load
-                    );
-                }
-                Err(e) => {
-                    log::error!("Failed to load structure from '{}': {}", self.pdb_path, e);
-                }
+                // Initial sync with engine
+                let data = self.scene.aggregated();
+                engine.update_from_aggregated(
+                    &data.backbone_chains,
+                    &data.sidechain_positions,
+                    &data.sidechain_hydrophobicity,
+                    &data.sidechain_residue_indices,
+                    &data.sidechain_atom_names,
+                    &data.sidechain_bonds,
+                    &data.backbone_sidechain_bonds,
+                    &data.all_positions,
+                    true, // Fit camera on initial load
+                    data.ss_types.as_deref(),
+                );
             }
+            Err(e) => {
+                log::error!("Failed to load structure from '{}': {}", self.pdb_path, e);
+            }
+        }
 
-            // Initialize ML runner
-            let (ml_runner, ml_updates, ml_results) = MLRunner::new();
-            self.ml_runner = Some(ml_runner);
-            self.ml_updates = Some(ml_updates);
-            self.ml_results = Some(ml_results);
+        // Initialize ML runner
+        let (ml_runner, ml_updates, ml_results) = MLRunner::new();
+        self.ml_runner = Some(ml_runner);
+        self.ml_updates = Some(ml_updates);
+        self.ml_results = Some(ml_results);
 
-            // Initialize Rosetta executor (uses action-based API: ActionCartGlobalWiggle, etc.)
-            let (rosetta_executor, rosetta_updates) = RosettaExecutor::new();
-            self.rosetta_executor = Some(rosetta_executor);
-            self.rosetta_updates = Some(rosetta_updates);
+        // Initialize Rosetta executor
+        let (rosetta_executor, rosetta_updates) = RosettaExecutor::new();
+        self.rosetta_executor = Some(rosetta_executor);
+        self.rosetta_updates = Some(rosetta_updates);
 
-            window.request_redraw();
-            self.window = Some(window);
-            self.engine = Some(engine);
+        self.engine = Some(engine);
+    }
+
+    /// Shut down ML runner and Rosetta executor.
+    pub(crate) fn shutdown(&self) {
+        if let Some(ref runner) = self.ml_runner {
+            runner.shutdown();
+        }
+        if let Some(ref executor) = self.rosetta_executor {
+            executor.shutdown();
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                // Shutdown runners before exit
-                if let Some(ref runner) = self.ml_runner {
-                    runner.shutdown();
-                }
-                if let Some(ref executor) = self.rosetta_executor {
-                    executor.shutdown();
-                }
-                event_loop.exit();
+    /// Resize the render engine surface.
+    pub(crate) fn resize(&mut self, width: u32, height: u32) {
+        if let Some(engine) = &mut self.engine {
+            engine.resize(width, height);
+        }
+    }
+
+    /// Update surface layer scale factor (e.g. when moving between displays).
+    pub(crate) fn set_surface_scale(&self, scale_factor: f64) {
+        if let Some(ref engine) = self.engine {
+            engine.context.set_surface_scale(scale_factor);
+        }
+    }
+
+    /// Tick visual effects, returning the current intensity.
+    pub(crate) fn tick_effects(&mut self, dt: f32) -> f32 {
+        self.effect.tick(dt)
+    }
+
+    /// Update camera animation by the given delta time.
+    pub(crate) fn update_camera_animation(&mut self, dt: f32) {
+        if let Some(engine) = &mut self.engine {
+            engine.update_camera_animation(dt);
+        }
+    }
+
+    /// Update per-frame visuals: band tracking during animation and pull tracking.
+    pub(crate) fn update_frame_visuals(&mut self) {
+        // Update bands during structure animation so they follow interpolated positions
+        if let Some(engine) = &self.engine {
+            if engine.needs_band_update() && !self.active_bands.is_empty() {
+                self.update_band_visualization();
             }
+        }
 
-            WindowEvent::Resized(newsize) => {
-                if let Some(engine) = &mut self.engine {
-                    engine.resize(newsize.width, newsize.height);
+        // Update pull visualization during animation so it tracks the moving residue
+        if let Some(ref mut pull) = self.pull_drag {
+            if let Some(engine) = &self.engine {
+                if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
+                    pull.start_pos = current_ca;
                 }
             }
+        }
+        if let Some(ref pull) = self.pull_drag {
+            let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+            self.update_pull_visualization(pull_info);
+        }
+    }
 
-            WindowEvent::ScaleFactorChanged { .. } => {
-                if let (Some(window), Some(engine)) = (&self.window, &mut self.engine) {
-                    let newsize = window.inner_size();
-                    engine.resize(newsize.width, newsize.height);
-                }
+    /// Render the current frame.
+    pub(crate) fn render(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            if let Err(e) = engine.render() {
+                log::error!("Render error: {:?}", e);
             }
+        } else {
+            log::warn!("render() called but engine is None");
+        }
+    }
 
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    self.handle_key(key);
-                }
+    /// Populate a FrontendState with current App domain state based on accumulated dirty flags.
+    pub(crate) fn populate_frontend(&mut self, frontend: &mut foldit_frontend::FrontendState) {
+        let app_dirty = self.take_ui_dirty();
+        if app_dirty.is_empty() {
+            return;
+        }
+
+        if app_dirty.contains(DirtyFlags::SCORE) {
+            if let Some(score) = self.latest_score {
+                frontend.set_score(score, false);
             }
-
-            WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = now.duration_since(self.last_frame);
-                self.last_frame = now;
-
-                // Process ML updates
-                self.process_ml_updates();
-
-                // Process Rosetta updates (wiggle)
-                self.process_rosetta_updates();
-
-                // Sync engine with scene if dirty
-                self.sync_engine_with_scene();
-
-                // Update visual effect
-                let _intensity = self.effect.tick(dt.as_secs_f32());
-                // TODO: Pass intensity to shader for pulsing effect
-
-                // Update camera animation
-                if let Some(engine) = &mut self.engine {
-                    engine.update_camera_animation(dt.as_secs_f32());
-                }
-
-                // Update bands during structure animation so they follow the interpolated positions
-                if let Some(engine) = &self.engine {
-                    if engine.needs_band_update() && !self.active_bands.is_empty() {
-                        self.update_band_visualization();
+        }
+        if app_dirty.contains(DirtyFlags::ACTIONS) {
+            frontend.set_actions(self.build_actions_list());
+        }
+        if app_dirty.contains(DirtyFlags::LOADING) {
+            let progress = self.effect.get_progress_percent().map(|pct| pct / 100.0);
+            frontend.set_loading_progress(progress);
+        }
+        if app_dirty.contains(DirtyFlags::VIEW) {
+            if let Some(engine) = &self.engine {
+                let mode = match engine.view_mode {
+                    foldit_render::engine::ViewMode::Tube => {
+                        foldit_frontend::state::ViewMode::Tube
                     }
-                }
+                    foldit_render::engine::ViewMode::Ribbon => {
+                        foldit_frontend::state::ViewMode::Ribbon
+                    }
+                };
+                frontend.set_view_mode(mode);
+            }
+        }
+        if app_dirty.contains(DirtyFlags::SELECTION) {
+            frontend.mark_dirty(DirtyFlags::SELECTION);
+        }
+        if app_dirty.contains(DirtyFlags::UI) {
+            frontend.mark_dirty(DirtyFlags::UI);
+        }
+    }
 
-                // Update pull visualization during animation so it tracks the moving residue
-                // First scope: update start_pos from current animated position
-                if let Some(ref mut pull) = self.pull_drag {
+    /// Handle native mouse input (from winit, not webview).
+    pub(crate) fn handle_native_mouse_input(
+        &mut self,
+        button: winit::event::MouseButton,
+        pressed: bool,
+    ) {
+        match button {
+            winit::event::MouseButton::Left => {
+                self.left_mouse_pressed = pressed;
+
+                if pressed {
+                    // Left button pressed - check if over a residue to start pull
                     if let Some(engine) = &self.engine {
-                        if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
-                            pull.start_pos = current_ca;
+                        let hovered = engine.hovered_residue();
+                        if hovered >= 0 {
+                            if let Some(ca_pos) =
+                                engine.get_residue_ca_position(hovered as usize)
+                            {
+                                let click_world_pos = engine.screen_to_world_at_depth(
+                                    self.last_mouse_pos.0,
+                                    self.last_mouse_pos.1,
+                                    ca_pos,
+                                );
+                                let data = self.scene.aggregated();
+                                let start_pos = get_closest_atom_for_residue(
+                                    &data.backbone_chains,
+                                    &data.sidechain_positions,
+                                    &data.sidechain_residue_indices,
+                                    hovered as usize,
+                                    click_world_pos,
+                                )
+                                .unwrap_or(ca_pos);
+
+                                self.pull_drag = Some(PullDragState {
+                                    residue: hovered,
+                                    start_pos,
+                                    target_pos: click_world_pos,
+                                    initial_mouse_pos: self.last_mouse_pos,
+                                    is_active: false,
+                                });
+                                log::debug!(
+                                    "Potential pull on residue {} at {:?}",
+                                    hovered,
+                                    start_pos
+                                );
+                            }
                         }
                     }
-                }
-                // Second scope: update visualization (separate to avoid borrow conflict)
-                if let Some(ref pull) = self.pull_drag {
-                    let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
-                    self.update_pull_visualization(pull_info);
-                }
 
-                // Render
-                if let Some(engine) = &mut self.engine {
-                    let _ = engine.render();
-                }
+                    if let Some(engine) = &mut self.engine {
+                        engine.handle_mouse_button(button, pressed);
+                    }
+                } else {
+                    // Left button released
+                    if let Some(pull) = self.pull_drag.take() {
+                        if let Some(engine) = &mut self.engine {
+                            engine.handle_mouse_button(button, false);
+                        }
 
-                // Request next frame
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-
-            WindowEvent::MouseInput { button, state, .. } => {
-                let pressed = state == ElementState::Pressed;
-
-                match button {
-                    winit::event::MouseButton::Left => {
-                        self.left_mouse_pressed = pressed;
-
-                        if pressed {
-                            // Left button pressed - check if over a residue to start pull
-                            if let Some(engine) = &self.engine {
-                                let hovered = engine.hovered_residue();
-                                if hovered >= 0 {
-                                    // Get CA position first (needed as reference for depth calculation)
-                                    if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                                        // Project mouse click to world space at residue depth
-                                        let click_world_pos = engine.screen_to_world_at_depth(
-                                            self.last_mouse_pos.0,
-                                            self.last_mouse_pos.1,
-                                            ca_pos,
-                                        );
-
-                                        // Find the closest atom (backbone or sidechain) to the click
-                                        let data = self.scene.aggregated();
-                                        let start_pos = get_closest_atom_for_residue(
-                                            &data.backbone_chains,
-                                            &data.sidechain_positions,
-                                            &data.sidechain_residue_indices,
-                                            hovered as usize,
-                                            click_world_pos,
-                                        ).unwrap_or(ca_pos);
-
-                                        // Create potential pull state (not active until drag threshold)
-                                        self.pull_drag = Some(PullDragState {
-                                            residue: hovered,
-                                            start_pos,
-                                            target_pos: click_world_pos,
-                                            initial_mouse_pos: self.last_mouse_pos,
-                                            is_active: false,
-                                        });
-                                        log::debug!("Potential pull on residue {} at {:?}", hovered, start_pos);
-                                    }
-                                }
-                            }
-
-                            // Always let engine handle mouse button for tracking
-                            if let Some(engine) = &mut self.engine {
-                                engine.handle_mouse_button(button, pressed);
+                        if pull.is_active {
+                            log::info!(
+                                "Pull released - residue {} pulled to {:?}",
+                                pull.residue,
+                                pull.target_pos
+                            );
+                            self.update_pull_visualization(None);
+                            if let Some(rosetta) = &self.rosetta_executor {
+                                rosetta.cancel();
                             }
                         } else {
-                            // Left button released
-                            if let Some(pull) = self.pull_drag.take() {
-                                // Always reset engine mouse state
-                                if let Some(engine) = &mut self.engine {
-                                    engine.handle_mouse_button(button, false);
-                                }
+                            if let Some(engine) = &mut self.engine {
+                                engine.handle_mouse_up();
+                            }
+                        }
+                    } else {
+                        if let Some(engine) = &mut self.engine {
+                            engine.handle_mouse_button(button, false);
+                            engine.handle_mouse_up();
+                        }
+                    }
+                }
+            }
+            winit::event::MouseButton::Right => {
+                self.right_mouse_pressed = pressed;
 
-                                if pull.is_active {
-                                    // Pull was active - finish it
-                                    log::info!("Pull released - residue {} pulled to {:?}", pull.residue, pull.target_pos);
-                                    // Clear pull visualization
-                                    self.update_pull_visualization(None);
+                if pressed {
+                    if let Some(engine) = &self.engine {
+                        let hovered = engine.hovered_residue();
+                        if hovered >= 0 {
+                            if let Some(ca_pos) =
+                                engine.get_residue_ca_position(hovered as usize)
+                            {
+                                let click_world_pos = engine.screen_to_world_at_depth(
+                                    self.last_mouse_pos.0,
+                                    self.last_mouse_pos.1,
+                                    ca_pos,
+                                );
+                                let data = self.scene.aggregated();
+                                let (start_atom_pos, start_atom_name) =
+                                    get_closest_atom_with_name(
+                                        &data.backbone_chains,
+                                        &data.sidechain_positions,
+                                        &data.sidechain_residue_indices,
+                                        &data.sidechain_atom_names,
+                                        hovered as usize,
+                                        click_world_pos,
+                                    )
+                                    .unwrap_or((ca_pos, "CA".to_string()));
 
-                                    // Cancel the Rosetta pull operation (non-blocking)
-                                    if let Some(rosetta) = &self.rosetta_executor {
-                                        rosetta.cancel();
-                                    }
-                                } else {
-                                    // Pull was not active (no drag) - treat as selection click
-                                    if let Some(engine) = &mut self.engine {
-                                        engine.handle_mouse_up();
-                                    }
-                                }
-                            } else {
-                                // No pull state at all, handle as normal click
-                                if let Some(engine) = &mut self.engine {
-                                    engine.handle_mouse_button(button, false);
-                                    engine.handle_mouse_up();
-                                }
+                                self.band_drag = Some(BandDragState {
+                                    start_residue: hovered,
+                                    start_atom_pos,
+                                    start_atom_name,
+                                    current_mouse_pos: self.last_mouse_pos,
+                                });
+                                log::info!(
+                                    "Started band drag from residue {} at {:?}",
+                                    hovered,
+                                    start_atom_pos
+                                );
                             }
                         }
                     }
-                    winit::event::MouseButton::Right => {
-                        self.right_mouse_pressed = pressed;
+                } else {
+                    if let Some(drag) = self.band_drag.take() {
+                        self.update_band_preview(None);
 
-                        if pressed {
-                            // Right button pressed - start band drag if over a residue
-                            if let Some(engine) = &self.engine {
-                                let hovered = engine.hovered_residue();
-                                if hovered >= 0 {
-                                    // Get CA position for depth reference
-                                    if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                                        // Project click to world space
-                                        let click_world_pos = engine.screen_to_world_at_depth(
-                                            self.last_mouse_pos.0,
-                                            self.last_mouse_pos.1,
-                                            ca_pos,
-                                        );
-                                        // Find closest atom to click (with name for tracking)
-                                        let data = self.scene.aggregated();
-                                        let (start_atom_pos, start_atom_name) = get_closest_atom_with_name(
+                        if let Some(engine) = &self.engine {
+                            let end_residue = engine.hovered_residue();
+                            if end_residue >= 0 && end_residue != drag.start_residue {
+                                if let Some(ca_pos) =
+                                    engine.get_residue_ca_position(end_residue as usize)
+                                {
+                                    let click_world_pos = engine.screen_to_world_at_depth(
+                                        self.last_mouse_pos.0,
+                                        self.last_mouse_pos.1,
+                                        ca_pos,
+                                    );
+                                    let data = self.scene.aggregated();
+                                    let (end_atom_pos, end_atom_name) =
+                                        get_closest_atom_with_name(
                                             &data.backbone_chains,
                                             &data.sidechain_positions,
                                             &data.sidechain_residue_indices,
                                             &data.sidechain_atom_names,
-                                            hovered as usize,
+                                            end_residue as usize,
                                             click_world_pos,
-                                        ).unwrap_or((ca_pos, "CA".to_string()));
+                                        )
+                                        .unwrap_or((ca_pos, "CA".to_string()));
 
-                                        self.band_drag = Some(BandDragState {
-                                            start_residue: hovered,
-                                            start_atom_pos,
-                                            start_atom_name,
-                                            current_mouse_pos: self.last_mouse_pos,
-                                        });
-                                        log::info!("Started band drag from residue {} at {:?}", hovered, start_atom_pos);
-                                    }
+                                    self.create_band_with_atoms(
+                                        drag.start_residue,
+                                        drag.start_atom_pos,
+                                        &drag.start_atom_name,
+                                        end_residue,
+                                        end_atom_pos,
+                                        &end_atom_name,
+                                    );
                                 }
-                            }
-                        } else {
-                            // Right button released - complete band creation if valid
-                            if let Some(drag) = self.band_drag.take() {
-                                // Clear band preview first
-                                self.update_band_preview(None);
-
-                                if let Some(engine) = &self.engine {
-                                    let end_residue = engine.hovered_residue();
-                                    if end_residue >= 0 && end_residue != drag.start_residue {
-                                        // Find closest atom at end position (with name for tracking)
-                                        if let Some(ca_pos) = engine.get_residue_ca_position(end_residue as usize) {
-                                            let click_world_pos = engine.screen_to_world_at_depth(
-                                                self.last_mouse_pos.0,
-                                                self.last_mouse_pos.1,
-                                                ca_pos,
-                                            );
-                                            let data = self.scene.aggregated();
-                                            let (end_atom_pos, end_atom_name) = get_closest_atom_with_name(
-                                                &data.backbone_chains,
-                                                &data.sidechain_positions,
-                                                &data.sidechain_residue_indices,
-                                                &data.sidechain_atom_names,
-                                                end_residue as usize,
-                                                click_world_pos,
-                                            ).unwrap_or((ca_pos, "CA".to_string()));
-
-                                            // Create band with specific atoms
-                                            self.create_band_with_atoms(
-                                                drag.start_residue,
-                                                drag.start_atom_pos,
-                                                &drag.start_atom_name,
-                                                end_residue,
-                                                end_atom_pos,
-                                                &end_atom_name,
-                                            );
-                                        }
-                                    } else if end_residue == drag.start_residue {
-                                        log::info!("Band drag ended on same residue - cancelled");
-                                    } else {
-                                        log::info!("Band drag ended on background - cancelled");
-                                    }
-                                }
+                            } else if end_residue == drag.start_residue {
+                                log::info!("Band drag ended on same residue - cancelled");
+                            } else {
+                                log::info!("Band drag ended on background - cancelled");
                             }
                         }
                     }
-                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle native cursor movement (from winit, not webview).
+    pub(crate) fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
+        let delta_x = x - self.last_mouse_pos.0;
+        let delta_y = y - self.last_mouse_pos.1;
+
+        // Handle pull drag movement
+        let mut pull_became_active = false;
+        if let Some(ref mut pull) = self.pull_drag {
+            if !pull.is_active {
+                let dx = x - pull.initial_mouse_pos.0;
+                let dy = y - pull.initial_mouse_pos.1;
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance > PULL_DRAG_THRESHOLD {
+                    pull.is_active = true;
+                    pull_became_active = true;
+                    log::info!(
+                        "Pull activated on residue {} (moved {} pixels)",
+                        pull.residue,
+                        distance
+                    );
                 }
             }
 
-            WindowEvent::CursorMoved { position, .. } => {
-                let delta_x = position.x as f32 - self.last_mouse_pos.0;
-                let delta_y = position.y as f32 - self.last_mouse_pos.1;
-
-                // Handle pull drag movement
-                let mut pull_became_active = false;
-                if let Some(ref mut pull) = self.pull_drag {
-                    // Check if we should activate the pull (moved past threshold)
-                    if !pull.is_active {
-                        let dx = position.x as f32 - pull.initial_mouse_pos.0;
-                        let dy = position.y as f32 - pull.initial_mouse_pos.1;
-                        let distance = (dx * dx + dy * dy).sqrt();
-                        if distance > PULL_DRAG_THRESHOLD {
-                            pull.is_active = true;
-                            pull_became_active = true;
-                            log::info!("Pull activated on residue {} (moved {} pixels)", pull.residue, distance);
-                        }
+            if pull.is_active {
+                if let Some(engine) = &self.engine {
+                    if let Some(current_ca) =
+                        engine.get_residue_ca_position(pull.residue as usize)
+                    {
+                        pull.start_pos = current_ca;
                     }
+                    pull.target_pos = engine.screen_to_world_at_depth(x, y, pull.start_pos);
+                }
+            }
+        }
 
-                    if pull.is_active {
-                        if let Some(engine) = &self.engine {
-                            // Update start_pos from current animated CA position of the pulled residue
-                            if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
-                                pull.start_pos = current_ca;
-                            }
-
-                            // Use absolute positioning: project current mouse to world space at residue depth
-                            pull.target_pos = engine.screen_to_world_at_depth(
-                                position.x as f32,
-                                position.y as f32,
-                                pull.start_pos,
+        // Start Rosetta pull when pull becomes active
+        if pull_became_active {
+            if let Some(ref pull) = self.pull_drag {
+                if let Some(rosetta) = &self.rosetta_executor {
+                    if let Some(combined) = self.scene.get_combined_coords_bytes() {
+                        let residue_1indexed = (pull.residue + 1) as u32;
+                        let target =
+                            [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+                        if let Err(e) =
+                            rosetta.start_pull(combined.bytes, residue_1indexed, target)
+                        {
+                            log::warn!("Failed to start pull: {}", e);
+                        } else {
+                            log::info!(
+                                "Started Rosetta pull operation for residue {}",
+                                residue_1indexed
                             );
                         }
                     }
                 }
-
-                // Start Rosetta pull when pull becomes active
-                if pull_became_active {
-                    if let Some(ref pull) = self.pull_drag {
-                        if let Some(rosetta) = &self.rosetta_executor {
-                            if let Some(combined) = self.scene.get_combined_coords_bytes() {
-                                let residue_1indexed = (pull.residue + 1) as u32;
-                                let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
-                                if let Err(e) = rosetta.start_pull(combined.bytes, residue_1indexed, target) {
-                                    log::warn!("Failed to start pull: {}", e);
-                                } else {
-                                    log::info!("Started Rosetta pull operation for residue {}", residue_1indexed);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Extract pull info for visualization and Rosetta update (separate scope to avoid borrow conflict)
-                if let Some(ref pull) = self.pull_drag {
-                    if pull.is_active {
-                        let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
-                        let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
-
-                        self.update_pull_visualization(pull_info);
-
-                        // Update Rosetta pull target position
-                        if let Some(rosetta) = &self.rosetta_executor {
-                            let _ = rosetta.update_pull_target(target);
-                        }
-
-                        // Update hover position (for picking) but don't move camera
-                        if let Some(engine) = &mut self.engine {
-                            engine.handle_mouse_position(position.x as f32, position.y as f32);
-                        }
-                    } else {
-                        // Pull not yet active - do normal camera handling
-                        if let Some(engine) = &mut self.engine {
-                            engine.handle_mouse_move(delta_x, delta_y);
-                            engine.handle_mouse_position(position.x as f32, position.y as f32);
-                        }
-                    }
-                } else {
-                    // Normal mouse move - camera and hover
-                    if let Some(engine) = &mut self.engine {
-                        engine.handle_mouse_move(delta_x, delta_y);
-                        engine.handle_mouse_position(position.x as f32, position.y as f32);
-                    }
-                }
-
-                self.last_mouse_pos = (position.x as f32, position.y as f32);
-
-                // Update band drag state during right-click drag
-                if let Some(ref mut drag) = self.band_drag {
-                    drag.current_mouse_pos = self.last_mouse_pos;
-
-                    // Show band preview - project mouse to world space at start atom depth
-                    if let Some(engine) = &self.engine {
-                        let target_pos = engine.screen_to_world_at_depth(
-                            position.x as f32,
-                            position.y as f32,
-                            drag.start_atom_pos,
-                        );
-                        let preview = Some((drag.start_atom_pos, target_pos, drag.start_residue as u32));
-                        self.update_band_preview(preview);
-                    }
-                }
-
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
+        }
 
-            WindowEvent::MouseWheel { delta, .. } => {
+        // Extract pull info for visualization and Rosetta update
+        if let Some(ref pull) = self.pull_drag {
+            if pull.is_active {
+                let pull_info =
+                    Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                let target =
+                    [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+
+                self.update_pull_visualization(pull_info);
+
+                if let Some(rosetta) = &self.rosetta_executor {
+                    let _ = rosetta.update_pull_target(target);
+                }
+
                 if let Some(engine) = &mut self.engine {
-                    match delta {
-                        MouseScrollDelta::LineDelta(_, y) => engine.handle_mouse_wheel(y),
-                        MouseScrollDelta::PixelDelta(pos) => {
-                            engine.handle_mouse_wheel(pos.y as f32 * 0.01)
-                        }
-                    }
+                    engine.handle_mouse_position(x, y);
                 }
-
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-
-            WindowEvent::ModifiersChanged(modifiers) => {
+            } else {
                 if let Some(engine) = &mut self.engine {
-                    engine.update_modifiers(modifiers.state());
+                    engine.handle_mouse_move(delta_x, delta_y);
+                    engine.handle_mouse_position(x, y);
                 }
             }
+        } else {
+            if let Some(engine) = &mut self.engine {
+                engine.handle_mouse_move(delta_x, delta_y);
+                engine.handle_mouse_position(x, y);
+            }
+        }
 
-            _ => (),
+        self.last_mouse_pos = (x, y);
+
+        // Update band drag state during right-click drag
+        if let Some(ref mut drag) = self.band_drag {
+            drag.current_mouse_pos = self.last_mouse_pos;
+
+            if let Some(engine) = &self.engine {
+                let target_pos =
+                    engine.screen_to_world_at_depth(x, y, drag.start_atom_pos);
+                let preview =
+                    Some((drag.start_atom_pos, target_pos, drag.start_residue as u32));
+                self.update_band_preview(preview);
+            }
         }
     }
-}
 
+    /// Handle native mouse wheel input (from winit, not webview).
+    pub(crate) fn handle_native_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if let Some(engine) = &mut self.engine {
+            match delta {
+                MouseScrollDelta::LineDelta(_, y) => engine.handle_mouse_wheel(y),
+                MouseScrollDelta::PixelDelta(pos) => {
+                    engine.handle_mouse_wheel(pos.y as f32 * 0.01)
+                }
+            }
+        }
+    }
+
+    /// Handle native modifier key changes.
+    pub(crate) fn handle_native_modifiers(&mut self, state: ModifiersState) {
+        if let Some(engine) = &mut self.engine {
+            engine.update_modifiers(state);
+        }
+    }
+
+    /// Handle a ViewportInput message from JS IPC.
+    /// Delegates to the same native handlers used by winit so all input logic
+    /// (pull drags, band drags, selection, modifiers) works identically.
+    pub(crate) fn handle_viewport_input(&mut self, input: foldit_frontend::ViewportInput) {
+        use foldit_frontend::ViewportInput;
+
+        match input {
+            ViewportInput::PointerDown { x, y, button, shift, .. } => {
+                let winit_button = match button {
+                    0 => winit::event::MouseButton::Left,
+                    2 => winit::event::MouseButton::Right,
+                    1 => winit::event::MouseButton::Middle,
+                    _ => return,
+                };
+                if let Some(engine) = &mut self.engine {
+                    engine.set_shift_pressed(shift);
+                }
+                // Update position before button press so handlers see correct coords
+                self.handle_native_cursor_moved(x, y);
+                self.handle_native_mouse_input(winit_button, true);
+            }
+            ViewportInput::PointerUp { x, y, button, shift, .. } => {
+                let winit_button = match button {
+                    0 => winit::event::MouseButton::Left,
+                    2 => winit::event::MouseButton::Right,
+                    1 => winit::event::MouseButton::Middle,
+                    _ => return,
+                };
+                if let Some(engine) = &mut self.engine {
+                    engine.set_shift_pressed(shift);
+                }
+                self.handle_native_cursor_moved(x, y);
+                self.handle_native_mouse_input(winit_button, false);
+            }
+            ViewportInput::PointerMove { x, y, shift, .. } => {
+                if let Some(engine) = &mut self.engine {
+                    engine.set_shift_pressed(shift);
+                }
+                self.handle_native_cursor_moved(x, y);
+            }
+            ViewportInput::Scroll { delta } => {
+                if let Some(engine) = &mut self.engine {
+                    engine.handle_mouse_wheel(delta);
+                }
+            }
+            ViewportInput::Key { code, pressed } => {
+                if pressed {
+                    self.handle_key_by_name(&code);
+                }
+            }
+            ViewportInput::Resize { .. } => {
+                // Ignored: JS sends CSS pixels (logical) which are wrong on HiDPI.
+                // Window resizes are handled by WindowEvent::Resized (physical pixels).
+            }
+        }
+
+        self.ui_dirty |= DirtyFlags::UI;
+    }
+
+    /// Handle a TriggerAction message from JS IPC.
+    pub(crate) fn handle_trigger_action(&mut self, action: foldit_frontend::ActionId) {
+        use foldit_frontend::ActionId;
+        match action {
+            ActionId::ToggleWiggle => self.handle_key(KeyCode::KeyW),
+            ActionId::ToggleShake => self.handle_key(KeyCode::KeyS),
+            ActionId::RunPrediction => self.handle_key(KeyCode::KeyP),
+            ActionId::RunMPNN => self.handle_key(KeyCode::KeyM),
+            ActionId::RunDiffusion => self.handle_key(KeyCode::KeyR),
+            ActionId::ToggleViewMode => self.handle_key(KeyCode::KeyV),
+            ActionId::ToggleBackboneQuality => self.handle_key(KeyCode::KeyQ),
+            ActionId::ToggleDesignedStructures => self.handle_key(KeyCode::KeyH),
+            ActionId::CycleFocus => self.handle_key(KeyCode::Tab),
+            ActionId::RemoveStructure => self.handle_key(KeyCode::Delete),
+            ActionId::Cancel => self.handle_key(KeyCode::Escape),
+            ActionId::Undo | ActionId::Redo => {
+                log::warn!("Undo/Redo not yet implemented");
+            }
+        }
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::UI;
+    }
+
+    /// Handle a ParameterizedAction message from JS IPC.
+    pub(crate) fn handle_parameterized_action(&mut self, action: foldit_frontend::ParameterizedAction) {
+        use foldit_frontend::ParameterizedAction;
+        match action {
+            ParameterizedAction::LoadStructure { path } => {
+                self.handle_load_structure(&path);
+                self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
+            }
+            ParameterizedAction::LoadPuzzle { puzzle_id } => {
+                self.scene.clear();
+                self.session = Session::new();
+                self.active_bands.clear();
+                self.action_manager = ActionManager::new();
+                self.rosetta_state = None;
+                match foldit_rs::puzzle::load_puzzle_structure(puzzle_id) {
+                    Ok(structure) => {
+                        let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
+                        let id = self.scene.add(structure);
+                        self.session.on_original_loaded(id, backbone_ca);
+                        self.pending_action = Some(AnimationAction::Load);
+                        self.pending_fit_camera = true;
+                    }
+                    Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
+                }
+                self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
+            }
+            ParameterizedAction::CreateBand { .. } => {
+                log::info!("CreateBand via IPC not yet wired");
+            }
+            ParameterizedAction::RemoveBand { .. } => {
+                log::info!("RemoveBand via IPC not yet wired");
+            }
+            ParameterizedAction::SetViewOption { .. } => {
+                log::info!("SetViewOption via IPC not yet wired");
+                self.ui_dirty |= DirtyFlags::VIEW;
+            }
+        }
+    }
+
+}
 /// Check if a string looks like a PDB ID (4 alphanumeric characters)
 fn is_pdb_id(s: &str) -> bool {
     s.len() == 4 && s.chars().all(|c| c.is_ascii_alphanumeric())
@@ -2169,9 +2488,8 @@ fn resolve_structure_path(input: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Standalone (winit) entry point
+// Entry point
 // ---------------------------------------------------------------------------
-#[cfg(feature = "standalone")]
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -2179,7 +2497,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "1bfe".to_string());
 
-    log::info!("Foldit ML Render starting (standalone mode)...");
+    log::info!("Foldit starting...");
 
     let pdb_path = match resolve_structure_path(&input) {
         Ok(path) => path,
@@ -2191,191 +2509,7 @@ fn main() {
 
     log::info!("Loading structure from: {}", pdb_path);
 
-    let mut app = App::new(pdb_path);
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut app).expect("Event loop error");
+    let app = App::new(pdb_path);
+    window::run(app, foldit_frontend::FrontendState::new());
 }
 
-// ---------------------------------------------------------------------------
-// Tauri entry point (default)
-// ---------------------------------------------------------------------------
-#[cfg(not(feature = "standalone"))]
-pub struct AppState {
-    pub app: std::sync::Mutex<App>,
-    pub frontend: std::sync::Mutex<foldit_rs::frontend::FrontendState>,
-}
-
-#[cfg(not(feature = "standalone"))]
-fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("Foldit starting (Tauri mode)...");
-
-    let pdb_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "1bfe".to_string());
-
-    let pdb_path = match resolve_structure_path(&pdb_path) {
-        Ok(path) => path,
-        Err(e) => {
-            log::error!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let app = App::new(pdb_path.clone());
-    let frontend = foldit_rs::frontend::FrontendState::new();
-
-    let app_state = AppState {
-        app: std::sync::Mutex::new(app),
-        frontend: std::sync::Mutex::new(frontend),
-    };
-
-    tauri::Builder::default()
-        .manage(app_state)
-        .invoke_handler(tauri::generate_handler![
-            commands::viewport_input,
-            commands::trigger_action,
-            commands::parameterized_action,
-        ])
-        .setup(move |tauri_app| {
-            use tauri::Manager;
-
-            let window = tauri_app.get_webview_window("main")
-                .expect("Failed to get main webview window");
-            let size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(1280, 720));
-
-            // Create render engine with the Tauri window handle
-            let mut engine = pollster::block_on(
-                ProteinRenderEngine::new_with_path(window, (size.width, size.height), &pdb_path)
-            );
-
-            // Load initial structure
-            {
-                let state: tauri::State<'_, AppState> = tauri_app.state();
-                let mut app = state.app.lock().unwrap();
-                let mut frontend = state.frontend.lock().unwrap();
-
-                match Structure::from_file(&app.pdb_path) {
-                    Ok(structure) => {
-                        log::info!(
-                            "Loaded structure: {} ({} sidechain atoms, {} backbone chains)",
-                            structure.name,
-                            structure.sidechain_atoms.len(),
-                            structure.backbone_chains.len()
-                        );
-
-                        let backbone_ca = extract_ca_from_chains(&structure.backbone_chains);
-                        let id = app.scene.add(structure);
-                        app.session.on_original_loaded(id, backbone_ca);
-
-                        let data = app.scene.aggregated();
-                        engine.update_from_aggregated(
-                            &data.backbone_chains,
-                            &data.sidechain_positions,
-                            &data.sidechain_hydrophobicity,
-                            &data.sidechain_residue_indices,
-                            &data.sidechain_atom_names,
-                            &data.sidechain_bonds,
-                            &data.backbone_sidechain_bonds,
-                            &data.all_positions,
-                            true,
-                        );
-
-                        frontend.set_puzzle_loaded(true);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to load structure: {}", e);
-                    }
-                }
-
-                // Initialize ML runner + Rosetta executor
-                let (ml_runner, ml_updates, ml_results) = MLRunner::new();
-                app.ml_runner = Some(ml_runner);
-                app.ml_updates = Some(ml_updates);
-                app.ml_results = Some(ml_results);
-
-                let (rosetta_executor, rosetta_updates) = RosettaExecutor::new();
-                app.rosetta_executor = Some(rosetta_executor);
-                app.rosetta_updates = Some(rosetta_updates);
-
-                app.engine = Some(engine);
-                frontend.mark_all_dirty();
-            }
-
-            // Set up render loop + state push via RunEvent in the .run() callback below
-            Ok(())
-        })
-        .build(tauri::generate_context!())
-        .expect("Failed to build Tauri application")
-        .run(|app_handle, event| {
-            use tauri::RunEvent;
-
-            match event {
-                RunEvent::MainEventsCleared => {
-                    let state: tauri::State<'_, AppState> = app_handle.state();
-
-                    // Render frame
-                    {
-                        let mut app = state.app.lock().unwrap();
-
-                        // Process ML updates
-                        app.process_ml_updates();
-
-                        // Process Rosetta updates
-                        app.process_rosetta_updates();
-
-                        // Sync engine with scene if dirty
-                        app.sync_engine_with_scene();
-
-                        // Render
-                        if let Some(engine) = &mut app.engine {
-                            let _: Result<(), wgpu::SurfaceError> = engine.render();
-                        }
-                    }
-
-                    // Push dirty state to frontend
-                    {
-                        let mut frontend = state.frontend.lock().unwrap();
-                        let dirty = frontend.take_dirty();
-                        if !dirty.is_empty() {
-                            use foldit_rs::frontend::DirtyFlags;
-                            use tauri::Emitter;
-
-                            // Build partial update with only dirty sections
-                            let mut update = serde_json::Map::new();
-                            let app = state.app.lock().unwrap();
-                            let _ = &app; // access app for score etc. in Phase 2
-
-                            if dirty.contains(DirtyFlags::SCORE) {
-                                update.insert("score".into(), serde_json::to_value(&frontend.score).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::SELECTION) {
-                                update.insert("selection".into(), serde_json::to_value(&frontend.selection).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::VIEW) {
-                                update.insert("view".into(), serde_json::to_value(&frontend.view).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::PANELS) {
-                                update.insert("panels".into(), serde_json::to_value(&frontend.panels).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::UI) {
-                                update.insert("ui".into(), serde_json::to_value(&frontend.ui).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::ACTIONS) {
-                                update.insert("actions".into(), serde_json::to_value(&frontend.actions).unwrap());
-                            }
-                            if dirty.contains(DirtyFlags::LOADING) {
-                                update.insert("loading".into(), serde_json::to_value(&frontend.loading).unwrap());
-                            }
-
-                            let payload = serde_json::Value::Object(update);
-                            let _ = app_handle.emit("state-update", payload);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        });
-}

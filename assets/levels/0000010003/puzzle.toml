@@ -1,0 +1,85 @@
+[puzzle]
+title = "Hide the Hydrophobic"
+view_setup = "view_clashes_hydrophobic_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 367.57946
+completion_score = 8000.0
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLLLLLLLLLLLLL"
+# original hash: 6fbc975a96f0ed1d4c70e6f9f634d22c
+
+[puzzle.files]
+# filters: 70fa0c97c9b95174b09c073c15a2b3ac
+# wts_patch: c20d221d55e7452ee836f9b55bae8d74
+# puzzle_setup: 716aacf6d311c24e32460f6d9ccb1bf1
+
+[puzzle.camera]
+center = [3.2, 4, 10]
+eye = [-7.2, -9.9, -36]
+up = [0.52, -0.84, 0.14]
+
+[[sequence]]
+text = "Proteins don't exist in a vacuum - they are surrounded by water! For simplicity, we don't show it in Foldit, but you can imagine water molecules filling all the space around the protein!"
+color = "science"
+point_to = "background"
+
+[[sequence]]
+text = "A water-based 'aqueous' environment is essential for protein folding."
+color = "science"
+point_to = "background"
+
+[[sequence]]
+text = "Orange sidechains are hydroPHOBIC, meaning water-fearing."
+color = "science"
+point_to = "sidechain"
+point_to_index = 21
+
+[[sequence]]
+text = "Blue sidechains are hydroPHILIC, meaning water-loving."
+color = "science"
+point_to = "sidechain"
+point_to_index = 10
+
+[[sequence]]
+text = "Since the protein is surrounded by water, the blue water-loving hydroPHILICS prefer to be on the outside of the protein, where they can interact with water!"
+color = "science"
+point_to = "sidechain"
+point_to_index = 10
+
+[[sequence]]
+text = "The orange water-fearing hydroPHOBICS prefer to be hidden away from water, buried in the core of the protein!"
+color = "science"
+point_to = "sidechain"
+point_to_index = 21
+
+[[sequence]]
+text = """
+In water, a protein will naturally reorganize so that orange hydrophobics are shielded from the surrounding water.
+This is called the Hydrophobic Effect, and is one of the main forces that drives protein folding!"""
+color = "science"
+point_to = "sidechain"
+point_to_index = 21
+
+[[sequence]]
+text = "Because of the Hydrophobic Effect, folded proteins tend to have a compact shape, with lots of orange hydrophobics buried in the protein core!"
+color = "science"
+point_to = "sidechain"
+point_to_index = 21
+
+[[sequence]]
+text = "This yellow bubble tells you the hydrophobic is too exposed to water."
+color = "game"
+point_to = "hydrophobic"
+
+[[sequence]]
+text = "Drag the hydroPHOBIC IN, and the hydroPHILIC OUT!"
+color = "game"
+point_to = "sidechain"
+point_to_index = 21

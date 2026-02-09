@@ -1,0 +1,47 @@
+[puzzle]
+title = "Ebola"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 50789.082
+completion_score = 10000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLEEEEEELLEEEEEELLLLLLLLLLLLHHHEEEEEEEHHHHLLLLLHHHHHHHEEEELLLLLEEEELLLLEEELLLLEELELLLLLLLEEEEEEEEEELLLLLLLLLEEEEELEEEEELLLHHHHHHHHHHHHHHHHHHHHHHHHLLLLLLLLHHHHHHHHHHHLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLHHHHHHHHHHHHLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+# original hash: d44a98ea8cee11b0d7c5014fcd77e545
+
+[puzzle.files]
+# puzzle_setup: 8d91ffc715bfb6d1c9139a90fbbe03f0
+# filters: c7042a7eef057768601ef28dfaca47f2
+# wts: 6d6b1a37464fba739a59140f390985d9
+# cnstr: 4d4ed965fac03d9076eeb221ab02f459
+# cmdline: a52e52f2f8b24a692aac22aecef0f36e
+# params: 4b9d7c616aff98ba7dbebc6d7dd64741
+
+[puzzle.camera]
+center = [43, 24, 70]
+eye = [65, -81, 88]
+up = [-0.83, -0.26, -0.5]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+sidechain_mode = "Don't Show (Fast)"
+
+[[sequence]]
+text = "This virus has a defense! The Ebola glycoprotein has a 'cap' that covers the binding site. In order to properly block Ebola, you need to design a binder protein that can stick to the binding site despite the cap."
+color = "science"
+point_to = "sidechain"
+point_to_index = 207
+image = "images/big/ebola.png"
+
+[[sequence]]
+text = "This is a challenge level! Try to score at least 10,000 points to make a strong binder! Good luck!"
+color = "game"

@@ -1,0 +1,57 @@
+[puzzle]
+title = "Swing It Around"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 1093.622
+completion_score = 7700.0
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "EEEEE"
+# original hash: 714b0d187c75110092e184cf36cfc050
+
+[puzzle.files]
+# puzzle_setup: f15f975020fc1e5f5a4e26da5cb519d7
+
+[puzzle.camera]
+center = [5.4, 18, 9.3]
+eye = [-4.6, -26, -13]
+up = [0.54, -0.47, 0.7]
+
+[[sequence]]
+text = "CLICK and DRAG the background to rotate your view."
+color = "game"
+point_to = "background"
+point_to_index = 65
+
+[[sequence]]
+text = "Remember, CLICK and DRAG the light background to rotate your view. If you CLICK and DRAG near the edge of the screen, you can rotate the camera's orientation!"
+color = "game"
+point_to = "background"
+
+[[sequence]]
+text = """
+A SIDECHAIN is a group of atoms that sticks out from the protein 'backbone'.
+In Foldit there are 20 different kinds of SIDECHAINS, all with different shapes and chemical properties."""
+color = "science"
+point_to = "sidechain"
+
+[[sequence]]
+text = "Each sidechain represents a different individual building block of the protein, which are called Amino Acids (sometimes also referred to as residues, and in Foldit, as segments)."
+color = "science"
+point_to = "sidechain"
+
+[[sequence]]
+text = "You can still drag SIDECHAINS with the mouse."
+color = "game"
+point_to = "sidechain"
+
+[[sequence]]
+text = "Clear these clashes to win!"
+color = "game"
+point_to = "sidechain"

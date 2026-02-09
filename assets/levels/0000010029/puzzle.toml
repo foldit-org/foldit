@@ -1,0 +1,43 @@
+[puzzle]
+title = "Movin' Along"
+view_setup = "view_clashes_voids_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 144.97628
+completion_score = 7200.0
+min_moves = 3
+guide_visible = true
+can_align_guide = false
+use_dof_tethers = true
+guide_align_residue = 14
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLHHHHHHHHHHHHHHHHLLLLLLLHHHHHHHHHHHHHHHH"
+# original hash: ba8dd7b408a21dba78d6ec3baa7045b5
+
+[puzzle.files]
+# guide_pdb: 600b9c7abc64331850bff74e6c5f1e83
+# puzzle_setup: 430fe585a3eb03e044ccf3269391f93e
+
+[puzzle.camera]
+center = [2.1, 1.3, -15]
+eye = [24, -2.2, -59]
+up = [0.78, -0.46, 0.43]
+
+[[sequence]]
+text = "Sometimes you need to MOVE an entire piece of the protein. Suppose you like this backbone so you've frozen its shape, and now you want to move it next to the other piece."
+color = "game"
+point_to = "helix"
+point_to_index = 36
+
+[[sequence]]
+text = "Select residues on the piece you want to Move and click the button to bring up the move tool. Then %%right click action%% and hold the purple tool to drag the piece around, or click and drag to rotate it."
+color = "game"
+point_to = "move_button"
+point_to_index = 36
+
+[[sequence]]
+text = "You can click and drag the background to rotate your view"
+color = "game"
+point_to = "background"

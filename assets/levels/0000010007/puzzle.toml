@@ -1,0 +1,59 @@
+[puzzle]
+title = "Disulfide Bonds"
+view_setup = "view_sc_and_non_protein_protein_hbond_only_sidechains"
+scorefxn = "ref2015_cart"
+start_energy = 385.48214
+completion_score = 8100.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+set_exploration_subset = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHHHHHHHHHLLLLEEEEEEEELLLLLLEEEEEEEELLEEEEEEELHHHHHHHHHHHHHHHHHHH"
+# original hash: 44d7aad43dfd0cd0b6c5fc9ac37456b2
+
+[puzzle.files]
+# filters: ebc4f463b9d1c4fa0a32588c58dbe2e3
+# puzzle_setup: 3fe565cc5304b3a06eed826a8fa74bf6
+
+[puzzle.camera]
+center = [6.2, 2.5, 7.8]
+eye = [12, -12, 11]
+up = [0.029, -0.22, -0.97]
+
+[puzzle.view_options]
+show_bondable_atoms = false
+
+[[sequence]]
+text = "This green yellow band is a disulfide bond. Disulfide bonds are good for your protein. You can form more bonds like these to gain bonus points."
+color = "game"
+point_to = "disulfide"
+point_to_index = 47
+
+[[sequence]]
+text = "This sidechain is on the amino acid cysteine. When two cysteines are close enough together, a disulfide bond is formed between the sulfur atoms in them. Remember the shape and color."
+color = "science"
+point_to = "sidechain"
+point_to_index = 47
+
+[[sequence]]
+text = "Disulfide bonds are much, much stronger than hydrogen bonds or ion pairs, so forming them is very good for stabilizing proteins."
+color = "science"
+point_to = "sidechain"
+point_to_index = 47
+
+[[sequence]]
+text = "At least two more disulfide bonds can be formed in this puzzle; try to look for cysteine sidechains and pull them close to each other."
+color = "game"
+point_to = "sidechain"
+point_to_index = 47
+
+[[sequence]]
+text = "Hint: try looking around the backbone marked in red."
+color = "game"
+point_to = "backbone"
+point_to_index = 38

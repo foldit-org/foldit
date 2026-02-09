@@ -1,0 +1,82 @@
+[puzzle]
+title = "Hydrogen Bonds"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 498.97047
+completion_score = 7800.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLLLLLL"
+# original hash: 8e30f26f10f541d96650fc8978c0387b
+
+[puzzle.files]
+# puzzle_setup: 5ad68fe3659de1599e7b4ebac28a4540
+
+[puzzle.camera]
+center = [7.8, 19, 21]
+eye = [-22, 47, 46]
+up = [0.54, 0.8, -0.25]
+
+[puzzle.view_options]
+show_hbonds = true
+show_helix_hbonds = true
+show_other_hbonds = true
+show_sidechain_hbonds = true
+show_non_protein_hbonds = true
+show_bondable_atoms = true
+sidechain_mode = "Show All (Slow)"
+
+[[sequence]]
+text = "It's time to learn about one of the most important interactions in proteins - HYDROGEN BONDS!"
+point_to = "hbond"
+
+[[sequence]]
+text = "These blue and white bands are HYDROGEN BONDS."
+point_to = "hbond"
+
+[[sequence]]
+text = "HYDROGEN BONDS form when two polar atoms (usually an oxygen and a nitrogen) share a hydrogen."
+color = "science"
+point_to = "hbond"
+
+[[sequence]]
+text = """
+When a hydrogen is attached to just one oxygen or nitrogen alone, their electrical charges are unbalanced.
+But another oxygen or nitrogen nearby can help to balance the charge! Together, these two polar atoms align with the shared hydrogen in the middle, forming a stable HYDROGEN BOND!"""
+color = "science"
+point_to = "hbond"
+
+[[sequence]]
+text = """
+In Foldit, the oxygen and nitrogen atoms that can share a hydrogen are colored red and blue.
+Match a red with a blue to form a HYDROGEN BOND!"""
+color = "game"
+point_to = "hbond"
+
+[[sequence]]
+text = """
+There are lots of hydrogens in a protein, but we don't normally show them because they clutter the view.
+You can change your View options to show all the bondable hydrogens that can participate in HYDROGEN BONDS."""
+color = "game"
+point_to = "view_options"
+
+[[sequence]]
+text = "HYDROGEN BONDS provide structure and order in a folded protein! Without HYDROGEN BONDS, a protein would collapse into a disordered tangle, instead of neatly folding up."
+color = "science"
+point_to = "hbond"
+
+[[sequence]]
+text = "Because of HYDROGEN BONDS, oxygen and nitrogen atoms will match up in pairs, which leads to the order and structure of a well-folded protein!"
+color = "science"
+point_to = "hbond"
+
+[[sequence]]
+text = "Go ahead and form some more hydrogen bonds!"
+color = "game"
+point_to = "hbond"

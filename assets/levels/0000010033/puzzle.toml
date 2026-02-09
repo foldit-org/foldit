@@ -1,0 +1,40 @@
+[puzzle]
+title = "Insulin"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 103.61172
+completion_score = 8500.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LHHHHHHLHHHLHHHHHHHLL"
+# original hash: 9f6a3bdccf7a45792e118a7db6eb6f3b
+
+[puzzle.files]
+# puzzle_setup: dc8df868be2f95d1c3d4a500fd7b017f
+
+[puzzle.camera]
+center = [-0.58, 7.8, -17]
+eye = [-5, -45, 34]
+up = [0.99, -0.13, -0.048]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "Not all forms of insulin are the same. This mutant version of insulin is known as 1A7F."
+color = "science"
+link_name = "View 1A7F in the Protein Data Bank"
+link_url = "https://www.rcsb.org/structure/1a7f"
+
+[[sequence]]
+text = "Top Foldit players were able to get 10,000 points on this challenge puzzle. Can you get 8,500?"
+color = "game"

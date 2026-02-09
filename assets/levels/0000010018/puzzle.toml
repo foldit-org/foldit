@@ -1,0 +1,37 @@
+[puzzle]
+title = "Backbones Collide"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 319.21586
+completion_score = 6500.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHLLLLHHHHHHH"
+# original hash: 4241e5d74ed9b21cced99c8543504de3
+
+[puzzle.files]
+# puzzle_setup: b265abb2cf489a6d323b9a401243d84c
+
+[puzzle.camera]
+center = [11, -2.2, -0.28]
+eye = [-32, 24, 7.4]
+up = [0.37, 0.77, -0.52]
+
+[[sequence]]
+text = "When multiple secondary structure elements come together (in this case, these two helices) to form a three-dimensional structure, it's called the TERTIARY STRUCTURE of the protein. Defined TERTIARY STRUCTURES are known as FOLDS."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "Clashes can also appear when backbone atoms are too close together! Click and drag the backbone to pull it apart!"
+point_to = "backbone"
+
+[[sequence]]
+text = "Don't pull too much! The protein still needs to be neatly folded up to form its correct tertiary structure."
+point_to = "backbone"

@@ -1,0 +1,66 @@
+[puzzle]
+title = "Intro to Design"
+view_setup = "view_align"
+scorefxn = "ref2015_cart"
+start_energy = 587.31345
+completion_score = 8730.0
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLHHHHHHHHHHHHHHHHLLLLLLLHHHHHHHHHHHHLLLHHHHHHLLLLLLLLLHHHHHHHHHHHHHHHHHLLLLL"
+# original hash: 1f11812cd19a998694135dde10d9466e
+
+[puzzle.files]
+# puzzle_setup: 91b1fd3ec8e26b1a86a23c16cf704bc2
+
+[puzzle.camera]
+center = [2.4, 8.1, 4.8]
+eye = [15, 50, 29]
+up = [-0.94, 0.34, -0.079]
+
+[puzzle.view_options]
+sidechain_mode = "Show All (Slow)"
+
+[[sequence]]
+text = "In 'design' puzzles, you have the power to design new proteins!"
+point_to = "background"
+
+[[sequence]]
+text = "Segments with brighter colors can be designed!"
+color = "game"
+point_to = "helix"
+point_to_index = 41
+
+[[sequence]]
+text = "Some of these sidechains are too large. You can change them with the Mutate tool."
+point_to = "sidechain"
+point_to_index = 41
+
+[[sequence]]
+text = "First select the sidechain you're interested in changing."
+color = "game"
+point_to = "sidechain"
+point_to_index = 41
+
+[[sequence]]
+text = "With the sidechain selected, click the button to Mutate, and then pick the sidechain you want from the list."
+color = "game"
+point_to = "design"
+no_repeat = true
+
+[[sequence]]
+text = "Try to find better fitting sidechains for both designable amino acids to remove the clashes."
+color = "game"
+point_to = "sidechain"
+point_to_index = 41
+
+[[on_event]]
+event = "moves"
+threshold = 15
+text = "If you're stuck, it may be easier to restart from the beginning."
+point_to = "reset"

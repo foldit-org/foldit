@@ -1,0 +1,71 @@
+[puzzle]
+title = "Band Together"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 109.82953
+completion_score = 8900.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "EEEEEELLLLLLLLLLLLEEEEEL"
+# original hash: 8f79e212602724d026e59e733353e93a
+
+[puzzle.files]
+# puzzle_setup: dd944526e00b73bcab6f7284a76c35ff
+# filters: 956d0f21f2d774ec42e7dfaf06bd472a
+
+[puzzle.camera]
+center = [-11, 31, 13]
+eye = [-59, -14, 54]
+up = [-0.26, 0.78, 0.56]
+
+[[sequence]]
+text = "Wiggle doesn't always work by itself!"
+point_to = "backbone"
+point_to_index = 34
+
+[[sequence]]
+text = """
+As we saw earlier, secondary structures are folded patterns that are commonly seen in proteins.
+Secondary structures form lots of HYDROGEN BONDS, and they help give structure to the protein fold!"""
+color = "science"
+point_to = "backbone"
+point_to_index = 34
+
+[[sequence]]
+text = "You can connect these SHEETS by using RUBBER BANDS. %%Right click action%% and drag from one sheet to the other."
+color = "game"
+point_to = "backbone"
+point_to_index = 34
+
+[[sequence]]
+text = "Try it with this SHEET! Hold %%Right click action%% and DRAG to the other SHEET."
+color = "game"
+point_to = "backbone"
+point_to_index = 34
+
+[[sequence]]
+text = "The Rubber Bands will pull together when you WIGGLE."
+color = "game"
+point_to = "wiggle"
+
+[[sequence]]
+text = "You can always Undo."
+color = "game"
+point_to = "undo"
+
+[[sequence]]
+text = "Don't worry about individual sidechains. Try connecting the sheets with a Rubber Band."
+point_to = "backbone"
+point_to_index = 34
+
+[[sequence]]
+text = "You can create as many Rubber Bands as you'd like. To delete or disable a Rubber Band, %%right click action%% on it."
+color = "game"
+point_to = "backbone"
+point_to_index = 34

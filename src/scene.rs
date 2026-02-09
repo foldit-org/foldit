@@ -5,6 +5,7 @@
 //! for efficient rendering.
 
 use foldit_conv::coords::{Coords, CoordsAtom, protein_only, serialize_coords, deserialize_coords_internal};
+use foldit_conv::secondary_structure::SSType;
 use foldit_render::bond_topology::get_residue_bonds;
 use glam::Vec3;
 use std::collections::HashMap;
@@ -102,6 +103,10 @@ pub struct Structure {
     /// Canonical coordinate data (source of truth for atom positions)
     /// This replaces coords_bytes as the primary storage format
     pub coords: Option<Coords>,
+
+    /// Secondary structure override (e.g. from puzzle.toml `ss` field).
+    /// When set, renderers should use this instead of auto-detection.
+    pub ss_override: Option<Vec<SSType>>,
 }
 
 impl Structure {
@@ -120,6 +125,7 @@ impl Structure {
             chain_sequences: Vec::new(),
             visible: true,
             coords: None,
+            ss_override: None,
         }
     }
 
@@ -177,6 +183,33 @@ impl Structure {
         Ok(structure)
     }
 
+    /// Load structure from a BinaryCIF file
+    /// Uses foldit-conv for parsing to ensure consistent COORDS handling.
+    pub fn from_bcif_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        use foldit_conv::coords::bcif::bcif_file_to_coords;
+        use foldit_conv::coords::binary::serialize;
+
+        let path_ref = path.as_ref();
+        let name = path_ref
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let coords = bcif_file_to_coords(path_ref)
+            .map_err(|e| format!("Failed to parse BinaryCIF: {:?}", e))?;
+
+        let coords_bytes = serialize(&coords)
+            .map_err(|e| format!("Failed to serialize coords: {:?}", e))?;
+
+        let mut structure = Self::from_coords_bytes(&name, &coords_bytes, 1.0)?;
+        structure.source = StructureSource::File {
+            path: path_ref.to_string_lossy().to_string(),
+        };
+
+        Ok(structure)
+    }
+
     /// Load structure from file, auto-detecting format
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path_ref = path.as_ref();
@@ -189,6 +222,7 @@ impl Structure {
         match ext.as_str() {
             "pdb" => Self::from_pdb_file(path),
             "cif" | "mmcif" => Self::from_mmcif_file(path),
+            "bcif" => Self::from_bcif_file(path),
             _ => Err(format!("Unknown file extension: {}", ext)),
         }
     }
@@ -477,6 +511,10 @@ pub struct AggregatedData {
 
     /// Per-residue render data from controllers (Rama, Blueprint, etc.)
     pub residue_render_data: ResidueRenderData,
+
+    /// Pre-computed secondary structure types (from ss_override or auto-detect).
+    /// When present, renderers should use these instead of auto-detecting.
+    pub ss_types: Option<Vec<SSType>>,
 }
 
 /// Per-residue render data aggregated from controllers
@@ -616,6 +654,13 @@ impl Scene {
             structure.backbone_chains = chains;
             self.invalidate_cache();
         }
+    }
+
+    /// Remove all structures and reset the scene to empty.
+    pub fn clear(&mut self) {
+        self.structures.clear();
+        self.insertion_order.clear();
+        self.invalidate_cache();
     }
 
     fn invalidate_cache(&mut self) {
@@ -828,6 +873,8 @@ impl Scene {
     fn compute_aggregated(&self) -> AggregatedData {
         let mut data = AggregatedData::default();
         let mut global_residue_offset: u32 = 0;
+        let mut has_any_ss_override = false;
+        let mut ss_parts: Vec<(u32, Option<&Vec<SSType>>, u32)> = Vec::new(); // (offset, override, count)
 
         for structure in self.iter() {
             if !structure.visible {
@@ -842,6 +889,12 @@ impl Scene {
                 .iter()
                 .map(|c| (c.len() / 3) as u32)
                 .sum();
+
+            // Track SS override info
+            if structure.ss_override.is_some() {
+                has_any_ss_override = true;
+            }
+            ss_parts.push((global_residue_offset, structure.ss_override.as_ref(), structure_residue_count));
 
             // Aggregate backbone chains
             for chain in &structure.backbone_chains {
@@ -875,6 +928,24 @@ impl Scene {
 
             // Update global residue offset for next structure
             global_residue_offset += structure_residue_count;
+        }
+
+        // Build flat ss_types if any structure has an override
+        if has_any_ss_override {
+            let total_residues = global_residue_offset as usize;
+            let mut ss_types = vec![SSType::Coil; total_residues];
+            for (offset, ss_override, count) in &ss_parts {
+                if let Some(overrides) = ss_override {
+                    let start = *offset as usize;
+                    let end = (start + *count as usize).min(total_residues);
+                    for (i, &ss) in overrides.iter().enumerate() {
+                        if start + i < end {
+                            ss_types[start + i] = ss;
+                        }
+                    }
+                }
+            }
+            data.ss_types = Some(ss_types);
         }
 
         data

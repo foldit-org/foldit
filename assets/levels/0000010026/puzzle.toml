@@ -1,0 +1,31 @@
+[puzzle]
+title = "Folding Pathway II"
+view_setup = "view_clashes_voids_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 710.26967
+completion_score = 9300.0
+min_moves = 4
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEEEEEELLLLEEEEEELLLLHHHHHHHHHHHHHHLLLLLEEEEELLLLEEEEE"
+# original hash: 2a4ce4cdd9faa3f814bf7cb8b1501c2c
+
+[puzzle.files]
+# puzzle_setup: 730268efd88f630e987a96d9bf35f0d1
+
+[puzzle.camera]
+center = [-12, -24, -10]
+eye = [27, 11, 86]
+up = [-0.75, -0.45, 0.48]
+
+[puzzle.view_options]
+current_visor = "Hydro/Score"
+
+[[sequence]]
+text = "Now that we've formed the SECONDARY STRUCTURE, go ahead and fold up the TERTIARY STRUCTURE. This is how proteins typically fold in nature."
+point_to = "level"

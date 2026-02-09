@@ -1,0 +1,59 @@
+[puzzle]
+title = "Sheets and Ladders"
+view_setup = "view_clashes_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 83.179386
+completion_score = 9500.0
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEEEEEELLLLLEEEEELLLLLLEEEEEL"
+# original hash: bbda37dd2325472b7f47ffbe12684bcd
+
+[puzzle.files]
+# guide_pdb: 88c26c199a05c93c50c7dfad1a5a0dcf
+# filters: 38539aa452689195776865c9697829e1
+# puzzle_setup: 1e67aad4d7f01686a8af4663fc3a4653
+
+[puzzle.camera]
+center = [11, -9.8, 1.5]
+eye = [48, -42, 4.7]
+up = [0.65, 0.74, -0.18]
+
+[[sequence]]
+text = """
+You can translate the view around by holding down %%middle click camera%% and dragging the background. You can also hold %%shift camera%% and left-click and drag instead.
+This also moves the protein."""
+color = "game"
+point_to = "background"
+
+[[sequence]]
+text = "Rubber Bands are free! Make as many as you want. Remember, %%right click action%% and drag to make a rubber band!"
+color = "game"
+point_to = "sheet"
+
+[[on_event]]
+event = "bands"
+text = "%%Right click action%% on a band to adjust its strength and length."
+color = "game"
+point_to = "band"
+
+# Secondary bubble chain (originally starting at param 4)
+[[sequence_alt]]
+text = "When you're close, you can remove the bands."
+color = "game"
+point_to = "bands"
+
+[[sequence_alt]]
+text = "Remember, you can always Undo using %%UNDO_UNDO%%."
+point_to = "undo"
+
+[[sequence_alt]]
+text = "Try to line up all three sheets so they form hydrogen bonds!"
+color = "game"
+point_to = "sheet"

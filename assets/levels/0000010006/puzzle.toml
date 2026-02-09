@@ -1,0 +1,56 @@
+[puzzle]
+title = "Swappin' Sidechains"
+view_setup = "view_clashes_voids_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = -78.677403
+completion_score = 9000.0
+min_moves = 3
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLHHHHHHHHHHHHHHHHLLLLLLLHHHHHHHHHHHHLLLHHHHHHLLLLLLLLLHHHHHHHHHHHHHHHHHLLLLL"
+# original hash: 1d8df680fa81490d1040aef99a160b96
+
+[puzzle.files]
+# filters: 86bba53ecefbc95a9087af662a519f34
+# puzzle_setup: 558aafed912377c1819b476ee4dc289f
+
+[puzzle.camera]
+center = [2.1, 2.5, -2.9]
+eye = [-17, 34, 30]
+up = [-0.92, -0.33, -0.22]
+
+[[sequence]]
+text = "You've been trying to get a high score every level, but what does it mean?"
+point_to = "score"
+
+[[sequence]]
+text = "Your score is calculated based on the latest scientific understanding of the chemistry of protein folding. Using advanced algorithms, we estimate the thermodynamic stability of your fold. Basically, the score tells you how much the protein likes the state it's in: a higher score is a more stable fold."
+color = "science"
+point_to = "score"
+
+[[sequence]]
+text = """
+See the red spheres? These are VOIDS.
+VOIDS are an indicator that there is empty space causing instability. They need to be filled for the structure to stabilize."""
+color = "game"
+point_to = "void"
+
+[[sequence]]
+text = "A well-folded protein with good tertiary structure will tend to be compact, with all SIDECHAINS packing closely with one another in the protein core."
+color = "science"
+point_to = "void"
+
+[[sequence]]
+text = "Try getting rid of some of the VOIDS by re-designing and moving the sidechains."
+color = "game"
+point_to = "void"
+
+[[sequence]]
+text = "This is the last time you'll get to see previews of the amino acids when designing! In future levels, you'll only see their abbreviated names. This will help you learn which name goes with which sidechain!"
+color = "game"
+point_to = "design"

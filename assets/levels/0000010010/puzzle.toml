@@ -1,0 +1,55 @@
+[puzzle]
+title = "Wiggle!"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 28.208766
+completion_score = 8550.0
+min_moves = 1
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+guide_align_residue = 24
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLHHHHHHHHHHHHHLLLLLHHHHHHHHHHLLLLLHHHHHHHHHHHH"
+# original hash: 7808108cb682201b79375b8dc036b900
+
+[puzzle.files]
+# puzzle_setup: ec210f3eeb12d22b55ecf6cbe930704c
+
+[puzzle.camera]
+center = [8.1, 11, -9]
+eye = [5.2, 40, -50]
+up = [0.9, -0.33, -0.29]
+
+[[sequence]]
+text = "You're doing great! You now have access to a very powerful tool: the WIGGLE tool!"
+color = "game"
+point_to = "wiggle"
+
+[[sequence]]
+text = "Just like SHAKE tries to optimize sidechains, WIGGLE tries to optimize the backbone! WIGGLE gets stuck if it cannot increase the score! Click this button again to stop the tool."
+color = "game"
+point_to = "wiggle"
+
+[[sequence]]
+text = "WIGGLE uses a method called 'minimization' to make very small changes that reduce the energy of your protein (increasing your score)."
+color = "science"
+point_to = "wiggle"
+image = "images/big/wiggle1.png"
+
+[[sequence]]
+text = """
+WIGGLE makes these tiny changes repeatedly until it reaches an 'energy minimum' and your score plateaus.
+At this point, there are no more tiny changes that can improve your score, and WIGGLE stalls."""
+color = "science"
+point_to = "wiggle"
+image = "images/big/wiggle2.png"
+
+[[sequence]]
+text = "The only way to get out of an energy minimum is to stop WIGGLE and try something else! Your score may drop temporarily while you escape the energy minimum, but it may pay off in the long run!"
+color = "science"
+point_to = "wiggle"
+image = "images/big/wiggle3.png"

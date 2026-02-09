@@ -1,0 +1,78 @@
+[puzzle]
+title = "Alignin' Sequences"
+view_setup = "view_align"
+scorefxn = "ref2015_cart"
+start_energy = 10311.622
+completion_score = 8200.0
+min_moves = 3
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+align_viz_widget = "SELECT|RESET|SCORE|MATCH|UNDO_REDO"
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLHHHHHHHHHHHLLLHHHHHHHHHHHHHLHHHHHHHHHHHHHHHHHHHH"
+# original hash: 3e340b675658e60581fc1351416f2dd0
+
+[puzzle.files]
+# puzzle_setup: a2cbdf1f63d5922f36119e5312fd46d8
+# ext_template_pdb: 4fab343696baf868a48e812eec6ea151
+# ext_alignment: e1a56c453f465e8df9cf754a5cc67fd3
+
+[puzzle.camera]
+center = [3.9, -43, 15]
+eye = [77, -69, -32]
+up = [0.36, 0.93, 0.039]
+
+[[sequence]]
+text = "This time the letters and colors in the sequences are not lined up well! Lining them up better will increase your SCORE."
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"
+
+[[sequence]]
+text = "This middle row shows how well each letter matches; a bigger white bar means a better match. These matches are determined by how similar the properties of the amino acids are."
+point_to = "align_panel"
+point_to_index = "AP_LBL_MATCH"
+
+[[sequence]]
+text = "For example. a threonine (T) and a serine (S) are different amino acids, but they both are small-ish and have hydroxyl groups."
+color = "science"
+point_to = "align_panel"
+point_to_index = "AP_LBL_MATCH"
+
+[[sequence]]
+text = "You can click and drag or use the arrow keys to move the letters around."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_MATCH"
+
+[[sequence]]
+text = "Double clicking THREADING will let you see your changes as you make them, or you can wait until you're done to THREAD."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_THREAD"
+
+[[sequence]]
+text = "Try to line up the colors. It's okay if there are spaces, but fewer spaces is better."
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"
+
+[[sequence]]
+text = "Why are there spaces? In nature, proteins will change over time through mutation and natural selection. This causes changes to amino acids like a Threonine to Serine, but it can also cause deletions of proteins. Sometimes these changes to the PRIMARY STRUCTURE are small enough that they don't change the TERTIARY STRUCTURE of the protein, but bigger changes are more likely to change it. At the protein level, this is how evolution occurs."
+color = "science"
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"
+
+[[sequence]]
+text = "When there's a gap in the alignment, a blue CUT is inserted. When you're done aligning, MOVE the two pieces together, then WIGGLE to bring the two ends of the cut together. When the cutpoint turns YELLOW, the two ends are close enough to close the cut by clicking on it."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"
+
+[[sequence]]
+text = "Click the cuts when they turn YELLOW to close the cut."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"

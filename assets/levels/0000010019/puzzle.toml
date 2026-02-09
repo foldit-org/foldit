@@ -1,0 +1,142 @@
+[puzzle]
+title = "Close the Gap"
+view_setup = "view_clashes_sidechain"
+scorefxn = "ref2015_cart"
+start_energy = 175.14661
+completion_score = 8700.0
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+guide_align_residue = 1
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHHHHHHHHHHHHHHHLLLHHHHHHHHHHHHHHHHHHHHHHH"
+# original hash: 15776d04df9f5ecba165d571e116b31b
+
+[puzzle.files]
+# guide_pdb: e2ca88c13ab56d9531bcfd1803fc7a4b
+# constraints: 84c5d9e455133f6b6e452bc9ae4bee4c
+# filters: 49a13c7da8ef05922ae44df0e3f0276e
+# puzzle_setup: 513cd7b71be675f8d6644ec1dee65e2c
+# wts_patch: da9e477f1e6e74982f24c7da87dc2e22
+
+[puzzle.camera]
+center = [-5.5, -3.2, -3.9]
+eye = [-50, -24, -17]
+up = [0.4, -0.91, 0.068]
+
+[[sequence]]
+text = "Other times the backbone is too far apart. VOIDS are an indicator that there is empty space that needs to be filled."
+color = "game"
+point_to = "void"
+
+[[sequence]]
+text = "Do you want to know more about the science behind VOIDS?"
+point_to = "void"
+button = "No thanks"
+alt_button = "Sure!"
+alt_next = "branch_301"
+
+[[sequence]]
+text = "Try getting rid of some of the VOIDS by DRAGGING the backbone together!"
+color = "game"
+point_to = "backbone"
+point_to_index = 1
+
+[[sequence]]
+text = "It is not always possible to get rid of all the VOIDS."
+color = "yellow"
+point_to = "void"
+
+[[sequence]]
+text = "Remember to avoid CLASHES! Pull the helices apart a bit, or SHAKE can help."
+color = "game"
+point_to = "shake"
+
+[[sequence]]
+text = "Click here to reset."
+color = "game"
+point_to = "reset"
+
+[[branch.branch_301]]
+text = "VOIDS represent empty space inside a protein! CLASHING shows where protein atoms are too close. VOIDS show where atoms are too far apart!"
+color = "science"
+point_to = "void"
+
+[[branch.branch_301]]
+text = "A VOID in the middle of your protein creates a vacuum, which is unstable! A well-folded protein will be very compact, with all SIDECHAINS packing closely with one another in the protein core!"
+color = "science"
+point_to = "void"
+
+[[branch.alt_branch_1301]]
+text = "Voids represent the empty spaces inside a protein. Even though the atoms don't want to be too close to each other, they also don't want to be too far away. A protein that isn't tightly 'packed' together will be less stable than a protein without extra space."
+point_to = "void"
+
+[[game_event]]
+type = "show_voids"
+condition = "EVT_REALTIME_SCORE"
+parameter = 8835
+show_voids = false
+
+[[game_event]]
+type = "show_voids"
+condition = "EVT_REALTIME_SCORE"
+parameter = -8835
+show_voids = true
+
+# Secondary bubble chain (originally starting at param 6)
+[[sequence_alt]]
+point_to = "level"
+
+# Secondary bubble chain (originally starting at param 405)
+[[sequence_alt]]
+text = "Click the Help button to see game controls, science facts, and more!"
+color = "game"
+point_to = "help"
+button = "Awesome, thanks!"
+
+# Secondary bubble chain (originally starting at param 1001)
+[[sequence_alt]]
+text = "This is a void. Like clashes, voids are bad for your fold."
+point_to = "void"
+
+[[sequence_alt]]
+text = "Do you want to know more about the science behind voids?"
+point_to = "void"
+button = "No thanks"
+alt_button = "Sure!"
+alt_next = "alt_branch_1301"
+
+[[sequence_alt]]
+text = "You usually won't be able to get rid of all of the voids, but you should be able to get rid of all of the clashes."
+point_to = "void"
+
+[[sequence_alt]]
+text = "Voids can even appear on the outside or surface of the protein, at places known as concave spots. These exterior voids are the result of how Foldit tells the inside from the outside."
+point_to = "background"
+
+[[sequence_alt]]
+text = "If you get stuck, you can reset the puzzle."
+point_to = "reset"
+
+[[sequence_alt]]
+text = "You can also Undo and Redo your last move."
+point_to = "undo"
+button = "Got it!"
+
+[[sequence_alt]]
+text = "Click the Help button to see game controls, science facts, and more!"
+point_to = "help"
+button = "Awesome, thanks!"
+
+[[sequence_alt]]
+text = "You also have new menu options! You can save and load your progress and take a screenshot!"
+point_to = "save"
+
+# Secondary bubble chain (originally starting at param 1301)
+[[sequence_alt]]
+text = "Voids represent the empty spaces inside a protein. Even though the atoms don't want to be too close to each other, they also don't want to be too far away. A protein that isn't tightly 'packed' together will be less stable than a protein without extra space."
+point_to = "void"

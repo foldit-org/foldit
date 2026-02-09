@@ -1,0 +1,80 @@
+[puzzle]
+title = "Basic Threading"
+view_setup = "view_align"
+scorefxn = "ref2015_cart"
+start_energy = 369.26435
+completion_score = 8300.0
+min_moves = 3
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+align_viz_widget = 0
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLHHHHHHHHHHHLLLLLEEEEELLLLEEE"
+# original hash: a7c9768063a7430f17966ce5dc28cc63
+
+[puzzle.files]
+# ext_template_pdb: f7283fcbd5f3653f1d26215bf3af68a3
+# ext_alignment: c57307f642b02d444d127bf53a5df204
+# puzzle_setup: a2cbdf1f63d5922f36119e5312fd46d8
+
+[puzzle.camera]
+center = [-18, -25, -0.72]
+eye = [19, -55, -18]
+up = [0.26, -0.21, 0.94]
+
+[[sequence]]
+text = "These levels will introduce the ALIGNMENT tool! It will let you use the structures of real proteins, called TEMPLATES, by THREADING."
+point_to = "background"
+
+[[sequence]]
+text = "Click this button to bring up the ALIGNMENT tool."
+color = "game"
+point_to = "align_button"
+
+[[on_event]]
+event = "align_viz"
+once = true
+text = "This 3D structure shows the backbone of the TEMPLATE."
+color = "game"
+point_to = "align_panel"
+point_to_index = 1048616
+# target_index value = 'AlignmentPanel::AP_LBL_GEOM | 40'
+
+[[on_event]]
+event = "thread_okay"
+once = true
+text = "Now that you've threaded it, close the alignment panel and try a shake and wiggle!"
+color = "game"
+point_to = "shake"
+
+# Secondary bubble chain (originally starting at param 4)
+[[sequence_alt]]
+text = "The bottom row of letters is the TEMPLATE's SEQUENCE (aka PRIMARY STRUCTURE). You can see it in 3D as spheres connected by lines."
+color = "game"
+point_to = "align_panel"
+point_to_index = -2147221464
+# target_index value = 'AlignmentPanel::AP_LBL_ATTN_BIT | AlignmentPanel::AP_LBL_TEMPL_LETTER | 40'
+
+[[sequence_alt]]
+text = "The top row of letters is the SEQUENCE (aka PRIMARY STRUCTURE) for your protein."
+color = "game"
+point_to = "align_panel"
+point_to_index = -2147287002
+# target_index value = 'AlignmentPanel::AP_LBL_ATTN_BIT | AlignmentPanel::AP_LBL_QUERY_LETTER | 38'
+
+[[sequence_alt]]
+text = "When you THREAD, your protein will change itself to match the 3D TEMPLATE."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_LETTERS"
+
+[[sequence_alt]]
+text = "Click this button to THREAD."
+color = "game"
+point_to = "align_panel"
+point_to_index = "AP_LBL_THREAD"
+no_repeat = true

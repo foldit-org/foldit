@@ -1,0 +1,96 @@
+[puzzle]
+title = "Primary Structure"
+view_setup = "view_sc_and_non_protein_protein_hbond_only_sidechains"
+scorefxn = "ref2015_cart"
+start_energy = 187.62649
+completion_score = 8550.0
+min_moves = 20
+guide_visible = true
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+# original hash: 62084f8bbdf5e80cfff5fd8b2403e8e5
+
+[puzzle.files]
+# guide_pdb: 1a523ebbd3b170a4b9b05084dac07d4e
+# puzzle_setup: 3952a0007f8cc392402dd3d6391f4166
+# filters: ee69845e317a2c662e9db6af2ce894f3
+
+[puzzle.camera]
+center = [27, 6.6, -3.4]
+eye = [-27, 15, 8.7]
+up = [0.19, 0.96, 0.18]
+
+[puzzle.view_options]
+current_visor = "Hydro/Score"
+show_hbonds = true
+show_helix_hbonds = true
+show_other_hbonds = true
+show_sidechain_hbonds = true
+show_non_protein_hbonds = true
+show_bondable_atoms = true
+sidechain_mode = "Show All (Slow)"
+
+[[sequence]]
+text = "This is the BACKBONE of the protein."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "The protein BACKBONE is a chain of amino acids, the building blocks that make up proteins! There are 20 different kinds of amino acids, each with a different SIDECHAIN - but every amino acid has the same BACKBONE!"
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "In the cell, new proteins are created by joining amino acids together in a long chain to form the protein BACKBONE, with SIDECHAINS sticking out from it!"
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "The ordering of the amino acids is referred to as the PRIMARY STRUCTURE of the protein."
+color = "science"
+point_to = "backbone"
+
+[[sequence]]
+text = "In this puzzle, you get to choose the primary structure that makes the most sense in this protein. You can hover over a sidechain to see a hint. It's always good to match the hint, but keep an eye out - sometimes you can do even better!"
+color = "game"
+point_to = "sidechain"
+point_to_index = 60
+
+[[sequence]]
+text = "To give you a head-start, all of the glycines and alanines have been done for you - these amino acids are locked in place so you can focus on amino acids with bigger sidechains."
+color = "game"
+point_to = "sidechain"
+point_to_index = 26
+
+[[sequence]]
+text = "One new useful tool that can help in this puzzle - if you hover over an amino acid and press Q, the screen will center on that point."
+color = "game"
+point_to = "backbone"
+
+[[sequence]]
+text = "Don't forget to hover over sidechains to see their native sequence!"
+color = "game"
+point_to = "backbone"
+
+[[sequence]]
+text = "Remember and use what you've learned so far: avoid clashes and voids, make hydrogen bonds and disulfide bonds, put hydrophobics inside sheltered places, and put hydrophilics on the surface near the water."
+point_to = "backbone"
+
+[[sequence]]
+text = "In this puzzle, you get bonus points for making disulfide bridges! There at least 3 to find in the native structure!"
+color = "game"
+point_to = "backbone"
+
+[[sequence]]
+text = "Use the colors as an indication of how an area is doing. You can press TAB on an amino acid to see its score in more detail. Look for the red (bad) segments and try to find a better-fitting sidechain for them!"
+color = "game"
+point_to = "sidechain"
+
+[[sequence]]
+text = "If you need to take a break, you can save your work and load it back in later!"
+color = "game"
+point_to = "save"

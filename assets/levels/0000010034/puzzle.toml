@@ -1,0 +1,38 @@
+[puzzle]
+title = "Ubiquitin"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 4109.9636
+completion_score = 9000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "EEEEEEELLLEEEEEEELLLLLHHHHHHHHHHHHLLLLLEEEEEELLEEELLLLLHHHHLLLLLEEEEEEEELLLL"
+# original hash: f9f37aa85d9affe618495875fd4d946d
+
+[puzzle.files]
+# puzzle_setup: dc8df868be2f95d1c3d4a500fd7b017f
+
+[puzzle.camera]
+center = [-11, -2.5, -6.1]
+eye = [39, -37, 51]
+up = [0.74, 0.6, -0.29]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "This protein is half of a diubiquitin conjugate. Ubiquitin is a small protein found in almost all cellular tissues, known especially for its role in apoptosis."
+color = "science"
+
+[[sequence]]
+text = "This is a challenge level! Try to score 9,000 points!"
+color = "game"

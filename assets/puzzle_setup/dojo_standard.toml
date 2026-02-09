@@ -1,0 +1,4 @@
+inherits = "dojo"
+move_tool_mode = "segment"
+enable_blueprint = true
+use_rama_map = true

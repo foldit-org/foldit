@@ -1,0 +1,52 @@
+[puzzle]
+title = "DNA and Protein"
+view_setup = "view_sc_and_non_protein_protein_hbond_only_sidechains"
+scorefxn = "ref2015_cart"
+start_energy = -1770.5167
+completion_score = 31000
+min_moves = 2
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLHHHHHHHHHHHH"
+# original hash: b670a8def2617e95d8dcd80351049683
+
+[puzzle.files]
+# puzzle_setup: a3b47bf0dbb90315e9c980d2a8d24770
+# wts_patch: 6a2202e2c36e1e494d3576fe2cac4280
+
+[puzzle.camera]
+center = [4.7, -0.6, -4]
+eye = [-42, 4.9, 13]
+up = [0.045, 0.98, -0.19]
+
+[[sequence]]
+text = "Proteins in real life have many functions. Usually, it involves the protein binding to something else. It could be a small molecule, another protein, or in this case, a piece of DNA."
+color = "science"
+point_to = "backbone"
+point_to_index = 1
+
+[[sequence]]
+text = "The rules governing how proteins bind to other things are the same as those that govern folding."
+color = "science"
+point_to = "backbone"
+point_to_index = 1
+
+[[sequence]]
+text = "Proteins can form hydrogen bonds to DNA. Mutate this protein to form better hydrogen bonds."
+point_to = "backbone"
+point_to_index = 1
+
+[[sequence]]
+text = "Try adding a long hydrophilic here."
+point_to = "backbone"
+point_to_index = 21
+
+[[sequence]]
+text = "Try a shorter, forked hydrophilic here."
+point_to = "backbone"
+point_to_index = 18

@@ -1,0 +1,68 @@
+[puzzle]
+title = "COVID-19 Spike Binder"
+view_setup = "view_clashes"
+scorefxn = "ref2015_cart"
+start_energy = 135.76673
+completion_score = 14000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LHHHHHHHHHHHHHHHHHHLLHHHHHHHHHHHHHHHHHLLHHHHHHHHHHHHHHHLLLELLLHHHHLLLLLLEHHHLEEEEELLEELLHHHHHHHLLLLEEEEELLLLLLLLLLLELEEEEEEEEEEHHHHHHLLLLLLLHHHHHLLLLLLLLLEEEEEEELHHHHLLLLLELLLEEELLLLLLLLLLLLLLLLLLEELLLLLLLLLLELLEELLEEELLELLLLLHHHLEEEEEEEEEELLLLLLLELLL"
+
+[puzzle.setup]
+# TODO: same format as puzzle_setup?
+
+[puzzle.camera]
+center = [2.5, 2.3, -1.3]
+eye = [-65, -7.9, -1.4]
+up = [0.15, -0.98, 0.15]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+current_visor = "Score/Hydro+CPK"
+
+[[sequence]]
+text = "Help us design a protein drug for COVID-19!"
+point_to = "sidechain"
+point_to_index = 234
+
+[[sequence]]
+text = "In gray is the viral spike protein that allows the virus to infect lung cells."
+point_to = "sidechain"
+point_to_index = 234
+
+[[sequence]]
+text = "This is also the protein that's used in vaccines to help your body recognize COVID-19."
+point_to = "sidechain"
+point_to_index = 234
+
+[[sequence]]
+text = "In color is a binder protein designed by scientists to bind the viral spike and block infection."
+point_to = "sidechain"
+point_to_index = 30
+
+[[sequence]]
+text = "This virus has a mutation that changes the shape of the spike. Our binder protein will no longer work because it clashes with the mutation!"
+point_to = "sidechain"
+point_to_index = 217
+
+[[sequence]]
+text = "Redesign the binder protein to resolve the clash and bind the mutated virus!"
+point_to = "sidechain"
+point_to_index = 13
+
+[[sequence]]
+text = "Use the Mutate tool to change this sidechain and resolve the clash."
+point_to = "sidechain"
+point_to_index = 13
+
+[[sequence]]
+text = "Look for a few other spots where mutating would be helpful to make these bind better to each other. Good luck!"
+point_to = "design"

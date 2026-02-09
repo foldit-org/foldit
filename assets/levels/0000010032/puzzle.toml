@@ -1,0 +1,40 @@
+[puzzle]
+title = "Collagen"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 487.101
+completion_score = 9000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHLLLLLLLLLLEEEEEEELLLLEEEEEEELLLLLLLLLLLHHHHHHHHHH"
+# original hash: f043175ad279ec1f52e919ee7157b2b2
+
+[puzzle.files]
+# puzzle_setup: 0383508401fd7877e4e38e0734efb6ef
+# wts: 265c10beb72f7a2403b76845cb82bd20
+
+[puzzle.camera]
+center = [-3.7, 7.2, 2.8]
+eye = [-4.1, -58, -32]
+up = [1, -0.019, 0.022]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+show_sidechain_hbonds = true
+
+[[sequence]]
+text = "This small domain is a component of the collagen that forms the connective tissue beneath your skin! This protein contains six cysteines that oxidize to form three disulfide bonds."
+color = "science"
+
+[[sequence]]
+text = "This is a challenge level! The best Foldit players in the world were only able to score 10,000 points on this level. Can you score 9,000? Good luck!"
+color = "game"

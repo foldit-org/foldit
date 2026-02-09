@@ -1,0 +1,14 @@
+inherits = "intro"
+
+[gui]
+simplified_filter_display = true
+disable_advanced_mode = true
+disable_tools_tab = true
+disable_action_options_tab = true
+disable_save_load = true
+disable_screenshot = true
+simple_undo = true
+disable_view_options = true
+
+[actions]
+PullSidechain = true

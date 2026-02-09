@@ -1,0 +1,38 @@
+[puzzle]
+title = "Fibrin"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 528.82837
+completion_score = 9500.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "HHHHHHHHHHHHHHHHHHEEHHHHHHHHHHHHHHHHHHHHHHHEEHHHHHHHEEEEHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHEEHHHEEEEEEHHHHHHHHHHHHHHEEEEEHHHHHHHHEEEEEEEHHHHHEEEEEEEEHLLLLEELLHEEHHHHHEEE"
+# original hash: 94a24ca4f98e99083030a8b3263806b7
+
+[puzzle.files]
+# puzzle_setup: dc8df868be2f95d1c3d4a500fd7b017f
+
+[puzzle.camera]
+center = [-21, -5.5, 6.2]
+eye = [72, -190.0, -74]
+up = [0.64, 0.56, -0.53]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "Fibrin is a fibrous protein that helps with blood clotting. Excessive fibrin can lead to thrombosis while a lack of functioning fibrin causes hemophilia."
+color = "science"
+
+[[sequence]]
+text = "This is a challenge level! Try to get 9,500 points!"
+color = "game"

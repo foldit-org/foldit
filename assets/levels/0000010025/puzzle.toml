@@ -1,0 +1,44 @@
+[puzzle]
+title = "Folding Pathway I"
+view_setup = "view_clashes_voids_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 2385.5913
+completion_score = 9200.0
+min_moves = 4
+guide_visible = true
+can_align_guide = true
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+# original hash: 7282a09c6b15be713521d3273087f7b5
+
+[puzzle.files]
+# guide_pdb: ee6e16a6b0e712e15f57984df8fa6e80
+# puzzle_setup: 22899593f3fc793b9d4c118ba6109747
+# filters: 2dcc4472f4bb40ae8fc0cc0b6a940117
+
+[puzzle.camera]
+center = [0, -21, -9]
+eye = [-12, 70, -21]
+up = [-0.99, -0.11, 0.097]
+
+[puzzle.view_options]
+current_visor = "Hydro/Score"
+
+[[sequence]]
+text = "In Foldit, we usually are just trying to find the NATIVE state by whatever means necessary."
+point_to = "backbone"
+point_to_index = 20
+
+[[sequence]]
+text = "But in real life, proteins need to fold to the NATIVE state as efficiently as possible."
+point_to = "backbone"
+point_to_index = 20
+
+[[sequence]]
+text = "The first thing that usually happens when proteins fold naturally is that they make their SECONDARY STRUCTURES. Go ahead and make those in this puzzle, and then in the next puzzle, we'll assemble those SECONDARY STRUCTURES into TERTIARY STRUCTURE."
+point_to = "backbone"
+point_to_index = 20

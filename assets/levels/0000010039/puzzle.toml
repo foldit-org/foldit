@@ -1,0 +1,48 @@
+[puzzle]
+title = "Mason-Pfizer Monkey Virus"
+view_setup = "view_clashes_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 1836.5
+completion_score = 10000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLEEEEELLEEEEELLLLLLLLLELLHHHLLLLLLLLLLEEEELLLLEEEELLLELLLEEEEELLLEEEEELLEELLLLLLLELLHHHHHHHHHL"
+# original hash: 9361f7c756d153bc7466752cf13feafb
+
+[puzzle.files]
+# puzzle_setup: d36d3c0dff022adf1de44478234aa4ff
+# ext_template_pdb: 9361f7c756d153bc7466752cf13feafb
+# ext_alignment: 4ab696f28c200cb1aa84f901dc0968b9
+
+[puzzle.camera]
+center = [-8.5, 8.2, -6.1]
+eye = [-23, -42, 18]
+up = [0.085, -0.45, -0.89]
+
+[puzzle.view_options]
+show_voids = false
+dark_background = true
+show_outlines = true
+
+[[sequence]]
+text = "This is it! The most famous puzzle in all of Foldit history!"
+color = "game"
+
+[[sequence]]
+text = "At the end of 2010, the folded monomer of protease from Mason-Pfizer monkey virus was unsolved by protein crystallographers. It was solved in 2003 by NMR, but there was a great deal of variation in those models and they didn't fit perfectly with the X-ray crystallographic data."
+color = "science"
+
+[[sequence]]
+text = "In January 2011, three weeks after the puzzle was released, Foldit players solved the crystal structure."
+color = "science"
+
+[[sequence]]
+text = "This is an extreme challenge level! Can you contend with the best Foldit players of 2011? Good luck!"
+color = "game"

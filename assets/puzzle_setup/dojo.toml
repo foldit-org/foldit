@@ -1,0 +1,9 @@
+move_tool_mode = "none"
+allowed_macros = "none"
+detect_disulfides = true
+
+[gui]
+disable_tracks = true
+use_new_bubble_format = true
+start_with_selection_interface = true
+disable_interface_switch = true

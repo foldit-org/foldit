@@ -1,0 +1,17 @@
+inherits = "intro"
+
+[gui]
+start_on_tools_tab = true
+disable_action_options_tab = true
+
+[actions]
+PullSidechain = true
+LocalMinimizePull = true
+LockCopy = true
+LockToggle = true
+BandAddDrag = true
+BandDelete = true
+BandEnableAll = true
+BandDisableAll = true
+Repack = true
+RepackDesign = true

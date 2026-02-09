@@ -1,0 +1,61 @@
+[puzzle]
+title = "Cut and Move"
+view_setup = "view_align"
+scorefxn = "ref2015_cart"
+start_energy = 67089.895
+completion_score = 4000.0
+min_moves = 5
+max_cutpoints = 0
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = true
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LLLLLLLLLL"
+# original hash: 13f8c3fa69b48d397ffac4b9bda6fc1c
+
+[puzzle.files]
+# puzzle_setup: 013dc6c73f840eaf6cdd77b4e8b6bfd4
+
+[puzzle.camera]
+center = [4, 6, 3.4]
+eye = [-6.5, -39, -18]
+up = [1.0, 0.0, 0.0]
+
+[[sequence]]
+text = "This blue band is a CUT."
+color = "game"
+point_to = "cut"
+
+[[sequence]]
+text = "You can make a cut by selecting two adjacent residues and then clicking the cut button. Cuts are useful to sort your protein into independent pieces."
+color = "game"
+point_to = "cut_button"
+
+[[sequence]]
+text = "For example, you can MOVE a cut piece on its own! Click on a piece to select it, then bring up the Move tool. Then %%right click action%% and hold the purple tool to drag the piece around, or click and drag to rotate it."
+color = "game"
+point_to = "backbone"
+image = "images/big/cutandmove.png"
+
+[[sequence]]
+text = "You're not allowed to finish a puzzle with a cut. While you have a cut, your score will be crossed out and considered invalid. When you're done moving them, you need to CLOSE the cuts!"
+color = "game"
+point_to = "cut"
+
+[[sequence]]
+text = "When the cut is BLUE, the pieces are too far away to merge. After you move them closer together, the cut will turn YELLOW."
+color = "game"
+point_to = "cut"
+
+[[sequence]]
+text = "You can CLICK a YELLOW cut to CLOSE it."
+color = "game"
+point_to = "cut"
+
+[[sequence]]
+text = "Wiggling will move cut pieces together ONLY if ENABLE CUT BANDS is checked. Turn this OFF when you're moving cut pieces, then ON when you're ready to CLOSE your cuts."
+color = "game"
+point_to = "behavior"

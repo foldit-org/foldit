@@ -1,0 +1,39 @@
+[puzzle]
+title = "Hydrophobic Disaster"
+view_setup = "view_clashes_voids_hbonds_hydrophobic_stubs"
+scorefxn = "ref2015_cart"
+start_energy = 480.89319
+completion_score = 6700.0
+min_moves = 4
+guide_visible = false
+can_align_guide = false
+use_dof_tethers = false
+
+[puzzle.structure]
+path = "structure.pdb"
+format = "pdb"
+ss = "LEEEEELLLLLLLLLHHHHHHHHHHHHHLLLEEEEEELLEEEELLLHHHHHHLLLLLLLLLEEEEELLLHHHHHHHHHHHHHHLL"
+# original hash: 419027e46a6be708ab32e9523b95cec0
+
+[puzzle.files]
+# puzzle_setup: dee873b080319bc480557e8fd56de68d
+
+[puzzle.camera]
+center = [0, -21, -9]
+eye = [-12, 70, -21]
+up = [-0.99, -0.11, 0.097]
+
+[puzzle.view_options]
+current_visor = "Hydro/Score"
+
+[[sequence]]
+text = "Everything comes together now!"
+point_to = "level"
+
+[[sequence]]
+text = "In this protein, there's clearly something amiss. Use the tools you know to fix the secondary and tertiary structure of this protein."
+point_to = "level"
+
+[[sequence]]
+text = "Notice that the color mode of the backbone is set to HYDRO. In this color mode, hydrophobic amino acids are orange and hydrophilic amino acids are blue."
+point_to = "helix"
