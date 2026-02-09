@@ -3,8 +3,6 @@ pub mod animation;
 pub mod ml_runner;
 pub mod molecule_state;
 pub mod puzzle;
-pub mod render_snapshot;
-pub mod scene;
 pub mod session;
 pub mod visual_effects;
 

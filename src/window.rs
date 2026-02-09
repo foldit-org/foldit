@@ -259,7 +259,7 @@ impl AppRunner {
         self.app.process_rosetta_updates();
 
         // Sync engine with scene if dirty
-        self.app.sync_engine_with_scene();
+        self.app.sync_engine();
 
         // Update visual effect
         let _intensity = self.app.tick_effects(dt.as_secs_f32());

@@ -133,17 +133,24 @@ pub fn load_puzzle(dir: &Path) -> Result<PuzzleLevel, PuzzleError> {
     toml::from_str(&contents).map_err(|e| PuzzleError::Parse(path, e))
 }
 
-/// Load a puzzle by ID: parse its TOML and return the parsed `Structure`.
+/// Data returned from loading a puzzle.
+pub struct PuzzleData {
+    pub entities: Vec<foldit_conv::coords::MoleculeEntity>,
+    pub name: String,
+    pub ss_override: Option<Vec<foldit_conv::secondary_structure::SSType>>,
+}
+
+/// Load a puzzle by ID: parse its TOML and return entities for the engine.
 ///
 /// Looks up `assets/levels/{puzzle_id:010}/puzzle.toml`, resolves the
 /// structure from `[puzzle.structure]` — either via `path` (file reference)
 /// or `data` (base64-encoded inline BinaryCIF).
-pub fn load_puzzle_structure(puzzle_id: u32) -> Result<crate::scene::Structure, String> {
+pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     let puzzle_dir = PathBuf::from(format!("assets/levels/{:010}", puzzle_id));
     let puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
     let structure = &puzzle.puzzle.structure;
 
-    let mut s = match (&structure.path, &structure.data) {
+    let coords = match (&structure.path, &structure.data) {
         (Some(path), None) => {
             let structure_path = puzzle_dir.join(path);
             log::info!(
@@ -151,7 +158,7 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<crate::scene::Structure, 
                 puzzle.puzzle.title,
                 structure_path.display()
             );
-            crate::scene::Structure::from_file(&structure_path)
+            load_coords_from_file(&structure_path)?
         }
         (None, Some(data_b64)) => {
             use base64::Engine;
@@ -166,51 +173,79 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<crate::scene::Structure, 
                 .decode(data_b64)
                 .map_err(|e| format!("Failed to decode base64 structure data: {}", e))?;
 
-            let coords_bytes = match structure.format.as_str() {
-                "coords" => raw,
+            match structure.format.as_str() {
+                "coords" => {
+                    use foldit_conv::coords::binary::deserialize;
+                    deserialize(&raw).map_err(|e| format!("Failed to parse COORDS: {:?}", e))?
+                }
                 "bcif" => {
                     use foldit_conv::coords::bcif::bcif_to_coords;
-                    use foldit_conv::coords::binary::serialize;
-                    let coords = bcif_to_coords(&raw)
-                        .map_err(|e| format!("Failed to parse inline BinaryCIF: {:?}", e))?;
-                    serialize(&coords)
-                        .map_err(|e| format!("Failed to serialize coords: {:?}", e))?
+                    bcif_to_coords(&raw)
+                        .map_err(|e| format!("Failed to parse inline BinaryCIF: {:?}", e))?
                 }
                 other => return Err(format!(
                     "Inline structure data not supported for format '{}'", other
                 )),
-            };
-
-            let mut s = crate::scene::Structure::from_coords_bytes(
-                &puzzle.puzzle.title,
-                &coords_bytes,
-                1.0,
-            )?;
-            s.source = crate::scene::StructureSource::File {
-                path: format!("puzzle:{}", puzzle_id),
-            };
-            Ok(s)
+            }
         }
-        (Some(_), Some(_)) => Err(
+        (Some(_), Some(_)) => return Err(
             "puzzle.structure: 'path' and 'data' are mutually exclusive".to_string()
         ),
-        (None, None) => Err(
+        (None, None) => return Err(
             "puzzle.structure: either 'path' or 'data' must be specified".to_string()
         ),
-    }?;
+    };
 
-    // Apply secondary structure override from puzzle.toml if present
-    if let Some(ss_str) = &structure.ss {
+    let entities = foldit_conv::coords::split_into_entities(&coords);
+
+    let ss_override = structure.ss.as_ref().map(|ss_str| {
         let ss = foldit_conv::secondary_structure::dssp::from_string(ss_str);
         log::info!(
             "Puzzle '{}': applying SS override ({} residues)",
             puzzle.puzzle.title,
             ss.len()
         );
-        s.ss_override = Some(ss);
-    }
+        ss
+    });
 
-    Ok(s)
+    Ok(PuzzleData {
+        entities,
+        name: puzzle.puzzle.title,
+        ss_override,
+    })
+}
+
+/// Load Coords from a file (auto-detecting format).
+pub fn load_coords_from_file(path: &Path) -> Result<foldit_conv::coords::Coords, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "pdb" => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read PDB file: {}", e))?;
+            let bytes = foldit_conv::coords::pdb::pdb_to_coords(&content)
+                .map_err(|e| format!("Failed to parse PDB: {:?}", e))?;
+            foldit_conv::coords::binary::deserialize(&bytes)
+                .map_err(|e| format!("Failed to deserialize: {:?}", e))
+        }
+        "cif" | "mmcif" => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read mmCIF file: {}", e))?;
+            let bytes = foldit_conv::coords::pdb::mmcif_to_coords(&content)
+                .map_err(|e| format!("Failed to parse mmCIF: {:?}", e))?;
+            foldit_conv::coords::binary::deserialize(&bytes)
+                .map_err(|e| format!("Failed to deserialize: {:?}", e))
+        }
+        "bcif" => {
+            foldit_conv::coords::bcif::bcif_file_to_coords(path)
+                .map_err(|e| format!("Failed to parse BinaryCIF: {:?}", e))
+        }
+        _ => Err(format!("Unknown file extension: {}", ext)),
+    }
 }
 
 #[cfg(test)]

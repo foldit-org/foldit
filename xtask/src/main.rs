@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn rosetta_interactive_path() -> String {
-    format!("{}/rosetta-interactive", std::env::var("HOME").unwrap_or_default())
+    "crates/foldit-runner/external/rosetta-interactive".to_string()
 }
 
 #[derive(Parser)]
@@ -29,6 +29,8 @@ enum Commands {
     },
     /// Download ML model weights
     DownloadModels,
+    /// Rebuild foldit-conv Python wheel from local source
+    BuildFolditConv,
 }
 
 fn main() -> Result<()> {
@@ -40,6 +42,7 @@ fn main() -> Result<()> {
         Commands::SetupRosettaInteractive => setup_rosetta_interactive(),
         Commands::Bundle { cpu_only } => bundle(cpu_only),
         Commands::DownloadModels => download_models(),
+        Commands::BuildFolditConv => build_foldit_conv(),
     }
 }
 
@@ -52,7 +55,25 @@ fn setup_ml() -> Result<()> {
     if !status.success() {
         anyhow::bail!("Failed to setup ML environments");
     }
+    // Within the workspace, always install the local foldit-conv wheel
+    build_foldit_conv()?;
     println!("ML environments setup complete.");
+    Ok(())
+}
+
+fn build_foldit_conv() -> Result<()> {
+    println!("Rebuilding foldit-conv wheel from local source...");
+    for env in ["foundry", "simplefold"] {
+        println!("  Installing into {} environment...", env);
+        let status = Command::new("pixi")
+            .args(["run", "--environment", env, "build-foldit-conv"])
+            .current_dir("crates/foldit-runner")
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to install foldit-conv wheel in {} environment", env);
+        }
+    }
+    println!("foldit-conv wheel rebuilt and installed in all environments.");
     Ok(())
 }
 
@@ -92,6 +113,17 @@ fn build_rosetta_interactive() -> Result<()> {
         .status()?;
     if !status.success() {
         anyhow::bail!("Failed to build Rosetta");
+    }
+
+    // Copy dylib into assets/libs/
+    let lib_src = format!("{}/release/bin/librosetta_interactive.dylib", cmake_dir);
+    let lib_dst = "assets/libs/librosetta_interactive.dylib";
+    if Path::new(&lib_src).exists() {
+        std::fs::create_dir_all("assets/libs")?;
+        std::fs::copy(&lib_src, lib_dst)?;
+        println!("Copied {} -> {}", lib_src, lib_dst);
+    } else {
+        anyhow::bail!("Built library not found at {}", lib_src);
     }
 
     println!("Rosetta build complete.");

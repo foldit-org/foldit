@@ -1300,7 +1300,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.8.23",
- "triple_buffer",
  "wgpu",
  "winit",
  "wry",
@@ -5701,15 +5700,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "triple_buffer"
-version = "8.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "420466259f9fa5decc654c490b9ab538400e5420df8237f84ecbe20368bcf72b"
-dependencies = [
- "crossbeam-utils",
 ]
 
 [[package]]

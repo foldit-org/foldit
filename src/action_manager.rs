@@ -1,9 +1,9 @@
 //! Action Manager - Per-structure action locking system
 //!
-//! Tracks which structures have active operations, enabling per-structure locking
-//! and preventing conflicting operations on the same structure.
+//! Tracks which groups have active operations, enabling per-group locking
+//! and preventing conflicting operations on the same group.
 
-use crate::scene::StructureId;
+use foldit_render::scene::GroupId;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -32,44 +32,43 @@ impl std::fmt::Display for ActionType {
     }
 }
 
-/// A lock held on a structure while an action is in progress.
+/// A lock held on a group while an action is in progress.
 #[derive(Debug)]
 pub struct ActionLock {
-    pub structure_id: StructureId,
+    pub group_id: GroupId,
     pub action_type: ActionType,
     pub cancel_flag: Arc<AtomicBool>,
 }
 
-/// Manages active actions on structures, providing per-structure locking.
+/// Manages active actions on groups, providing per-group locking.
 #[derive(Debug, Default)]
 pub struct ActionManager {
-    active: HashMap<StructureId, ActionLock>,
+    active: HashMap<u64, ActionLock>,
 }
 
 impl ActionManager {
-    /// Create a new action manager.
     pub fn new() -> Self {
         Self {
             active: HashMap::new(),
         }
     }
 
-    /// Try to acquire a lock on a structure for the given action.
-    /// Returns the cancel flag if successful, None if the structure is already locked.
+    /// Try to acquire a lock on a group for the given action.
+    /// Returns the cancel flag if successful, None if the group is already locked.
     pub fn try_lock(
         &mut self,
-        structure_id: StructureId,
+        group_id: GroupId,
         action_type: ActionType,
     ) -> Option<Arc<AtomicBool>> {
-        if self.active.contains_key(&structure_id) {
+        if self.active.contains_key(&group_id.0) {
             return None;
         }
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.active.insert(
-            structure_id,
+            group_id.0,
             ActionLock {
-                structure_id,
+                group_id,
                 action_type,
                 cancel_flag: cancel_flag.clone(),
             },
@@ -78,25 +77,24 @@ impl ActionManager {
         Some(cancel_flag)
     }
 
-    /// Release the lock on a structure.
-    pub fn unlock(&mut self, structure_id: StructureId) {
-        self.active.remove(&structure_id);
+    /// Release the lock on a group.
+    pub fn unlock(&mut self, group_id: GroupId) {
+        self.active.remove(&group_id.0);
     }
 
-    /// Check if a structure is currently locked.
-    pub fn is_locked(&self, structure_id: StructureId) -> bool {
-        self.active.contains_key(&structure_id)
+    /// Check if a group is currently locked.
+    pub fn is_locked(&self, group_id: GroupId) -> bool {
+        self.active.contains_key(&group_id.0)
     }
 
-    /// Get the action type for a locked structure.
-    pub fn get_action_type(&self, structure_id: StructureId) -> Option<ActionType> {
-        self.active.get(&structure_id).map(|lock| lock.action_type)
+    /// Get the action type for a locked group.
+    pub fn get_action_type(&self, group_id: GroupId) -> Option<ActionType> {
+        self.active.get(&group_id.0).map(|lock| lock.action_type)
     }
 
-    /// Request cancellation of the action on a structure.
-    /// Returns true if the structure was locked and cancellation was requested.
-    pub fn request_cancel(&self, structure_id: StructureId) -> bool {
-        if let Some(lock) = self.active.get(&structure_id) {
+    /// Request cancellation of the action on a group.
+    pub fn request_cancel(&self, group_id: GroupId) -> bool {
+        if let Some(lock) = self.active.get(&group_id.0) {
             lock.cancel_flag
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             true
@@ -105,8 +103,8 @@ impl ActionManager {
         }
     }
 
-    /// Get all currently locked structure IDs.
-    pub fn locked_structures(&self) -> Vec<StructureId> {
-        self.active.keys().copied().collect()
+    /// Get all currently locked group IDs.
+    pub fn locked_groups(&self) -> Vec<GroupId> {
+        self.active.values().map(|lock| lock.group_id).collect()
     }
 }
