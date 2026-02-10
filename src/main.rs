@@ -9,11 +9,8 @@
 //!   P - Predict (SimpleFold structure prediction)
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
-//!   V - Cycle sheet style (Ribbon/ClassicRibbon/RMF)
 //!   Q - Toggle backbone quality (high/low)
-//!   H - Toggle visibility of designed structures
 //!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
-//!   Delete - Remove last added structure
 //!   Esc - Cancel operation / clear selection / clear bands
 //!   Left-drag on residue - Pull (coming soon)
 //!   Right-drag residue to residue - Create band
@@ -131,6 +128,15 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// Get a display title derived from the PDB path (e.g. "1BFE" from ".../1bfe.cif")
+    pub(crate) fn structure_title(&self) -> String {
+        std::path::Path::new(&self.pdb_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_uppercase()
+    }
+
     pub(crate) fn new(pdb_path: String) -> Self {
         Self {
             engine: None,
@@ -202,8 +208,6 @@ impl App {
             )
         });
 
-        let group_count = self.engine().group_count();
-
         vec![
             ActionInfo {
                 id: 0, // ToggleWiggle
@@ -239,36 +243,6 @@ impl App {
                 enabled: !has_any_lock,
                 active: locked.iter().any(|&id|
                     self.action_manager.get_action_type(id) == Some(ActionType::MLStructureDesign)),
-            },
-            ActionInfo {
-                id: 5, // ToggleViewMode
-                name: "View Mode".into(),
-                enabled: true,
-                active: false,
-            },
-            ActionInfo {
-                id: 7, // ToggleDesignedStructures
-                name: "Toggle Designs".into(),
-                enabled: group_count > 1,
-                active: false,
-            },
-            ActionInfo {
-                id: 8, // CycleFocus
-                name: "Cycle Focus".into(),
-                enabled: group_count > 1,
-                active: false,
-            },
-            ActionInfo {
-                id: 9, // RemoveStructure
-                name: "Remove".into(),
-                enabled: group_count > 1,
-                active: false,
-            },
-            ActionInfo {
-                id: 10, // Cancel
-                name: "Cancel".into(),
-                enabled: has_any_lock || !self.active_bands.is_empty(),
-                active: false,
             },
         ]
     }
@@ -655,6 +629,65 @@ impl App {
                         self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
                 }
+        }
+    }
+
+    /// Block until the Rosetta session returns its initial score and corrected coordinates.
+    /// Called during initialization so the first frame shows the Rosetta-corrected model.
+    /// Times out after 30 seconds to avoid hanging if session creation fails.
+    fn wait_for_rosetta_init(&mut self) {
+        let updates = match self.rosetta_updates.as_mut() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        log::info!("Waiting for Rosetta session initialization...");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+        let update = loop {
+            match updates.try_recv() {
+                Ok(update) => break Some(update),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        log::warn!("Timed out waiting for Rosetta session initialization");
+                        break None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    log::warn!("Rosetta update channel closed before initial update");
+                    break None;
+                }
+            }
+        };
+
+        if let Some(update) = update {
+            log::info!(
+                "Rosetta initial update: score {:.2}, {} bytes",
+                update.score,
+                update.coords_bytes.len()
+            );
+
+            self.latest_score = Some(update.score);
+            self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
+
+            // Apply corrected coordinates to the scene
+            if let Some(ref state) = self.rosetta_state {
+                let chain_ids: Vec<(GroupId, Vec<u8>)> = state
+                    .chain_ids_per_structure
+                    .iter()
+                    .map(|(id, chains)| (GroupId(id.0), chains.clone()))
+                    .collect();
+
+                match self.engine_mut().apply_combined_update(
+                    &update.coords_bytes,
+                    &chain_ids,
+                    AnimationAction::Wiggle,
+                ) {
+                    Ok(()) => log::info!("Applied Rosetta-corrected coordinates"),
+                    Err(e) => log::warn!("Failed to apply initial Rosetta update: {}", e),
+                }
+            }
         }
     }
 
@@ -1131,49 +1164,6 @@ impl App {
                 self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
             }
 
-            KeyCode::KeyH => {
-                // Toggle visibility of designed structures (all except original)
-                if let Some(ref executor) = self.rosetta_executor {
-                    executor.stop();
-                }
-                self.rosetta_state = None;
-
-                let ids = self.engine().group_ids();
-                for id in ids {
-                    if Some(id) != self.session.original {
-                        let toggle_info = self.engine().group(id).map(|g| (g.name().to_string(), !g.visible));
-                        if let Some((name, new_visible)) = toggle_info {
-                            self.engine_mut().set_group_visible(id, new_visible);
-                            log::info!("Set {} visibility to {}", name, new_visible);
-                        }
-                    }
-                }
-                self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Load));
-                self.ui_dirty |= DirtyFlags::VIEW;
-            }
-
-            KeyCode::Delete | KeyCode::Backspace => {
-                // Remove last added structure (keep original)
-                if self.engine().group_count() > 1 {
-                    let ids = self.engine().group_ids();
-                    if let Some(&last_id) = ids.last() {
-                        if Some(last_id) != self.session.original {
-                            if let Some(ref executor) = self.rosetta_executor {
-                                executor.stop();
-                            }
-                            self.rosetta_state = None;
-
-                            if let Some(removed) = self.engine_mut().remove_group(last_id) {
-                                log::info!("Removed structure: {}", removed.name());
-                                self.engine_mut().scene.validate_focus();
-                                self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Load));
-                                self.ui_dirty |= DirtyFlags::ACTIONS;
-                            }
-                        }
-                    }
-                }
-            }
-
             KeyCode::Escape => {
                 // Cancel current operation and clear selection
                 log::info!("Cancelling current operation");
@@ -1589,11 +1579,8 @@ impl App {
             "KeyP" => KeyCode::KeyP,
             "KeyM" => KeyCode::KeyM,
             "KeyR" => KeyCode::KeyR,
-            "KeyV" => KeyCode::KeyV,
             "KeyQ" => KeyCode::KeyQ,
-            "KeyH" => KeyCode::KeyH,
             "Tab" => KeyCode::Tab,
-            "Delete" => KeyCode::Delete,
             "Escape" => KeyCode::Escape,
             _ => {
                 log::debug!("Unhandled key code from frontend: {}", code);
@@ -1671,6 +1658,14 @@ impl App {
         self.rosetta_updates = Some(rosetta_updates);
 
         self.engine = Some(engine);
+
+        // Create Rosetta session and block until it returns the corrected model + score.
+        // This ensures the first rendered frame shows the Rosetta-corrected structure.
+        if self.ensure_rosetta_session().is_some() {
+            self.wait_for_rosetta_init();
+        } else {
+            log::warn!("Failed to create initial Rosetta session");
+        }
     }
 
     /// Shut down ML runner and Rosetta executor.
@@ -2139,12 +2134,7 @@ impl App {
             ActionId::RunPrediction => self.handle_key(KeyCode::KeyP),
             ActionId::RunMPNN => self.handle_key(KeyCode::KeyM),
             ActionId::RunDiffusion => self.handle_key(KeyCode::KeyR),
-            ActionId::ToggleViewMode => self.handle_key(KeyCode::KeyV),
             ActionId::ToggleBackboneQuality => self.handle_key(KeyCode::KeyQ),
-            ActionId::ToggleDesignedStructures => self.handle_key(KeyCode::KeyH),
-            ActionId::CycleFocus => self.handle_key(KeyCode::Tab),
-            ActionId::RemoveStructure => self.handle_key(KeyCode::Delete),
-            ActionId::Cancel => self.handle_key(KeyCode::Escape),
             ActionId::Undo | ActionId::Redo => {
                 log::warn!("Undo/Redo not yet implemented");
             }

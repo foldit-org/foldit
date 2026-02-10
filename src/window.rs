@@ -188,7 +188,32 @@ impl AppRunner {
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
                 .with_devtools(true)
-                .with_initialization_script("window.isWebview = true;")
+                .with_initialization_script(r#"
+                    window.isWebview = true;
+                    (function() {
+                        const orig = { log: console.log, warn: console.warn, error: console.error };
+                        function stringify(a) {
+                            if (a instanceof Error) return a.message + '\n' + a.stack;
+                            if (typeof a === 'string') return a;
+                            try { return JSON.stringify(a); } catch { return String(a); }
+                        }
+                        function forward(level, args) {
+                            try {
+                                const msg = Array.from(args).map(stringify).join(' ');
+                                window.ipc.postMessage(JSON.stringify({ cmd: 'console', level, msg }));
+                            } catch(e) {}
+                        }
+                        console.log = function() { forward('log', arguments); orig.log.apply(console, arguments); };
+                        console.warn = function() { forward('warn', arguments); orig.warn.apply(console, arguments); };
+                        console.error = function() { forward('error', arguments); orig.error.apply(console, arguments); };
+                        window.addEventListener('error', function(e) {
+                            forward('error', ['[Uncaught] ' + e.message + ' at ' + e.filename + ':' + e.lineno]);
+                        });
+                        window.addEventListener('unhandledrejection', function(e) {
+                            forward('error', ['[UnhandledRejection] ' + e.reason]);
+                        });
+                    })();
+                "#)
                 .with_url("http://localhost:5173")
                 .with_ipc_handler(move |req| {
                     let body = req.body();
@@ -209,6 +234,16 @@ impl AppRunner {
                                     .get("data")
                                     .and_then(|d| serde_json::from_value(d.clone()).ok())
                                     .map(IpcMessage::ParameterizedAction),
+                                "console" => {
+                                    let level = val.get("level").and_then(|v| v.as_str()).unwrap_or("log");
+                                    let msg = val.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+                                    match level {
+                                        "error" => log::error!("[JS] {}", msg),
+                                        "warn" => log::warn!("[JS] {}", msg),
+                                        _ => log::info!("[JS] {}", msg),
+                                    }
+                                    None
+                                }
                                 _ => {
                                     log::debug!("Unknown IPC command: {}", cmd);
                                     None
@@ -291,7 +326,7 @@ impl ApplicationHandler for AppRunner {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Foldit ML Render")
+                            .with_title("Foldit")
                             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
                     )
                     .expect("Failed to create window"),
@@ -302,6 +337,7 @@ impl ApplicationHandler for AppRunner {
 
             // Mark frontend dirty so the first push sends everything
             self.frontend.set_puzzle_loaded(true);
+            self.frontend.set_score_title(self.app.structure_title());
             self.frontend.mark_all_dirty();
 
             // Only create webview if the frontend dev server is likely running.
