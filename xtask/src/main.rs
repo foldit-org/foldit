@@ -7,6 +7,15 @@ fn rosetta_interactive_path() -> String {
     "crates/foldit-runner/external/rosetta-interactive".to_string()
 }
 
+fn rosetta_lib_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    { "rosetta_interactive.dll" }
+    #[cfg(target_os = "macos")]
+    { "librosetta_interactive.dylib" }
+    #[cfg(target_os = "linux")]
+    { "librosetta_interactive.so" }
+}
+
 #[derive(Parser)]
 #[command(name = "xtask")]
 struct Cli {
@@ -31,6 +40,8 @@ enum Commands {
     DownloadModels,
     /// Rebuild foldit-conv Python wheel from local source
     BuildFolditConv,
+    /// Build the frontend (pnpm build) and copy dist to assets/gui
+    BuildFrontend,
 }
 
 fn main() -> Result<()> {
@@ -43,6 +54,7 @@ fn main() -> Result<()> {
         Commands::Bundle { cpu_only } => bundle(cpu_only),
         Commands::DownloadModels => download_models(),
         Commands::BuildFolditConv => build_foldit_conv(),
+        Commands::BuildFrontend => build_frontend(),
     }
 }
 
@@ -115,15 +127,32 @@ fn build_rosetta_interactive() -> Result<()> {
         anyhow::bail!("Failed to build Rosetta");
     }
 
-    // Copy dylib into assets/libs/
-    let lib_src = format!("{}/release/bin/librosetta_interactive.dylib", cmake_dir);
-    let lib_dst = "assets/libs/librosetta_interactive.dylib";
+    // Copy library into assets/libs/
+    let lib_src = format!("{}/release/bin/{}", cmake_dir, rosetta_lib_name());
+    let lib_dst = format!("assets/libs/{}", rosetta_lib_name());
     if Path::new(&lib_src).exists() {
         std::fs::create_dir_all("assets/libs")?;
-        std::fs::copy(&lib_src, lib_dst)?;
+        std::fs::copy(&lib_src, &lib_dst)?;
         println!("Copied {} -> {}", lib_src, lib_dst);
     } else {
         anyhow::bail!("Built library not found at {}", lib_src);
+    }
+
+    // On Windows, also copy the import library (.lib) needed for linking at build time
+    #[cfg(target_os = "windows")]
+    {
+        let import_lib_src = format!("{}/release/bin/rosetta_interactive.lib", cmake_dir);
+        let import_lib_dst = "assets/libs/rosetta_interactive.lib";
+        if Path::new(&import_lib_src).exists() {
+            std::fs::copy(&import_lib_src, import_lib_dst)?;
+            println!("Copied {} -> {}", import_lib_src, import_lib_dst);
+        } else {
+            anyhow::bail!(
+                "Import library not found at {}. \
+                 Check that the CMake build produced a .lib file.",
+                import_lib_src
+            );
+        }
     }
 
     println!("Rosetta build complete.");
@@ -134,11 +163,11 @@ fn setup_rosetta_interactive() -> Result<()> {
     let rosetta_path = rosetta_interactive_path();
 
     // Source paths
-    let lib_src = format!("{}/source/cmake_4/release/bin/librosetta_interactive.dylib", rosetta_path);
+    let lib_src = format!("{}/source/cmake_4/release/bin/{}", rosetta_path, rosetta_lib_name());
     let db_src = format!("{}/database", rosetta_path);
 
     // Destination paths
-    let lib_dst = "bundle/librosetta_interactive.dylib";
+    let lib_dst = format!("bundle/{}", rosetta_lib_name());
     let db_dst = "bundle/rosetta_database";
 
     // Check source exists
@@ -163,7 +192,7 @@ fn setup_rosetta_interactive() -> Result<()> {
 
     // Copy library
     println!("Copying Rosetta library...");
-    std::fs::copy(&lib_src, lib_dst)?;
+    std::fs::copy(&lib_src, &lib_dst)?;
     println!("  {} -> {}", lib_src, lib_dst);
 
     // Remove old database if exists
@@ -219,12 +248,12 @@ fn bundle(cpu_only: bool) -> Result<()> {
 
     // 5. Copy Rosetta resources from ~/rosetta-interactive
     let rosetta_path = rosetta_interactive_path();
-    let lib_src = format!("{}/source/cmake_4/release/bin/librosetta_interactive.dylib", rosetta_path);
+    let lib_src = format!("{}/source/cmake_4/release/bin/{}", rosetta_path, rosetta_lib_name());
     let db_src = format!("{}/database", rosetta_path);
 
     if Path::new(&lib_src).exists() {
         println!("Copying Rosetta library...");
-        std::fs::copy(&lib_src, "bundle/librosetta_interactive.dylib")?;
+        std::fs::copy(&lib_src, format!("bundle/{}", rosetta_lib_name()))?;
     } else {
         println!("Warning: Rosetta library not found at {}", lib_src);
         println!("  Run 'cargo xtask build-rosetta-interactive' or './build.sh' in ~/rosetta-interactive");
@@ -237,7 +266,53 @@ fn bundle(cpu_only: bool) -> Result<()> {
         println!("Warning: Rosetta database not found at {}", db_src);
     }
 
+    // 6. Copy frontend assets to bundle
+    if Path::new("assets/gui").exists() {
+        println!("Copying frontend assets...");
+        copy_dir("assets/gui", "bundle/gui")?;
+    } else {
+        println!("Warning: Frontend assets not found at assets/gui");
+        println!("  Run 'cargo xtask build-frontend' first");
+    }
+
     println!("Bundle ready at ./bundle/");
+    Ok(())
+}
+
+fn build_frontend() -> Result<()> {
+    let frontend_dir = "crates/foldit-frontend/js";
+    println!("Building frontend...");
+
+    #[cfg(windows)]
+    let status = Command::new("cmd")
+        .args(["/c", "pnpm", "build"])
+        .current_dir(frontend_dir)
+        .status()?;
+    #[cfg(unix)]
+    let status = Command::new("pnpm")
+        .arg("build")
+        .current_dir(frontend_dir)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to build frontend");
+    }
+
+    let dist_dir = format!("{}/dist", frontend_dir);
+    let gui_dir = "assets/gui";
+
+    if !Path::new(&dist_dir).exists() {
+        anyhow::bail!("Frontend dist directory not found at {}", dist_dir);
+    }
+
+    // Remove old assets/gui if it exists
+    if Path::new(gui_dir).exists() {
+        std::fs::remove_dir_all(gui_dir)?;
+    }
+    std::fs::create_dir_all(gui_dir)?;
+
+    copy_dir(&dist_dir, gui_dir)?;
+    println!("Frontend built and copied to {}", gui_dir);
     Ok(())
 }
 

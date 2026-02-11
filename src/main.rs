@@ -2650,7 +2650,11 @@ fn resolve_structure_path(input: &str) -> Result<String, String> {
 // Entry point
 // ---------------------------------------------------------------------------
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("info,wgpu_hal::vulkan::instance=off,naga=warn"),
+    )
+    .init();
 
     let input = std::env::args()
         .nth(1)

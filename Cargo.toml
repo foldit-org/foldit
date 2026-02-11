@@ -66,5 +66,12 @@ serde_json = "1"
 toml = "0.8"
 base64 = "0.22"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
 [patch."https://github.com/petridecus/foldit-conv"]
 foldit-conv = { path = "crates/foldit-conv" }
