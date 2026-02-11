@@ -75,8 +75,10 @@ impl AppRunner {
         if let Some(ref webview) = self.webview {
             match serde_json::to_string(&self.frontend) {
                 Ok(json) => {
-                    let script =
-                        format!("if(window.__onInitialState)window.__onInitialState({})", json);
+                    let script = format!(
+                        "if(window.__onInitialState)window.__onInitialState({})",
+                        json
+                    );
                     let _ = webview.evaluate_script(&script);
                 }
                 Err(e) => log::warn!("Failed to serialize initial state: {}", e),
@@ -175,7 +177,9 @@ impl AppRunner {
     }
 
     /// Create the wry webview as a child of the winit window.
-    fn create_webview(window: &Arc<Window>) -> (Option<wry::WebView>, std::sync::mpsc::Receiver<IpcMessage>) {
+    fn create_webview(
+        window: &Arc<Window>,
+    ) -> (Option<wry::WebView>, std::sync::mpsc::Receiver<IpcMessage>) {
         let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<IpcMessage>();
 
         let webview = {
@@ -293,8 +297,11 @@ impl AppRunner {
         // Process Rosetta updates
         self.app.process_rosetta_updates();
 
-        // Sync engine with scene if dirty
+        // Sync engine with scene if dirty (non-blocking: submits to background thread)
         self.app.sync_engine();
+
+        // Apply any completed scene from background thread (GPU uploads only, <1ms)
+        self.app.apply_pending_scene();
 
         // Update visual effect
         let _intensity = self.app.tick_effects(dt.as_secs_f32());
@@ -355,12 +362,7 @@ impl ApplicationHandler for AppRunner {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 self.app.shutdown();
@@ -386,7 +388,7 @@ impl ApplicationHandler for AppRunner {
                 if !self.webview_ready && event.state == ElementState::Pressed =>
             {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    self.app.handle_key(key);
+                    self.app.handle_keybinding(key);
                 }
             }
 

@@ -109,4 +109,10 @@ impl Session {
     pub fn mpnn_apply_target(&self) -> Option<GroupId> {
         self.rfd3_design.or(self.original)
     }
+
+    /// Get the best structure for RFD3 to target.
+    /// Returns original structure for RFDiffusion3 design.
+    pub fn rfd3_target(&self, _focus: &Focus) -> Option<GroupId> {
+        self.original
+    }
 }

@@ -9,7 +9,9 @@
 //!   P - Predict (SimpleFold structure prediction)
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
-//!   Q - Toggle backbone quality (high/low)
+//!   I - Toggle water and ion visibility
+//!   Q - Recenter camera on focused entity
+//!   T - Toggle trajectory playback (load with --trajectory <path.dcd>)
 //!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
 //!   Esc - Cancel operation / clear selection / clear bands
 //!   Left-drag on residue - Pull (coming soon)
@@ -18,31 +20,32 @@
 
 mod window;
 
-use foldit_rs::action_manager::{ActionManager, ActionType};
+use foldit_conv::coords::binary::{
+    deserialize as deserialize_coords, serialize as serialize_coords,
+};
+use foldit_conv::coords::types::Coords;
+use foldit_conv::coords::{
+    align_coords_bytes, get_closest_atom_for_residue, get_closest_atom_with_name,
+    kabsch_alignment_with_scale, split_into_entities,
+};
 use foldit_frontend::DirtyFlags;
-use foldit_rs::ml_runner::{MLResult, MLRunner, MLTask, IntermediateUpdate};
-use foldit_rs::rosetta::{RosettaExecutor, RosettaUpdate, RosettaSessionState, RosettaStructureId};
-use foldit_rs::session::Session;
-use foldit_rs::visual_effects::VisualEffect;
-use std::collections::HashMap;
 use foldit_render::band_renderer::BandRenderInfo;
 use foldit_render::pull_renderer::PullRenderInfo;
 use foldit_render::scene::{Focus, GroupId};
-use foldit_conv::coords::{
-    align_coords_bytes, get_closest_atom_for_residue,
-    get_closest_atom_with_name, kabsch_alignment_with_scale,
-    split_into_entities,
-};
-use foldit_conv::coords::binary::{deserialize as deserialize_coords, serialize as serialize_coords};
-use foldit_conv::coords::types::Coords;
+use foldit_rs::action_manager::{ActionManager, ActionType};
+use foldit_rs::ml_runner::{IntermediateUpdate, MLResult, MLRunner, MLTask};
+use foldit_rs::rosetta::{RosettaExecutor, RosettaSessionState, RosettaStructureId, RosettaUpdate};
+use foldit_rs::session::Session;
+use foldit_rs::visual_effects::VisualEffect;
 use glam::Vec3;
+use std::collections::HashMap;
 
 use foldit_render::animation::AnimationAction;
 use foldit_render::engine::ProteinRenderEngine;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use winit::event::MouseScrollDelta;
-use winit::keyboard::{KeyCode, ModifiersState};
+use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
 /// Information about an active band for UI tracking
@@ -174,10 +177,18 @@ impl App {
     }
 
     /// Sync the engine's renderers with the scene if dirty.
-    /// Called once per frame from tick_frame.
+    /// Called once per frame from tick_frame. Non-blocking: submits to background thread.
     fn sync_engine(&mut self) {
         if let Some(engine) = &mut self.engine {
             engine.sync_scene_to_renderers(None);
+        }
+    }
+
+    /// Apply any completed scene from the background scene processor.
+    /// Called once per frame from tick_frame. GPU uploads only (<1ms).
+    fn apply_pending_scene(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.apply_pending_scene();
         }
     }
 
@@ -204,7 +215,9 @@ impl App {
         let has_ml_op = locked.iter().any(|&id| {
             matches!(
                 self.action_manager.get_action_type(id),
-                Some(ActionType::MLPredict) | Some(ActionType::MLSequenceDesign) | Some(ActionType::MLStructureDesign)
+                Some(ActionType::MLPredict)
+                    | Some(ActionType::MLSequenceDesign)
+                    | Some(ActionType::MLStructureDesign)
             )
         });
 
@@ -213,36 +226,43 @@ impl App {
                 id: 0, // ToggleWiggle
                 name: "Wiggle".into(),
                 enabled: !has_ml_op, // Can toggle off if Rosetta is running
-                active: has_rosetta_op && locked.iter().any(|&id|
-                    self.action_manager.get_action_type(id) == Some(ActionType::RosettaWiggle)),
+                active: has_rosetta_op
+                    && locked.iter().any(|&id| {
+                        self.action_manager.get_action_type(id) == Some(ActionType::RosettaWiggle)
+                    }),
             },
             ActionInfo {
                 id: 1, // ToggleShake
                 name: "Shake".into(),
                 enabled: !has_ml_op,
-                active: has_rosetta_op && locked.iter().any(|&id|
-                    self.action_manager.get_action_type(id) == Some(ActionType::RosettaShake)),
+                active: has_rosetta_op
+                    && locked.iter().any(|&id| {
+                        self.action_manager.get_action_type(id) == Some(ActionType::RosettaShake)
+                    }),
             },
             ActionInfo {
                 id: 2, // RunPrediction
                 name: "Predict".into(),
                 enabled: !has_any_lock,
-                active: locked.iter().any(|&id|
-                    self.action_manager.get_action_type(id) == Some(ActionType::MLPredict)),
+                active: locked.iter().any(|&id| {
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLPredict)
+                }),
             },
             ActionInfo {
                 id: 3, // RunMPNN
                 name: "MPNN".into(),
                 enabled: !has_any_lock,
-                active: locked.iter().any(|&id|
-                    self.action_manager.get_action_type(id) == Some(ActionType::MLSequenceDesign)),
+                active: locked.iter().any(|&id| {
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLSequenceDesign)
+                }),
             },
             ActionInfo {
                 id: 4, // RunDiffusion
                 name: "Diffusion".into(),
                 enabled: !has_any_lock,
-                active: locked.iter().any(|&id|
-                    self.action_manager.get_action_type(id) == Some(ActionType::MLStructureDesign)),
+                active: locked.iter().any(|&id| {
+                    self.action_manager.get_action_type(id) == Some(ActionType::MLStructureDesign)
+                }),
             },
         ]
     }
@@ -275,7 +295,9 @@ impl App {
 
     /// Parse COORDS bytes into entities for the engine scene.
     /// Returns entities with protein-only filtering applied.
-    fn entities_from_coords_bytes(coords_bytes: &[u8]) -> Result<Vec<foldit_conv::coords::entity::MoleculeEntity>, String> {
+    fn entities_from_coords_bytes(
+        coords_bytes: &[u8],
+    ) -> Result<Vec<foldit_conv::coords::entity::MoleculeEntity>, String> {
         let coords = deserialize_coords(coords_bytes)
             .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
         let coords = foldit_conv::coords::protein_only(&coords);
@@ -307,20 +329,29 @@ impl App {
                         // Compute scale + alignment from CA positions
                         if let Some(ref original_ca) = self.session.original_backbone_ca {
                             // Extract CA positions from entities for alignment
-                            let predicted_ca: Vec<Vec3> = entities.iter()
+                            let predicted_ca: Vec<Vec3> = entities
+                                .iter()
                                 .flat_map(|e| {
                                     let mut cas = Vec::new();
                                     for i in 0..e.coords.num_atoms {
-                                        let name = std::str::from_utf8(&e.coords.atom_names[i]).unwrap_or("").trim();
+                                        let name = std::str::from_utf8(&e.coords.atom_names[i])
+                                            .unwrap_or("")
+                                            .trim();
                                         if name == "CA" {
-                                            cas.push(Vec3::new(e.coords.atoms[i].x, e.coords.atoms[i].y, e.coords.atoms[i].z));
+                                            cas.push(Vec3::new(
+                                                e.coords.atoms[i].x,
+                                                e.coords.atoms[i].y,
+                                                e.coords.atoms[i].z,
+                                            ));
                                         }
                                     }
                                     cas
                                 })
                                 .collect();
 
-                            if let Some((rotation, translation, scale)) = kabsch_alignment_with_scale(original_ca, &predicted_ca) {
+                            if let Some((rotation, translation, scale)) =
+                                kabsch_alignment_with_scale(original_ca, &predicted_ca)
+                            {
                                 // Apply transform to all atoms in all entities
                                 for entity in &mut entities {
                                     for atom in &mut entity.coords.atoms {
@@ -331,19 +362,25 @@ impl App {
                                         atom.z = transformed.z;
                                     }
                                 }
-                                log::debug!("Applied Kabsch+scale ({:.3}) for frame {}", scale, update.step);
+                                log::debug!(
+                                    "Applied Kabsch+scale ({:.3}) for frame {}",
+                                    scale,
+                                    update.step
+                                );
                             }
                         }
 
                         // Update the original group's entities
-                        let name = format!("Predicting... ({}/{})", update.step, update.total_steps);
+                        let name =
+                            format!("Predicting... ({}/{})", update.step, update.total_steps);
                         if let Some(group) = self.engine_mut().group_mut(orig_id) {
                             group.set_entities(entities);
                             group.assembly.name = name;
                             group.invalidate_render_cache();
                             log::info!("Updated frame {}/{}", update.step, update.total_steps);
                         }
-                        self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+                        self.engine_mut()
+                            .sync_scene_to_renderers(Some(AnimationAction::Diffusion));
                     }
                     Err(e) => {
                         log::warn!("Failed to parse intermediate: {}", e);
@@ -368,11 +405,17 @@ impl App {
                     let coords = backbone_chains_to_coords(&backbone_chains);
                     let entities = split_into_entities(&coords);
                     group.set_entities(entities);
-                    group.assembly.name = format!("Designing... ({}/{})", update.step, update.total_steps);
+                    group.assembly.name =
+                        format!("Designing... ({}/{})", update.step, update.total_steps);
                     group.invalidate_render_cache();
-                    log::info!("Updated animation frame {}/{}", update.step, update.total_steps);
+                    log::info!(
+                        "Updated animation frame {}/{}",
+                        update.step,
+                        update.total_steps
+                    );
                 }
-                self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+                self.engine_mut()
+                    .sync_scene_to_renderers(Some(AnimationAction::Diffusion));
             } else {
                 // Create new animation structure
                 let coords = backbone_chains_to_coords(&backbone_chains);
@@ -444,20 +487,24 @@ impl App {
             .unwrap_or_default();
 
         for result in pending_results {
-                match result {
-                    MLResult::Predict { coords_bytes, confidence } => {
-                        log::info!("Prediction complete! Confidence: {:.2}", confidence);
+            match result {
+                MLResult::Predict {
+                    coords_bytes,
+                    confidence,
+                } => {
+                    log::info!("Prediction complete! Confidence: {:.2}", confidence);
 
-                        // Remove animation structure if exists
-                        if let Some(anim_id) = self.session.animation_structure {
-                            self.engine_mut().remove_group(anim_id);
-                            self.session.on_animation_structure_removed();
-                        }
+                    // Remove animation structure if exists
+                    if let Some(anim_id) = self.session.animation_structure {
+                        self.engine_mut().remove_group(anim_id);
+                        self.session.on_animation_structure_removed();
+                    }
 
-                        // Update original structure in place with predicted coords
-                        if let Some(orig_id) = self.session.original {
-                            // Apply Kabsch alignment to the raw COORDS before parsing
-                            let aligned_coords_bytes = if let Some(ref original_ca) = self.session.original_backbone_ca {
+                    // Update original structure in place with predicted coords
+                    if let Some(orig_id) = self.session.original {
+                        // Apply Kabsch alignment to the raw COORDS before parsing
+                        let aligned_coords_bytes =
+                            if let Some(ref original_ca) = self.session.original_backbone_ca {
                                 match align_coords_bytes(&coords_bytes, original_ca) {
                                     Ok(aligned) => {
                                         log::info!("Applied Kabsch alignment to COORDS data");
@@ -472,163 +519,176 @@ impl App {
                                 coords_bytes.clone()
                             };
 
-                            match Self::entities_from_coords_bytes(&aligned_coords_bytes) {
-                                Ok(entities) => {
-                                    let name = format!("SimpleFold ({:.0}%)", confidence * 100.0);
-                                    if let Some(group) = self.engine_mut().group_mut(orig_id) {
-                                        group.set_entities(entities);
-                                        group.assembly.name = name;
-                                        group.visible = true;
-                                        group.invalidate_render_cache();
-                                        log::info!("Updated structure with prediction");
-                                    }
-                                    self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+                        match Self::entities_from_coords_bytes(&aligned_coords_bytes) {
+                            Ok(entities) => {
+                                let name = format!("SimpleFold ({:.0}%)", confidence * 100.0);
+                                if let Some(group) = self.engine_mut().group_mut(orig_id) {
+                                    group.set_entities(entities);
+                                    group.assembly.name = name;
+                                    group.visible = true;
+                                    group.invalidate_render_cache();
+                                    log::info!("Updated structure with prediction");
                                 }
-                                Err(e) => {
-                                    log::error!("Failed to parse prediction: {}", e);
-                                    // Show original again on error
-                                    self.engine_mut().set_group_visible(orig_id, true);
-                                }
+                                self.engine_mut()
+                                    .sync_scene_to_renderers(Some(AnimationAction::Diffusion));
                             }
-                            // Unlock the structure now that prediction is complete
-                            self.action_manager.unlock(orig_id);
+                            Err(e) => {
+                                log::error!("Failed to parse prediction: {}", e);
+                                // Show original again on error
+                                self.engine_mut().set_group_visible(orig_id, true);
+                            }
                         }
-
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+                        // Unlock the structure now that prediction is complete
+                        self.action_manager.unlock(orig_id);
                     }
 
-                    MLResult::SequenceDesign { sequences, scores } => {
-                        log::info!("Sequence design complete!");
-                        for (i, (seq, score)) in sequences.iter().zip(scores.iter()).enumerate() {
-                            log::info!("  {}: {} (score: {:.3})", i + 1, seq, score);
-                        }
+                    self.effect = VisualEffect::None;
+                    self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+                }
 
-                        let focus = self.focus();
-                        // Track the locked structure for potential unlock on failure
-                        let locked_target = self.session.mpnn_target(&focus);
-
-                        // Find best sequence (highest score, or first if all equal)
-                        let best_idx = scores
-                            .iter()
-                            .enumerate()
-                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-
-                        let mut unlock_needed = true; // Will be set to false if we successfully hand off to Rosetta
-
-                        if let Some(best_seq) = sequences.get(best_idx) {
-                            log::info!("Using sequence {} (score: {:.3})", best_idx + 1, scores[best_idx]);
-
-                            // Get coords from the MPNN target (RFD3 design if exists, otherwise original)
-                            let target_id = self.session.mpnn_apply_target();
-                            let coords = target_id
-                                .and_then(|id| self.get_group_coords_bytes(id));
-
-                            if self.session.rfd3_design.is_some() {
-                                log::info!("Using RFD3 design structure for MPNN");
-                            } else {
-                                log::info!("Using original structure for MPNN");
-                            }
-
-                            if let Some(coords) = coords {
-                                // Apply the sequence and pack rotamers via Rosetta
-                                if let Some(ref executor) = self.rosetta_executor {
-                                    // Stop any running operation and drain stale updates
-                                    executor.stop();
-                                    if let Some(ref mut updates) = self.rosetta_updates {
-                                        while updates.try_recv().is_ok() {
-                                            // Drain stale updates
-                                        }
-                                    }
-                                    // Clear session state - sequence change will need fresh session
-                                    self.rosetta_state = None;
-
-                                    log::info!("Applying designed sequence via Rosetta and packing sidechains...");
-                                    self.session.on_mpnn_start();
-                                    if let Err(e) = executor.apply_sequence_and_pack(coords, best_seq.clone()) {
-                                        log::error!("Failed to apply sequence: {}", e);
-                                        self.session.mpnn_pending = false;
-                                    } else {
-                                        // Successfully handed off to Rosetta, keep lock until Rosetta completes
-                                        unlock_needed = false;
-                                    }
-                                } else {
-                                    log::warn!("No Rosetta executor available for sidechain placement");
-                                }
-                            } else {
-                                log::warn!("No coords available from original structure");
-                            }
-                        }
-
-                        // Unlock on failure (Rosetta will unlock on success in process_rosetta_updates)
-                        if unlock_needed {
-                            if let Some(id) = locked_target {
-                                self.action_manager.unlock(id);
-                            }
-                        }
-
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+                MLResult::SequenceDesign { sequences, scores } => {
+                    log::info!("Sequence design complete!");
+                    for (i, (seq, score)) in sequences.iter().zip(scores.iter()).enumerate() {
+                        log::info!("  {}: {} (score: {:.3})", i + 1, seq, score);
                     }
 
-                    MLResult::StructureDesign { backbone_chains, confidence } => {
+                    let focus = self.focus();
+                    // Track the locked structure for potential unlock on failure
+                    let locked_target = self.session.mpnn_target(&focus);
+
+                    // Find best sequence (highest score, or first if all equal)
+                    let best_idx = scores
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+
+                    let mut unlock_needed = true; // Will be set to false if we successfully hand off to Rosetta
+
+                    if let Some(best_seq) = sequences.get(best_idx) {
                         log::info!(
-                            "Structure design complete! {} chains, confidence: {:.2}",
-                            backbone_chains.len(),
-                            confidence
+                            "Using sequence {} (score: {:.3})",
+                            best_idx + 1,
+                            scores[best_idx]
                         );
 
-                        // Invalidate Rosetta session - topology has changed with new structure
-                        self.rosetta_state = None;
+                        // Get coords from the MPNN target (RFD3 design if exists, otherwise original)
+                        let target_id = self.session.mpnn_apply_target();
+                        let coords = target_id.and_then(|id| self.get_group_coords_bytes(id));
 
-                        // If we have an animation structure, update it to the final result
-                        // Otherwise create a new one
-                        if let Some(anim_id) = self.session.animation_structure {
-                            let coords = backbone_chains_to_coords(&backbone_chains);
-                            let entities = split_into_entities(&coords);
-                            if let Some(group) = self.engine_mut().group_mut(anim_id) {
-                                group.set_entities(entities);
-                                group.assembly.name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
-                                group.invalidate_render_cache();
-                                log::info!("Updated animation structure {:?} to final result", anim_id);
-                            }
-                            // Track this as the RFD3 design for MPNN
-                            self.session.on_rfd3_complete(anim_id);
+                        if self.session.rfd3_design.is_some() {
+                            log::info!("Using RFD3 design structure for MPNN");
                         } else {
-                            // No animation structure, create new one
-                            let coords = backbone_chains_to_coords(&backbone_chains);
-                            let entities = split_into_entities(&coords);
-                            let name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
-                            let id = self.engine_mut().load_entities(entities, &name, false);
-                            log::info!("Added designed structure {:?} to scene", id);
-                            self.session.on_rfd3_complete(id);
+                            log::info!("Using original structure for MPNN");
                         }
 
-                        // Unlock the original structure now that RFD3 is complete
-                        if let Some(orig_id) = self.session.original {
-                            self.action_manager.unlock(orig_id);
+                        if let Some(coords) = coords {
+                            // Apply the sequence and pack rotamers via Rosetta
+                            if let Some(ref executor) = self.rosetta_executor {
+                                // Stop any running operation and drain stale updates
+                                executor.stop();
+                                if let Some(ref mut updates) = self.rosetta_updates {
+                                    while updates.try_recv().is_ok() {
+                                        // Drain stale updates
+                                    }
+                                }
+                                // Clear session state - sequence change will need fresh session
+                                self.rosetta_state = None;
+
+                                log::info!("Applying designed sequence via Rosetta and packing sidechains...");
+                                self.session.on_mpnn_start();
+                                if let Err(e) =
+                                    executor.apply_sequence_and_pack(coords, best_seq.clone())
+                                {
+                                    log::error!("Failed to apply sequence: {}", e);
+                                    self.session.mpnn_pending = false;
+                                } else {
+                                    // Successfully handed off to Rosetta, keep lock until Rosetta completes
+                                    unlock_needed = false;
+                                }
+                            } else {
+                                log::warn!("No Rosetta executor available for sidechain placement");
+                            }
+                        } else {
+                            log::warn!("No coords available from original structure");
                         }
-
-                        // Smoothly animate camera to show all structures including new design
-                        self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Diffusion));
-                        self.engine_mut().fit_camera_to_focus();
-
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
 
-                    MLResult::Error(error) => {
-                        log::error!("ML error: {}", error);
-                        // Unlock any locked structures on error
-                        for lock_id in self.action_manager.locked_groups() {
-                            self.action_manager.unlock(lock_id);
+                    // Unlock on failure (Rosetta will unlock on success in process_rosetta_updates)
+                    if unlock_needed {
+                        if let Some(id) = locked_target {
+                            self.action_manager.unlock(id);
                         }
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                     }
+
+                    self.effect = VisualEffect::None;
+                    self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
                 }
+
+                MLResult::StructureDesign {
+                    backbone_chains,
+                    confidence,
+                } => {
+                    log::info!(
+                        "Structure design complete! {} chains, confidence: {:.2}",
+                        backbone_chains.len(),
+                        confidence
+                    );
+
+                    // Invalidate Rosetta session - topology has changed with new structure
+                    self.rosetta_state = None;
+
+                    // If we have an animation structure, update it to the final result
+                    // Otherwise create a new one
+                    if let Some(anim_id) = self.session.animation_structure {
+                        let coords = backbone_chains_to_coords(&backbone_chains);
+                        let entities = split_into_entities(&coords);
+                        if let Some(group) = self.engine_mut().group_mut(anim_id) {
+                            group.set_entities(entities);
+                            group.assembly.name =
+                                format!("RFD3 Design ({:.0}%)", confidence * 100.0);
+                            group.invalidate_render_cache();
+                            log::info!("Updated animation structure {:?} to final result", anim_id);
+                        }
+                        // Track this as the RFD3 design for MPNN
+                        self.session.on_rfd3_complete(anim_id);
+                    } else {
+                        // No animation structure, create new one
+                        let coords = backbone_chains_to_coords(&backbone_chains);
+                        let entities = split_into_entities(&coords);
+                        let name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
+                        let id = self.engine_mut().load_entities(entities, &name, false);
+                        log::info!("Added designed structure {:?} to scene", id);
+                        self.session.on_rfd3_complete(id);
+                    }
+
+                    // Unlock the original structure now that RFD3 is complete
+                    if let Some(orig_id) = self.session.original {
+                        self.action_manager.unlock(orig_id);
+                    }
+
+                    // Smoothly animate camera to show all structures including new design
+                    self.engine_mut()
+                        .sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+                    self.engine_mut().fit_camera_to_focus();
+
+                    self.effect = VisualEffect::None;
+                    self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+                }
+
+                MLResult::Error(error) => {
+                    log::error!("ML error: {}", error);
+                    // Unlock any locked structures on error
+                    for lock_id in self.action_manager.locked_groups() {
+                        self.action_manager.unlock(lock_id);
+                    }
+                    self.effect = VisualEffect::None;
+                    self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+                }
+            }
         }
     }
 
@@ -691,7 +751,11 @@ impl App {
         }
     }
 
-    /// Process pending Rosetta updates (non-blocking)
+    /// Process pending Rosetta updates (non-blocking).
+    ///
+    /// Only the LAST update per frame triggers a full scene rebuild.
+    /// Intermediate updates are stale data immediately overwritten by the next,
+    /// so rebuilding renderers for each one wastes CPU and blocks the event loop.
     fn process_rosetta_updates(&mut self) {
         let pending_updates: Vec<RosettaUpdate> = self
             .rosetta_updates
@@ -705,542 +769,313 @@ impl App {
             })
             .unwrap_or_default();
 
-        for update in pending_updates {
+        if pending_updates.is_empty() {
+            return;
+        }
+
+        if pending_updates.len() > 1 {
+            log::debug!(
+                "Dropping {} stale Rosetta updates, processing latest",
+                pending_updates.len() - 1
+            );
+        }
+
+        // Track score from the latest update and convergence from any update
+        let any_converged = pending_updates.iter().any(|u| u.converged);
+        let last = pending_updates.last().unwrap();
+        self.latest_score = Some(last.score);
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
+
+        // MPNN results are one-shot: if pending, the first update is the result.
+        // Process it before the normal wiggle/shake path.
+        if self.session.mpnn_pending {
+            let update = &pending_updates[0];
             log::info!(
-                "Rosetta update: cycle {}, score {:.2}, converged: {}",
-                update.cycle,
-                update.score,
-                update.converged
+                "MPNN update received: {} bytes, score: {:.1}",
+                update.coords_bytes.len(),
+                update.score
             );
 
-            // Track score and action state for frontend push
-            self.latest_score = Some(update.score);
-            self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
+            let target_id = self.session.mpnn_apply_target();
+            let focus = self.focus();
+            let locked_id = self.session.mpnn_target(&focus);
 
-            // Check if this is an MPNN result or wiggle/shake update
-            if self.session.mpnn_pending {
-                log::info!("MPNN update received: {} bytes, score: {:.1}",
-                    update.coords_bytes.len(), update.score);
+            match Self::entities_from_coords_bytes(&update.coords_bytes) {
+                Ok(entities) => {
+                    log::info!("MPNN structure parsed: {} entities", entities.len());
 
-                // Target structure is RFD3 design if exists, otherwise original
-                let target_id = self.session.mpnn_apply_target();
-                let focus = self.focus();
-                // Structure that was locked when MPNN started
-                let locked_id = self.session.mpnn_target(&focus);
-
-                match Self::entities_from_coords_bytes(&update.coords_bytes) {
-                    Ok(entities) => {
-                        log::info!("MPNN structure parsed: {} entities", entities.len());
-
-                        if let Some(id) = target_id {
-                            let name = format!("MPNN Design (score {:.1})", update.score);
-                            if let Some(group) = self.engine_mut().group_mut(id) {
-                                group.set_entities(entities);
-                                group.assembly.name = name;
-                                group.invalidate_render_cache();
-                                log::info!("Updated group {:?} with MPNN design", id);
-                            }
-                            self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Mutation));
-                            // Track this as the MPNN design
-                            self.session.on_mpnn_complete(id);
-                        } else {
-                            self.session.mpnn_pending = false;
+                    if let Some(id) = target_id {
+                        let name = format!("MPNN Design (score {:.1})", update.score);
+                        if let Some(group) = self.engine_mut().group_mut(id) {
+                            group.set_entities(entities);
+                            group.assembly.name = name;
+                            group.invalidate_render_cache();
+                            log::info!("Updated group {:?} with MPNN design", id);
                         }
-                        // Unlock the structure now that MPNN is complete
-                        if let Some(id) = locked_id {
-                            self.action_manager.unlock(id);
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to parse MPNN structure: {}", e);
+                        self.engine_mut()
+                            .sync_scene_to_renderers(Some(AnimationAction::Mutation));
+                        self.session.on_mpnn_complete(id);
+                    } else {
                         self.session.mpnn_pending = false;
-                        // Unlock on error
-                        if let Some(id) = locked_id {
-                            self.action_manager.unlock(id);
-                        }
+                    }
+                    if let Some(id) = locked_id {
+                        self.action_manager.unlock(id);
                     }
                 }
-            } else if let Some(ref state) = self.rosetta_state {
-                // Full session update - apply to all structures using the session mapping
-                log::info!("Applying full session update ({} structures, {} bytes)",
-                    state.structure_count(), update.coords_bytes.len());
-
-                // Convert RosettaStructureId back to GroupId for scene update
-                let chain_ids: Vec<(GroupId, Vec<u8>)> = state.chain_ids_per_structure
-                    .iter()
-                    .map(|(id, chains)| (GroupId(id.0), chains.clone()))
-                    .collect();
-
-                match self.engine_mut().apply_combined_update(&update.coords_bytes, &chain_ids, AnimationAction::Wiggle) {
-                    Ok(()) => {
-                        log::info!("Successfully updated all structures in session");
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to apply combined update: {}", e);
-                    }
-                }
-            } else {
-                let focus = self.focus();
-                if let Some(id) = self.session.operation_target(&focus).or(self.session.original) {
-                    // Single structure update (focused structure or fallback to original)
-                    let target_name = self.engine().group(id).map(|g| g.name().to_string()).unwrap_or_else(|| format!("{:?}", id));
-                    log::info!("Applying update to '{}' ({} bytes)", target_name, update.coords_bytes.len());
-
-                    match Self::entities_from_coords_bytes(&update.coords_bytes) {
-                        Ok(entities) => {
-                            let name = update
-                                .message
-                                .clone()
-                                .unwrap_or_else(|| format!("Cycle {} (score {:.1})", update.cycle, update.score));
-
-                            if let Some(group) = self.engine_mut().group_mut(id) {
-                                group.set_entities(entities);
-                                // Keep the existing name for wiggle/shake updates
-                                if !update.converged {
-                                    group.assembly.name = name;
-                                }
-                                group.invalidate_render_cache();
-                            }
-                            self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Wiggle));
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to update structure from Rosetta: {}", e);
-                        }
+                Err(e) => {
+                    log::error!("Failed to parse MPNN structure: {}", e);
+                    self.session.mpnn_pending = false;
+                    if let Some(id) = locked_id {
+                        self.action_manager.unlock(id);
                     }
                 }
             }
 
-            // Note: Wiggle/shake never auto-converge (like real Foldit).
-            // Operations only stop when user explicitly presses the key again.
-            if update.converged {
-                self.effect = VisualEffect::None;
+            // If there was only the MPNN update, we're done
+            if pending_updates.len() == 1 {
+                if any_converged {
+                    self.effect = VisualEffect::None;
+                }
+                return;
+            }
+        }
+
+        // Normal wiggle/shake: only process the LAST update (skip stale intermediates)
+        let update = pending_updates.last().unwrap();
+        log::info!(
+            "Rosetta update: cycle {}, score {:.2}, converged: {}",
+            update.cycle,
+            update.score,
+            update.converged
+        );
+
+        if let Some(ref state) = self.rosetta_state {
+            log::info!(
+                "Applying full session update ({} structures, {} bytes)",
+                state.structure_count(),
+                update.coords_bytes.len()
+            );
+
+            let chain_ids: Vec<(GroupId, Vec<u8>)> = state
+                .chain_ids_per_structure
+                .iter()
+                .map(|(id, chains)| (GroupId(id.0), chains.clone()))
+                .collect();
+
+            match self.engine_mut().apply_combined_update(
+                &update.coords_bytes,
+                &chain_ids,
+                AnimationAction::Wiggle,
+            ) {
+                Ok(()) => {
+                    log::info!("Successfully updated all structures in session");
+                }
+                Err(e) => {
+                    log::warn!("Failed to apply combined update: {}", e);
+                }
+            }
+        } else {
+            let focus = self.focus();
+            if let Some(id) = self
+                .session
+                .operation_target(&focus)
+                .or(self.session.original)
+            {
+                let target_name = self
+                    .engine()
+                    .group(id)
+                    .map(|g| g.name().to_string())
+                    .unwrap_or_else(|| format!("{:?}", id));
+                log::info!(
+                    "Applying update to '{}' ({} bytes)",
+                    target_name,
+                    update.coords_bytes.len()
+                );
+
+                match Self::entities_from_coords_bytes(&update.coords_bytes) {
+                    Ok(entities) => {
+                        let name = update.message.clone().unwrap_or_else(|| {
+                            format!("Cycle {} (score {:.1})", update.cycle, update.score)
+                        });
+
+                        if let Some(group) = self.engine_mut().group_mut(id) {
+                            group.set_entities(entities);
+                            if !update.converged {
+                                group.assembly.name = name;
+                            }
+                            group.invalidate_render_cache();
+                        }
+                        self.engine_mut()
+                            .sync_scene_to_renderers(Some(AnimationAction::Wiggle));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to update structure from Rosetta: {}", e);
+                    }
+                }
+            }
+        }
+
+        if any_converged {
+            self.effect = VisualEffect::None;
+        }
+    }
+
+    /// Handle a physical key press using configurable keybindings.
+    /// Returns true if the key was handled.
+    pub(crate) fn handle_keybinding(&mut self, key: winit::keyboard::KeyCode) -> bool {
+        let key_str = key_code_to_string(key);
+        let action = self.engine
+            .as_ref()
+            .and_then(|e| e.options().keybindings.lookup(&key_str).map(|s| s.to_string()));
+        if let Some(action) = action {
+            match action.as_str() {
+                "recenter_camera" => self.recenter_camera(),
+                "toggle_trajectory" => self.toggle_trajectory(),
+                "toggle_ions" => self.toggle_ions(),
+                "toggle_waters" => self.toggle_waters(),
+                "toggle_solvent" => self.toggle_solvent(),
+                "toggle_lipids" => self.toggle_lipids(),
+                "cycle_focus" => self.cycle_focus(),
+                "cancel" => self.cancel_operations(),
+                other => {
+                    log::debug!("Unknown keybinding action: {}", other);
+                    return false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn recenter_camera(&mut self) {
+        self.engine_mut().fit_camera_to_focus();
+        log::info!("Recentered on {}", self.engine().scene.focus_description());
+    }
+
+    pub(crate) fn cycle_focus(&mut self) {
+        self.engine_mut().cycle_focus();
+        let focus_name = self.engine().scene.focus_description();
+        log::info!("Focus: {}", focus_name);
+        self.update_rosetta_locks();
+        self.engine_mut().fit_camera_to_focus();
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+    }
+
+    pub(crate) fn toggle_trajectory(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            if engine.has_trajectory() {
+                engine.toggle_trajectory();
+            } else if let Some(path) = Self::trajectory_path_from_args() {
+                engine.load_trajectory(std::path::Path::new(&path));
+            } else {
+                log::info!(
+                    "No trajectory loaded. Pass --trajectory <path.dcd> to load one."
+                );
             }
         }
     }
 
-    /// Handle keyboard input for ML operations
-    pub(crate) fn handle_key(&mut self, key: KeyCode) {
-        match key {
-            KeyCode::KeyW => {
-                // Wiggle: pure minimization (no packing)
-                if self.rosetta_executor.is_none() {
-                    log::warn!("Rosetta executor not initialized");
-                    return;
-                }
-
-                // Check if ANY structure has an active operation
-                let locked_ids = self.action_manager.locked_groups();
-                if !locked_ids.is_empty() {
-                    // Check what type of operation is running
-                    let has_rosetta_op = locked_ids.iter().any(|&id| {
-                        matches!(
-                            self.action_manager.get_action_type(id),
-                            Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
-                        )
-                    });
-
-                    if has_rosetta_op {
-                        // Rosetta operation running - stop it (toggle behavior)
-                        log::info!("Stopping Rosetta operation...");
-                        for lock_id in locked_ids {
-                            if matches!(
-                                self.action_manager.get_action_type(lock_id),
-                                Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
-                            ) {
-                                self.action_manager.request_cancel(lock_id);
-                                self.action_manager.unlock(lock_id);
-                            }
-                        }
-                        if let Some(ref executor) = self.rosetta_executor {
-                            executor.stop();
-                        }
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::ACTIONS;
-                    } else {
-                        // ML operation running - can't start wiggle
-                        let action = locked_ids.first()
-                            .and_then(|&id| self.action_manager.get_action_type(id));
-                        log::warn!("Cannot start wiggle: {:?} is running", action);
-                    }
-                } else {
-                    let focus = self.focus();
-                    // Use session's lock target (original in session mode, focused in single mode)
-                    let Some(lock_id) = self.session.lock_target(&focus) else {
-                        log::warn!("No structure available for wiggle");
-                        return;
-                    };
-
-                    // Get combined coords
-                    let Some(combined) = self.engine().combined_coords_for_backend() else {
-                        log::warn!("No coords available for wiggle");
-                        return;
-                    };
-                    let coords = combined.bytes.clone();
-
-                    // Ensure session exists with correct topology
-                    if self.ensure_rosetta_session().is_none() {
-                        log::warn!("Failed to ensure Rosetta session for wiggle");
-                        return;
-                    }
-
-                    // Update locks based on current focus
-                    self.update_rosetta_locks();
-
-                    if let Some(_cancel_flag) = self.action_manager.try_lock(lock_id, ActionType::RosettaWiggle) {
-                        let target_desc = if self.session.is_session_mode(&focus) {
-                            format!("full session ({} structures)", self.engine().group_count())
-                        } else {
-                            self.session.operation_target(&focus)
-                                .and_then(|id| self.engine().group(id))
-                                .map(|g| g.name().to_string())
-                                .unwrap_or_default()
-                        };
-                        log::info!("Starting wiggle on {} ({} bytes)...", target_desc, coords.len());
-                        if let Some(ref executor) = self.rosetta_executor {
-                            if let Err(e) = executor.start_wiggle(coords) {
-                                log::error!("Failed to start wiggle: {}", e);
-                                self.action_manager.unlock(lock_id);
-                                return;
-                            }
-                        }
-                        self.effect = VisualEffect::pulsing();
-                        self.ui_dirty |= DirtyFlags::ACTIONS;
-                    } else {
-                        log::warn!("Structure is already locked by another operation");
-                    }
-                }
-            }
-
-            KeyCode::KeyS => {
-                // Shake: pure packing (rotamer optimization, no minimization)
-                if self.rosetta_executor.is_none() {
-                    log::warn!("Rosetta executor not initialized");
-                    return;
-                }
-
-                // Check if ANY structure has an active operation
-                let locked_ids = self.action_manager.locked_groups();
-                if !locked_ids.is_empty() {
-                    let has_rosetta_op = locked_ids.iter().any(|&id| {
-                        matches!(
-                            self.action_manager.get_action_type(id),
-                            Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
-                        )
-                    });
-
-                    if has_rosetta_op {
-                        log::info!("Stopping Rosetta operation...");
-                        for lock_id in locked_ids {
-                            if matches!(
-                                self.action_manager.get_action_type(lock_id),
-                                Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
-                            ) {
-                                self.action_manager.request_cancel(lock_id);
-                                self.action_manager.unlock(lock_id);
-                            }
-                        }
-                        if let Some(ref executor) = self.rosetta_executor {
-                            executor.stop();
-                        }
-                        self.effect = VisualEffect::None;
-                        self.ui_dirty |= DirtyFlags::ACTIONS;
-                    } else {
-                        let action = locked_ids.first()
-                            .and_then(|&id| self.action_manager.get_action_type(id));
-                        log::warn!("Cannot start shake: {:?} is running", action);
-                    }
-                } else {
-                    let focus = self.focus();
-                    let Some(lock_id) = self.session.lock_target(&focus) else {
-                        log::warn!("No structure available for shake");
-                        return;
-                    };
-
-                    let Some(combined) = self.engine().combined_coords_for_backend() else {
-                        log::warn!("No coords available for shake");
-                        return;
-                    };
-                    let coords = combined.bytes.clone();
-
-                    if self.ensure_rosetta_session().is_none() {
-                        log::warn!("Failed to ensure Rosetta session for shake");
-                        return;
-                    }
-
-                    self.update_rosetta_locks();
-
-                    if let Some(_cancel_flag) = self.action_manager.try_lock(lock_id, ActionType::RosettaShake) {
-                        let target_desc = if self.session.is_session_mode(&focus) {
-                            format!("full session ({} structures)", self.engine().group_count())
-                        } else {
-                            self.session.operation_target(&focus)
-                                .and_then(|id| self.engine().group(id))
-                                .map(|g| g.name().to_string())
-                                .unwrap_or_default()
-                        };
-                        log::info!("Starting shake on {} ({} bytes)...", target_desc, coords.len());
-                        if let Some(ref executor) = self.rosetta_executor {
-                            if let Err(e) = executor.start_shake(coords) {
-                                log::error!("Failed to start shake: {}", e);
-                                self.action_manager.unlock(lock_id);
-                                return;
-                            }
-                        }
-                        self.effect = VisualEffect::pulsing();
-                        self.ui_dirty |= DirtyFlags::ACTIONS;
-                    } else {
-                        log::warn!("Structure is already locked by another operation");
-                    }
-                }
-            }
-
-            KeyCode::KeyP => {
-                // SimpleFold: predict structure from sequence (multi-chain aware)
-                let Some(target_id) = self.session.original else {
-                    log::warn!("No structure loaded for prediction");
-                    return;
-                };
-
-                if self.action_manager.is_locked(target_id) {
-                    let action = self.action_manager.get_action_type(target_id);
-                    log::warn!("Structure is locked by {:?}, cannot start SimpleFold", action);
-                    return;
-                }
-
-                // Stop any Rosetta operations and clear session
-                if let Some(ref executor) = self.rosetta_executor {
-                    executor.stop();
-                }
-                self.rosetta_state = None;
-
-                let chains = self.get_structure_chains();
-                if chains.is_empty() {
-                    log::warn!("No sequence/chains available");
-                    return;
-                }
-
-                let ml_runner = match &self.ml_runner {
-                    Some(r) => r,
-                    None => {
-                        log::warn!("ML runner not initialized");
-                        return;
-                    }
-                };
-
-                if self.action_manager.try_lock(target_id, ActionType::MLPredict).is_none() {
-                    log::warn!("Failed to acquire lock for SimpleFold");
-                    return;
-                }
-
-                let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
-                if chains.len() == 1 {
-                    log::info!(
-                        "Starting SimpleFold prediction for {} residues...",
-                        total_residues
-                    );
-                } else {
-                    log::info!(
-                        "Starting SimpleFold prediction for {} chains ({} total residues)...",
-                        chains.len(),
-                        total_residues
-                    );
-                }
-
-                if let Err(e) = ml_runner.submit(MLTask::Predict {
-                    sequence: None,
-                    chains,
-                    num_recycles: 3,
-                }) {
-                    log::error!("Failed to submit prediction task: {}", e);
-                    self.action_manager.unlock(target_id);
-                    return;
-                }
-
-                self.effect = VisualEffect::pulsing();
-                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-            }
-
-            KeyCode::KeyM => {
-                // MPNN: design sequence for current structure
-                let focus = self.focus();
-                let Some(target_id) = self.session.mpnn_target(&focus) else {
-                    log::warn!("No structure available for sequence design");
-                    return;
-                };
-
-                if self.action_manager.is_locked(target_id) {
-                    let action = self.action_manager.get_action_type(target_id);
-                    log::warn!("Structure is locked by {:?}, cannot start MPNN", action);
-                    return;
-                }
-
-                if let Some(ref executor) = self.rosetta_executor {
-                    executor.stop();
-                }
-                self.rosetta_state = None;
-
-                let ml_runner = match &self.ml_runner {
-                    Some(r) => r,
-                    None => {
-                        log::warn!("ML runner not initialized");
-                        return;
-                    }
-                };
-
-                let target_name = self.engine().group(target_id).map(|g| g.name().to_string()).unwrap_or_default();
-                let coords = self.get_group_coords_bytes(target_id);
-
-                match coords {
-                    Some(coords) => {
-                        if self.action_manager.try_lock(target_id, ActionType::MLSequenceDesign).is_none() {
-                            log::warn!("Failed to acquire lock for MPNN");
-                            return;
-                        }
-
-                        log::info!("Starting MPNN sequence design on '{}' ({} bytes)...", target_name, coords.len());
-
-                        if let Err(e) = ml_runner.submit(MLTask::SequenceDesign {
-                            coords,
-                            temperature: 0.1,
-                            num_sequences: 4,
-                        }) {
-                            log::error!("Failed to submit sequence design task: {}", e);
-                            self.action_manager.unlock(target_id);
-                            return;
-                        }
-
-                        self.effect = VisualEffect::pulsing();
-                        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-                    }
-                    None => {
-                        log::warn!("No coords available for sequence design");
-                    }
-                }
-            }
-
-            KeyCode::KeyR => {
-                // RFDiffusion3: design new structure
-                let Some(lock_id) = self.session.original else {
-                    log::warn!("No structure loaded, cannot start RFD3");
-                    return;
-                };
-
-                if self.action_manager.is_locked(lock_id) {
-                    let action = self.action_manager.get_action_type(lock_id);
-                    log::warn!("Structure is locked by {:?}, cannot start RFD3", action);
-                    return;
-                }
-
-                if let Some(ref executor) = self.rosetta_executor {
-                    executor.stop();
-                }
-                self.rosetta_state = None;
-
-                let ml_runner = match &self.ml_runner {
-                    Some(r) => r,
-                    None => {
-                        log::warn!("ML runner not initialized");
-                        return;
-                    }
-                };
-
-                if self.action_manager.try_lock(lock_id, ActionType::MLStructureDesign).is_none() {
-                    log::warn!("Failed to acquire lock for RFD3");
-                    return;
-                }
-
-                log::info!("Starting RFDiffusion3 structure design...");
-
-                if let Err(e) = ml_runner.submit(MLTask::StructureDesign {
-                    length: "100-100".to_string(),
-                    num_steps: 50,
-                }) {
-                    log::error!("Failed to submit structure design task: {}", e);
-                    self.action_manager.unlock(lock_id);
-                    return;
-                }
-
-                self.effect = VisualEffect::design_highlight(Vec::new());
-                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-            }
-
-            KeyCode::Escape => {
-                // Cancel current operation and clear selection
-                log::info!("Cancelling current operation");
-
-                // Clear selection
-                if let Some(engine) = &mut self.engine {
-                    engine.picking.clear_selection();
-                }
-
-                // Stop any locked operations and release locks
-                let locked_ids: Vec<GroupId> = self.action_manager.locked_groups();
-                for group_id in locked_ids {
-                    self.action_manager.request_cancel(group_id);
-                    if let Some(ref executor) = self.rosetta_executor {
-                        executor.stop();
-                    }
-                    self.action_manager.unlock(group_id);
-                    log::info!("Stopped operation on group {:?}", group_id);
-                }
-
-                // Remove animation structure if one exists
-                if let Some(anim_id) = self.session.animation_structure {
-                    if self.engine_mut().remove_group(anim_id).is_some() {
-                        log::info!("Removed in-progress animation structure");
-                        self.session.on_animation_structure_removed();
-                        self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Load));
-                    }
-                }
-
-                self.effect = VisualEffect::None;
-
-                // Also clear all bands on Escape
-                if !self.active_bands.is_empty() {
-                    if let Some(ref executor) = self.rosetta_executor {
-                        let _ = executor.clear_all_bands();
-                    }
-                    log::info!("Cleared {} bands", self.active_bands.len());
-                    self.active_bands.clear();
-                    self.update_band_visualization();
-                }
-
-                // Cancel any band drag in progress
-                self.band_drag = None;
-                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
-            }
-
-            KeyCode::Tab => {
-                // Cycle focus: Session -> Group 1 -> Group 2 -> ... -> Session
-                self.engine_mut().cycle_focus();
-                let focus_name = self.engine().scene.focus_description();
-                log::info!("Focus: {}", focus_name);
-
-                // Update Rosetta locks to match new focus
-                self.update_rosetta_locks();
-
-                // Update camera based on new focus
-                self.engine_mut().fit_camera_to_focus();
-
-                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
-            }
-
-            _ => {}
+    pub(crate) fn toggle_waters(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.toggle_waters();
+            log::info!(
+                "Waters: {}",
+                if engine.options.display.show_waters { "visible" } else { "hidden" }
+            );
         }
+    }
+
+    pub(crate) fn toggle_ions(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.toggle_ions();
+            log::info!(
+                "Ions: {}",
+                if engine.options.display.show_ions { "visible" } else { "hidden" }
+            );
+        }
+    }
+
+    pub(crate) fn toggle_solvent(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.toggle_solvent();
+            log::info!(
+                "Solvent: {}",
+                if engine.options.display.show_solvent { "visible" } else { "hidden" }
+            );
+        }
+    }
+
+    pub(crate) fn toggle_lipids(&mut self) {
+        if let Some(engine) = &mut self.engine {
+            engine.toggle_lipids();
+            log::info!("Lipids: {}", engine.options.display.lipid_mode);
+        }
+    }
+
+    pub(crate) fn cancel_operations(&mut self) {
+        log::info!("Cancelling current operation");
+        if let Some(engine) = &mut self.engine {
+            engine.picking.clear_selection();
+        }
+        let locked_ids: Vec<GroupId> = self.action_manager.locked_groups();
+        for group_id in locked_ids {
+            self.action_manager.request_cancel(group_id);
+            if let Some(ref executor) = self.rosetta_executor {
+                executor.stop();
+            }
+            self.action_manager.unlock(group_id);
+            log::info!("Stopped operation on group {:?}", group_id);
+        }
+        if let Some(anim_id) = self.session.animation_structure {
+            if self.engine_mut().remove_group(anim_id).is_some() {
+                log::info!("Removed in-progress animation structure");
+                self.session.on_animation_structure_removed();
+                self.engine_mut()
+                    .sync_scene_to_renderers(Some(AnimationAction::Load));
+            }
+        }
+        self.effect = VisualEffect::None;
+        if !self.active_bands.is_empty() {
+            if let Some(ref executor) = self.rosetta_executor {
+                let _ = executor.clear_all_bands();
+            }
+            log::info!("Cleared {} bands", self.active_bands.len());
+            self.active_bands.clear();
+            self.update_band_visualization();
+        }
+        self.band_drag = None;
+        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
+    }
+
+    /// Check CLI args for `--trajectory <path>`.
+    fn trajectory_path_from_args() -> Option<String> {
+        let args: Vec<String> = std::env::args().collect();
+        args.windows(2).find_map(|w| {
+            if w[0] == "--trajectory" {
+                Some(w[1].clone())
+            } else {
+                None
+            }
+        })
     }
 
     /// Get chains from the focused structure (or original) for multi-chain prediction
     /// Returns Vec<(chain_id, sequence)>
     fn get_structure_chains(&self) -> Vec<(String, String)> {
         let focus = self.focus();
-        let structure_id = self.session.operation_target(&focus).or(self.session.original);
+        let structure_id = self
+            .session
+            .operation_target(&focus)
+            .or(self.session.original);
         if let Some(id) = structure_id {
             if let Some(group) = self.engine().group(id) {
                 // Get render data to access chain sequences
                 // We need a mutable reference for render_data(), so use protein_coords directly
                 if let Some(protein_coords) = group.protein_coords() {
                     let coords = foldit_conv::coords::protein_only(&protein_coords);
-                    let (sequence, chain_sequences) = foldit_conv::coords::render::extract_sequences(&coords);
+                    let (sequence, chain_sequences) =
+                        foldit_conv::coords::render::extract_sequences(&coords);
                     if !chain_sequences.is_empty() {
                         return chain_sequences
                             .iter()
@@ -1297,11 +1132,17 @@ impl App {
                 .map(|(id, range)| (RosettaStructureId(id.0), *range))
                 .collect();
 
-            self.rosetta_state = Some(RosettaSessionState::new(chain_ids_per_structure, residue_ranges));
+            self.rosetta_state = Some(RosettaSessionState::new(
+                chain_ids_per_structure,
+                residue_ranges,
+            ));
             log::info!(
                 "Session created with {} structures, {} total residues",
                 combined.chain_ids_per_group.len(),
-                self.rosetta_state.as_ref().map(|s| s.total_residues).unwrap_or(0)
+                self.rosetta_state
+                    .as_ref()
+                    .map(|s| s.total_residues)
+                    .unwrap_or(0)
             );
         }
 
@@ -1317,17 +1158,25 @@ impl App {
 
         let focus = self.focus();
         // Get new focus as RosettaStructureId
-        let new_focus = self.session.operation_target(&focus)
+        let new_focus = self
+            .session
+            .operation_target(&focus)
             .map(|id| RosettaStructureId(id.0));
 
         // Check if focus has changed
         if state.focused_structure == new_focus {
-            log::debug!("update_rosetta_locks: focus unchanged ({:?}), skipping", new_focus);
+            log::debug!(
+                "update_rosetta_locks: focus unchanged ({:?}), skipping",
+                new_focus
+            );
             return;
         }
 
-        log::info!("update_rosetta_locks: focus changing from {:?} to {:?}",
-            state.focused_structure, new_focus);
+        log::info!(
+            "update_rosetta_locks: focus changing from {:?} to {:?}",
+            state.focused_structure,
+            new_focus
+        );
 
         let Some(executor) = self.rosetta_executor.as_ref() else {
             return;
@@ -1376,7 +1225,8 @@ impl App {
             return;
         }
 
-        let band_infos: Vec<BandRenderInfo> = self.active_bands
+        let band_infos: Vec<BandRenderInfo> = self
+            .active_bands
             .values()
             .filter_map(|band| {
                 let idx1 = (band.res1 as usize).checked_sub(1)?;
@@ -1416,7 +1266,8 @@ impl App {
 
         let ca_positions = engine.get_current_ca_positions();
 
-        let mut band_infos: Vec<BandRenderInfo> = self.active_bands
+        let mut band_infos: Vec<BandRenderInfo> = self
+            .active_bands
             .values()
             .filter_map(|band| {
                 let idx1 = (band.res1 as usize).checked_sub(1)?;
@@ -1529,21 +1380,29 @@ impl App {
             Ok(band_id) => {
                 log::info!(
                     "Created band {} between {}:{} and {}:{} (length: {:.1}Å)",
-                    band_id, res1, start_atom_name, res2, end_atom_name, length
-                );
-
-                self.active_bands.insert(band_id, ActiveBand {
                     band_id,
                     res1,
-                    atom1_name: start_atom_name.to_string(),
+                    start_atom_name,
                     res2,
-                    atom2_name: end_atom_name.to_string(),
-                    length,
-                    strength,
-                    is_pull: true,
-                    is_push: false,
-                    is_disabled: false,
-                });
+                    end_atom_name,
+                    length
+                );
+
+                self.active_bands.insert(
+                    band_id,
+                    ActiveBand {
+                        band_id,
+                        res1,
+                        atom1_name: start_atom_name.to_string(),
+                        res2,
+                        atom2_name: end_atom_name.to_string(),
+                        length,
+                        strength,
+                        is_pull: true,
+                        is_push: false,
+                        is_disabled: false,
+                    },
+                );
 
                 self.update_band_visualization();
             }
@@ -1569,25 +1428,6 @@ impl App {
         let pos2 = ca_positions.get(res2)?;
 
         Some(pos1.distance(*pos2) as f64)
-    }
-
-    /// Handle a key press by string name (for IPC).
-    pub fn handle_key_by_name(&mut self, code: &str) {
-        let key = match code {
-            "KeyW" => KeyCode::KeyW,
-            "KeyS" => KeyCode::KeyS,
-            "KeyP" => KeyCode::KeyP,
-            "KeyM" => KeyCode::KeyM,
-            "KeyR" => KeyCode::KeyR,
-            "KeyQ" => KeyCode::KeyQ,
-            "Tab" => KeyCode::Tab,
-            "Escape" => KeyCode::Escape,
-            _ => {
-                log::debug!("Unhandled key code from frontend: {}", code);
-                return;
-            }
-        };
-        self.handle_key(key);
     }
 
     /// Load a structure by path or PDB ID (for IPC).
@@ -1634,7 +1474,8 @@ impl App {
         if let Some(&first_id) = engine.group_ids().first() {
             let name = engine.group(first_id).map(|g| g.name()).unwrap_or("?");
             log::info!("Loaded structure: {}", name);
-            let backbone_ca = engine.group(first_id)
+            let backbone_ca = engine
+                .group(first_id)
                 .map(|g| entities_backbone_ca(g.entities()))
                 .unwrap_or_default();
             log::info!(
@@ -1666,15 +1507,21 @@ impl App {
         } else {
             log::warn!("Failed to create initial Rosetta session");
         }
+
+        // Mark VIEW dirty so available_presets are populated on first frontend push
+        self.ui_dirty |= DirtyFlags::VIEW;
     }
 
-    /// Shut down ML runner and Rosetta executor.
-    pub(crate) fn shutdown(&self) {
+    /// Shut down ML runner, Rosetta executor, and scene processor.
+    pub(crate) fn shutdown(&mut self) {
         if let Some(ref runner) = self.ml_runner {
             runner.shutdown();
         }
         if let Some(ref executor) = self.rosetta_executor {
             executor.shutdown();
+        }
+        if let Some(engine) = &mut self.engine {
+            engine.shutdown_scene_processor();
         }
     }
 
@@ -1713,15 +1560,16 @@ impl App {
         }
 
         if let Some(ref mut pull) = self.pull_drag {
-            if let Some(engine) = &self.engine {
-                if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
-                    pull.start_pos = current_ca;
+            if pull.is_active {
+                if let Some(engine) = &self.engine {
+                    if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize)
+                    {
+                        pull.start_pos = current_ca;
+                    }
                 }
+                let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                self.update_pull_visualization(pull_info);
             }
-        }
-        if let Some(ref pull) = self.pull_drag {
-            let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
-            self.update_pull_visualization(pull_info);
         }
     }
 
@@ -1758,14 +1606,21 @@ impl App {
         if app_dirty.contains(DirtyFlags::VIEW) {
             if let Some(engine) = &self.engine {
                 let mode = match engine.view_mode {
-                    foldit_render::engine::ViewMode::Tube => {
-                        foldit_frontend::state::ViewMode::Tube
-                    }
+                    foldit_render::engine::ViewMode::Tube => foldit_frontend::state::ViewMode::Tube,
                     foldit_render::engine::ViewMode::Ribbon => {
                         foldit_frontend::state::ViewMode::Ribbon
                     }
                 };
                 frontend.set_view_mode(mode);
+
+                // Serialize engine Options as the single source of truth
+                frontend.view.options =
+                    serde_json::to_value(engine.options()).unwrap_or_default();
+
+                let presets_dir = std::path::Path::new("assets/view_presets");
+                frontend.view.available_presets =
+                    foldit_render::options::Options::list_presets(presets_dir);
+                frontend.view.active_preset = engine.active_preset.clone();
             }
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {
@@ -1790,9 +1645,7 @@ impl App {
                     if let Some(engine) = &self.engine {
                         let hovered = engine.hovered_residue();
                         if hovered >= 0 {
-                            if let Some(ca_pos) =
-                                engine.get_residue_ca_position(hovered as usize)
-                            {
+                            if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
                                 let click_world_pos = engine.screen_to_world_at_depth(
                                     self.last_mouse_pos.0,
                                     self.last_mouse_pos.1,
@@ -1833,6 +1686,7 @@ impl App {
                         if let Some(engine) = &mut self.engine {
                             engine.handle_mouse_button(button, false);
                         }
+                        self.update_pull_visualization(None);
 
                         if pull.is_active {
                             log::info!(
@@ -1840,7 +1694,6 @@ impl App {
                                 pull.residue,
                                 pull.target_pos
                             );
-                            self.update_pull_visualization(None);
                             if let Some(rosetta) = &self.rosetta_executor {
                                 rosetta.cancel();
                             }
@@ -1864,25 +1717,22 @@ impl App {
                     if let Some(engine) = &self.engine {
                         let hovered = engine.hovered_residue();
                         if hovered >= 0 {
-                            if let Some(ca_pos) =
-                                engine.get_residue_ca_position(hovered as usize)
-                            {
+                            if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
                                 let click_world_pos = engine.screen_to_world_at_depth(
                                     self.last_mouse_pos.0,
                                     self.last_mouse_pos.1,
                                     ca_pos,
                                 );
                                 let agg = self.engine_mut().scene.aggregated().clone();
-                                let (start_atom_pos, start_atom_name) =
-                                    get_closest_atom_with_name(
-                                        &agg.backbone_chains,
-                                        &agg.sidechain_positions,
-                                        &agg.sidechain_residue_indices,
-                                        &agg.sidechain_atom_names,
-                                        hovered as usize,
-                                        click_world_pos,
-                                    )
-                                    .unwrap_or((ca_pos, "CA".to_string()));
+                                let (start_atom_pos, start_atom_name) = get_closest_atom_with_name(
+                                    &agg.backbone_chains,
+                                    &agg.sidechain_positions,
+                                    &agg.sidechain_residue_indices,
+                                    &agg.sidechain_atom_names,
+                                    hovered as usize,
+                                    click_world_pos,
+                                )
+                                .unwrap_or((ca_pos, "CA".to_string()));
 
                                 self.band_drag = Some(BandDragState {
                                     start_residue: hovered,
@@ -1914,16 +1764,15 @@ impl App {
                                         ca_pos,
                                     );
                                     let agg = self.engine_mut().scene.aggregated().clone();
-                                    let (end_atom_pos, end_atom_name) =
-                                        get_closest_atom_with_name(
-                                            &agg.backbone_chains,
-                                            &agg.sidechain_positions,
-                                            &agg.sidechain_residue_indices,
-                                            &agg.sidechain_atom_names,
-                                            end_residue as usize,
-                                            click_world_pos,
-                                        )
-                                        .unwrap_or((ca_pos, "CA".to_string()));
+                                    let (end_atom_pos, end_atom_name) = get_closest_atom_with_name(
+                                        &agg.backbone_chains,
+                                        &agg.sidechain_positions,
+                                        &agg.sidechain_residue_indices,
+                                        &agg.sidechain_atom_names,
+                                        end_residue as usize,
+                                        click_world_pos,
+                                    )
+                                    .unwrap_or((ca_pos, "CA".to_string()));
 
                                     self.create_band_with_atoms(
                                         drag.start_residue,
@@ -1972,8 +1821,7 @@ impl App {
 
             if pull.is_active {
                 if let Some(engine) = &self.engine {
-                    if let Some(current_ca) =
-                        engine.get_residue_ca_position(pull.residue as usize)
+                    if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize)
                     {
                         pull.start_pos = current_ca;
                     }
@@ -1988,10 +1836,8 @@ impl App {
                 if let Some(rosetta) = &self.rosetta_executor {
                     if let Some(combined) = self.engine().combined_coords_for_backend() {
                         let residue_1indexed = (pull.residue + 1) as u32;
-                        let target =
-                            [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
-                        if let Err(e) =
-                            rosetta.start_pull(combined.bytes, residue_1indexed, target)
+                        let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+                        if let Err(e) = rosetta.start_pull(combined.bytes, residue_1indexed, target)
                         {
                             log::warn!("Failed to start pull: {}", e);
                         } else {
@@ -2008,10 +1854,8 @@ impl App {
         // Extract pull info for visualization and Rosetta update
         if let Some(ref pull) = self.pull_drag {
             if pull.is_active {
-                let pull_info =
-                    Some((pull.start_pos, pull.target_pos, pull.residue as u32));
-                let target =
-                    [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
+                let pull_info = Some((pull.start_pos, pull.target_pos, pull.residue as u32));
+                let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
 
                 self.update_pull_visualization(pull_info);
 
@@ -2042,10 +1886,8 @@ impl App {
             drag.current_mouse_pos = self.last_mouse_pos;
 
             if let Some(engine) = &self.engine {
-                let target_pos =
-                    engine.screen_to_world_at_depth(x, y, drag.start_atom_pos);
-                let preview =
-                    Some((drag.start_atom_pos, target_pos, drag.start_residue as u32));
+                let target_pos = engine.screen_to_world_at_depth(x, y, drag.start_atom_pos);
+                let preview = Some((drag.start_atom_pos, target_pos, drag.start_residue as u32));
                 self.update_band_preview(preview);
             }
         }
@@ -2056,9 +1898,7 @@ impl App {
         if let Some(engine) = &mut self.engine {
             match delta {
                 MouseScrollDelta::LineDelta(_, y) => engine.handle_mouse_wheel(y),
-                MouseScrollDelta::PixelDelta(pos) => {
-                    engine.handle_mouse_wheel(pos.y as f32 * 0.01)
-                }
+                MouseScrollDelta::PixelDelta(pos) => engine.handle_mouse_wheel(pos.y as f32 * 0.01),
             }
         }
     }
@@ -2075,7 +1915,13 @@ impl App {
         use foldit_frontend::ViewportInput;
 
         match input {
-            ViewportInput::PointerDown { x, y, button, shift, .. } => {
+            ViewportInput::PointerDown {
+                x,
+                y,
+                button,
+                shift,
+                ..
+            } => {
                 let winit_button = match button {
                     0 => winit::event::MouseButton::Left,
                     2 => winit::event::MouseButton::Right,
@@ -2088,7 +1934,13 @@ impl App {
                 self.handle_native_cursor_moved(x, y);
                 self.handle_native_mouse_input(winit_button, true);
             }
-            ViewportInput::PointerUp { x, y, button, shift, .. } => {
+            ViewportInput::PointerUp {
+                x,
+                y,
+                button,
+                shift,
+                ..
+            } => {
                 let winit_button = match button {
                     0 => winit::event::MouseButton::Left,
                     2 => winit::event::MouseButton::Right,
@@ -2114,7 +1966,19 @@ impl App {
             }
             ViewportInput::Key { code, pressed } => {
                 if pressed {
-                    self.handle_key_by_name(&code);
+                    match code.as_str() {
+                        "KeyQ" => self.recenter_camera(),
+                        "KeyT" => self.toggle_trajectory(),
+                        "KeyI" => self.toggle_ions(),
+                        "KeyU" => self.toggle_waters(),
+                        "KeyO" => self.toggle_solvent(),
+                        "KeyL" => self.toggle_lipids(),
+                        "Tab" => self.cycle_focus(),
+                        "Escape" => self.cancel_operations(),
+                        _ => {
+                            log::debug!("Unhandled key code from frontend: {}", code);
+                        }
+                    }
                 }
             }
             ViewportInput::Resize { .. } => {
@@ -2129,12 +1993,11 @@ impl App {
     pub(crate) fn handle_trigger_action(&mut self, action: foldit_frontend::ActionId) {
         use foldit_frontend::ActionId;
         match action {
-            ActionId::ToggleWiggle => self.handle_key(KeyCode::KeyW),
-            ActionId::ToggleShake => self.handle_key(KeyCode::KeyS),
-            ActionId::RunPrediction => self.handle_key(KeyCode::KeyP),
-            ActionId::RunMPNN => self.handle_key(KeyCode::KeyM),
-            ActionId::RunDiffusion => self.handle_key(KeyCode::KeyR),
-            ActionId::ToggleBackboneQuality => self.handle_key(KeyCode::KeyQ),
+            ActionId::ToggleWiggle => self.toggle_wiggle(),
+            ActionId::ToggleShake => self.toggle_shake(),
+            ActionId::RunPrediction => self.run_prediction(),
+            ActionId::RunMPNN => self.run_mpnn(),
+            ActionId::RunDiffusion => self.run_diffusion(),
             ActionId::Undo | ActionId::Redo => {
                 log::warn!("Undo/Redo not yet implemented");
             }
@@ -2142,8 +2005,361 @@ impl App {
         self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::UI;
     }
 
+    fn toggle_wiggle(&mut self) {
+        if self.rosetta_executor.is_none() {
+            log::warn!("Rosetta executor not initialized");
+            return;
+        }
+
+        let locked_ids = self.action_manager.locked_groups();
+        if !locked_ids.is_empty() {
+            let has_rosetta_op = locked_ids.iter().any(|&id| {
+                matches!(
+                    self.action_manager.get_action_type(id),
+                    Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                )
+            });
+
+            if has_rosetta_op {
+                log::info!("Stopping Rosetta operation...");
+                for lock_id in locked_ids {
+                    if matches!(
+                        self.action_manager.get_action_type(lock_id),
+                        Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                    ) {
+                        self.action_manager.request_cancel(lock_id);
+                        self.action_manager.unlock(lock_id);
+                    }
+                }
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.effect = VisualEffect::None;
+                self.ui_dirty |= DirtyFlags::ACTIONS;
+            }
+        } else {
+            let focus = self.focus();
+            let Some(lock_id) = self.session.lock_target(&focus) else {
+                log::warn!("No structure available for wiggle");
+                return;
+            };
+
+            let Some(combined) = self.engine().combined_coords_for_backend() else {
+                log::warn!("No coords available for wiggle");
+                return;
+            };
+            let coords = combined.bytes.clone();
+
+            if self.ensure_rosetta_session().is_none() {
+                log::warn!("Failed to ensure Rosetta session for wiggle");
+                return;
+            }
+
+            self.update_rosetta_locks();
+
+            if let Some(_cancel_flag) = self
+                .action_manager
+                .try_lock(lock_id, ActionType::RosettaWiggle)
+            {
+                let target_desc = if self.session.is_session_mode(&focus) {
+                    format!("full session ({} structures)", self.engine().group_count())
+                } else {
+                    self.session
+                        .operation_target(&focus)
+                        .and_then(|id| self.engine().group(id))
+                        .map(|g| g.name().to_string())
+                        .unwrap_or_default()
+                };
+                log::info!(
+                    "Starting wiggle on {} ({} bytes)...",
+                    target_desc,
+                    coords.len()
+                );
+                if let Some(ref executor) = self.rosetta_executor {
+                    if let Err(e) = executor.start_wiggle(coords) {
+                        log::error!("Failed to start wiggle: {}", e);
+                        self.action_manager.unlock(lock_id);
+                        return;
+                    }
+                }
+                self.effect = VisualEffect::pulsing();
+                self.ui_dirty |= DirtyFlags::ACTIONS;
+            } else {
+                log::warn!("Structure is already locked by another operation");
+            }
+        }
+    }
+
+    fn toggle_shake(&mut self) {
+        if self.rosetta_executor.is_none() {
+            log::warn!("Rosetta executor not initialized");
+            return;
+        }
+
+        let locked_ids = self.action_manager.locked_groups();
+        if !locked_ids.is_empty() {
+            let has_rosetta_op = locked_ids.iter().any(|&id| {
+                matches!(
+                    self.action_manager.get_action_type(id),
+                    Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                )
+            });
+
+            if has_rosetta_op {
+                log::info!("Stopping Rosetta operation...");
+                for lock_id in locked_ids {
+                    if matches!(
+                        self.action_manager.get_action_type(lock_id),
+                        Some(ActionType::RosettaWiggle) | Some(ActionType::RosettaShake)
+                    ) {
+                        self.action_manager.request_cancel(lock_id);
+                        self.action_manager.unlock(lock_id);
+                    }
+                }
+                if let Some(ref executor) = self.rosetta_executor {
+                    executor.stop();
+                }
+                self.effect = VisualEffect::None;
+                self.ui_dirty |= DirtyFlags::ACTIONS;
+            }
+        } else {
+            let focus = self.focus();
+            let Some(lock_id) = self.session.lock_target(&focus) else {
+                log::warn!("No structure available for shake");
+                return;
+            };
+
+            let Some(combined) = self.engine().combined_coords_for_backend() else {
+                log::warn!("No coords available for shake");
+                return;
+            };
+            let coords = combined.bytes.clone();
+
+            if self.ensure_rosetta_session().is_none() {
+                log::warn!("Failed to ensure Rosetta session for shake");
+                return;
+            }
+
+            self.update_rosetta_locks();
+
+            if let Some(_cancel_flag) = self
+                .action_manager
+                .try_lock(lock_id, ActionType::RosettaShake)
+            {
+                let target_desc = if self.session.is_session_mode(&focus) {
+                    format!("full session ({} structures)", self.engine().group_count())
+                } else {
+                    self.session
+                        .operation_target(&focus)
+                        .and_then(|id| self.engine().group(id))
+                        .map(|g| g.name().to_string())
+                        .unwrap_or_default()
+                };
+                log::info!(
+                    "Starting shake on {} ({} bytes)...",
+                    target_desc,
+                    coords.len()
+                );
+                if let Some(ref executor) = self.rosetta_executor {
+                    if let Err(e) = executor.start_shake(coords) {
+                        log::error!("Failed to start shake: {}", e);
+                        self.action_manager.unlock(lock_id);
+                        return;
+                    }
+                }
+                self.effect = VisualEffect::pulsing();
+                self.ui_dirty |= DirtyFlags::ACTIONS;
+            } else {
+                log::warn!("Structure is already locked by another operation");
+            }
+        }
+    }
+
+    fn run_prediction(&mut self) {
+        let Some(target_id) = self.session.original else {
+            log::warn!("No structure loaded for prediction");
+            return;
+        };
+
+        if self.action_manager.is_locked(target_id) {
+            let action = self.action_manager.get_action_type(target_id);
+            log::warn!(
+                "Structure is locked by {:?}, cannot start SimpleFold",
+                action
+            );
+            return;
+        }
+
+        if let Some(ref executor) = self.rosetta_executor {
+            executor.stop();
+        }
+        self.rosetta_state = None;
+
+        let chains = self.get_structure_chains();
+        if chains.is_empty() {
+            log::warn!("No sequence/chains available");
+            return;
+        }
+
+        let ml_runner = match &self.ml_runner {
+            Some(r) => r,
+            None => {
+                log::warn!("ML runner not initialized");
+                return;
+            }
+        };
+
+        if self
+            .action_manager
+            .try_lock(target_id, ActionType::MLPredict)
+            .is_none()
+        {
+            log::warn!("Failed to acquire lock for SimpleFold");
+            return;
+        }
+
+        let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
+        log::info!(
+            "Starting SimpleFold prediction for {} residues...",
+            total_residues
+        );
+
+        if let Err(e) = ml_runner.submit(MLTask::Predict {
+            sequence: None,
+            chains,
+            num_recycles: 3,
+        }) {
+            log::error!("Failed to submit prediction task: {}", e);
+            self.action_manager.unlock(target_id);
+            return;
+        }
+
+        self.effect = VisualEffect::pulsing();
+        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+    }
+
+    fn run_mpnn(&mut self) {
+        let focus = self.focus();
+        let Some(target_id) = self.session.mpnn_target(&focus) else {
+            log::warn!("No structure available for sequence design");
+            return;
+        };
+
+        if self.action_manager.is_locked(target_id) {
+            let action = self.action_manager.get_action_type(target_id);
+            log::warn!("Structure is locked by {:?}, cannot start MPNN", action);
+            return;
+        }
+
+        if let Some(ref executor) = self.rosetta_executor {
+            executor.stop();
+        }
+        self.rosetta_state = None;
+
+        let ml_runner = match &self.ml_runner {
+            Some(r) => r,
+            None => {
+                log::warn!("ML runner not initialized");
+                return;
+            }
+        };
+
+        let target_name = self
+            .engine()
+            .group(target_id)
+            .map(|g| g.name().to_string())
+            .unwrap_or_default();
+        let coords = self.get_group_coords_bytes(target_id);
+
+        match coords {
+            Some(coords) => {
+                if self
+                    .action_manager
+                    .try_lock(target_id, ActionType::MLSequenceDesign)
+                    .is_none()
+                {
+                    log::warn!("Failed to acquire lock for MPNN");
+                    return;
+                }
+
+                log::info!(
+                    "Starting MPNN sequence design on '{}' ({} bytes)...",
+                    target_name,
+                    coords.len()
+                );
+
+                if let Err(e) = ml_runner.submit(MLTask::SequenceDesign {
+                    coords,
+                    temperature: 0.1,
+                    num_sequences: 4,
+                }) {
+                    log::error!("Failed to submit MPNN task: {}", e);
+                    self.action_manager.unlock(target_id);
+                    return;
+                }
+
+                self.effect = VisualEffect::pulsing();
+                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+            }
+            None => {
+                log::warn!("No coords available for MPNN");
+            }
+        }
+    }
+
+    fn run_diffusion(&mut self) {
+        let Some(target_id) = self.session.original else {
+            log::warn!("No structure loaded, cannot start RFD3");
+            return;
+        };
+
+        if self.action_manager.is_locked(target_id) {
+            let action = self.action_manager.get_action_type(target_id);
+            log::warn!("Structure is locked by {:?}, cannot start RFD3", action);
+            return;
+        }
+
+        if let Some(ref executor) = self.rosetta_executor {
+            executor.stop();
+        }
+        self.rosetta_state = None;
+
+        let ml_runner = match &self.ml_runner {
+            Some(r) => r,
+            None => {
+                log::warn!("ML runner not initialized");
+                return;
+            }
+        };
+
+        if self
+            .action_manager
+            .try_lock(target_id, ActionType::MLStructureDesign)
+            .is_none()
+        {
+            log::warn!("Failed to acquire lock for RFD3");
+            return;
+        }
+
+        log::info!("Starting RFDiffusion3 structure design...");
+        if let Err(e) = ml_runner.submit(MLTask::StructureDesign {
+            length: "100-100".to_string(),
+            num_steps: 50,
+        }) {
+            log::error!("Failed to submit RFD3 task: {}", e);
+            self.action_manager.unlock(target_id);
+            return;
+        }
+
+        self.effect = VisualEffect::design_highlight(Vec::new());
+        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+    }
+
     /// Handle a ParameterizedAction message from JS IPC.
-    pub(crate) fn handle_parameterized_action(&mut self, action: foldit_frontend::ParameterizedAction) {
+    pub(crate) fn handle_parameterized_action(
+        &mut self,
+        action: foldit_frontend::ParameterizedAction,
+    ) {
         use foldit_frontend::ParameterizedAction;
         match action {
             ParameterizedAction::LoadStructure { path } => {
@@ -2158,9 +2374,19 @@ impl App {
                 self.rosetta_state = None;
                 match foldit_rs::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
+                        // Apply view preset if specified in puzzle.toml
+                        if let Some(preset_name) = &puzzle_data.view_preset {
+                            let presets_dir = std::path::Path::new("assets/view_presets");
+                            self.engine_mut().load_preset(preset_name, presets_dir);
+                        }
+
                         let backbone_ca = entities_backbone_ca(&puzzle_data.entities);
                         let mut ss_override = puzzle_data.ss_override;
-                        let id = self.engine_mut().load_entities(puzzle_data.entities, &puzzle_data.name, true);
+                        let id = self.engine_mut().load_entities(
+                            puzzle_data.entities,
+                            &puzzle_data.name,
+                            true,
+                        );
                         // Apply SS override if present
                         if let Some(ss) = ss_override.take() {
                             if let Some(group) = self.engine_mut().group_mut(id) {
@@ -2168,11 +2394,15 @@ impl App {
                             }
                         }
                         self.session.on_original_loaded(id, backbone_ca);
-                        self.engine_mut().sync_scene_to_renderers(Some(AnimationAction::Load));
+                        self.engine_mut()
+                            .sync_scene_to_renderers(Some(AnimationAction::Load));
                     }
                     Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
                 }
-                self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
+                self.ui_dirty |= DirtyFlags::LOADING
+                    | DirtyFlags::SCORE
+                    | DirtyFlags::SELECTION
+                    | DirtyFlags::ACTIONS;
             }
             ParameterizedAction::CreateBand { .. } => {
                 log::info!("CreateBand via IPC not yet wired");
@@ -2180,21 +2410,100 @@ impl App {
             ParameterizedAction::RemoveBand { .. } => {
                 log::info!("RemoveBand via IPC not yet wired");
             }
-            ParameterizedAction::SetViewOption { .. } => {
-                log::info!("SetViewOption via IPC not yet wired");
+            ParameterizedAction::SetViewOption { key, value } => {
+                self.engine_mut().apply_view_option(&key, &value);
+                self.ui_dirty |= DirtyFlags::VIEW;
+            }
+            ParameterizedAction::LoadViewPreset { name } => {
+                let presets_dir = std::path::Path::new("assets/view_presets");
+                self.engine_mut().load_preset(&name, presets_dir);
+                self.ui_dirty |= DirtyFlags::VIEW;
+            }
+            ParameterizedAction::SaveViewPreset { name } => {
+                let presets_dir = std::path::Path::new("assets/view_presets");
+                if self.engine().save_preset(&name, presets_dir) {
+                    self.engine_mut().active_preset = Some(name);
+                }
                 self.ui_dirty |= DirtyFlags::VIEW;
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
 
+/// Convert a winit KeyCode to the string format used in keybinding options.
+fn key_code_to_string(key: winit::keyboard::KeyCode) -> String {
+    use winit::keyboard::KeyCode;
+    match key {
+        KeyCode::KeyA => "KeyA".into(),
+        KeyCode::KeyB => "KeyB".into(),
+        KeyCode::KeyC => "KeyC".into(),
+        KeyCode::KeyD => "KeyD".into(),
+        KeyCode::KeyE => "KeyE".into(),
+        KeyCode::KeyF => "KeyF".into(),
+        KeyCode::KeyG => "KeyG".into(),
+        KeyCode::KeyH => "KeyH".into(),
+        KeyCode::KeyI => "KeyI".into(),
+        KeyCode::KeyJ => "KeyJ".into(),
+        KeyCode::KeyK => "KeyK".into(),
+        KeyCode::KeyL => "KeyL".into(),
+        KeyCode::KeyM => "KeyM".into(),
+        KeyCode::KeyN => "KeyN".into(),
+        KeyCode::KeyO => "KeyO".into(),
+        KeyCode::KeyP => "KeyP".into(),
+        KeyCode::KeyQ => "KeyQ".into(),
+        KeyCode::KeyR => "KeyR".into(),
+        KeyCode::KeyS => "KeyS".into(),
+        KeyCode::KeyT => "KeyT".into(),
+        KeyCode::KeyU => "KeyU".into(),
+        KeyCode::KeyV => "KeyV".into(),
+        KeyCode::KeyW => "KeyW".into(),
+        KeyCode::KeyX => "KeyX".into(),
+        KeyCode::KeyY => "KeyY".into(),
+        KeyCode::KeyZ => "KeyZ".into(),
+        KeyCode::Digit0 => "Digit0".into(),
+        KeyCode::Digit1 => "Digit1".into(),
+        KeyCode::Digit2 => "Digit2".into(),
+        KeyCode::Digit3 => "Digit3".into(),
+        KeyCode::Digit4 => "Digit4".into(),
+        KeyCode::Digit5 => "Digit5".into(),
+        KeyCode::Digit6 => "Digit6".into(),
+        KeyCode::Digit7 => "Digit7".into(),
+        KeyCode::Digit8 => "Digit8".into(),
+        KeyCode::Digit9 => "Digit9".into(),
+        KeyCode::Escape => "Escape".into(),
+        KeyCode::Tab => "Tab".into(),
+        KeyCode::Space => "Space".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Backspace => "Backspace".into(),
+        KeyCode::Delete => "Delete".into(),
+        KeyCode::ArrowUp => "ArrowUp".into(),
+        KeyCode::ArrowDown => "ArrowDown".into(),
+        KeyCode::ArrowLeft => "ArrowLeft".into(),
+        KeyCode::ArrowRight => "ArrowRight".into(),
+        KeyCode::F1 => "F1".into(),
+        KeyCode::F2 => "F2".into(),
+        KeyCode::F3 => "F3".into(),
+        KeyCode::F4 => "F4".into(),
+        KeyCode::F5 => "F5".into(),
+        KeyCode::F6 => "F6".into(),
+        KeyCode::F7 => "F7".into(),
+        KeyCode::F8 => "F8".into(),
+        KeyCode::F9 => "F9".into(),
+        KeyCode::F10 => "F10".into(),
+        KeyCode::F11 => "F11".into(),
+        KeyCode::F12 => "F12".into(),
+        other => format!("{:?}", other),
+    }
+}
+
 /// Load a file (PDB/CIF/BCIF) and return entities + name.
-fn load_file_as_entities(path: &str) -> Result<(Vec<foldit_conv::coords::entity::MoleculeEntity>, String), String> {
+fn load_file_as_entities(
+    path: &str,
+) -> Result<(Vec<foldit_conv::coords::entity::MoleculeEntity>, String), String> {
     let p = std::path::Path::new(path);
     let name = p
         .file_stem()
@@ -2213,7 +2522,9 @@ fn entities_backbone_ca(entities: &[foldit_conv::coords::entity::MoleculeEntity]
     for entity in entities {
         if entity.molecule_type == foldit_conv::coords::entity::MoleculeType::Protein {
             for i in 0..entity.coords.num_atoms {
-                let name = std::str::from_utf8(&entity.coords.atom_names[i]).unwrap_or("").trim();
+                let name = std::str::from_utf8(&entity.coords.atom_names[i])
+                    .unwrap_or("")
+                    .trim();
                 if name == "CA" {
                     cas.push(Vec3::new(
                         entity.coords.atoms[i].x,
@@ -2262,10 +2573,13 @@ fn backbone_chains_to_coords(backbone_chains: &[Vec<Vec3>]) -> Coords {
         }
     }
 
-    let elements = atom_names.iter().map(|n| {
-        let s = std::str::from_utf8(n).unwrap_or("");
-        Element::from_atom_name(s)
-    }).collect();
+    let elements = atom_names
+        .iter()
+        .map(|n| {
+            let s = std::str::from_utf8(n).unwrap_or("");
+            Element::from_atom_name(s)
+        })
+        .collect();
 
     Coords {
         num_atoms: atoms.len(),

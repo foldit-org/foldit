@@ -28,6 +28,8 @@ pub struct PuzzleMeta {
     pub completion_score: f64,
     pub structure: StructureRef,
     pub camera: Camera,
+    /// Optional view preset name (loads `assets/view_presets/{name}.toml`).
+    pub view_preset: Option<String>,
     // Remaining fields (view_setup, scorefxn, min_moves, guide_visible,
     // files, setup, view_options, etc.) are captured here and silently ignored.
     #[serde(flatten)]
@@ -138,6 +140,8 @@ pub struct PuzzleData {
     pub entities: Vec<foldit_conv::coords::MoleculeEntity>,
     pub name: String,
     pub ss_override: Option<Vec<foldit_conv::secondary_structure::SSType>>,
+    /// Optional view preset name from puzzle.toml `[puzzle] view_preset`.
+    pub view_preset: Option<String>,
 }
 
 /// Load a puzzle by ID: parse its TOML and return entities for the engine.
@@ -212,6 +216,7 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         entities,
         name: puzzle.puzzle.title,
         ss_override,
+        view_preset: puzzle.puzzle.view_preset,
     })
 }
 
