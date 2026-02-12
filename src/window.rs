@@ -13,73 +13,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-/// CBT hook that injects `WS_EX_NOREDIRECTIONBITMAP` into wry's container HWND
-/// at creation time.  Without this, the container's GDI redirection surface
-/// paints an opaque background that occludes the wgpu swap chain, even though
-/// WebView2 sets its background to transparent via DirectComposition.
-///
-/// The hook is installed right before `build_as_child` and removed immediately
-/// after, so it only affects HWNDs created by wry during that call.
-#[cfg(target_os = "windows")]
-mod transparency_hook {
-    use std::cell::Cell;
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-
-    const HCBT_CREATEWND_CODE: i32 = 3;
-
-    thread_local! {
-        static HOOK: Cell<isize> = const { Cell::new(0) };
-    }
-
-    unsafe extern "system" fn cbt_proc(code: i32, wparam: usize, lparam: isize) -> isize {
-        if code == HCBT_CREATEWND_CODE {
-            let hwnd = wparam as HWND;
-            let mut class_buf = [0u16; 16];
-            let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 16);
-            // Match the "WRY" prefix of wry's "WRY_WEBVIEW" container class.
-            if len >= 3
-                && class_buf[0] == b'W' as u16
-                && class_buf[1] == b'R' as u16
-                && class_buf[2] == b'Y' as u16
-            {
-                let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOREDIRECTIONBITMAP as i32);
-                log::info!("CBT hook: injected WS_EX_NOREDIRECTIONBITMAP into WRY container");
-            }
-        }
-        HOOK.with(|h| CallNextHookEx(h.get() as _, code, wparam, lparam))
-    }
-
-    pub fn install() {
-        unsafe {
-            let hook = SetWindowsHookExW(
-                WH_CBT,
-                Some(cbt_proc),
-                std::ptr::null_mut(),
-                GetCurrentThreadId(),
-            );
-            if hook.is_null() {
-                log::warn!("Failed to install CBT hook for webview transparency");
-            }
-            HOOK.with(|h| h.set(hook as isize));
-        }
-    }
-
-    pub fn remove() {
-        HOOK.with(|h| {
-            let hook = h.get();
-            if hook != 0 {
-                unsafe {
-                    UnhookWindowsHookEx(hook as _);
-                }
-                h.set(0);
-            }
-        });
-    }
-}
-
 /// Messages from JS (via wry ipc_handler) to Rust
 #[derive(Debug)]
 pub(crate) enum IpcMessage {
@@ -98,9 +31,10 @@ pub(crate) struct AppRunner {
     ipc_rx: Option<std::sync::mpsc::Receiver<IpcMessage>>,
     webview_ready: bool,
     last_frame: Instant,
+    /// Last applied render size, to avoid redundant resizes
+    last_render_size: (u32, u32),
     #[cfg(debug_assertions)]
     dev_server: Option<std::process::Child>,
-    /// Whether the dev server is confirmed available (set before event loop).
     #[cfg(debug_assertions)]
     dev_server_available: bool,
 }
@@ -115,6 +49,7 @@ impl AppRunner {
             ipc_rx: None,
             webview_ready: false,
             last_frame: Instant::now(),
+            last_render_size: (0, 0),
             #[cfg(debug_assertions)]
             dev_server: None,
             #[cfg(debug_assertions)]
@@ -228,16 +163,13 @@ impl AppRunner {
         }
     }
 
-    /// Resize the webview to match a new window size.
+    /// Resize the webview to match a new window size (physical pixels).
     fn resize_webview(&self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if let (Some(ref webview), Some(ref window)) = (&self.webview, &self.window) {
-            use wry::dpi::{LogicalPosition, LogicalSize};
-            let scale = window.scale_factor();
-            let logical_w = new_size.width as f64 / scale;
-            let logical_h = new_size.height as f64 / scale;
+        if let Some(ref webview) = &self.webview {
+            use wry::dpi::{PhysicalPosition, PhysicalSize};
             let _ = webview.set_bounds(wry::Rect {
-                position: LogicalPosition::new(0.0, 0.0).into(),
-                size: LogicalSize::new(logical_w, logical_h).into(),
+                position: PhysicalPosition::new(0, 0).into(),
+                size: PhysicalSize::new(new_size.width, new_size.height).into(),
             });
         }
     }
@@ -255,7 +187,6 @@ impl AppRunner {
     /// Spawn the Vite dev server and block until it's ready (called before event loop).
     #[cfg(debug_assertions)]
     fn ensure_dev_server(&mut self) {
-        // Already running?
         if Self::frontend_server_available() {
             log::info!("Dev server already running at localhost:5173");
             self.dev_server_available = true;
@@ -302,7 +233,6 @@ impl AppRunner {
             }
         }
 
-        // Block until it's up (max ~15s)
         use std::thread;
         use std::time::Duration;
         for i in 0..75 {
@@ -347,11 +277,8 @@ impl AppRunner {
         let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<IpcMessage>();
 
         let webview = {
-            use wry::dpi::{LogicalPosition, LogicalSize};
+            use wry::dpi::{PhysicalPosition, PhysicalSize};
             let inner = window.inner_size();
-            let scale = window.scale_factor();
-            let logical_w = inner.width as f64 / scale;
-            let logical_h = inner.height as f64 / scale;
 
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
@@ -396,17 +323,11 @@ impl AppRunner {
                     move |req| Self::handle_ipc(&ipc_tx, req)
                 })
                 .with_bounds(wry::Rect {
-                    position: LogicalPosition::new(0.0, 0.0).into(),
-                    size: LogicalSize::new(logical_w, logical_h).into(),
+                    position: PhysicalPosition::new(0, 0).into(),
+                    size: PhysicalSize::new(inner.width, inner.height).into(),
                 });
 
-            #[cfg(target_os = "windows")]
-            transparency_hook::install();
-            let result = builder.build_as_child(window);
-            #[cfg(target_os = "windows")]
-            transparency_hook::remove();
-
-            match result {
+            match builder.build_as_child(window) {
                 Ok(wv) => {
                     log::info!("wry webview created (release, custom protocol)");
                     Some(wv)
@@ -521,11 +442,8 @@ impl AppRunner {
         let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<IpcMessage>();
 
         let webview = {
-            use wry::dpi::{LogicalPosition, LogicalSize};
+            use wry::dpi::{PhysicalPosition, PhysicalSize};
             let inner = window.inner_size();
-            let scale = window.scale_factor();
-            let logical_w = inner.width as f64 / scale;
-            let logical_h = inner.height as f64 / scale;
 
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
@@ -537,17 +455,11 @@ impl AppRunner {
                     move |req| Self::handle_ipc(&ipc_tx, req)
                 })
                 .with_bounds(wry::Rect {
-                    position: LogicalPosition::new(0.0, 0.0).into(),
-                    size: LogicalSize::new(logical_w, logical_h).into(),
+                    position: PhysicalPosition::new(0, 0).into(),
+                    size: PhysicalSize::new(inner.width, inner.height).into(),
                 });
 
-            #[cfg(target_os = "windows")]
-            transparency_hook::install();
-            let result = builder.build_as_child(window);
-            #[cfg(target_os = "windows")]
-            transparency_hook::remove();
-
-            match result {
+            match builder.build_as_child(window) {
                 Ok(wv) => {
                     log::info!("wry webview created (debug, dev server)");
                     Some(wv)
@@ -567,6 +479,21 @@ impl AppRunner {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame);
         self.last_frame = now;
+
+        // Ensure render surface always matches actual window size.
+        // We do this every frame because Resized events can be unreliable
+        // on Windows (stale WM_SIZE, timing issues with child windows).
+        if let Some(ref window) = self.window {
+            let ws = window.inner_size();
+            let size = (ws.width, ws.height);
+            if size != self.last_render_size && size.0 > 0 && size.1 > 0 {
+                log::info!("tick_frame resize: {}x{} (was {}x{})",
+                    size.0, size.1, self.last_render_size.0, self.last_render_size.1);
+                self.app.resize(size.0, size.1);
+                self.resize_webview(ws);
+                self.last_render_size = size;
+            }
+        }
 
         // Process IPC messages from webview
         self.process_ipc_messages();
@@ -608,14 +535,20 @@ impl AppRunner {
 impl ApplicationHandler for AppRunner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            // Create window
+            // Create window.
+            // On Windows, disable WS_CLIPCHILDREN so the wry child HWND
+            // doesn't occlude the wgpu DirectComposition swap chain.
+            let mut attrs = Window::default_attributes()
+                .with_title("Foldit")
+                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs = attrs.with_clip_children(false);
+            }
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        Window::default_attributes()
-                            .with_title("Foldit")
-                            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
-                    )
+                    .create_window(attrs)
                     .expect("Failed to create window"),
             );
 
@@ -662,17 +595,29 @@ impl ApplicationHandler for AppRunner {
             }
 
             WindowEvent::Resized(newsize) => {
-                log::info!("WindowEvent::Resized: {}x{}", newsize.width, newsize.height);
-                self.app.resize(newsize.width, newsize.height);
-                self.resize_webview(newsize);
+                log::info!(
+                    "Resized event: {}x{} (last_render_size: {}x{})",
+                    newsize.width, newsize.height,
+                    self.last_render_size.0, self.last_render_size.1,
+                );
+                let size = (newsize.width, newsize.height);
+                if size.0 > 0 && size.1 > 0 {
+                    self.app.resize(size.0, size.1);
+                    self.resize_webview(newsize);
+                    self.last_render_size = size;
+                }
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(window) = &self.window {
-                    let newsize = window.inner_size();
+                    let actual = window.inner_size();
                     self.app.set_surface_scale(window.scale_factor());
-                    self.app.resize(newsize.width, newsize.height);
-                    self.resize_webview(newsize);
+                    let size = (actual.width, actual.height);
+                    if size.0 > 0 && size.1 > 0 {
+                        self.app.resize(size.0, size.1);
+                        self.resize_webview(actual);
+                        self.last_render_size = size;
+                    }
                 }
             }
 

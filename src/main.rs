@@ -1460,9 +1460,14 @@ impl App {
         // Create render engine with the specified molecule path
         let size = window.inner_size();
         let scale = window.scale_factor();
+        log::info!(
+            "initialize_with_window: inner_size={}x{}, scale_factor={}",
+            size.width, size.height, scale
+        );
         let engine = pollster::block_on(ProteinRenderEngine::new_with_path(
             window.clone(),
             (size.width, size.height),
+            scale,
             &self.pdb_path,
         ));
 
@@ -1532,9 +1537,11 @@ impl App {
         }
     }
 
+
     /// Update surface layer scale factor.
-    pub(crate) fn set_surface_scale(&self, scale_factor: f64) {
-        if let Some(ref engine) = self.engine {
+    pub(crate) fn set_surface_scale(&mut self, scale_factor: f64) {
+        if let Some(ref mut engine) = self.engine {
+            engine.set_scale_factor(scale_factor);
             engine.context.set_surface_scale(scale_factor);
         }
     }
