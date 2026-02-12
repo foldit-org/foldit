@@ -1216,6 +1216,7 @@ dependencies = [
  "criterion",
  "foldit-conv",
  "glam",
+ "half",
  "instant",
  "log",
  "pdbtbx",

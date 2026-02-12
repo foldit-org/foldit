@@ -924,9 +924,12 @@ impl App {
     /// Returns true if the key was handled.
     pub(crate) fn handle_keybinding(&mut self, key: winit::keyboard::KeyCode) -> bool {
         let key_str = key_code_to_string(key);
-        let action = self.engine
-            .as_ref()
-            .and_then(|e| e.options().keybindings.lookup(&key_str).map(|s| s.to_string()));
+        let action = self.engine.as_ref().and_then(|e| {
+            e.options()
+                .keybindings
+                .lookup(&key_str)
+                .map(|s| s.to_string())
+        });
         if let Some(action) = action {
             match action.as_str() {
                 "recenter_camera" => self.recenter_camera(),
@@ -969,9 +972,7 @@ impl App {
             } else if let Some(path) = Self::trajectory_path_from_args() {
                 engine.load_trajectory(std::path::Path::new(&path));
             } else {
-                log::info!(
-                    "No trajectory loaded. Pass --trajectory <path.dcd> to load one."
-                );
+                log::info!("No trajectory loaded. Pass --trajectory <path.dcd> to load one.");
             }
         }
     }
@@ -981,7 +982,11 @@ impl App {
             engine.toggle_waters();
             log::info!(
                 "Waters: {}",
-                if engine.options.display.show_waters { "visible" } else { "hidden" }
+                if engine.options.display.show_waters {
+                    "visible"
+                } else {
+                    "hidden"
+                }
             );
         }
     }
@@ -991,7 +996,11 @@ impl App {
             engine.toggle_ions();
             log::info!(
                 "Ions: {}",
-                if engine.options.display.show_ions { "visible" } else { "hidden" }
+                if engine.options.display.show_ions {
+                    "visible"
+                } else {
+                    "hidden"
+                }
             );
         }
     }
@@ -1001,7 +1010,11 @@ impl App {
             engine.toggle_solvent();
             log::info!(
                 "Solvent: {}",
-                if engine.options.display.show_solvent { "visible" } else { "hidden" }
+                if engine.options.display.show_solvent {
+                    "visible"
+                } else {
+                    "hidden"
+                }
             );
         }
     }
@@ -1462,7 +1475,9 @@ impl App {
         let scale = window.scale_factor();
         log::info!(
             "initialize_with_window: inner_size={}x{}, scale_factor={}",
-            size.width, size.height, scale
+            size.width,
+            size.height,
+            scale
         );
         let engine = pollster::block_on(ProteinRenderEngine::new_with_path(
             window.clone(),
@@ -1536,7 +1551,6 @@ impl App {
             engine.resize(width, height);
         }
     }
-
 
     /// Update surface layer scale factor.
     pub(crate) fn set_surface_scale(&mut self, scale_factor: f64) {
@@ -1621,8 +1635,7 @@ impl App {
                 frontend.set_view_mode(mode);
 
                 // Serialize engine Options as the single source of truth
-                frontend.view.options =
-                    serde_json::to_value(engine.options()).unwrap_or_default();
+                frontend.view.options = serde_json::to_value(engine.options()).unwrap_or_default();
 
                 let presets_dir = std::path::Path::new("assets/view_presets");
                 frontend.view.available_presets =
