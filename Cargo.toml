@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/foldit-frontend",
-    "crates/foldit-render",
+    "crates/viso",
     "crates/foldit-conv",
     "crates/foldit-runner",
     "xtask",
@@ -29,7 +29,7 @@ path = "crates/foldit-runner/src/bin/worker.rs"
 [dependencies]
 # Workspace crates
 foldit-frontend = { path = "crates/foldit-frontend" }
-foldit-render = { path = "crates/foldit-render" }
+viso = { path = "crates/viso" }
 foldit-conv = { path = "crates/foldit-conv" }
 foldit-runner = { path = "crates/foldit-runner", default-features = false, features = ["python"] }
 
@@ -48,6 +48,9 @@ wgpu = "28"
 
 # Direct mmCIF parsing for atom names and residue info
 pdbtbx = "0.12"
+
+# Lock-free per-entity coord buffering
+triple_buffer = "8"
 
 # Utilities
 log = "0.4"

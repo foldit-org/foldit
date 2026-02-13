@@ -33,6 +33,10 @@ pub(crate) struct AppRunner {
     last_frame: Instant,
     /// Last applied render size, to avoid redundant resizes
     last_render_size: (u32, u32),
+    /// Engine initialization is deferred until the webview loading screen is visible
+    init_pending: bool,
+    /// Timeout for webview readiness — initialize anyway if webview takes too long
+    init_deadline: Option<Instant>,
     #[cfg(debug_assertions)]
     dev_server: Option<std::process::Child>,
     #[cfg(debug_assertions)]
@@ -50,6 +54,8 @@ impl AppRunner {
             webview_ready: false,
             last_frame: Instant::now(),
             last_render_size: (0, 0),
+            init_pending: false,
+            init_deadline: None,
             #[cfg(debug_assertions)]
             dev_server: None,
             #[cfg(debug_assertions)]
@@ -67,10 +73,18 @@ impl AppRunner {
         for msg in messages {
             match msg {
                 IpcMessage::Ready => {
-                    log::info!("Webview ready, pushing full state");
+                    log::info!("Webview ready");
                     self.webview_ready = true;
                     self.frontend.mark_all_dirty();
-                    self.push_full_state_to_webview();
+                    // Only push full state if engine init is already done.
+                    // If init is still pending, the init block will push state
+                    // once it completes (with puzzle_loaded: true).
+                    // This avoids a race where __onInitialState sends puzzle_loaded:false
+                    // and a subsequent __onStateUpdate sends puzzle_loaded:true,
+                    // but the Promise .then() microtask overwrites it back to false.
+                    if !self.init_pending {
+                        self.push_full_state_to_webview();
+                    }
                 }
                 IpcMessage::ViewportInput(input) => self.app.handle_viewport_input(input),
                 IpcMessage::TriggerAction(action) => self.app.handle_trigger_action(action),
@@ -480,6 +494,42 @@ impl AppRunner {
         let dt = now.duration_since(self.last_frame);
         self.last_frame = now;
 
+        // Process IPC messages (needed to detect webview_ready during init)
+        self.process_ipc_messages();
+
+        // Deferred initialization: wait for the webview to show the loading screen
+        // before blocking the main thread with engine/structure creation.
+        if self.init_pending {
+            let should_init = self.webview_ready
+                || self.webview.is_none()
+                || self.init_deadline.is_some_and(|d| now > d);
+
+            if should_init {
+                log::info!("Deferred init starting (webview_ready={})", self.webview_ready);
+                self.init_pending = false;
+                self.init_deadline = None;
+                let window = self.window.as_ref().unwrap().clone();
+                self.app.initialize_with_window(window);
+                // Engine + puzzle loaded — ready to show the game view
+                self.frontend.set_puzzle_loaded(true);
+                self.frontend.set_score_title(self.app.structure_title());
+                self.frontend.mark_all_dirty();
+                // Push full state via __onInitialState now (the Ready handler
+                // deferred this push so the JS only ever sees puzzle_loaded:true).
+                if self.webview_ready {
+                    self.push_full_state_to_webview();
+                }
+                log::info!("Deferred init complete, puzzle_loaded={}", self.frontend.loading().puzzle_loaded);
+                // Fall through to render the first frame
+            } else {
+                // Webview still loading — keep pumping frames so it can paint
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+        }
+
         // Ensure render surface always matches actual window size.
         // We do this every frame because Resized events can be unreliable
         // on Windows (stale WM_SIZE, timing issues with child windows).
@@ -495,23 +545,14 @@ impl AppRunner {
             }
         }
 
-        // Process IPC messages from webview
-        self.process_ipc_messages();
-
-        // Process ML updates
-        self.app.process_ml_updates();
-
-        // Process Rosetta updates
-        self.app.process_rosetta_updates();
+        // Process all backend updates (Rosetta + ML) via triple buffers
+        self.app.apply_backend_updates();
 
         // Sync engine with scene if dirty (non-blocking: submits to background thread)
         self.app.sync_engine();
 
         // Apply any completed scene from background thread (GPU uploads only, <1ms)
         self.app.apply_pending_scene();
-
-        // Update visual effect
-        let _intensity = self.app.tick_effects(dt.as_secs_f32());
 
         // Update camera animation
         self.app.update_camera_animation(dt.as_secs_f32());
@@ -552,15 +593,7 @@ impl ApplicationHandler for AppRunner {
                     .expect("Failed to create window"),
             );
 
-            // Initialize App domain logic (engine, structure, ML, Rosetta)
-            self.app.initialize_with_window(window.clone());
-
-            // Mark frontend dirty so the first push sends everything
-            self.frontend.set_puzzle_loaded(true);
-            self.frontend.set_score_title(self.app.structure_title());
-            self.frontend.mark_all_dirty();
-
-            // Debug: dev server was already ensured before event loop started
+            // Create webview first so the loading screen is visible before heavy init
             #[cfg(debug_assertions)]
             {
                 if self.dev_server_available {
@@ -572,13 +605,18 @@ impl ApplicationHandler for AppRunner {
                 }
             }
 
-            // Release: always create webview with custom protocol
             #[cfg(not(debug_assertions))]
             {
                 let (webview, ipc_rx) = Self::create_webview_release(&window);
                 self.webview = webview;
                 self.ipc_rx = Some(ipc_rx);
             }
+
+            // Defer engine initialization until the webview loading screen is up.
+            // tick_frame will call initialize_with_window once webview_ready fires
+            // (or after a timeout if the webview is slow / absent).
+            self.init_pending = true;
+            self.init_deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
 
             window.request_redraw();
             self.window = Some(window);

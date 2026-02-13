@@ -1,10 +1,5 @@
-pub mod action_manager;
-pub mod animation;
-pub mod ml_runner;
-pub mod molecule_state;
 pub mod puzzle;
-pub mod session;
-pub mod visual_effects;
+pub mod shared_state;
 
 // Re-export modular rosetta backend from foldit-runner
 pub mod rosetta {

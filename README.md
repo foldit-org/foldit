@@ -91,7 +91,7 @@ foldit-rs/
 │   └── main.rs              # Main application
 ├── crates/
 │   ├── foldit-ml/           # ML inference library
-│   ├── foldit-render/       # GPU render engine
+│   ├── viso/                # GPU render engine
 │   └── foldit-conv/         # Format conversion
 ├── xtask/                   # Build automation
 ├── Cargo.toml               # Workspace manifest

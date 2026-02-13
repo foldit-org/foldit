@@ -58,6 +58,15 @@ fn main() -> Result<()> {
     }
 }
 
+fn python_lib_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    { "python312.dll" }
+    #[cfg(target_os = "macos")]
+    { "libpython3.12.dylib" }
+    #[cfg(target_os = "linux")]
+    { "libpython3.12.so" }
+}
+
 fn setup_ml() -> Result<()> {
     println!("Setting up ML environments (foundry + simplefold)...");
     let status = Command::new("pixi")
@@ -69,6 +78,49 @@ fn setup_ml() -> Result<()> {
     }
     // Within the workspace, always install the local foldit-conv wheel
     build_foldit_conv()?;
+
+    // Copy Python shared library to assets/libs/ (mirrors the Rosetta pattern).
+    // All pixi envs share the same Python 3.12 runtime, so we just need to find
+    // any installed env (GPU or CPU variant).
+    let pixi_envs_dir = Path::new("crates/foldit-runner/.pixi/envs");
+    let candidate_envs = ["foundry", "foundry-cpu", "simplefold", "simplefold-cpu"];
+    let lib_name = python_lib_name();
+
+    let python_lib_src = candidate_envs.iter().find_map(|env_name| {
+        let env_path = pixi_envs_dir.join(env_name);
+        #[cfg(target_os = "windows")]
+        let lib_path = env_path.join(lib_name);
+        #[cfg(not(target_os = "windows"))]
+        let lib_path = env_path.join("lib").join(lib_name);
+        if lib_path.exists() { Some(lib_path) } else { None }
+    });
+
+    if let Some(python_lib_src) = python_lib_src {
+        std::fs::create_dir_all("assets/libs")?;
+        let python_lib_dst = format!("assets/libs/{}", lib_name);
+        std::fs::copy(&python_lib_src, &python_lib_dst)?;
+        println!("Copied {} -> {}", python_lib_src.display(), python_lib_dst);
+    } else {
+        println!(
+            "Warning: Python library ({}) not found in any pixi env (expected after pixi setup)",
+            lib_name
+        );
+    }
+
+    // On Windows, also copy the import library if present (for future link-time use)
+    #[cfg(target_os = "windows")]
+    {
+        let import_lib_src = candidate_envs.iter().find_map(|env_name| {
+            let path = pixi_envs_dir.join(env_name).join("libs").join("python312.lib");
+            if path.exists() { Some(path) } else { None }
+        });
+        if let Some(import_lib_src) = import_lib_src {
+            let import_lib_dst = "assets/libs/python312.lib";
+            std::fs::copy(&import_lib_src, import_lib_dst)?;
+            println!("Copied {} -> {}", import_lib_src.display(), import_lib_dst);
+        }
+    }
+
     println!("ML environments setup complete.");
     Ok(())
 }
@@ -257,14 +309,20 @@ fn bundle(cpu_only: bool) -> Result<()> {
     copy_dir("crates/foldit-runner/bundle", "bundle")?;
 
     // 4. Copy Rust binaries
-    if std::path::Path::new("target/release/foldit-ml-worker").exists() {
-        std::fs::copy("target/release/foldit-ml-worker", "bundle/foldit-ml-worker")?;
-        println!("Copied foldit-ml-worker to bundle.");
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+
+    let worker_name = format!("foldit-runner-worker{}", exe_ext);
+    let worker_src = format!("target/release/{}", worker_name);
+    if std::path::Path::new(&worker_src).exists() {
+        std::fs::copy(&worker_src, format!("bundle/{}", worker_name))?;
+        println!("Copied {} to bundle.", worker_name);
     }
 
-    if std::path::Path::new("target/release/foldit-rs").exists() {
-        std::fs::copy("target/release/foldit-rs", "bundle/foldit-rs")?;
-        println!("Copied foldit-rs to bundle.");
+    let app_name = format!("foldit-rs{}", exe_ext);
+    let app_src = format!("target/release/{}", app_name);
+    if std::path::Path::new(&app_src).exists() {
+        std::fs::copy(&app_src, format!("bundle/{}", app_name))?;
+        println!("Copied {} to bundle.", app_name);
     }
 
     // 5. Copy Rosetta resources

@@ -1209,29 +1209,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "foldit-render"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "criterion",
- "foldit-conv",
- "glam",
- "half",
- "instant",
- "log",
- "pdbtbx",
- "pollster",
- "rand 0.9.2",
- "serde",
- "serde_json",
- "toml 0.8.23",
- "triple_buffer",
- "ureq",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "foldit-rs"
 version = "0.1.0"
 dependencies = [
@@ -1241,7 +1218,6 @@ dependencies = [
  "env_logger",
  "foldit-conv",
  "foldit-frontend",
- "foldit-render",
  "foldit-runner",
  "glam",
  "lazy_static",
@@ -1253,6 +1229,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.8.23",
+ "triple_buffer",
+ "viso",
  "wgpu",
  "winit",
  "wry",
@@ -1269,6 +1247,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "foldit-conv",
+ "glam",
  "iceoryx2",
  "interprocess",
  "itoa 1.0.17",
@@ -1296,6 +1275,7 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tonic-reflection",
+ "triple_buffer",
  "windows-sys 0.59.0",
 ]
 
@@ -5699,6 +5679,29 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "viso"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "criterion",
+ "foldit-conv",
+ "glam",
+ "half",
+ "instant",
+ "log",
+ "pdbtbx",
+ "pollster",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "triple_buffer",
+ "ureq",
+ "wgpu",
+ "winit",
+]
 
 [[package]]
 name = "walkdir"
