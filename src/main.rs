@@ -27,9 +27,9 @@ use action_router::ActionRouter;
 use foldit_frontend::DirtyFlags;
 use foldit_runner::Orchestrator;
 use foldit_rs::shared_state::SharedState;
-use viso::band_renderer::BandRenderInfo;
-use viso::engine::ProteinRenderEngine;
-use viso::pull_renderer::PullRenderInfo;
+use viso::renderer::molecular::band::BandRenderInfo;
+use viso::engine::core::ProteinRenderEngine;
+use viso::renderer::molecular::pull::PullRenderInfo;
 use std::sync::Arc;
 use winit::event::MouseScrollDelta;
 use winit::keyboard::ModifiersState;
@@ -444,19 +444,13 @@ impl App {
             frontend.set_loading_progress(None);
         }
         if app_dirty.contains(DirtyFlags::VIEW) {
-            let mode = match engine.view_mode {
-                viso::engine::ViewMode::Tube => foldit_frontend::state::ViewMode::Tube,
-                viso::engine::ViewMode::Ribbon => {
-                    foldit_frontend::state::ViewMode::Ribbon
-                }
-            };
-            frontend.set_view_mode(mode);
+            frontend.set_view_mode(foldit_frontend::state::ViewMode::Ribbon);
 
             frontend.view.options = serde_json::to_value(engine.options()).unwrap_or_default();
 
             let presets_dir = std::path::Path::new("assets/view_presets");
             frontend.view.available_presets =
-                viso::options::Options::list_presets(presets_dir);
+                viso::util::options::Options::list_presets(presets_dir);
             frontend.view.active_preset = engine.active_preset.clone();
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {

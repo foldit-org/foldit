@@ -14,8 +14,8 @@ use foldit_runner::Orchestrator;
 use foldit_rs::shared_state::SharedState;
 use glam::Vec3;
 use viso::animation::AnimationAction;
-use viso::engine::ProteinRenderEngine;
-use viso::scene::GroupId;
+use viso::engine::core::ProteinRenderEngine;
+use viso::engine::scene::GroupId;
 
 /// Handle a single backend update. Called by the frame loop after draining
 /// triple buffers via SharedState.

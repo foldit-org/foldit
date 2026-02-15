@@ -7,14 +7,14 @@
 use crate::backend_handler;
 use foldit_frontend::DirtyFlags;
 use foldit_rs::shared_state::SharedState;
-use viso::band_renderer::BandRenderInfo;
-use viso::scene::Focus;
+use viso::renderer::molecular::band::BandRenderInfo;
+use viso::engine::scene::Focus;
 use foldit_runner::orchestrator::{EntityId, OpType};
 use foldit_runner::Orchestrator;
 use glam::Vec3;
 
 use viso::animation::AnimationAction;
-use viso::engine::ProteinRenderEngine;
+use viso::engine::core::ProteinRenderEngine;
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
