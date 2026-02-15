@@ -34,10 +34,11 @@ pub(crate) fn handle_backend_update(
             cycle,
             message,
             converged,
+            per_residue_scores,
         } => {
             handle_rosetta_coords(
                 engine, shared, orchestrator, ui_dirty, latest_score,
-                coords_bytes, score, cycle, message, converged,
+                coords_bytes, score, cycle, message, converged, per_residue_scores,
             );
         }
         BackendUpdate::MLIntermediate {
@@ -99,6 +100,7 @@ fn handle_rosetta_coords(
     cycle: u32,
     message: Option<String>,
     converged: bool,
+    per_residue_scores: Option<Vec<f64>>,
 ) {
     *latest_score = Some(score);
     *ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
@@ -129,6 +131,7 @@ fn handle_rosetta_coords(
                     group.name = name;
                     group.invalidate_render_cache();
                 }
+                cache_per_residue_scores(engine, apply_target, &per_residue_scores);
                 engine.sync_scene_to_renderers(Some(AnimationAction::Mutation));
                 if let Some(ref mut orch) = orchestrator {
                     orch.unlock(mpnn_eid);
@@ -166,12 +169,18 @@ fn handle_rosetta_coords(
             .map(|(id, chains)| (GroupId(id.0), chains.clone()))
             .collect();
 
+        // Cache scores on all groups BEFORE sync so they're in PerGroupData
+        for (group_id, _) in &chain_ids {
+            cache_per_residue_scores(engine, *group_id, &per_residue_scores);
+        }
         match engine.apply_combined_update(
             &coords_bytes,
             &chain_ids,
             AnimationAction::Wiggle,
         ) {
-            Ok(()) => log::info!("Successfully updated all structures in session"),
+            Ok(()) => {
+                log::info!("Successfully updated all structures in session");
+            }
             Err(e) => log::warn!("Failed to apply combined update: {}", e),
         }
     } else {
@@ -191,6 +200,7 @@ fn handle_rosetta_coords(
                         }
                         group.invalidate_render_cache();
                     }
+                    cache_per_residue_scores(engine, id, &per_residue_scores);
                     engine.sync_scene_to_renderers(Some(AnimationAction::Wiggle));
                 }
                 Err(e) => log::warn!("Failed to update structure from Rosetta: {}", e),
@@ -533,6 +543,20 @@ fn update_animation_structure_from_backend(
     }
 
     log::warn!("No coordinates in update, skipping");
+}
+
+/// Cache per-residue scores on a group (scores are stored as raw data;
+/// the scene processor derives and caches colors from them).
+fn cache_per_residue_scores(
+    engine: &mut ProteinRenderEngine,
+    group_id: GroupId,
+    per_residue_scores: &Option<Vec<f64>>,
+) {
+    if let Some(scores) = per_residue_scores {
+        if let Some(group) = engine.group_mut(group_id) {
+            group.set_per_residue_scores(Some(scores.clone()));
+        }
+    }
 }
 
 // ── Helpers ──

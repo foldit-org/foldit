@@ -1,3 +1,6 @@
-frontend/
 database/
+frontend/
+models/
 libs/*
+view_presets/*
+!view_presets/default.toml

@@ -37,6 +37,8 @@ pub(crate) struct AppRunner {
     init_pending: bool,
     /// Timeout for webview readiness — initialize anyway if webview takes too long
     init_deadline: Option<Instant>,
+    /// Shared log buffer from tee_logger (drained each frame into frontend state)
+    log_buffer: crate::tee_logger::LogBuffer,
     #[cfg(debug_assertions)]
     dev_server: Option<std::process::Child>,
     #[cfg(debug_assertions)]
@@ -44,7 +46,7 @@ pub(crate) struct AppRunner {
 }
 
 impl AppRunner {
-    fn new(app: App, frontend: foldit_frontend::FrontendState) -> Self {
+    fn new(app: App, frontend: foldit_frontend::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> Self {
         Self {
             app,
             window: None,
@@ -56,6 +58,7 @@ impl AppRunner {
             last_render_size: (0, 0),
             init_pending: false,
             init_deadline: None,
+            log_buffer,
             #[cfg(debug_assertions)]
             dev_server: None,
             #[cfg(debug_assertions)]
@@ -113,6 +116,14 @@ impl AppRunner {
 
     /// Push dirty FrontendState sections to the webview.
     fn push_dirty_state_to_webview(&mut self) {
+        // Drain log buffer into frontend state
+        if let Ok(buf) = self.log_buffer.lock() {
+            if !buf.is_empty() {
+                let log_text: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
+                self.frontend.set_log(log_text);
+            }
+        }
+
         // Transfer App domain state into FrontendState
         self.app.populate_frontend(&mut self.frontend);
 
@@ -708,8 +719,8 @@ impl Drop for AppRunner {
 }
 
 /// Run the application event loop. This function never returns.
-pub(crate) fn run(app: App, frontend: foldit_frontend::FrontendState) -> ! {
-    let mut runner = AppRunner::new(app, frontend);
+pub(crate) fn run(app: App, frontend: foldit_frontend::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> ! {
+    let mut runner = AppRunner::new(app, frontend, log_buffer);
 
     // In debug, spawn dev server and wait for it before opening the window.
     #[cfg(debug_assertions)]

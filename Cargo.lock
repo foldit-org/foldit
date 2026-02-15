@@ -1215,6 +1215,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytemuck",
+ "env_filter",
  "env_logger",
  "foldit-conv",
  "foldit-frontend",

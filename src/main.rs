@@ -20,6 +20,7 @@
 
 mod action_router;
 mod backend_handler;
+mod tee_logger;
 mod window;
 
 use action_router::ActionRouter;
@@ -423,6 +424,9 @@ impl App {
             None => return,
         };
 
+        // FPS changes every frame — always push it
+        frontend.set_fps(engine.frame_timing.fps());
+
         let app_dirty = self.router.take_ui_dirty();
         if app_dirty.is_empty() {
             return;
@@ -475,12 +479,16 @@ impl App {
             size.height,
             scale
         );
-        let engine = pollster::block_on(ProteinRenderEngine::new_with_path(
+        let mut engine = pollster::block_on(ProteinRenderEngine::new_with_path(
             window.clone(),
             (size.width, size.height),
             scale,
             &self.pdb_path,
         ));
+
+        // Load default view preset if available
+        let presets_dir = std::path::Path::new("assets/view_presets");
+        engine.load_preset("default", presets_dir);
 
         engine.context.set_surface_scale(scale);
 
@@ -579,11 +587,9 @@ fn update_all_visualizations(engine: &mut ProteinRenderEngine, router: &ActionRo
 // Entry point
 // ---------------------------------------------------------------------------
 fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("info,wgpu_hal::vulkan::instance=off,naga=warn"),
-    )
-    .init();
+    let log_buffer = tee_logger::init(
+        "info,wgpu_hal::vulkan::instance=off,naga=warn",
+    );
 
     let input = std::env::args()
         .nth(1)
@@ -602,5 +608,5 @@ fn main() {
     log::info!("Loading structure from: {}", pdb_path);
 
     let app = App::new(pdb_path);
-    window::run(app, foldit_frontend::FrontendState::new());
+    window::run(app, foldit_frontend::FrontendState::new(), log_buffer);
 }

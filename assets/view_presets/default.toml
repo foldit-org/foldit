@@ -6,28 +6,38 @@ show_solvent = false
 lipid_mode = "coarse"
 show_sidechains = true
 show_hydrogens = false
+backbone_color_mode = "secondary_structure"
 
 [lighting]
 light1_dir = [-0.3, 0.9, -0.3]
 light2_dir = [0.3, 0.6, -0.4]
-light1_intensity = 0.7
-light2_intensity = 0.3
-ambient = 0.12
+light1_intensity = 2.0
+light2_intensity = 1.1
+ambient = 0.45
 specular_intensity = 0.35
 shininess = 38.0
-rim_power = 3.0
+rim_power = 5.0
 rim_intensity = 0.3
 rim_directionality = 0.3
 rim_color = [1.0, 0.85, 0.7]
-ibl_strength = 1.0
+ibl_strength = 0.6
 rim_dir = [0.0, -0.7, 0.5]
+roughness = 0.35
+metalness = 0.15
 
 [post_processing]
 outline_thickness = 1.0
 outline_strength = 0.7
 ao_strength = 0.85
+ao_radius = 0.5
+ao_bias = 0.025
+ao_power = 2.0
 fog_start = 100.0
 fog_density = 0.005
+exposure = 1.0
+normal_outline_strength = 0.5
+bloom_intensity = 0.0
+bloom_threshold = 1.0
 
 [camera]
 fovy = 45.0
