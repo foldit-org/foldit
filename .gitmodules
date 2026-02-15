@@ -9,4 +9,4 @@
 	url = https://github.com/petridecus/foldit-frontend
 [submodule "crates/viso"]
 	path = crates/viso
-	url = git@github.com:petridecus/viso.git
+	url = https://github.com/petridecus/viso
