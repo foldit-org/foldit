@@ -6,7 +6,7 @@ show_solvent = false
 lipid_mode = "coarse"
 show_sidechains = true
 show_hydrogens = false
-backbone_color_mode = "secondary_structure"
+backbone_color_mode = "score"
 
 [lighting]
 light1_dir = [-0.3, 0.9, -0.3]
