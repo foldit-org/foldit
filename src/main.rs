@@ -453,6 +453,7 @@ impl App {
         use viso::engine::scene::Focus;
 
         let focus = *engine.focus();
+        log::info!("MPNN: focus = {:?}", focus);
 
         // Determine target and extract assembly bytes based on focus.
         // Always send full group assembly bytes — focus determines what gets designed.
@@ -482,6 +483,16 @@ impl App {
             log::warn!("No coords available for sequence design");
             return;
         };
+
+        let group_entity_count = engine.group(target_id).map(|g| g.entities().len()).unwrap_or(0);
+        let group_name = engine.group(target_id).map(|g| g.name().to_string());
+        log::info!(
+            "MPNN: target_id={:?}, group='{}', {} entities, {} assembly bytes",
+            target_id,
+            group_name.as_deref().unwrap_or("?"),
+            group_entity_count,
+            assembly_bytes.len(),
+        );
 
         // Role validation: target must be designable
         if let Some(meta) = shared.entity_meta(target_id) {

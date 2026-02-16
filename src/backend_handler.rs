@@ -13,6 +13,7 @@ use foldit_runner::orchestrator::{BackendUpdate, EntityId, OpType};
 use foldit_runner::Orchestrator;
 use foldit_rs::shared_state::SharedState;
 use glam::Vec3;
+use std::collections::HashMap;
 use viso::animation::AnimationAction;
 use viso::engine::core::ProteinRenderEngine;
 use viso::engine::scene::GroupId;
@@ -69,12 +70,12 @@ pub(crate) fn handle_backend_update(
             );
         }
         BackendUpdate::StructureDesignResult {
-            backbone_chains,
+            entities,
             confidence,
         } => {
             handle_structure_design_result(
                 engine, shared, orchestrator, ui_dirty,
-                backbone_chains, confidence,
+                entities, confidence,
             );
         }
         BackendUpdate::Error { message } => {
@@ -113,14 +114,16 @@ fn handle_rosetta_coords(
     });
 
     if let Some(mpnn_eid) = mpnn_entity {
-        log::info!(
-            "MPNN update received: {} bytes, score: {:.1}",
-            coords_bytes.len(),
-            score
-        );
-
         // Apply to the group that was locked for MPNN
         let apply_target = GroupId(mpnn_eid.0);
+        let group_name = engine.group(apply_target).map(|g| g.name().to_string());
+        log::info!(
+            "MPNN update received: {} bytes, score: {:.1}, target={:?} ({})",
+            coords_bytes.len(),
+            score,
+            apply_target,
+            group_name.as_deref().unwrap_or("?"),
+        );
 
         match entities_from_coords_bytes(&coords_bytes) {
             Ok(entities) => {
@@ -132,7 +135,13 @@ fn handle_rosetta_coords(
                     group.invalidate_render_cache();
                 }
                 cache_per_residue_scores(engine, apply_target, &per_residue_scores);
-                engine.sync_scene_to_renderers(Some(AnimationAction::Mutation));
+
+                // Only animate the MPNN target entity with CollapseExpand;
+                // all other entities snap.
+                let mut entity_actions = HashMap::new();
+                entity_actions.insert(apply_target, AnimationAction::Mutation);
+                engine.sync_scene_to_renderers_targeted(entity_actions);
+
                 if let Some(ref mut orch) = orchestrator {
                     orch.unlock(mpnn_eid);
                 }
@@ -376,12 +385,12 @@ fn handle_structure_design_result(
     shared: &mut SharedState,
     orchestrator: &mut Option<Orchestrator>,
     ui_dirty: &mut DirtyFlags,
-    backbone_chains: Vec<Vec<Vec3>>,
+    entities: Vec<foldit_conv::coords::entity::MoleculeEntity>,
     confidence: f32,
 ) {
     log::info!(
-        "Structure design complete! {} chains, confidence: {:.2}",
-        backbone_chains.len(),
+        "Structure design complete! {} entities, confidence: {:.2}",
+        entities.len(),
         confidence
     );
 
@@ -390,9 +399,8 @@ fn handle_structure_design_result(
         orch.clear_session();
     }
 
+    let had_animation = shared.animation().is_some();
     if let Some(anim_id) = shared.animation() {
-        let coords = backbone_chains_to_coords(&backbone_chains);
-        let entities = split_into_entities(&coords);
         if let Some(group) = engine.group_mut(anim_id) {
             group.set_entities(entities);
             group.name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
@@ -401,13 +409,9 @@ fn handle_structure_design_result(
         }
         shared.promote_animation_to_design(anim_id, confidence);
     } else {
-        let coords = backbone_chains_to_coords(&backbone_chains);
-        let entities = split_into_entities(&coords);
         let name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
         let id = engine.load_entities(entities, &name, false);
         log::info!("Added designed structure {:?} to scene", id);
-        // No source info available here (no animation to promote), register as a design
-        // from the loaded entity
         if let Some(loaded) = shared.loaded_entity() {
             shared.register_animation(id, loaded);
             shared.promote_animation_to_design(id, confidence);
@@ -422,7 +426,9 @@ fn handle_structure_design_result(
     }
 
     engine.sync_scene_to_renderers(Some(AnimationAction::Diffusion));
-    engine.fit_camera_to_focus();
+    if !had_animation {
+        engine.fit_camera_to_focus();
+    }
 
     *ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
 }
@@ -582,19 +588,55 @@ fn positions_to_backbone_chains(positions: &[Vec3]) -> Vec<Vec<Vec3>> {
     if positions.is_empty() {
         return vec![];
     }
-    let mut chain: Vec<Vec3> = Vec::new();
+
+    // Maximum C→N distance (Å) before we split into a new chain.
+    // A normal peptide bond is ~1.33 Å; during noisy early diffusion steps
+    // distances stretch to 5-8 Å.  Real inter-chain gaps in multi-chain
+    // proteins (PPI, protein-ligand, etc.) are typically > 15 Å.
+    const CHAIN_BREAK_DIST_SQ: f32 = 10.0 * 10.0; // 10 Å squared
+
+    let mut chains: Vec<Vec<Vec3>> = Vec::new();
+    let mut current_chain: Vec<Vec3> = Vec::new();
+
     for chunk in positions.chunks(4) {
-        for (i, &pos) in chunk.iter().enumerate() {
-            if i < 3 {
-                chain.push(pos);
+        // Each chunk is [N, CA, C, O]; we keep only [N, CA, C].
+        if chunk.len() < 3 {
+            continue;
+        }
+        let n_pos = chunk[0];
+        let ca_pos = chunk[1];
+        let c_pos = chunk[2];
+
+        // Detect chain break: distance from previous C to this N.
+        // current_chain stores [N, CA, C, N, CA, C, ...] so the last
+        // element of current_chain is the previous residue's C atom.
+        if !current_chain.is_empty() {
+            let prev_c = *current_chain.last().unwrap();
+            let dx = n_pos.x - prev_c.x;
+            let dy = n_pos.y - prev_c.y;
+            let dz = n_pos.z - prev_c.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            if dist_sq > CHAIN_BREAK_DIST_SQ {
+                chains.push(std::mem::take(&mut current_chain));
             }
         }
+
+        current_chain.push(n_pos);
+        current_chain.push(ca_pos);
+        current_chain.push(c_pos);
     }
-    if chain.is_empty() {
-        vec![]
-    } else {
-        vec![chain]
+
+    if !current_chain.is_empty() {
+        chains.push(current_chain);
     }
+
+    // Discard fragment chains (< 5 residues = 15 backbone atoms).
+    // During noisy early diffusion steps, false chain breaks produce small
+    // fragments (2-4 residues) that render as floating sticks.  Real
+    // protein chains in RFD3 designs are ≥ 10+ residues.
+    chains.retain(|c| c.len() >= 15);
+
+    chains
 }
 
 /// Serialize a group's protein coordinates to COORDS bytes.

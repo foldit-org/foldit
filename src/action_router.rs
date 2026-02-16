@@ -190,7 +190,7 @@ impl ActionRouter {
             ActionId::RunDiffusion => {
                 Some(foldit_frontend::ParameterizedAction::RunStructureDesign {
                     length: "100-100".to_string(),
-                    num_steps: 200,
+                    num_steps: 50,
                 })
             }
             ActionId::Undo | ActionId::Redo => {
