@@ -119,6 +119,47 @@ impl SharedState {
         });
     }
 
+    /// Register a loaded entity with roles derived from its molecule entities.
+    ///
+    /// Inspects the entity types to determine capabilities:
+    /// - Groups containing protein are foldable and designable
+    /// - Groups that are entirely water/ion/solvent are ambient (non-interactive)
+    pub fn register_loaded_with_entities(
+        &mut self,
+        id: GroupId,
+        reference_ca: Vec<Vec3>,
+        entities: &[foldit_conv::coords::entity::MoleculeEntity],
+    ) {
+        use foldit_conv::coords::entity::MoleculeType;
+
+        let has_protein = entities.iter().any(|e| e.molecule_type == MoleculeType::Protein);
+        let all_ambient = !entities.is_empty() && entities.iter().all(|e| {
+            matches!(e.molecule_type, MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent)
+        });
+
+        let role = if all_ambient {
+            EntityRole { foldable: false, designable: false, ambient: true }
+        } else {
+            EntityRole {
+                foldable: has_protein,
+                designable: has_protein,
+                ambient: false,
+            }
+        };
+
+        self.entities.insert(id, EntityMeta {
+            origin: EntityOrigin::Loaded,
+            role,
+            reference_ca: Some(reference_ca),
+            designed_sequences: Vec::new(),
+        });
+    }
+
+    /// Get entity metadata (for building EntityContext).
+    pub fn entity_meta(&self, id: GroupId) -> Option<&EntityMeta> {
+        self.entities.get(&id)
+    }
+
     /// Register an animation entity (transient ML intermediate).
     pub fn register_animation(&mut self, id: GroupId, source: GroupId) {
         self.entities.insert(id, EntityMeta {

@@ -240,12 +240,17 @@ impl AppRunner {
             .spawn();
 
         #[cfg(unix)]
-        let result = Command::new("pnpm")
-            .arg("dev")
-            .current_dir(frontend_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn();
+        let result = {
+            use std::os::unix::process::CommandExt;
+            Command::new("pnpm")
+                .arg("dev")
+                .current_dir(frontend_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .process_group(0) // Own process group so we can kill the whole tree
+                .spawn()
+        };
 
         match result {
             Ok(child) => {
@@ -285,9 +290,16 @@ impl AppRunner {
                     .stderr(std::process::Stdio::null())
                     .status();
             }
-            #[cfg(not(windows))]
+            #[cfg(unix)]
             {
-                let _ = child.kill();
+                // Kill the entire process group (pnpm + node/vite children).
+                // The child was spawned with process_group(0) so its pid IS
+                // the pgid. Negative pid tells kill(1) to signal the group.
+                let _ = std::process::Command::new("kill")
+                    .args(["--", &format!("-{}", pid)])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
             }
             let _ = child.wait();
         }

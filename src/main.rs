@@ -6,7 +6,7 @@
 //! Controls:
 //!   W - Wiggle (Rosetta minimize, toggle on/off)
 //!   S - Shake (Rosetta repack sidechains, toggle on/off)
-//!   P - Predict (SimpleFold structure prediction)
+//!   P - Predict (RoseTTAFold3 structure prediction)
 //!   M - MPNN (design sequence for structure)
 //!   R - RFDiffusion3 (design new structure)
 //!   I - Toggle water and ion visibility
@@ -282,7 +282,9 @@ impl App {
 
     pub(crate) fn handle_trigger_action(&mut self, action: foldit_frontend::ActionId) {
         if let Some(engine) = &mut self.engine {
-            self.router.handle_trigger_action(engine, &mut self.shared_state, action);
+            if let Some(pa) = self.router.handle_trigger_action(engine, &mut self.shared_state, action) {
+                self.handle_parameterized_action(pa);
+            }
         }
     }
 
@@ -366,7 +368,316 @@ impl App {
                 }
                 self.router.ui_dirty |= DirtyFlags::VIEW;
             }
+            ParameterizedAction::RunSequenceDesign { temperature, num_sequences } => {
+                Self::run_sequence_design(
+                    &mut self.router, &self.shared_state, engine,
+                    temperature, num_sequences,
+                );
+            }
+            ParameterizedAction::RunStructureDesign { length, num_steps } => {
+                Self::run_structure_design(
+                    &mut self.router, &self.shared_state, engine,
+                    &length, num_steps,
+                );
+            }
         }
+    }
+
+    // ── ML operations (parameterized) ──
+
+    /// Build entity context data for a group (for multi-entity ML operations).
+    fn build_entity_context(
+        engine: &ProteinRenderEngine,
+        shared: &SharedState,
+        id: viso::engine::scene::GroupId,
+    ) -> Option<foldit_runner::orchestrator::EntityContextData> {
+        use foldit_conv::coords::entity::MoleculeType;
+        use foldit_runner::orchestrator::{EntityContextData, EntityInfoData};
+
+        let group = engine.group(id)?;
+        let assembly_coords = foldit_conv::types::assembly::assembly_bytes(group.entities()).ok()?;
+        let meta = shared.entity_meta(id);
+
+        let entities = group.entities().iter().map(|e| {
+            let mol_str = match e.molecule_type {
+                MoleculeType::Protein => "protein",
+                MoleculeType::DNA => "dna",
+                MoleculeType::RNA => "rna",
+                MoleculeType::Ligand => "ligand",
+                MoleculeType::Ion => "ion",
+                MoleculeType::Water => "water",
+                MoleculeType::Lipid => "lipid",
+                MoleculeType::Cofactor => "cofactor",
+                MoleculeType::Solvent => "solvent",
+            };
+
+            // Count residues (unique res_nums)
+            let mut res_nums: Vec<i32> = e.coords.res_nums.iter().copied().collect();
+            res_nums.dedup();
+            let residue_count = res_nums.len() as u32;
+
+            let chain_id = e.coords.chain_ids.first()
+                .map(|&c| String::from(c as char))
+                .unwrap_or_default();
+
+            let is_protein = e.molecule_type == MoleculeType::Protein;
+            let is_ambient = matches!(e.molecule_type,
+                MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
+
+            EntityInfoData {
+                entity_id: e.entity_id,
+                molecule_type: mol_str.to_string(),
+                chain_id,
+                residue_count,
+                designable: is_protein && meta.map_or(true, |m| m.role.designable),
+                foldable: is_protein && meta.map_or(true, |m| m.role.foldable),
+                fixed: !is_protein && !is_ambient,
+            }
+        }).collect();
+
+        Some(EntityContextData {
+            entities,
+            assembly_coords,
+        })
+    }
+
+    fn run_sequence_design(
+        router: &mut ActionRouter,
+        shared: &SharedState,
+        engine: &mut ProteinRenderEngine,
+        temperature: f32,
+        num_sequences: u32,
+    ) {
+        use foldit_runner::orchestrator::{EntityContextData, EntityInfoData, EntityId, OpType};
+        use foldit_conv::coords::entity::MoleculeType;
+        use viso::engine::scene::Focus;
+
+        let focus = *engine.focus();
+
+        // Determine target and extract assembly bytes based on focus.
+        // Always send full group assembly bytes — focus determines what gets designed.
+        let (target_id, assembly_bytes) = match focus {
+            Focus::Entity(eid) => {
+                // Entity focus: find the containing group, send whole group assembly
+                match backend_handler::get_entity_coords_bytes(engine, eid) {
+                    Some((gid, _entity_bytes)) => {
+                        (gid, backend_handler::get_group_assembly_bytes(engine, gid))
+                    }
+                    None => {
+                        log::warn!("No coords for entity {}", eid);
+                        return;
+                    }
+                }
+            }
+            _ => {
+                let Some(gid) = shared.lock_target(&focus) else {
+                    log::warn!("No structure available for sequence design");
+                    return;
+                };
+                (gid, backend_handler::get_group_assembly_bytes(engine, gid))
+            }
+        };
+
+        let Some(assembly_bytes) = assembly_bytes else {
+            log::warn!("No coords available for sequence design");
+            return;
+        };
+
+        // Role validation: target must be designable
+        if let Some(meta) = shared.entity_meta(target_id) {
+            if meta.role.ambient {
+                log::warn!("Cannot run sequence design on ambient entity group (water/ion)");
+                return;
+            }
+            if !meta.role.designable {
+                log::warn!("Target entity group is not designable");
+                return;
+            }
+        }
+
+        // Build focus-aware entity context:
+        // - Focus::Entity → only that entity's chains are designable
+        // - Focus::Group/Session → all protein chains are designable
+        let entity_context = if let Some(group) = engine.group(target_id) {
+            let focused_entity_id = match focus {
+                Focus::Entity(eid) => Some(eid),
+                _ => None,
+            };
+
+            let entities: Vec<EntityInfoData> = group.entities().iter().map(|e| {
+                let is_protein = e.molecule_type == MoleculeType::Protein;
+                let is_ambient = matches!(e.molecule_type,
+                    MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
+                let mol_str = match e.molecule_type {
+                    MoleculeType::Protein => "protein",
+                    MoleculeType::DNA => "dna",
+                    MoleculeType::RNA => "rna",
+                    MoleculeType::Ligand => "ligand",
+                    MoleculeType::Ion => "ion",
+                    MoleculeType::Water => "water",
+                    MoleculeType::Lipid => "lipid",
+                    MoleculeType::Cofactor => "cofactor",
+                    MoleculeType::Solvent => "solvent",
+                };
+                let chain_id = e.coords.chain_ids.first()
+                    .map(|&c| String::from(c as char))
+                    .unwrap_or_default();
+
+                let mut res_nums: Vec<i32> = e.coords.res_nums.iter().copied().collect();
+                res_nums.dedup();
+
+                // Focus-aware designability: when focusing on a specific entity,
+                // only that entity's protein chains are designable
+                let designable = if let Some(focused_eid) = focused_entity_id {
+                    is_protein && e.entity_id == focused_eid
+                } else {
+                    is_protein
+                };
+                let fixed = if let Some(focused_eid) = focused_entity_id {
+                    // Other proteins become fixed context, non-protein non-ambient are fixed
+                    (is_protein && e.entity_id != focused_eid) || (!is_protein && !is_ambient)
+                } else {
+                    !is_protein && !is_ambient
+                };
+
+                EntityInfoData {
+                    entity_id: e.entity_id,
+                    molecule_type: mol_str.to_string(),
+                    chain_id,
+                    residue_count: res_nums.len() as u32,
+                    designable,
+                    foldable: is_protein,
+                    fixed,
+                }
+            }).collect();
+
+            let designed: Vec<&str> = entities.iter()
+                .filter(|e| e.designable)
+                .map(|e| e.chain_id.as_str())
+                .collect();
+            let fixed: Vec<&str> = entities.iter()
+                .filter(|e| e.fixed)
+                .map(|e| e.chain_id.as_str())
+                .collect();
+            log::info!(
+                "MPNN entity context: designed={:?}, fixed={:?}",
+                designed, fixed,
+            );
+
+            Some(EntityContextData {
+                entities,
+                assembly_coords: assembly_bytes.clone(),
+            })
+        } else {
+            None
+        };
+
+        let Some(ref mut orch) = router.orchestrator else {
+            log::warn!("Orchestrator not initialized");
+            return;
+        };
+
+        if orch.is_locked(EntityId(target_id.0)) {
+            let op = orch.get_op_type(EntityId(target_id.0));
+            log::warn!("Structure is locked by {:?}, cannot start sequence design", op);
+            return;
+        }
+
+        if orch.try_lock(EntityId(target_id.0), OpType::MLSequenceDesign).is_none() {
+            log::warn!("Failed to acquire lock for sequence design");
+            return;
+        }
+
+        let target_name = engine
+            .group(target_id)
+            .map(|g| g.name().to_string())
+            .unwrap_or_default();
+
+        log::info!(
+            "Starting sequence design on '{}' ({} bytes, T={}, n={})...",
+            target_name, assembly_bytes.len(), temperature, num_sequences
+        );
+
+        let result = if let Some(ctx) = entity_context {
+            orch.design_sequence_with_context(assembly_bytes, temperature, num_sequences, ctx)
+        } else {
+            orch.design_sequence(assembly_bytes, temperature, num_sequences)
+        };
+
+        if let Err(e) = result {
+            log::error!("Failed to submit sequence design: {}", e);
+            orch.unlock(EntityId(target_id.0));
+            return;
+        }
+
+        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+    }
+
+    fn run_structure_design(
+        router: &mut ActionRouter,
+        shared: &SharedState,
+        engine: &ProteinRenderEngine,
+        length: &str,
+        num_steps: u32,
+    ) {
+        use foldit_runner::orchestrator::{EntityId, OpType};
+
+        let Some(target_id) = shared.loaded_entity() else {
+            log::warn!("No structure loaded, cannot start structure design");
+            return;
+        };
+
+        // Role validation: target must be foldable
+        if let Some(meta) = shared.entity_meta(target_id) {
+            if meta.role.ambient {
+                log::warn!("Cannot run structure design on ambient entity group (water/ion)");
+                return;
+            }
+            if !meta.role.foldable {
+                log::warn!("Target entity group is not foldable");
+                return;
+            }
+        }
+
+        // Build entity context with assembly bytes for assembly-aware design
+        let entity_context = Self::build_entity_context(engine, shared, target_id);
+
+        let Some(ref mut orch) = router.orchestrator else {
+            log::warn!("Orchestrator not initialized");
+            return;
+        };
+
+        if orch.is_locked(EntityId(target_id.0)) {
+            let op = orch.get_op_type(EntityId(target_id.0));
+            log::warn!("Structure is locked by {:?}, cannot start structure design", op);
+            return;
+        }
+
+        if orch.try_lock(EntityId(target_id.0), OpType::MLStructureDesign).is_none() {
+            log::warn!("Failed to acquire lock for structure design");
+            return;
+        }
+
+        log::info!("Starting structure design (length={}, steps={})...", length, num_steps);
+
+        let result = if let Some(ctx) = entity_context {
+            log::info!(
+                "Passing assembly context ({} entities, {} bytes)",
+                ctx.entities.len(),
+                ctx.assembly_coords.len(),
+            );
+            orch.design_structure_with_context(length.to_string(), num_steps, ctx)
+        } else {
+            orch.design_structure(length.to_string(), num_steps)
+        };
+
+        if let Err(e) = result {
+            log::error!("Failed to submit structure design: {}", e);
+            orch.unlock(EntityId(target_id.0));
+            return;
+        }
+
+        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
     }
 
     // ── Native input (when webview is not ready) ──
@@ -588,6 +899,10 @@ fn main() {
     let input = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "1bfe".to_string());
+
+    // Install signal handlers that kill ML worker process groups on
+    // SIGINT/SIGTERM, preventing orphaned Python subprocesses.
+    foldit_runner::install_cleanup_signal_handlers();
 
     log::info!("Foldit starting...");
 

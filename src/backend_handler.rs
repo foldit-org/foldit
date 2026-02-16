@@ -274,7 +274,7 @@ fn handle_ml_predict_result(
 
         match entities_from_coords_bytes(&aligned_coords_bytes) {
             Ok(entities) => {
-                let name = format!("SimpleFold ({:.0}%)", confidence * 100.0);
+                let name = format!("RF3 ({:.0}%)", confidence * 100.0);
                 if let Some(group) = engine.group_mut(orig_id) {
                     group.set_entities(entities);
                     group.name = name;
@@ -564,10 +564,18 @@ fn cache_per_residue_scores(
 fn entities_from_coords_bytes(
     coords_bytes: &[u8],
 ) -> Result<Vec<foldit_conv::coords::entity::MoleculeEntity>, String> {
-    let coords = deserialize_coords(coords_bytes)
-        .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
-    let coords = foldit_conv::coords::protein_only(&coords);
-    Ok(split_into_entities(&coords))
+    // Auto-detect ASSEM01 (entity-aware) vs COORDS (flat) format
+    if coords_bytes.len() >= 8
+        && &coords_bytes[0..8] == foldit_conv::types::coords::ASSEMBLY_MAGIC
+    {
+        foldit_conv::types::coords::deserialize_assembly(coords_bytes)
+            .map_err(|e| format!("Failed to parse ASSEM01: {:?}", e))
+    } else {
+        let coords = deserialize_coords(coords_bytes)
+            .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
+        let coords = foldit_conv::coords::protein_only(&coords);
+        Ok(split_into_entities(&coords))
+    }
 }
 
 fn positions_to_backbone_chains(positions: &[Vec3]) -> Vec<Vec<Vec3>> {
@@ -594,6 +602,12 @@ pub(crate) fn get_group_coords_bytes(engine: &ProteinRenderEngine, id: GroupId) 
     let group = engine.group(id)?;
     let protein_coords = group.protein_coords()?;
     serialize_coords(&protein_coords).ok()
+}
+
+/// Serialize all entities in a group to ASSEM01 bytes (preserves all entity types).
+pub(crate) fn get_group_assembly_bytes(engine: &ProteinRenderEngine, id: GroupId) -> Option<Vec<u8>> {
+    let group = engine.group(id)?;
+    foldit_conv::types::assembly::assembly_bytes(group.entities()).ok()
 }
 
 /// Serialize a single entity's coordinates to COORDS bytes.

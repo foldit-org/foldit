@@ -4,7 +4,6 @@
 //! user actions to the appropriate backend operations. Does NOT handle
 //! backend output processing, rendering, or frontend state sync.
 
-use crate::backend_handler;
 use foldit_frontend::DirtyFlags;
 use foldit_rs::shared_state::SharedState;
 use viso::renderer::molecular::band::BandRenderInfo;
@@ -175,19 +174,32 @@ impl ActionRouter {
         engine: &mut ProteinRenderEngine,
         shared: &mut SharedState,
         action: foldit_frontend::ActionId,
-    ) {
+    ) -> Option<foldit_frontend::ParameterizedAction> {
         use foldit_frontend::ActionId;
-        match action {
-            ActionId::ToggleWiggle => self.toggle_wiggle(engine, shared),
-            ActionId::ToggleShake => self.toggle_shake(engine, shared),
-            ActionId::RunPrediction => self.run_prediction(engine, shared),
-            ActionId::RunMPNN => self.run_mpnn(engine, shared),
-            ActionId::RunDiffusion => self.run_diffusion(engine, shared),
+        let parameterized = match action {
+            ActionId::ToggleWiggle => { self.toggle_wiggle(engine, shared); None }
+            ActionId::ToggleShake => { self.toggle_shake(engine, shared); None }
+            ActionId::RunPrediction => { self.run_prediction(engine, shared); None }
+            ActionId::RunMPNN => {
+                // Default params — frontend can use ParameterizedAction for custom values
+                Some(foldit_frontend::ParameterizedAction::RunSequenceDesign {
+                    temperature: 0.1,
+                    num_sequences: 4,
+                })
+            }
+            ActionId::RunDiffusion => {
+                Some(foldit_frontend::ParameterizedAction::RunStructureDesign {
+                    length: "100-100".to_string(),
+                    num_steps: 200,
+                })
+            }
             ActionId::Undo | ActionId::Redo => {
                 log::warn!("Undo/Redo not yet implemented");
+                None
             }
-        }
+        };
         self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::UI;
+        parameterized
     }
 
     pub fn cancel_operations(&mut self, engine: &mut ProteinRenderEngine, shared: &mut SharedState) {
@@ -409,7 +421,7 @@ impl ActionRouter {
             if orch.is_locked(EntityId(target_id.0)) {
                 let op = orch.get_op_type(EntityId(target_id.0));
                 log::warn!(
-                    "Structure is locked by {:?}, cannot start SimpleFold",
+                    "Structure is locked by {:?}, cannot start RoseTTAFold3",
                     op
                 );
                 return;
@@ -428,144 +440,37 @@ impl ActionRouter {
             return;
         }
 
+        // Build entity context with assembly bytes for assembly-aware prediction
+        let entity_context = crate::App::build_entity_context(engine, shared, target_id);
+
         let orch = self.orchestrator.as_mut().unwrap();
         if orch
             .try_lock(EntityId(target_id.0), OpType::MLPredict)
             .is_none()
         {
-            log::warn!("Failed to acquire lock for SimpleFold");
+            log::warn!("Failed to acquire lock for RoseTTAFold3");
             return;
         }
 
         let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
         log::info!(
-            "Starting SimpleFold prediction for {} residues...",
+            "Starting RoseTTAFold3 prediction for {} residues...",
             total_residues
         );
 
-        if let Err(e) = orch.predict(None, chains, 3) {
+        let result = if let Some(ctx) = entity_context {
+            log::info!(
+                "Passing assembly context ({} entities, {} bytes)",
+                ctx.entities.len(),
+                ctx.assembly_coords.len(),
+            );
+            orch.predict_with_context(None, chains, 3, ctx)
+        } else {
+            orch.predict(None, chains, 3)
+        };
+
+        if let Err(e) = result {
             log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(EntityId(target_id.0));
-            return;
-        }
-
-        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-    }
-
-    fn run_mpnn(&mut self, engine: &mut ProteinRenderEngine, shared: &SharedState) {
-        let focus = self.focus(engine);
-        log::info!("MPNN focus: {:?}", focus);
-
-        // Determine target group and coords based on focus level:
-        //   Focus::Group  → whole group's protein coords
-        //   Focus::Entity → single entity's coords (isolates to one chain)
-        //   Focus::Session → fallback to loaded entity's coords
-        let (target_id, coords) = match focus {
-            Focus::Entity(eid) => {
-                match backend_handler::get_entity_coords_bytes(engine, eid) {
-                    Some((gid, bytes)) => (gid, Some(bytes)),
-                    None => {
-                        log::warn!("No coords for entity {}", eid);
-                        return;
-                    }
-                }
-            }
-            _ => {
-                let Some(gid) = shared.lock_target(&focus) else {
-                    log::warn!("No structure available for sequence design");
-                    return;
-                };
-                (gid, backend_handler::get_group_coords_bytes(engine, gid))
-            }
-        };
-
-        if self.orchestrator.is_none() {
-            log::warn!("Orchestrator not initialized");
-            return;
-        }
-
-        {
-            let orch = self.orchestrator.as_ref().unwrap();
-            if orch.is_locked(EntityId(target_id.0)) {
-                let op = orch.get_op_type(EntityId(target_id.0));
-                log::warn!("Structure is locked by {:?}, cannot start MPNN", op);
-                return;
-            }
-        }
-
-        {
-            let orch = self.orchestrator.as_mut().unwrap();
-            orch.stop_rosetta();
-            orch.clear_session();
-        }
-
-        let target_name = engine
-            .group(target_id)
-            .map(|g| g.name().to_string())
-            .unwrap_or_default();
-
-        match coords {
-            Some(coords) => {
-                let orch = self.orchestrator.as_mut().unwrap();
-                if orch
-                    .try_lock(EntityId(target_id.0), OpType::MLSequenceDesign)
-                    .is_none()
-                {
-                    log::warn!("Failed to acquire lock for MPNN");
-                    return;
-                }
-
-                log::info!(
-                    "Starting MPNN sequence design on '{}' ({} bytes)...",
-                    target_name,
-                    coords.len()
-                );
-
-                if let Err(e) = orch.design_sequence(coords, 0.1, 4) {
-                    log::error!("Failed to submit MPNN task: {}", e);
-                    orch.unlock(EntityId(target_id.0));
-                    return;
-                }
-
-                self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-            }
-            None => {
-                log::warn!("No coords available for MPNN");
-            }
-        }
-    }
-
-    fn run_diffusion(&mut self, _engine: &mut ProteinRenderEngine, shared: &SharedState) {
-        let Some(target_id) = shared.loaded_entity() else {
-            log::warn!("No structure loaded, cannot start RFD3");
-            return;
-        };
-
-        let Some(ref mut orch) = self.orchestrator else {
-            log::warn!("Orchestrator not initialized");
-            return;
-        };
-
-        if orch.is_locked(EntityId(target_id.0)) {
-            let op = orch.get_op_type(EntityId(target_id.0));
-            log::warn!("Structure is locked by {:?}, cannot start RFD3", op);
-            return;
-        }
-
-        orch.stop_rosetta();
-        orch.clear_session();
-
-        if orch
-            .try_lock(EntityId(target_id.0), OpType::MLStructureDesign)
-            .is_none()
-        {
-            log::warn!("Failed to acquire lock for RFD3");
-            return;
-        }
-
-        log::info!("Starting RFDiffusion3 structure design...");
-        if let Err(e) = orch.design_structure("100-100".to_string(), 50) {
-            log::error!("Failed to submit RFD3 task: {}", e);
             orch.unlock(EntityId(target_id.0));
             return;
         }
