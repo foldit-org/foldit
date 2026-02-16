@@ -1259,6 +1259,7 @@ dependencies = [
  "interprocess",
  "itoa 1.0.17",
  "lexical-core",
+ "libc",
  "log",
  "memchr",
  "ndarray",
