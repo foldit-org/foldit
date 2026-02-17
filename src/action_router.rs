@@ -64,6 +64,35 @@ pub(crate) struct ActionRouter {
     pub last_mouse_pos: (f32, f32),
 }
 
+/// Extract (chain_id, sequence) pairs from a slice of entities.
+/// Merges entity coordinates, filters to protein residues, then extracts sequences.
+pub(crate) fn extract_chains_from_entities_pub(
+    entities: &[foldit_conv::coords::entity::MoleculeEntity],
+) -> Vec<(String, String)> {
+    extract_chains_from_entities(entities)
+}
+
+fn extract_chains_from_entities(
+    entities: &[foldit_conv::coords::entity::MoleculeEntity],
+) -> Vec<(String, String)> {
+    let merged = foldit_conv::coords::entity::merge_entities(entities);
+    let coords = foldit_conv::coords::protein_only(&merged);
+    let (_full_seq, chain_sequences) = foldit_conv::coords::render::extract_sequences(&coords);
+    if !chain_sequences.is_empty() {
+        chain_sequences
+            .iter()
+            .map(|(cid, seq)| (format!("{}", *cid as char), seq.clone()))
+            .collect()
+    } else {
+        let full_seq = _full_seq;
+        if !full_seq.is_empty() {
+            vec![("A".to_string(), full_seq)]
+        } else {
+            vec![]
+        }
+    }
+}
+
 impl ActionRouter {
     pub fn new() -> Self {
         Self {
@@ -191,6 +220,7 @@ impl ActionRouter {
                 Some(foldit_frontend::ParameterizedAction::RunStructureDesign {
                     length: "100-100".to_string(),
                     num_steps: 50,
+                    contig: None,
                 })
             }
             ActionId::Undo | ActionId::Redo => {
@@ -406,8 +436,14 @@ impl ActionRouter {
     // ── ML operations ──
 
     fn run_prediction(&mut self, engine: &mut ProteinRenderEngine, shared: &SharedState) {
-        let Some(target_id) = shared.loaded_entity() else {
-            log::warn!("No structure loaded for prediction");
+        use crate::backend_handler;
+
+        let focus = self.focus(engine);
+        let fallback = shared.loaded_entity();
+        let Some((target_id, entities)) =
+            backend_handler::collect_ml_entities(engine, &focus, fallback)
+        else {
+            log::warn!("No structure available for prediction");
             return;
         };
 
@@ -434,14 +470,21 @@ impl ActionRouter {
             orch.clear_session();
         }
 
-        let chains = self.get_structure_chains(engine, shared);
+        // Extract chains from collected entities
+        let chains = extract_chains_from_entities(&entities);
         if chains.is_empty() {
             log::warn!("No sequence/chains available");
             return;
         }
 
-        // Build entity context with assembly bytes for assembly-aware prediction
-        let entity_context = crate::App::build_entity_context(engine, shared, target_id);
+        let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
+        log::info!(
+            "RF3 prediction: focus={:?}, {} entities, {} total atoms",
+            focus, entities.len(), total_atoms,
+        );
+
+        // Build entity context from the collected entities
+        let entity_context = crate::App::build_entity_context(&entities, shared, target_id);
 
         let orch = self.orchestrator.as_mut().unwrap();
         if orch

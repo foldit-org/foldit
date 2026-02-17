@@ -8,11 +8,12 @@
 //!   S - Shake (Rosetta repack sidechains, toggle on/off)
 //!   P - Predict (RoseTTAFold3 structure prediction)
 //!   M - MPNN (design sequence for structure)
-//!   R - RFDiffusion3 (design new structure)
+//!   R - Toggle auto-rotate (turntable spin)
 //!   I - Toggle water and ion visibility
 //!   Q - Recenter camera on focused entity
 //!   T - Toggle trajectory playback (load with --trajectory <path.dcd>)
 //!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
+//!   ` (backtick) - Reset focus to full scene
 //!   Esc - Cancel operation / clear selection / clear bands
 //!   Left-drag on residue - Pull (coming soon)
 //!   Right-drag residue to residue - Create band
@@ -185,6 +186,17 @@ impl App {
                     engine.fit_camera_to_focus();
                     self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
                 }
+                "toggle_auto_rotate" => {
+                    let on = engine.camera_controller.toggle_auto_rotate();
+                    log::info!("Auto-rotate: {}", if on { "on" } else { "off" });
+                }
+                "reset_focus" => {
+                    engine.scene.set_focus(viso::engine::scene::Focus::Session);
+                    engine.fit_camera_to_focus();
+                    self.router.update_rosetta_locks(engine, &self.shared_state);
+                    self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                    log::info!("Focus: Session (all structures)");
+                }
                 "cancel" => self.router.cancel_operations(engine, &mut self.shared_state),
                 other => {
                     log::debug!("Unknown keybinding action: {}", other);
@@ -253,11 +265,21 @@ impl App {
                         "KeyI" => { engine.toggle_ions(); }
                         "KeyU" => { engine.toggle_waters(); }
                         "KeyO" => { engine.toggle_solvent(); }
+                        "KeyR" => {
+                            let on = engine.camera_controller.toggle_auto_rotate();
+                            log::info!("Auto-rotate: {}", if on { "on" } else { "off" });
+                        }
                         "KeyL" => { engine.toggle_lipids(); }
                         "Tab" => {
                             engine.cycle_focus();
                             self.router.update_rosetta_locks(engine, &self.shared_state);
                             engine.fit_camera_to_focus();
+                            self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                        }
+                        "Backquote" => {
+                            engine.scene.set_focus(viso::engine::scene::Focus::Session);
+                            engine.fit_camera_to_focus();
+                            self.router.update_rosetta_locks(engine, &self.shared_state);
                             self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
                         }
                         "Escape" => {
@@ -374,10 +396,16 @@ impl App {
                     temperature, num_sequences,
                 );
             }
-            ParameterizedAction::RunStructureDesign { length, num_steps } => {
+            ParameterizedAction::RunStructureDesign { length, num_steps, contig } => {
                 Self::run_structure_design(
                     &mut self.router, &self.shared_state, engine,
-                    &length, num_steps,
+                    &length, num_steps, contig,
+                );
+            }
+            ParameterizedAction::RunPrediction { entity_ids } => {
+                Self::run_prediction_for_entities(
+                    &mut self.router, &self.shared_state, engine,
+                    &entity_ids,
                 );
             }
         }
@@ -385,20 +413,19 @@ impl App {
 
     // ── ML operations (parameterized) ──
 
-    /// Build entity context data for a group (for multi-entity ML operations).
+    /// Build entity context data from a pre-collected slice of entities.
     fn build_entity_context(
-        engine: &ProteinRenderEngine,
+        entities: &[foldit_conv::coords::entity::MoleculeEntity],
         shared: &SharedState,
-        id: viso::engine::scene::GroupId,
+        group_id: viso::engine::scene::GroupId,
     ) -> Option<foldit_runner::orchestrator::EntityContextData> {
         use foldit_conv::coords::entity::MoleculeType;
         use foldit_runner::orchestrator::{EntityContextData, EntityInfoData};
 
-        let group = engine.group(id)?;
-        let assembly_coords = foldit_conv::types::assembly::assembly_bytes(group.entities()).ok()?;
-        let meta = shared.entity_meta(id);
+        let assembly_coords = crate::backend_handler::entities_to_assembly_bytes(entities)?;
+        let meta = shared.entity_meta(group_id);
 
-        let entities = group.entities().iter().map(|e| {
+        let entity_info = entities.iter().map(|e| {
             let mol_str = match e.molecule_type {
                 MoleculeType::Protein => "protein",
                 MoleculeType::DNA => "dna",
@@ -436,7 +463,7 @@ impl App {
         }).collect();
 
         Some(EntityContextData {
-            entities,
+            entities: entity_info,
             assembly_coords,
         })
     }
@@ -455,42 +482,28 @@ impl App {
         let focus = *engine.focus();
         log::info!("MPNN: focus = {:?}", focus);
 
-        // Determine target and extract assembly bytes based on focus.
-        // Always send full group assembly bytes — focus determines what gets designed.
-        let (target_id, assembly_bytes) = match focus {
-            Focus::Entity(eid) => {
-                // Entity focus: find the containing group, send whole group assembly
-                match backend_handler::get_entity_coords_bytes(engine, eid) {
-                    Some((gid, _entity_bytes)) => {
-                        (gid, backend_handler::get_group_assembly_bytes(engine, gid))
-                    }
-                    None => {
-                        log::warn!("No coords for entity {}", eid);
-                        return;
-                    }
-                }
-            }
-            _ => {
-                let Some(gid) = shared.lock_target(&focus) else {
-                    log::warn!("No structure available for sequence design");
-                    return;
-                };
-                (gid, backend_handler::get_group_assembly_bytes(engine, gid))
-            }
+        // Collect entities based on focus (single entity, group, or session fallback).
+        let fallback = shared.loaded_entity().or(shared.lock_target(&focus));
+        let Some((target_id, entities)) =
+            backend_handler::collect_ml_entities(engine, &focus, fallback)
+        else {
+            log::warn!("No structure available for sequence design");
+            return;
         };
 
-        let Some(assembly_bytes) = assembly_bytes else {
+        let Some(assembly_bytes) = backend_handler::entities_to_assembly_bytes(&entities) else {
             log::warn!("No coords available for sequence design");
             return;
         };
 
-        let group_entity_count = engine.group(target_id).map(|g| g.entities().len()).unwrap_or(0);
+        let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
         let group_name = engine.group(target_id).map(|g| g.name().to_string());
         log::info!(
-            "MPNN: target_id={:?}, group='{}', {} entities, {} assembly bytes",
+            "MPNN: target_id={:?}, group='{}', {} entities, {} total atoms, {} assembly bytes",
             target_id,
             group_name.as_deref().unwrap_or("?"),
-            group_entity_count,
+            entities.len(),
+            total_atoms,
             assembly_bytes.len(),
         );
 
@@ -509,79 +522,75 @@ impl App {
         // Build focus-aware entity context:
         // - Focus::Entity → only that entity's chains are designable
         // - Focus::Group/Session → all protein chains are designable
-        let entity_context = if let Some(group) = engine.group(target_id) {
-            let focused_entity_id = match focus {
-                Focus::Entity(eid) => Some(eid),
-                _ => None,
+        let focused_entity_id = match focus {
+            Focus::Entity(eid) => Some(eid),
+            _ => None,
+        };
+
+        let entity_info: Vec<EntityInfoData> = entities.iter().map(|e| {
+            let is_protein = e.molecule_type == MoleculeType::Protein;
+            let is_ambient = matches!(e.molecule_type,
+                MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
+            let mol_str = match e.molecule_type {
+                MoleculeType::Protein => "protein",
+                MoleculeType::DNA => "dna",
+                MoleculeType::RNA => "rna",
+                MoleculeType::Ligand => "ligand",
+                MoleculeType::Ion => "ion",
+                MoleculeType::Water => "water",
+                MoleculeType::Lipid => "lipid",
+                MoleculeType::Cofactor => "cofactor",
+                MoleculeType::Solvent => "solvent",
+            };
+            let chain_id = e.coords.chain_ids.first()
+                .map(|&c| String::from(c as char))
+                .unwrap_or_default();
+
+            let mut res_nums: Vec<i32> = e.coords.res_nums.iter().copied().collect();
+            res_nums.dedup();
+
+            // Focus-aware designability: when focusing on a specific entity,
+            // only that entity's protein chains are designable
+            let designable = if let Some(focused_eid) = focused_entity_id {
+                is_protein && e.entity_id == focused_eid
+            } else {
+                is_protein
+            };
+            let fixed = if let Some(focused_eid) = focused_entity_id {
+                // Other proteins become fixed context, non-protein non-ambient are fixed
+                (is_protein && e.entity_id != focused_eid) || (!is_protein && !is_ambient)
+            } else {
+                !is_protein && !is_ambient
             };
 
-            let entities: Vec<EntityInfoData> = group.entities().iter().map(|e| {
-                let is_protein = e.molecule_type == MoleculeType::Protein;
-                let is_ambient = matches!(e.molecule_type,
-                    MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
-                let mol_str = match e.molecule_type {
-                    MoleculeType::Protein => "protein",
-                    MoleculeType::DNA => "dna",
-                    MoleculeType::RNA => "rna",
-                    MoleculeType::Ligand => "ligand",
-                    MoleculeType::Ion => "ion",
-                    MoleculeType::Water => "water",
-                    MoleculeType::Lipid => "lipid",
-                    MoleculeType::Cofactor => "cofactor",
-                    MoleculeType::Solvent => "solvent",
-                };
-                let chain_id = e.coords.chain_ids.first()
-                    .map(|&c| String::from(c as char))
-                    .unwrap_or_default();
+            EntityInfoData {
+                entity_id: e.entity_id,
+                molecule_type: mol_str.to_string(),
+                chain_id,
+                residue_count: res_nums.len() as u32,
+                designable,
+                foldable: is_protein,
+                fixed,
+            }
+        }).collect();
 
-                let mut res_nums: Vec<i32> = e.coords.res_nums.iter().copied().collect();
-                res_nums.dedup();
+        let designed: Vec<&str> = entity_info.iter()
+            .filter(|e| e.designable)
+            .map(|e| e.chain_id.as_str())
+            .collect();
+        let fixed: Vec<&str> = entity_info.iter()
+            .filter(|e| e.fixed)
+            .map(|e| e.chain_id.as_str())
+            .collect();
+        log::info!(
+            "MPNN entity context: designed={:?}, fixed={:?}",
+            designed, fixed,
+        );
 
-                // Focus-aware designability: when focusing on a specific entity,
-                // only that entity's protein chains are designable
-                let designable = if let Some(focused_eid) = focused_entity_id {
-                    is_protein && e.entity_id == focused_eid
-                } else {
-                    is_protein
-                };
-                let fixed = if let Some(focused_eid) = focused_entity_id {
-                    // Other proteins become fixed context, non-protein non-ambient are fixed
-                    (is_protein && e.entity_id != focused_eid) || (!is_protein && !is_ambient)
-                } else {
-                    !is_protein && !is_ambient
-                };
-
-                EntityInfoData {
-                    entity_id: e.entity_id,
-                    molecule_type: mol_str.to_string(),
-                    chain_id,
-                    residue_count: res_nums.len() as u32,
-                    designable,
-                    foldable: is_protein,
-                    fixed,
-                }
-            }).collect();
-
-            let designed: Vec<&str> = entities.iter()
-                .filter(|e| e.designable)
-                .map(|e| e.chain_id.as_str())
-                .collect();
-            let fixed: Vec<&str> = entities.iter()
-                .filter(|e| e.fixed)
-                .map(|e| e.chain_id.as_str())
-                .collect();
-            log::info!(
-                "MPNN entity context: designed={:?}, fixed={:?}",
-                designed, fixed,
-            );
-
-            Some(EntityContextData {
-                entities,
-                assembly_coords: assembly_bytes.clone(),
-            })
-        } else {
-            None
-        };
+        let entity_context = Some(EntityContextData {
+            entities: entity_info,
+            assembly_coords: assembly_bytes.clone(),
+        });
 
         let Some(ref mut orch) = router.orchestrator else {
             log::warn!("Orchestrator not initialized");
@@ -630,11 +639,19 @@ impl App {
         engine: &ProteinRenderEngine,
         length: &str,
         num_steps: u32,
+        contig: Option<String>,
     ) {
         use foldit_runner::orchestrator::{EntityId, OpType};
 
-        let Some(target_id) = shared.loaded_entity() else {
-            log::warn!("No structure loaded, cannot start structure design");
+        // For structure design, always use the loaded protein as context —
+        // the user's contig references the original protein's chains/residues,
+        // not whatever group happens to be focused.
+        let loaded_group = shared.loaded_entity();
+        let Some((target_id, entities)) = loaded_group
+            .and_then(|gid| engine.group(gid))
+            .map(|group| (group.id, group.entities().to_vec()))
+        else {
+            log::warn!("No structure available for structure design");
             return;
         };
 
@@ -650,8 +667,21 @@ impl App {
             }
         }
 
-        // Build entity context with assembly bytes for assembly-aware design
-        let entity_context = Self::build_entity_context(engine, shared, target_id);
+        // Filter out ambient entities (water, ion, solvent) — they share chain/residue
+        // IDs with protein atoms and confuse the foundry parser.
+        use foldit_conv::coords::entity::MoleculeType;
+        let entities: Vec<_> = entities.into_iter().filter(|e| {
+            !matches!(e.molecule_type, MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent)
+        }).collect();
+
+        let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
+        log::info!(
+            "RFD3 structure design: source={:?}, {} entities, {} total atoms",
+            target_id, entities.len(), total_atoms,
+        );
+
+        // Build entity context from collected entities
+        let entity_context = Self::build_entity_context(&entities, shared, target_id);
 
         let Some(ref mut orch) = router.orchestrator else {
             log::warn!("Orchestrator not initialized");
@@ -669,7 +699,8 @@ impl App {
             return;
         }
 
-        log::info!("Starting structure design (length={}, steps={})...", length, num_steps);
+        let contig_str = contig.unwrap_or_default();
+        log::info!("Starting structure design (length={}, steps={}, contig='{}')...", length, num_steps, contig_str);
 
         let result = if let Some(ctx) = entity_context {
             log::info!(
@@ -677,13 +708,98 @@ impl App {
                 ctx.entities.len(),
                 ctx.assembly_coords.len(),
             );
-            orch.design_structure_with_context(length.to_string(), num_steps, ctx)
+            orch.design_structure_with_context(length.to_string(), num_steps, contig_str, ctx)
         } else {
-            orch.design_structure(length.to_string(), num_steps)
+            orch.design_structure(length.to_string(), num_steps, contig_str)
         };
 
         if let Err(e) = result {
             log::error!("Failed to submit structure design: {}", e);
+            orch.unlock(EntityId(target_id.0));
+            return;
+        }
+
+        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+    }
+
+    fn run_prediction_for_entities(
+        router: &mut ActionRouter,
+        shared: &SharedState,
+        engine: &mut ProteinRenderEngine,
+        entity_ids: &[u32],
+    ) {
+        use foldit_runner::orchestrator::{EntityId, OpType};
+
+        // Collect entities matching the given IDs from all groups
+        let mut collected = Vec::new();
+        let mut target_id = None;
+        for gid in engine.group_ids() {
+            if let Some(group) = engine.group(gid) {
+                for entity in group.entities() {
+                    if entity_ids.contains(&entity.entity_id) {
+                        collected.push(entity.clone());
+                        if target_id.is_none() {
+                            target_id = Some(gid);
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some(target_id) = target_id else {
+            log::warn!("No matching entities found for prediction");
+            return;
+        };
+
+        if collected.is_empty() {
+            log::warn!("No entities selected for prediction");
+            return;
+        }
+
+        let chains = action_router::extract_chains_from_entities_pub(&collected);
+        if chains.is_empty() {
+            log::warn!("No protein chains found in selected entities");
+            return;
+        }
+
+        let total_atoms: usize = collected.iter().map(|e| e.coords.num_atoms).sum();
+        log::info!(
+            "RF3 prediction (entity picker): {} entities, {} total atoms",
+            collected.len(), total_atoms,
+        );
+
+        let entity_context = Self::build_entity_context(&collected, shared, target_id);
+
+        let Some(ref mut orch) = router.orchestrator else {
+            log::warn!("Orchestrator not initialized");
+            return;
+        };
+
+        if orch.is_locked(EntityId(target_id.0)) {
+            let op = orch.get_op_type(EntityId(target_id.0));
+            log::warn!("Structure is locked by {:?}, cannot start prediction", op);
+            return;
+        }
+
+        orch.stop_rosetta();
+        orch.clear_session();
+
+        if orch.try_lock(EntityId(target_id.0), OpType::MLPredict).is_none() {
+            log::warn!("Failed to acquire lock for prediction");
+            return;
+        }
+
+        let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
+        log::info!("Starting RoseTTAFold3 prediction for {} residues...", total_residues);
+
+        let result = if let Some(ctx) = entity_context {
+            orch.predict_with_context(None, chains, 3, ctx)
+        } else {
+            orch.predict(None, chains, 3)
+        };
+
+        if let Err(e) = result {
+            log::error!("Failed to submit prediction task: {}", e);
             orch.unlock(EntityId(target_id.0));
             return;
         }
@@ -780,6 +896,35 @@ impl App {
         }
         if app_dirty.contains(DirtyFlags::UI) {
             frontend.mark_dirty(DirtyFlags::UI);
+        }
+        if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SELECTION) {
+            use foldit_conv::coords::entity::MoleculeType;
+            let mut scene_entities = Vec::new();
+            for gid in engine.group_ids() {
+                if let Some(group) = engine.group(gid) {
+                    for entity in group.entities() {
+                        let mol_str = match entity.molecule_type {
+                            MoleculeType::Protein => "protein",
+                            MoleculeType::DNA => "dna",
+                            MoleculeType::RNA => "rna",
+                            MoleculeType::Ligand => "ligand",
+                            MoleculeType::Ion => "ion",
+                            MoleculeType::Water => "water",
+                            MoleculeType::Lipid => "lipid",
+                            MoleculeType::Cofactor => "cofactor",
+                            MoleculeType::Solvent => "solvent",
+                        };
+                        scene_entities.push(foldit_frontend::SceneEntityInfo {
+                            entity_id: entity.entity_id,
+                            label: entity.label(),
+                            molecule_type: mol_str.to_string(),
+                            atom_count: entity.coords.num_atoms,
+                            residue_count: entity.residue_count(),
+                        });
+                    }
+                }
+            }
+            frontend.set_scene_entities(scene_entities);
         }
     }
 

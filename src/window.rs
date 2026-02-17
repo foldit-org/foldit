@@ -177,6 +177,12 @@ impl AppRunner {
                 serde_json::to_value(&self.frontend.loading).unwrap(),
             );
         }
+        if dirty.contains(DirtyFlags::SCENE) {
+            update.insert(
+                "scene".into(),
+                serde_json::to_value(&self.frontend.scene).unwrap(),
+            );
+        }
 
         if let Some(ref webview) = self.webview {
             let payload = serde_json::Value::Object(update);

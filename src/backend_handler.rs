@@ -4,6 +4,7 @@
 //! translating user input into orchestrator commands.
 
 use foldit_conv::coords::binary::{deserialize as deserialize_coords, serialize as serialize_coords};
+use foldit_conv::coords::entity::MoleculeEntity;
 use foldit_conv::coords::types::Coords;
 use foldit_conv::coords::{
     align_coords_bytes, kabsch_alignment_with_scale, split_into_entities,
@@ -16,7 +17,7 @@ use glam::Vec3;
 use std::collections::HashMap;
 use viso::animation::AnimationAction;
 use viso::engine::core::ProteinRenderEngine;
-use viso::engine::scene::GroupId;
+use viso::engine::scene::{Focus, GroupId};
 
 /// Handle a single backend update. Called by the frame loop after draining
 /// triple buffers via SharedState.
@@ -80,8 +81,12 @@ pub(crate) fn handle_backend_update(
         }
         BackendUpdate::Error { message } => {
             log::error!("Backend error: {}", message);
+            // Restore visibility of any locked entity groups so models don't
+            // "disappear" after a failed ML operation.
             if let Some(ref mut orch) = orchestrator {
                 for eid in orch.locked_entities() {
+                    let gid = GroupId(eid.0);
+                    engine.set_group_visible(gid, true);
                     orch.unlock(eid);
                 }
             }
@@ -257,7 +262,23 @@ fn handle_ml_predict_result(
     coords_bytes: Vec<u8>,
     confidence: f32,
 ) {
-    log::info!("Prediction complete! Confidence: {:.2}", confidence);
+    let is_assem = coords_bytes.len() >= 8
+        && &coords_bytes[0..8] == foldit_conv::types::coords::ASSEMBLY_MAGIC;
+    log::info!(
+        "Prediction complete! Confidence: {:.2}, {} bytes, is_assem={}",
+        confidence, coords_bytes.len(), is_assem,
+    );
+
+    if coords_bytes.is_empty() {
+        log::error!("Prediction returned empty coords — not updating model");
+        if let Some(ref mut orch) = orchestrator {
+            for eid in orch.locked_entities() {
+                orch.unlock(eid);
+            }
+        }
+        *ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS;
+        return;
+    }
 
     if let Some(anim_id) = shared.animation() {
         engine.remove_group(anim_id);
@@ -269,7 +290,7 @@ fn handle_ml_predict_result(
             if let Some(original_ca) = shared.reference_ca(orig_id) {
                 match align_coords_bytes(&coords_bytes, original_ca) {
                     Ok(aligned) => {
-                        log::info!("Applied Kabsch alignment to COORDS data");
+                        log::info!("Applied Kabsch alignment to prediction ({} bytes)", aligned.len());
                         aligned
                     }
                     Err(e) => {
@@ -278,19 +299,30 @@ fn handle_ml_predict_result(
                     }
                 }
             } else {
+                log::info!("No reference CA — using prediction coords as-is");
                 coords_bytes.clone()
             };
 
         match entities_from_coords_bytes(&aligned_coords_bytes) {
             Ok(entities) => {
-                let name = format!("RF3 ({:.0}%)", confidence * 100.0);
-                if let Some(group) = engine.group_mut(orig_id) {
-                    group.set_entities(entities);
-                    group.name = name;
-                    group.visible = true;
-                    group.invalidate_render_cache();
+                let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
+                log::info!(
+                    "Parsed prediction: {} entities, {} total atoms",
+                    entities.len(), total_atoms,
+                );
+                if total_atoms == 0 {
+                    log::error!("Prediction entities have 0 atoms — not updating model");
+                    engine.set_group_visible(orig_id, true);
+                } else {
+                    let name = format!("RF3 ({:.0}%)", confidence * 100.0);
+                    if let Some(group) = engine.group_mut(orig_id) {
+                        group.set_entities(entities);
+                        group.name = name;
+                        group.visible = true;
+                        group.invalidate_render_cache();
+                    }
+                    engine.sync_scene_to_renderers(Some(AnimationAction::Diffusion));
                 }
-                engine.sync_scene_to_renderers(Some(AnimationAction::Diffusion));
             }
             Err(e) => {
                 log::error!("Failed to parse prediction: {}", e);
@@ -589,54 +621,22 @@ fn positions_to_backbone_chains(positions: &[Vec3]) -> Vec<Vec<Vec3>> {
         return vec![];
     }
 
-    // Maximum C→N distance (Å) before we split into a new chain.
-    // A normal peptide bond is ~1.33 Å; during noisy early diffusion steps
-    // distances stretch to 5-8 Å.  Real inter-chain gaps in multi-chain
-    // proteins (PPI, protein-ligand, etc.) are typically > 15 Å.
-    const CHAIN_BREAK_DIST_SQ: f32 = 10.0 * 10.0; // 10 Å squared
-
-    let mut chains: Vec<Vec<Vec3>> = Vec::new();
-    let mut current_chain: Vec<Vec3> = Vec::new();
+    let mut chain: Vec<Vec3> = Vec::new();
 
     for chunk in positions.chunks(4) {
-        // Each chunk is [N, CA, C, O]; we keep only [N, CA, C].
         if chunk.len() < 3 {
             continue;
         }
-        let n_pos = chunk[0];
-        let ca_pos = chunk[1];
-        let c_pos = chunk[2];
-
-        // Detect chain break: distance from previous C to this N.
-        // current_chain stores [N, CA, C, N, CA, C, ...] so the last
-        // element of current_chain is the previous residue's C atom.
-        if !current_chain.is_empty() {
-            let prev_c = *current_chain.last().unwrap();
-            let dx = n_pos.x - prev_c.x;
-            let dy = n_pos.y - prev_c.y;
-            let dz = n_pos.z - prev_c.z;
-            let dist_sq = dx * dx + dy * dy + dz * dz;
-            if dist_sq > CHAIN_BREAK_DIST_SQ {
-                chains.push(std::mem::take(&mut current_chain));
-            }
-        }
-
-        current_chain.push(n_pos);
-        current_chain.push(ca_pos);
-        current_chain.push(c_pos);
+        chain.push(chunk[0]); // N
+        chain.push(chunk[1]); // CA
+        chain.push(chunk[2]); // C
     }
 
-    if !current_chain.is_empty() {
-        chains.push(current_chain);
+    if chain.is_empty() {
+        vec![]
+    } else {
+        vec![chain]
     }
-
-    // Discard fragment chains (< 5 residues = 15 backbone atoms).
-    // During noisy early diffusion steps, false chain breaks produce small
-    // fragments (2-4 residues) that render as floating sticks.  Real
-    // protein chains in RFD3 designs are ≥ 10+ residues.
-    chains.retain(|c| c.len() >= 15);
-
-    chains
 }
 
 /// Serialize a group's protein coordinates to COORDS bytes.
@@ -721,4 +721,43 @@ fn backbone_chains_to_coords(backbone_chains: &[Vec<Vec3>]) -> Coords {
         atom_names,
         elements,
     }
+}
+
+/// Collect entities for ML based on current focus.
+/// Returns `(GroupId, Vec<MoleculeEntity>)` for locking + serialization.
+///
+/// - `Focus::Entity(eid)` → returns only that single entity (and its group id).
+/// - `Focus::Group(gid)` → returns all entities in the group.
+/// - `Focus::Session` → falls back to `fallback_group`.
+pub(crate) fn collect_ml_entities(
+    engine: &ProteinRenderEngine,
+    focus: &Focus,
+    fallback_group: Option<GroupId>,
+) -> Option<(GroupId, Vec<MoleculeEntity>)> {
+    match focus {
+        Focus::Entity(eid) => {
+            for group in engine.scene.iter() {
+                for entity in group.entities() {
+                    if entity.entity_id == *eid {
+                        return Some((group.id, vec![entity.clone()]));
+                    }
+                }
+            }
+            None
+        }
+        Focus::Group(gid) => {
+            let group = engine.group(*gid)?;
+            Some((*gid, group.entities().to_vec()))
+        }
+        Focus::Session => {
+            let gid = fallback_group?;
+            let group = engine.group(gid)?;
+            Some((gid, group.entities().to_vec()))
+        }
+    }
+}
+
+/// Serialize a slice of entities to ASSEM01 bytes.
+pub(crate) fn entities_to_assembly_bytes(entities: &[MoleculeEntity]) -> Option<Vec<u8>> {
+    foldit_conv::types::assembly::assembly_bytes(entities).ok()
 }
