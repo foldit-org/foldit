@@ -608,6 +608,7 @@ impl ApplicationHandler for AppRunner {
             // Create window.
             // On Windows, disable WS_CLIPCHILDREN so the wry child HWND
             // doesn't occlude the wgpu DirectComposition swap chain.
+            #[allow(unused_mut)]
             let mut attrs = Window::default_attributes()
                 .with_title("Foldit")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));

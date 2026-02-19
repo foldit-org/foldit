@@ -1,5 +1,3 @@
-use std::path::Path;
-
 fn main() {
     // Bundle mode: libraries in same directory as the binary
     #[cfg(target_os = "macos")]

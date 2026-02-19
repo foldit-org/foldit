@@ -29,7 +29,7 @@ use foldit_frontend::DirtyFlags;
 use foldit_runner::Orchestrator;
 use foldit_rs::shared_state::SharedState;
 use viso::renderer::molecular::band::BandRenderInfo;
-use viso::engine::core::ProteinRenderEngine;
+use viso::engine::ProteinRenderEngine;
 use viso::renderer::molecular::pull::PullRenderInfo;
 use std::sync::Arc;
 use winit::event::MouseScrollDelta;
@@ -89,14 +89,13 @@ impl App {
 
     pub(crate) fn set_surface_scale(&mut self, scale_factor: f64) {
         if let Some(ref mut engine) = self.engine {
-            engine.set_scale_factor(scale_factor);
-            engine.context.set_surface_scale(scale_factor);
+            engine.context.render_scale = if scale_factor < 2.0 { 2 } else { 1 };
         }
     }
 
     pub(crate) fn update_camera_animation(&mut self, dt: f32) {
         if let Some(engine) = &mut self.engine {
-            engine.update_camera_animation(dt);
+            engine.camera_controller.update_animation(dt);
         }
     }
 
@@ -140,73 +139,38 @@ impl App {
     // ── Keybinding dispatch (engine + router) ──
 
     pub(crate) fn handle_keybinding(&mut self, key: winit::keyboard::KeyCode) -> bool {
+        use viso::input::KeyAction;
+
         let Some(engine) = &mut self.engine else { return false };
-        let key_str = action_router::key_code_to_string(key);
-        let action = engine
-            .options()
-            .keybindings
-            .lookup(&key_str)
-            .map(|s| s.to_string());
-        if let Some(action) = action {
-            match action.as_str() {
-                "recenter_camera" => {
-                    engine.fit_camera_to_focus();
-                    log::info!("Recentered on {}", engine.scene.focus_description());
-                }
-                "toggle_trajectory" => {
-                    if engine.has_trajectory() {
-                        engine.toggle_trajectory();
-                    } else if let Some(path) = action_router::trajectory_path_from_args() {
-                        engine.load_trajectory(std::path::Path::new(&path));
-                    } else {
-                        log::info!("No trajectory loaded. Pass --trajectory <path.dcd> to load one.");
-                    }
-                }
-                "toggle_ions" => {
-                    engine.toggle_ions();
-                    log::info!("Ions: {}", if engine.options.display.show_ions { "visible" } else { "hidden" });
-                }
-                "toggle_waters" => {
-                    engine.toggle_waters();
-                    log::info!("Waters: {}", if engine.options.display.show_waters { "visible" } else { "hidden" });
-                }
-                "toggle_solvent" => {
-                    engine.toggle_solvent();
-                    log::info!("Solvent: {}", if engine.options.display.show_solvent { "visible" } else { "hidden" });
-                }
-                "toggle_lipids" => {
-                    engine.toggle_lipids();
-                    log::info!("Lipids: {}", engine.options.display.lipid_mode);
-                }
-                "cycle_focus" => {
-                    engine.cycle_focus();
-                    let focus_name = engine.scene.focus_description();
-                    log::info!("Focus: {}", focus_name);
-                    self.router.update_rosetta_locks(engine, &self.shared_state);
-                    engine.fit_camera_to_focus();
-                    self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
-                }
-                "toggle_auto_rotate" => {
-                    let on = engine.camera_controller.toggle_auto_rotate();
-                    log::info!("Auto-rotate: {}", if on { "on" } else { "off" });
-                }
-                "reset_focus" => {
-                    engine.scene.set_focus(viso::engine::scene::Focus::Session);
-                    engine.fit_camera_to_focus();
-                    self.router.update_rosetta_locks(engine, &self.shared_state);
-                    self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
-                    log::info!("Focus: Session (all structures)");
-                }
-                "cancel" => self.router.cancel_operations(engine, &mut self.shared_state),
-                other => {
-                    log::debug!("Unknown keybinding action: {}", other);
-                    return false;
+        let key_str = format!("{key:?}");
+        let Some(action) = engine.options.keybindings.lookup(&key_str) else {
+            return false;
+        };
+
+        // Actions that need foldit-specific pre/post processing
+        match action {
+            KeyAction::ToggleTrajectory => {
+                if engine.trajectory_player.is_some() {
+                    engine.toggle_trajectory();
+                } else if let Some(path) = action_router::trajectory_path_from_args() {
+                    engine.load_trajectory(std::path::Path::new(&path));
+                } else {
+                    log::info!("No trajectory loaded. Pass --trajectory <path.dcd> to load one.");
                 }
             }
-            true
-        } else {
-            false
+            KeyAction::Cancel => {
+                self.router.cancel_operations(engine, &mut self.shared_state);
+            }
+            KeyAction::CycleFocus | KeyAction::ResetFocus => {
+                action.execute(engine);
+                log::info!("Focus: {}", engine.scene.focus_description());
+                self.router.update_rosetta_locks(engine, &self.shared_state);
+                self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+            }
+            // All other actions: delegate entirely to viso
+            other => other.execute(engine),
         }
+        true
     }
 
     // ── Viewport input (from webview) ──
@@ -225,7 +189,7 @@ impl App {
                     1 => winit::event::MouseButton::Middle,
                     _ => return,
                 };
-                engine.set_shift_pressed(shift);
+                engine.camera_controller.shift_pressed = shift;
                 self.router.handle_native_cursor_moved(engine, x, y);
                 self.router.handle_native_mouse_input(engine, winit_button, true);
             }
@@ -238,56 +202,42 @@ impl App {
                     1 => winit::event::MouseButton::Middle,
                     _ => return,
                 };
-                engine.set_shift_pressed(shift);
+                engine.camera_controller.shift_pressed = shift;
                 self.router.handle_native_cursor_moved(engine, x, y);
                 self.router.handle_native_mouse_input(engine, winit_button, false);
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
-                engine.set_shift_pressed(shift);
+                engine.camera_controller.shift_pressed = shift;
                 self.router.handle_native_cursor_moved(engine, x, y);
             }
             ViewportInput::Scroll { delta } => {
-                engine.handle_mouse_wheel(delta);
+                engine.camera_controller.zoom(delta);
             }
             ViewportInput::Key { code, pressed } => {
+                // Key strings from JS match the keybinding format directly
                 if pressed {
-                    match code.as_str() {
-                        "KeyQ" => {
-                            engine.fit_camera_to_focus();
-                        }
-                        "KeyT" => {
-                            if engine.has_trajectory() {
-                                engine.toggle_trajectory();
-                            } else if let Some(path) = action_router::trajectory_path_from_args() {
-                                engine.load_trajectory(std::path::Path::new(&path));
+                    use viso::input::KeyAction;
+                    if let Some(action) = engine.options.keybindings.lookup(&code) {
+                        match action {
+                            KeyAction::ToggleTrajectory => {
+                                if engine.trajectory_player.is_some() {
+                                    engine.toggle_trajectory();
+                                } else if let Some(path) = action_router::trajectory_path_from_args() {
+                                    engine.load_trajectory(std::path::Path::new(&path));
+                                }
                             }
+                            KeyAction::Cancel => {
+                                self.router.cancel_operations(engine, &mut self.shared_state);
+                            }
+                            KeyAction::CycleFocus | KeyAction::ResetFocus => {
+                                action.execute(engine);
+                                self.router.update_rosetta_locks(engine, &self.shared_state);
+                                self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                            }
+                            other => other.execute(engine),
                         }
-                        "KeyI" => { engine.toggle_ions(); }
-                        "KeyU" => { engine.toggle_waters(); }
-                        "KeyO" => { engine.toggle_solvent(); }
-                        "KeyR" => {
-                            let on = engine.camera_controller.toggle_auto_rotate();
-                            log::info!("Auto-rotate: {}", if on { "on" } else { "off" });
-                        }
-                        "KeyL" => { engine.toggle_lipids(); }
-                        "Tab" => {
-                            engine.cycle_focus();
-                            self.router.update_rosetta_locks(engine, &self.shared_state);
-                            engine.fit_camera_to_focus();
-                            self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
-                        }
-                        "Backquote" => {
-                            engine.scene.set_focus(viso::engine::scene::Focus::Session);
-                            engine.fit_camera_to_focus();
-                            self.router.update_rosetta_locks(engine, &self.shared_state);
-                            self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
-                        }
-                        "Escape" => {
-                            self.router.cancel_operations(engine, &mut self.shared_state);
-                        }
-                        _ => {
-                            log::debug!("Unhandled key code from frontend: {}", code);
-                        }
+                    } else {
+                        log::debug!("Unhandled key code from frontend: {}", code);
                     }
                 }
             }
@@ -336,7 +286,7 @@ impl App {
             ParameterizedAction::LoadPuzzle { puzzle_id } => {
                 use viso::animation::AnimationAction;
 
-                engine.clear_scene();
+                engine.scene.clear();
                 self.router.reset_for_new_structure(&mut self.shared_state);
 
                 match foldit_rs::puzzle::load_puzzle_structure(puzzle_id) {
@@ -354,7 +304,7 @@ impl App {
                             true,
                         );
                         if let Some(ss) = ss_override.take() {
-                            if let Some(group) = engine.group_mut(id) {
+                            if let Some(group) = engine.scene.group_mut(id) {
                                 group.ss_override = Some(ss);
                             }
                         }
@@ -374,9 +324,14 @@ impl App {
             ParameterizedAction::RemoveBand { .. } => {
                 log::info!("RemoveBand via IPC not yet wired");
             }
-            ParameterizedAction::SetViewOption { key, value } => {
-                engine.apply_view_option(&key, &value);
-                self.router.ui_dirty |= DirtyFlags::VIEW;
+            ParameterizedAction::SetViewOptions { options } => {
+                match serde_json::from_value::<viso::options::Options>(options) {
+                    Ok(opts) => {
+                        engine.set_options(opts);
+                        self.router.ui_dirty |= DirtyFlags::VIEW;
+                    }
+                    Err(e) => log::error!("Failed to deserialize view options: {}", e),
+                }
             }
             ParameterizedAction::LoadViewPreset { name } => {
                 let presets_dir = std::path::Path::new("assets/view_presets");
@@ -385,9 +340,7 @@ impl App {
             }
             ParameterizedAction::SaveViewPreset { name } => {
                 let presets_dir = std::path::Path::new("assets/view_presets");
-                if engine.save_preset(&name, presets_dir) {
-                    engine.active_preset = Some(name);
-                }
+                engine.save_preset(&name, presets_dir);
                 self.router.ui_dirty |= DirtyFlags::VIEW;
             }
             ParameterizedAction::RunSequenceDesign { temperature, num_sequences } => {
@@ -417,7 +370,7 @@ impl App {
     fn build_entity_context(
         entities: &[foldit_conv::coords::entity::MoleculeEntity],
         shared: &SharedState,
-        group_id: viso::engine::scene::GroupId,
+        group_id: viso::scene::GroupId,
     ) -> Option<foldit_runner::orchestrator::EntityContextData> {
         use foldit_conv::coords::entity::MoleculeType;
         use foldit_runner::orchestrator::{EntityContextData, EntityInfoData};
@@ -477,9 +430,9 @@ impl App {
     ) {
         use foldit_runner::orchestrator::{EntityContextData, EntityInfoData, EntityId, OpType};
         use foldit_conv::coords::entity::MoleculeType;
-        use viso::engine::scene::Focus;
+        use viso::scene::Focus;
 
-        let focus = *engine.focus();
+        let focus = *engine.scene.focus();
         log::info!("MPNN: focus = {:?}", focus);
 
         // Collect entities based on focus (single entity, group, or session fallback).
@@ -497,7 +450,7 @@ impl App {
         };
 
         let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
-        let group_name = engine.group(target_id).map(|g| g.name().to_string());
+        let group_name = engine.scene.group(target_id).map(|g| g.name().to_string());
         log::info!(
             "MPNN: target_id={:?}, group='{}', {} entities, {} total atoms, {} assembly bytes",
             target_id,
@@ -609,7 +562,7 @@ impl App {
         }
 
         let target_name = engine
-            .group(target_id)
+            .scene.group(target_id)
             .map(|g| g.name().to_string())
             .unwrap_or_default();
 
@@ -648,7 +601,7 @@ impl App {
         // not whatever group happens to be focused.
         let loaded_group = shared.loaded_entity();
         let Some((target_id, entities)) = loaded_group
-            .and_then(|gid| engine.group(gid))
+            .and_then(|gid| engine.scene.group(gid))
             .map(|group| (group.id, group.entities().to_vec()))
         else {
             log::warn!("No structure available for structure design");
@@ -733,8 +686,8 @@ impl App {
         // Collect entities matching the given IDs from all groups
         let mut collected = Vec::new();
         let mut target_id = None;
-        for gid in engine.group_ids() {
-            if let Some(group) = engine.group(gid) {
+        for gid in engine.scene.group_ids() {
+            if let Some(group) = engine.scene.group(gid) {
                 for entity in group.entities() {
                     if entity_ids.contains(&entity.entity_id) {
                         collected.push(entity.clone());
@@ -830,15 +783,15 @@ impl App {
     pub(crate) fn handle_native_mouse_wheel(&mut self, delta: MouseScrollDelta) {
         if let Some(engine) = &mut self.engine {
             match delta {
-                MouseScrollDelta::LineDelta(_, y) => engine.handle_mouse_wheel(y),
-                MouseScrollDelta::PixelDelta(pos) => engine.handle_mouse_wheel(pos.y as f32 * 0.01),
+                MouseScrollDelta::LineDelta(_, y) => engine.camera_controller.zoom(y),
+                MouseScrollDelta::PixelDelta(pos) => engine.camera_controller.zoom(pos.y as f32 * 0.01),
             }
         }
     }
 
     pub(crate) fn handle_native_modifiers(&mut self, state: ModifiersState) {
         if let Some(engine) = &mut self.engine {
-            engine.update_modifiers(state);
+            engine.camera_controller.shift_pressed = state.shift_key();
         }
     }
 
@@ -862,8 +815,9 @@ impl App {
             None => return,
         };
 
-        // FPS changes every frame — always push it
+        // FPS and selected count change every frame — always push them
         frontend.set_fps(engine.frame_timing.fps());
+        frontend.ui.selected_count = engine.picking.selected_residues.len();
 
         let app_dirty = self.router.take_ui_dirty();
         if app_dirty.is_empty() {
@@ -882,13 +836,18 @@ impl App {
             frontend.set_loading_progress(None);
         }
         if app_dirty.contains(DirtyFlags::VIEW) {
-            frontend.set_view_mode(foldit_frontend::state::ViewMode::Ribbon);
+            frontend.view.options = serde_json::to_value(&engine.options).unwrap_or_default();
 
-            frontend.view.options = serde_json::to_value(engine.options()).unwrap_or_default();
+            // Schema is static — only set once
+            if frontend.view.options_schema.is_null() {
+                frontend.view.options_schema =
+                    serde_json::to_value(viso::options::Options::json_schema())
+                        .unwrap_or_default();
+            }
 
             let presets_dir = std::path::Path::new("assets/view_presets");
             frontend.view.available_presets =
-                viso::util::options::Options::list_presets(presets_dir);
+                viso::options::Options::list_presets(presets_dir);
             frontend.view.active_preset = engine.active_preset.clone();
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {
@@ -900,8 +859,8 @@ impl App {
         if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SELECTION) {
             use foldit_conv::coords::entity::MoleculeType;
             let mut scene_entities = Vec::new();
-            for gid in engine.group_ids() {
-                if let Some(group) = engine.group(gid) {
+            for gid in engine.scene.group_ids() {
+                if let Some(group) = engine.scene.group(gid) {
                     for entity in group.entities() {
                         let mol_str = match entity.molecule_type {
                             MoleculeType::Protein => "protein",
@@ -951,13 +910,13 @@ impl App {
         let presets_dir = std::path::Path::new("assets/view_presets");
         engine.load_preset("default", presets_dir);
 
-        engine.context.set_surface_scale(scale);
+        engine.context.render_scale = if scale < 2.0 { 2 } else { 1 };
 
-        if let Some(&first_id) = engine.group_ids().first() {
-            let name = engine.group(first_id).map(|g| g.name()).unwrap_or("?");
+        if let Some(&first_id) = engine.scene.group_ids().first() {
+            let name = engine.scene.group(first_id).map(|g| g.name()).unwrap_or("?");
             log::info!("Loaded structure: {}", name);
             let backbone_ca = engine
-                .group(first_id)
+                .scene.group(first_id)
                 .map(|g| action_router::entities_backbone_ca(g.entities()))
                 .unwrap_or_default();
             log::info!(
@@ -972,7 +931,7 @@ impl App {
         let mut orchestrator = Orchestrator::new();
 
         // Register entity triple buffers for each loaded group
-        let group_ids = engine.group_ids();
+        let group_ids = engine.scene.group_ids();
         for gid in &group_ids {
             let reader = orchestrator.register_entity(gid.0);
             self.shared_state.register_entity(*gid, reader);
@@ -999,7 +958,7 @@ impl App {
     pub(crate) fn shutdown(&mut self) {
         self.router.shutdown();
         if let Some(engine) = &mut self.engine {
-            engine.shutdown_scene_processor();
+            engine.scene_processor.shutdown();
         }
     }
 }
@@ -1027,7 +986,7 @@ fn update_all_visualizations(engine: &mut ProteinRenderEngine, router: &ActionRo
 
     // Update bands
     if band_infos.is_empty() {
-        engine.clear_bands();
+        engine.band_renderer.clear();
     } else {
         engine.update_bands(&band_infos);
     }
@@ -1040,7 +999,7 @@ fn update_all_visualizations(engine: &mut ProteinRenderEngine, router: &ActionRo
             residue_idx,
         }));
     } else {
-        engine.clear_pull();
+        engine.pull_renderer.clear();
     }
 }
 

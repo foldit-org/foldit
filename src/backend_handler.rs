@@ -16,8 +16,8 @@ use foldit_rs::shared_state::SharedState;
 use glam::Vec3;
 use std::collections::HashMap;
 use viso::animation::AnimationAction;
-use viso::engine::core::ProteinRenderEngine;
-use viso::engine::scene::{Focus, GroupId};
+use viso::engine::ProteinRenderEngine;
+use viso::scene::{Focus, GroupId};
 
 /// Handle a single backend update. Called by the frame loop after draining
 /// triple buffers via SharedState.
@@ -86,7 +86,7 @@ pub(crate) fn handle_backend_update(
             if let Some(ref mut orch) = orchestrator {
                 for eid in orch.locked_entities() {
                     let gid = GroupId(eid.0);
-                    engine.set_group_visible(gid, true);
+                    engine.scene.set_visible(gid, true);
                     orch.unlock(eid);
                 }
             }
@@ -121,7 +121,7 @@ fn handle_rosetta_coords(
     if let Some(mpnn_eid) = mpnn_entity {
         // Apply to the group that was locked for MPNN
         let apply_target = GroupId(mpnn_eid.0);
-        let group_name = engine.group(apply_target).map(|g| g.name().to_string());
+        let group_name = engine.scene.group(apply_target).map(|g| g.name().to_string());
         log::info!(
             "MPNN update received: {} bytes, score: {:.1}, target={:?} ({})",
             coords_bytes.len(),
@@ -134,7 +134,7 @@ fn handle_rosetta_coords(
             Ok(entities) => {
                 log::info!("MPNN structure parsed: {} entities", entities.len());
                 let name = format!("MPNN Design (score {:.1})", score);
-                if let Some(group) = engine.group_mut(apply_target) {
+                if let Some(group) = engine.scene.group_mut(apply_target) {
                     group.set_entities(entities);
                     group.name = name;
                     group.invalidate_render_cache();
@@ -198,7 +198,7 @@ fn handle_rosetta_coords(
             Err(e) => log::warn!("Failed to apply combined update: {}", e),
         }
     } else {
-        let focus = *engine.focus();
+        let focus = *engine.scene.focus();
         if let Some(id) = SharedState::operation_target(&focus)
             .or(shared.loaded_entity())
         {
@@ -207,7 +207,7 @@ fn handle_rosetta_coords(
                     let name = message.unwrap_or_else(|| {
                         format!("Cycle {} (score {:.1})", cycle, score)
                     });
-                    if let Some(group) = engine.group_mut(id) {
+                    if let Some(group) = engine.scene.group_mut(id) {
                         group.set_entities(entities);
                         if !converged {
                             group.name = name;
@@ -281,7 +281,7 @@ fn handle_ml_predict_result(
     }
 
     if let Some(anim_id) = shared.animation() {
-        engine.remove_group(anim_id);
+        engine.scene.remove_group(anim_id);
         shared.remove_animation();
     }
 
@@ -312,10 +312,10 @@ fn handle_ml_predict_result(
                 );
                 if total_atoms == 0 {
                     log::error!("Prediction entities have 0 atoms — not updating model");
-                    engine.set_group_visible(orig_id, true);
+                    engine.scene.set_visible(orig_id, true);
                 } else {
                     let name = format!("RF3 ({:.0}%)", confidence * 100.0);
-                    if let Some(group) = engine.group_mut(orig_id) {
+                    if let Some(group) = engine.scene.group_mut(orig_id) {
                         group.set_entities(entities);
                         group.name = name;
                         group.visible = true;
@@ -326,7 +326,7 @@ fn handle_ml_predict_result(
             }
             Err(e) => {
                 log::error!("Failed to parse prediction: {}", e);
-                engine.set_group_visible(orig_id, true);
+                engine.scene.set_visible(orig_id, true);
             }
         }
         if let Some(ref mut orch) = orchestrator {
@@ -432,14 +432,16 @@ fn handle_structure_design_result(
     }
 
     let had_animation = shared.animation().is_some();
+    let design_group_id;
     if let Some(anim_id) = shared.animation() {
-        if let Some(group) = engine.group_mut(anim_id) {
+        if let Some(group) = engine.scene.group_mut(anim_id) {
             group.set_entities(entities);
             group.name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
             group.invalidate_render_cache();
             log::info!("Updated animation structure {:?} to final result", anim_id);
         }
         shared.promote_animation_to_design(anim_id, confidence);
+        design_group_id = anim_id;
     } else {
         let name = format!("RFD3 Design ({:.0}%)", confidence * 100.0);
         let id = engine.load_entities(entities, &name, false);
@@ -448,6 +450,7 @@ fn handle_structure_design_result(
             shared.register_animation(id, loaded);
             shared.promote_animation_to_design(id, confidence);
         }
+        design_group_id = id;
     }
 
     // Unlock the original structure
@@ -457,7 +460,10 @@ fn handle_structure_design_result(
         }
     }
 
-    engine.sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+    // Only animate the design group — not the input structure.
+    engine.sync_scene_to_renderers_targeted(
+        HashMap::from([(design_group_id, AnimationAction::DiffusionFinalize)]),
+    );
     if !had_animation {
         engine.fit_camera_to_focus();
     }
@@ -528,7 +534,7 @@ fn update_animation_structure_from_backend(
                     }
 
                     let name = format!("Predicting... ({}/{})", step, total_steps);
-                    if let Some(group) = engine.group_mut(orig_id) {
+                    if let Some(group) = engine.scene.group_mut(orig_id) {
                         group.set_entities(entities);
                         group.name = name;
                         group.invalidate_render_cache();
@@ -551,9 +557,15 @@ fn update_animation_structure_from_backend(
             log::warn!("Empty backbone chains, skipping update");
             return;
         }
+        log::info!(
+            "RFD3 intermediate: {} backbone positions -> {} backbone chains, {} residues",
+            backbone_positions.len(),
+            backbone_chains.len(),
+            backbone_chains.iter().map(|c| c.len() / 3).sum::<usize>(),
+        );
 
         if let Some(anim_id) = shared.animation() {
-            if let Some(group) = engine.group_mut(anim_id) {
+            if let Some(group) = engine.scene.group_mut(anim_id) {
                 let coords = backbone_chains_to_coords(&backbone_chains);
                 let entities = split_into_entities(&coords);
                 group.set_entities(entities);
@@ -566,7 +578,10 @@ fn update_animation_structure_from_backend(
                     total_steps
                 );
             }
-            engine.sync_scene_to_renderers(Some(AnimationAction::Diffusion));
+            // Only animate the design group — not the input structure.
+            engine.sync_scene_to_renderers_targeted(
+                HashMap::from([(anim_id, AnimationAction::Diffusion)]),
+            );
         } else {
             let coords = backbone_chains_to_coords(&backbone_chains);
             let entities = split_into_entities(&coords);
@@ -591,7 +606,7 @@ fn cache_per_residue_scores(
     per_residue_scores: &Option<Vec<f64>>,
 ) {
     if let Some(scores) = per_residue_scores {
-        if let Some(group) = engine.group_mut(group_id) {
+        if let Some(group) = engine.scene.group_mut(group_id) {
             group.set_per_residue_scores(Some(scores.clone()));
         }
     }
@@ -641,28 +656,30 @@ fn positions_to_backbone_chains(positions: &[Vec3]) -> Vec<Vec<Vec3>> {
 
 /// Serialize a group's protein coordinates to COORDS bytes.
 pub(crate) fn get_group_coords_bytes(engine: &ProteinRenderEngine, id: GroupId) -> Option<Vec<u8>> {
-    let group = engine.group(id)?;
+    let group = engine.scene.group(id)?;
     let protein_coords = group.protein_coords()?;
     serialize_coords(&protein_coords).ok()
 }
 
 /// Serialize all entities in a group to ASSEM01 bytes (preserves all entity types).
 pub(crate) fn get_group_assembly_bytes(engine: &ProteinRenderEngine, id: GroupId) -> Option<Vec<u8>> {
-    let group = engine.group(id)?;
+    let group = engine.scene.group(id)?;
     foldit_conv::types::assembly::assembly_bytes(group.entities()).ok()
 }
 
 /// Serialize a single entity's coordinates to COORDS bytes.
 /// Returns `(GroupId, bytes)` so the caller can lock the containing group.
 pub(crate) fn get_entity_coords_bytes(engine: &ProteinRenderEngine, entity_id: u32) -> Option<(GroupId, Vec<u8>)> {
-    for group in engine.scene.iter() {
-        for entity in group.entities() {
-            if entity.entity_id == entity_id {
-                if entity.coords.num_atoms == 0 {
-                    return None;
+    for gid in engine.scene.group_ids() {
+        if let Some(group) = engine.scene.group(gid) {
+            for entity in group.entities() {
+                if entity.entity_id == entity_id {
+                    if entity.coords.num_atoms == 0 {
+                        return None;
+                    }
+                    let bytes = serialize_coords(&entity.coords).ok()?;
+                    return Some((gid, bytes));
                 }
-                let bytes = serialize_coords(&entity.coords).ok()?;
-                return Some((group.id, bytes));
             }
         }
     }
@@ -736,22 +753,24 @@ pub(crate) fn collect_ml_entities(
 ) -> Option<(GroupId, Vec<MoleculeEntity>)> {
     match focus {
         Focus::Entity(eid) => {
-            for group in engine.scene.iter() {
-                for entity in group.entities() {
-                    if entity.entity_id == *eid {
-                        return Some((group.id, vec![entity.clone()]));
+            for gid in engine.scene.group_ids() {
+                if let Some(group) = engine.scene.group(gid) {
+                    for entity in group.entities() {
+                        if entity.entity_id == *eid {
+                            return Some((gid, vec![entity.clone()]));
+                        }
                     }
                 }
             }
             None
         }
         Focus::Group(gid) => {
-            let group = engine.group(*gid)?;
+            let group = engine.scene.group(*gid)?;
             Some((*gid, group.entities().to_vec()))
         }
         Focus::Session => {
             let gid = fallback_group?;
-            let group = engine.group(gid)?;
+            let group = engine.scene.group(gid)?;
             Some((gid, group.entities().to_vec()))
         }
     }

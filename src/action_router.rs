@@ -7,13 +7,13 @@
 use foldit_frontend::DirtyFlags;
 use foldit_rs::shared_state::SharedState;
 use viso::renderer::molecular::band::BandRenderInfo;
-use viso::engine::scene::Focus;
+use viso::scene::Focus;
 use foldit_runner::orchestrator::{EntityId, OpType};
 use foldit_runner::Orchestrator;
 use glam::Vec3;
 
 use viso::animation::AnimationAction;
-use viso::engine::core::ProteinRenderEngine;
+use viso::engine::ProteinRenderEngine;
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ impl ActionRouter {
     // ── Helpers ──
 
     fn focus(&self, engine: &ProteinRenderEngine) -> Focus {
-        *engine.focus()
+        *engine.scene.focus()
     }
 
     pub fn take_ui_dirty(&mut self) -> DirtyFlags {
@@ -124,7 +124,7 @@ impl ActionRouter {
         let structure_id = SharedState::operation_target(&focus)
             .or(shared.loaded_entity());
         if let Some(id) = structure_id {
-            if let Some(group) = engine.group(id) {
+            if let Some(group) = engine.scene.group(id) {
                 if let Some(protein_coords) = group.protein_coords() {
                     let coords = foldit_conv::coords::protein_only(&protein_coords);
                     let (sequence, chain_sequences) =
@@ -164,9 +164,11 @@ impl ActionRouter {
     /// Return band drag preview info (start_pos, current_target, residue_idx).
     pub fn band_drag_preview(&self, engine: &ProteinRenderEngine) -> Option<(Vec3, Vec3, u32)> {
         self.band_drag.as_ref().map(|drag| {
-            let target_pos = engine.screen_to_world_at_depth(
+            let target_pos = engine.camera_controller.screen_to_world_at_depth(
                 drag.current_mouse_pos.0,
                 drag.current_mouse_pos.1,
+                engine.context.config.width,
+                engine.context.config.height,
                 drag.start_atom_pos,
             );
             (drag.start_atom_pos, target_pos, drag.start_residue as u32)
@@ -247,7 +249,7 @@ impl ActionRouter {
             }
         }
         if let Some(anim_id) = shared.animation() {
-            if engine.remove_group(anim_id).is_some() {
+            if engine.scene.remove_group(anim_id).is_some() {
                 log::info!("Removed in-progress animation structure");
                 shared.remove_animation();
                 engine.sync_scene_to_renderers(Some(AnimationAction::Load));
@@ -260,7 +262,7 @@ impl ActionRouter {
             }
             log::info!("Cleared {} bands", self.active_bands.len());
             self.active_bands.clear();
-            engine.clear_bands();
+            engine.band_renderer.clear();
         }
         self.band_drag = None;
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
@@ -310,7 +312,7 @@ impl ActionRouter {
             return;
         };
 
-        let Some(combined) = engine.combined_coords_for_backend() else {
+        let Some(combined) = engine.scene.combined_coords_for_backend() else {
             log::warn!("No coords available for wiggle");
             return;
         };
@@ -324,10 +326,10 @@ impl ActionRouter {
         self.update_rosetta_locks(engine, shared);
 
         let target_desc = if SharedState::is_session_mode(&focus) {
-            format!("full session ({} structures)", engine.group_count())
+            format!("full session ({} structures)", engine.scene.group_count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| engine.group(id))
+                .and_then(|id| engine.scene.group(id))
                 .map(|g| g.name().to_string())
                 .unwrap_or_default()
         };
@@ -392,7 +394,7 @@ impl ActionRouter {
             return;
         };
 
-        let Some(combined) = engine.combined_coords_for_backend() else {
+        let Some(combined) = engine.scene.combined_coords_for_backend() else {
             log::warn!("No coords available for shake");
             return;
         };
@@ -406,10 +408,10 @@ impl ActionRouter {
         self.update_rosetta_locks(engine, shared);
 
         let target_desc = if SharedState::is_session_mode(&focus) {
-            format!("full session ({} structures)", engine.group_count())
+            format!("full session ({} structures)", engine.scene.group_count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| engine.group(id))
+                .and_then(|id| engine.scene.group(id))
                 .map(|g| g.name().to_string())
                 .unwrap_or_default()
         };
@@ -528,7 +530,7 @@ impl ActionRouter {
             RosettaSessionState, StructureId as RosettaStructureId,
         };
 
-        let combined = match engine.combined_coords_for_backend() {
+        let combined = match engine.scene.combined_coords_for_backend() {
             Some(c) => c,
             None => return false,
         };
@@ -540,7 +542,7 @@ impl ActionRouter {
         let needs_recreation = match self.orchestrator.as_ref().unwrap().session() {
             None => true,
             Some(state) => {
-                let visible = engine.visible_residue_counts();
+                let visible = engine.scene.visible_residue_counts();
                 let visible_rosetta_ids: Vec<RosettaStructureId> = visible
                     .iter()
                     .map(|(id, _)| RosettaStructureId(id.0))
@@ -668,30 +670,26 @@ impl ActionRouter {
         button: winit::event::MouseButton,
         pressed: bool,
     ) {
-        use foldit_conv::coords::{get_closest_atom_for_residue, get_closest_atom_with_name};
+
 
         match button {
             winit::event::MouseButton::Left => {
                 self.left_mouse_pressed = pressed;
 
                 if pressed {
-                    let hovered = engine.hovered_residue();
+                    let hovered = engine.picking.hovered_residue;
                     if hovered >= 0 {
                         if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                            let click_world_pos = engine.screen_to_world_at_depth(
+                            let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
                                 self.last_mouse_pos.0,
                                 self.last_mouse_pos.1,
+                                engine.context.config.width,
+                                engine.context.config.height,
                                 ca_pos,
                             );
-                            let agg = engine.scene.aggregated().clone();
-                            let start_pos = get_closest_atom_for_residue(
-                                &agg.backbone_chains,
-                                &agg.sidechain_positions,
-                                &agg.sidechain_residue_indices,
-                                hovered as usize,
-                                click_world_pos,
-                            )
-                            .unwrap_or(ca_pos);
+                            let start_pos = engine
+                                .get_closest_atom_for_residue(hovered as usize, click_world_pos)
+                                .unwrap_or(ca_pos);
 
                             self.pull_drag = Some(PullDragState {
                                 residue: hovered,
@@ -736,24 +734,19 @@ impl ActionRouter {
                 self.right_mouse_pressed = pressed;
 
                 if pressed {
-                    let hovered = engine.hovered_residue();
+                    let hovered = engine.picking.hovered_residue;
                     if hovered >= 0 {
                         if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                            let click_world_pos = engine.screen_to_world_at_depth(
+                            let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
                                 self.last_mouse_pos.0,
                                 self.last_mouse_pos.1,
+                                engine.context.config.width,
+                                engine.context.config.height,
                                 ca_pos,
                             );
-                            let agg = engine.scene.aggregated().clone();
-                            let (start_atom_pos, start_atom_name) = get_closest_atom_with_name(
-                                &agg.backbone_chains,
-                                &agg.sidechain_positions,
-                                &agg.sidechain_residue_indices,
-                                &agg.sidechain_atom_names,
-                                hovered as usize,
-                                click_world_pos,
-                            )
-                            .unwrap_or((ca_pos, "CA".to_string()));
+                            let (start_atom_pos, start_atom_name) = engine
+                                .get_closest_atom_with_name(hovered as usize, click_world_pos)
+                                .unwrap_or((ca_pos, "CA".to_string()));
 
                             self.band_drag = Some(BandDragState {
                                 start_residue: hovered,
@@ -770,26 +763,21 @@ impl ActionRouter {
                     }
                 } else {
                     if let Some(drag) = self.band_drag.take() {
-                        let end_residue = engine.hovered_residue();
+                        let end_residue = engine.picking.hovered_residue;
                         if end_residue >= 0 && end_residue != drag.start_residue {
                             if let Some(ca_pos) =
                                 engine.get_residue_ca_position(end_residue as usize)
                             {
-                                let click_world_pos = engine.screen_to_world_at_depth(
+                                let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
                                     self.last_mouse_pos.0,
                                     self.last_mouse_pos.1,
+                                    engine.context.config.width,
+                                    engine.context.config.height,
                                     ca_pos,
                                 );
-                                let agg = engine.scene.aggregated().clone();
-                                let (end_atom_pos, end_atom_name) = get_closest_atom_with_name(
-                                    &agg.backbone_chains,
-                                    &agg.sidechain_positions,
-                                    &agg.sidechain_residue_indices,
-                                    &agg.sidechain_atom_names,
-                                    end_residue as usize,
-                                    click_world_pos,
-                                )
-                                .unwrap_or((ca_pos, "CA".to_string()));
+                                let (end_atom_pos, end_atom_name) = engine
+                                    .get_closest_atom_with_name(end_residue as usize, click_world_pos)
+                                    .unwrap_or((ca_pos, "CA".to_string()));
 
                                 self.create_band_with_atoms(
                                     engine,
@@ -844,7 +832,7 @@ impl ActionRouter {
                 if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
                     pull.start_pos = current_ca;
                 }
-                pull.target_pos = engine.screen_to_world_at_depth(x, y, pull.start_pos);
+                pull.target_pos = engine.camera_controller.screen_to_world_at_depth(x, y, engine.context.config.width, engine.context.config.height, pull.start_pos);
             }
         }
 
@@ -852,7 +840,7 @@ impl ActionRouter {
         if pull_became_active {
             if let Some(ref pull) = self.pull_drag {
                 if let Some(ref orch) = self.orchestrator {
-                    if let Some(combined) = engine.combined_coords_for_backend() {
+                    if let Some(combined) = engine.scene.combined_coords_for_backend() {
                         let residue_1indexed = (pull.residue + 1) as u32;
                         let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
                         if let Err(e) = orch.start_pull(combined.bytes, residue_1indexed, target) {
@@ -875,14 +863,14 @@ impl ActionRouter {
                 if let Some(ref orch) = self.orchestrator {
                     let _ = orch.update_pull_target(target);
                 }
-                engine.handle_mouse_position(x, y);
+                engine.input.handle_mouse_position(x, y);
             } else {
                 engine.handle_mouse_move(delta_x, delta_y);
-                engine.handle_mouse_position(x, y);
+                engine.input.handle_mouse_position(x, y);
             }
         } else {
             engine.handle_mouse_move(delta_x, delta_y);
-            engine.handle_mouse_position(x, y);
+            engine.input.handle_mouse_position(x, y);
         }
 
         self.last_mouse_pos = (x, y);
@@ -1114,70 +1102,4 @@ pub(crate) fn trajectory_path_from_args() -> Option<String> {
             None
         }
     })
-}
-
-/// Convert a winit KeyCode to the string format used in keybinding options.
-pub(crate) fn key_code_to_string(key: winit::keyboard::KeyCode) -> String {
-    use winit::keyboard::KeyCode;
-    match key {
-        KeyCode::KeyA => "KeyA".into(),
-        KeyCode::KeyB => "KeyB".into(),
-        KeyCode::KeyC => "KeyC".into(),
-        KeyCode::KeyD => "KeyD".into(),
-        KeyCode::KeyE => "KeyE".into(),
-        KeyCode::KeyF => "KeyF".into(),
-        KeyCode::KeyG => "KeyG".into(),
-        KeyCode::KeyH => "KeyH".into(),
-        KeyCode::KeyI => "KeyI".into(),
-        KeyCode::KeyJ => "KeyJ".into(),
-        KeyCode::KeyK => "KeyK".into(),
-        KeyCode::KeyL => "KeyL".into(),
-        KeyCode::KeyM => "KeyM".into(),
-        KeyCode::KeyN => "KeyN".into(),
-        KeyCode::KeyO => "KeyO".into(),
-        KeyCode::KeyP => "KeyP".into(),
-        KeyCode::KeyQ => "KeyQ".into(),
-        KeyCode::KeyR => "KeyR".into(),
-        KeyCode::KeyS => "KeyS".into(),
-        KeyCode::KeyT => "KeyT".into(),
-        KeyCode::KeyU => "KeyU".into(),
-        KeyCode::KeyV => "KeyV".into(),
-        KeyCode::KeyW => "KeyW".into(),
-        KeyCode::KeyX => "KeyX".into(),
-        KeyCode::KeyY => "KeyY".into(),
-        KeyCode::KeyZ => "KeyZ".into(),
-        KeyCode::Digit0 => "Digit0".into(),
-        KeyCode::Digit1 => "Digit1".into(),
-        KeyCode::Digit2 => "Digit2".into(),
-        KeyCode::Digit3 => "Digit3".into(),
-        KeyCode::Digit4 => "Digit4".into(),
-        KeyCode::Digit5 => "Digit5".into(),
-        KeyCode::Digit6 => "Digit6".into(),
-        KeyCode::Digit7 => "Digit7".into(),
-        KeyCode::Digit8 => "Digit8".into(),
-        KeyCode::Digit9 => "Digit9".into(),
-        KeyCode::Escape => "Escape".into(),
-        KeyCode::Tab => "Tab".into(),
-        KeyCode::Space => "Space".into(),
-        KeyCode::Enter => "Enter".into(),
-        KeyCode::Backspace => "Backspace".into(),
-        KeyCode::Delete => "Delete".into(),
-        KeyCode::ArrowUp => "ArrowUp".into(),
-        KeyCode::ArrowDown => "ArrowDown".into(),
-        KeyCode::ArrowLeft => "ArrowLeft".into(),
-        KeyCode::ArrowRight => "ArrowRight".into(),
-        KeyCode::F1 => "F1".into(),
-        KeyCode::F2 => "F2".into(),
-        KeyCode::F3 => "F3".into(),
-        KeyCode::F4 => "F4".into(),
-        KeyCode::F5 => "F5".into(),
-        KeyCode::F6 => "F6".into(),
-        KeyCode::F7 => "F7".into(),
-        KeyCode::F8 => "F8".into(),
-        KeyCode::F9 => "F9".into(),
-        KeyCode::F10 => "F10".into(),
-        KeyCode::F11 => "F11".into(),
-        KeyCode::F12 => "F12".into(),
-        other => format!("{:?}", other),
-    }
 }

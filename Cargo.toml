@@ -2,10 +2,12 @@
 resolver = "2"
 members = [
     "crates/foldit-frontend",
-    "crates/viso",
     "crates/foldit-conv",
     "crates/foldit-runner",
     "xtask",
+]
+exclude = [
+    "crates/viso",
 ]
 
 [package]

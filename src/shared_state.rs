@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 use triple_buffer::Output;
 use foldit_runner::orchestrator::BackendUpdate;
-use viso::engine::scene::{Focus, GroupId};
+use viso::scene::{Focus, GroupId};
 
 /// Reader side of a per-entity triple buffer.
 struct EntityBuffer {
