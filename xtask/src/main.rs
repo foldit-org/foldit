@@ -121,6 +121,17 @@ fn setup_ml() -> Result<()> {
         }
     }
 
+    // Build the worker binary so it's next to the main executable.
+    // Without this, MLClient::new() fails at runtime because
+    // find_worker_binary() can't locate foldit-runner-worker.
+    println!("Building foldit-runner-worker binary...");
+    let status = Command::new("cargo")
+        .args(["build", "--bin", "foldit-runner-worker"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build foldit-runner-worker");
+    }
+
     println!("ML environments setup complete.");
     Ok(())
 }
