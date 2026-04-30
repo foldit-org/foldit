@@ -1,12 +1,13 @@
 [display]
-view_mode = "ribbon"
 show_waters = false
 show_ions = false
 show_solvent = false
 lipid_mode = "coarse"
 show_sidechains = true
 show_hydrogens = false
-backbone_color_mode = "score"
+color_scheme = "score"
+palette_preset = "green_yellow_red"
+palette_mode = "gradient"
 
 [lighting]
 light1_dir = [-0.3, 0.9, -0.3]

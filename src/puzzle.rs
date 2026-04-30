@@ -137,9 +137,9 @@ pub fn load_puzzle(dir: &Path) -> Result<PuzzleLevel, PuzzleError> {
 
 /// Data returned from loading a puzzle.
 pub struct PuzzleData {
-    pub entities: Vec<foldit_conv::coords::MoleculeEntity>,
+    pub entities: Vec<molex::MoleculeEntity>,
     pub name: String,
-    pub ss_override: Option<Vec<foldit_conv::secondary_structure::SSType>>,
+    pub ss_override: Option<Vec<molex::SSType>>,
     /// Optional view preset name from puzzle.toml `[puzzle] view_preset`.
     pub view_preset: Option<String>,
 }
@@ -154,7 +154,7 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     let puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
     let structure = &puzzle.puzzle.structure;
 
-    let coords = match (&structure.path, &structure.data) {
+    let entities = match (&structure.path, &structure.data) {
         (Some(path), None) => {
             let structure_path = puzzle_dir.join(path);
             log::info!(
@@ -162,7 +162,7 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
                 puzzle.puzzle.title,
                 structure_path.display()
             );
-            load_coords_from_file(&structure_path)?
+            load_entities_from_file(&structure_path)?
         }
         (None, Some(data_b64)) => {
             use base64::Engine;
@@ -179,12 +179,14 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
 
             match structure.format.as_str() {
                 "coords" => {
-                    use foldit_conv::coords::binary::deserialize;
-                    deserialize(&raw).map_err(|e| format!("Failed to parse COORDS: {:?}", e))?
+                    use molex::ops::codec::deserialize;
+                    let coords = deserialize(&raw)
+                        .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
+                    molex::ops::codec::split_into_entities(&coords)
                 }
                 "bcif" => {
-                    use foldit_conv::coords::bcif::bcif_to_coords;
-                    bcif_to_coords(&raw)
+                    use molex::adapters::bcif::bcif_to_entities;
+                    bcif_to_entities(&raw)
                         .map_err(|e| format!("Failed to parse inline BinaryCIF: {:?}", e))?
                 }
                 other => return Err(format!(
@@ -200,10 +202,8 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         ),
     };
 
-    let entities = foldit_conv::coords::split_into_entities(&coords);
-
     let ss_override = structure.ss.as_ref().map(|ss_str| {
-        let ss = foldit_conv::secondary_structure::dssp::from_string(ss_str);
+        let ss = molex::analysis::ss::string::from_string(ss_str);
         log::info!(
             "Puzzle '{}': applying SS override ({} residues)",
             puzzle.puzzle.title,
@@ -221,7 +221,10 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
 }
 
 /// Load Coords from a file (auto-detecting format).
-pub fn load_coords_from_file(path: &Path) -> Result<foldit_conv::coords::Coords, String> {
+/// Load a structure file and return classified entities.
+pub fn load_entities_from_file(
+    path: &Path,
+) -> Result<Vec<molex::MoleculeEntity>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -230,26 +233,18 @@ pub fn load_coords_from_file(path: &Path) -> Result<foldit_conv::coords::Coords,
 
     match ext.as_str() {
         "pdb" => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read PDB file: {}", e))?;
-            let bytes = foldit_conv::coords::pdb::pdb_to_coords(&content)
-                .map_err(|e| format!("Failed to parse PDB: {:?}", e))?;
-            foldit_conv::coords::binary::deserialize(&bytes)
-                .map_err(|e| format!("Failed to deserialize: {:?}", e))
+            molex::adapters::pdb::pdb_file_to_entities(path)
+                .map_err(|e| format!("Failed to parse PDB: {e:?}"))
         }
         "cif" | "mmcif" => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read mmCIF file: {}", e))?;
-            let bytes = foldit_conv::coords::pdb::mmcif_to_coords(&content)
-                .map_err(|e| format!("Failed to parse mmCIF: {:?}", e))?;
-            foldit_conv::coords::binary::deserialize(&bytes)
-                .map_err(|e| format!("Failed to deserialize: {:?}", e))
+            molex::adapters::mmcif_file_to_entities(path)
+                .map_err(|e| format!("Failed to parse mmCIF: {e:?}"))
         }
         "bcif" => {
-            foldit_conv::coords::bcif::bcif_file_to_coords(path)
-                .map_err(|e| format!("Failed to parse BinaryCIF: {:?}", e))
+            molex::adapters::bcif::bcif_file_to_entities(path)
+                .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}"))
         }
-        _ => Err(format!("Unknown file extension: {}", ext)),
+        _ => Err(format!("Unknown file extension: {ext}")),
     }
 }
 

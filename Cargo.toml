@@ -2,12 +2,16 @@
 resolver = "2"
 members = [
     "crates/foldit-frontend",
-    "crates/foldit-conv",
     "crates/foldit-runner",
     "xtask",
 ]
+# Submodule directories that exist in-tree but are NOT workspace members.
+# Without this, cargo's workspace discovery walks into these from outside
+# (e.g., maturin running `cargo metadata` on crates/molex/Cargo.toml) and
+# errors with "current package believes it's in a workspace when it's not".
 exclude = [
     "crates/viso",
+    "crates/molex",
 ]
 
 [package]
@@ -22,18 +26,17 @@ default-run = "foldit-rs"
 name = "foldit-rs"
 path = "src/main.rs"
 
-# Runner worker binary - source lives in foldit-runner, but defined here so
-# `cargo build` from workspace root builds it automatically
-[[bin]]
-name = "foldit-runner-worker"
-path = "crates/foldit-runner/src/bin/worker.rs"
-
 [dependencies]
 # Workspace crates
 foldit-frontend = { path = "crates/foldit-frontend" }
-viso = { path = "crates/viso" }
-foldit-conv = { path = "crates/foldit-conv" }
 foldit-runner = { path = "crates/foldit-runner", default-features = false, features = ["python"] }
+
+# External crates (released independently). To hack on either of these
+# from the local submodule, run e.g. `git submodule update --init
+# crates/viso` and uncomment the matching [patch] block at the bottom
+# of this file.
+viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
+molex = "0.3.0"
 
 # Required for foldit-ml-worker binary
 anyhow = "1.0"
@@ -43,10 +46,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 
 # Core
 glam = "0.30"
+indexmap = "2"
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
-wgpu = "28"
+wgpu = "26"
 
 # Direct mmCIF parsing for atom names and residue info
 pdbtbx = "0.12"
@@ -72,5 +76,18 @@ serde_json = "1"
 toml = "0.8"
 base64 = "0.22"
 
-[patch."https://github.com/petridecus/foldit-conv"]
-foldit-conv = { path = "crates/foldit-conv" }
+# ── Local development overrides ───────────────────────────────────────
+# Each block below redirects a published dep to its local submodule
+# checkout. Toggle them per-dep, independently:
+#
+#   1. `git submodule update --init crates/<name>` to populate the path.
+#   2. Uncomment the matching block.
+#   3. `cargo build` will now use the local checkout.
+#
+# Leave commented for the default "use published version" workflow.
+
+[patch."https://github.com/petridecus/viso"]
+viso = { path = "crates/viso" }
+
+[patch.crates-io]
+molex = { path = "crates/molex" }

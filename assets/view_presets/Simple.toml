@@ -1,5 +1,4 @@
 [display]
-view_mode = "ribbon"
 show_waters = false
 show_ions = false
 show_solvent = true

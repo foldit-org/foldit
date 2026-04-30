@@ -38,13 +38,22 @@ enum Commands {
     },
     /// Download ML model weights
     DownloadModels,
-    /// Rebuild foldit-conv Python wheel from local source
-    BuildFolditConv,
+    /// Rebuild molex Python wheel from local source
+    BuildMolex,
     /// Build the frontend (pnpm build) and copy dist to assets/gui
     BuildFrontend,
 }
 
 fn main() -> Result<()> {
+    // Pin CWD to the workspace root so all relative paths resolve the
+    // same way regardless of where the user invoked `cargo xtask` from.
+    // The xtask crate lives at <workspace>/xtask, so the manifest dir's
+    // parent is the workspace root.
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("xtask CARGO_MANIFEST_DIR has no parent"))?;
+    std::env::set_current_dir(workspace_root)?;
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -53,7 +62,7 @@ fn main() -> Result<()> {
         Commands::SetupRosettaInteractive => setup_rosetta_interactive(),
         Commands::Bundle { cpu_only } => bundle(cpu_only),
         Commands::DownloadModels => download_models(),
-        Commands::BuildFolditConv => build_foldit_conv(),
+        Commands::BuildMolex => build_molex(),
         Commands::BuildFrontend => build_frontend(),
     }
 }
@@ -76,8 +85,10 @@ fn setup_ml() -> Result<()> {
     if !status.success() {
         anyhow::bail!("Failed to setup ML environments");
     }
-    // Within the workspace, always install the local foldit-conv wheel
-    build_foldit_conv()?;
+    // Note: molex is installed from PyPI by pixi (see pixi.toml's
+    // `molex = ">=0.3.0"`). To rebuild from the local submodule, run
+    // `cargo xtask build-molex` separately. Don't force a local
+    // rebuild here — it's only needed when actively developing molex.
 
     // Copy Python shared library to assets/libs/ (mirrors the Rosetta pattern).
     // All pixi envs share the same Python 3.12 runtime, so we just need to find
@@ -124,9 +135,11 @@ fn setup_ml() -> Result<()> {
     // Build the worker binary so it's next to the main executable.
     // Without this, MLClient::new() fails at runtime because
     // find_worker_binary() can't locate foldit-runner-worker.
+    // Scope to -p foldit-runner so the build doesn't drag foldit-rs's
+    // viso/wgpu dep graph into a backend-only binary.
     println!("Building foldit-runner-worker binary...");
     let status = Command::new("cargo")
-        .args(["build", "--bin", "foldit-runner-worker"])
+        .args(["build", "-p", "foldit-runner", "--bin", "foldit-runner-worker"])
         .status()?;
     if !status.success() {
         anyhow::bail!("Failed to build foldit-runner-worker");
@@ -136,19 +149,19 @@ fn setup_ml() -> Result<()> {
     Ok(())
 }
 
-fn build_foldit_conv() -> Result<()> {
-    println!("Rebuilding foldit-conv wheel from local source...");
+fn build_molex() -> Result<()> {
+    println!("Rebuilding molex wheel from local source...");
     for env in ["foundry", "simplefold"] {
         println!("  Installing into {} environment...", env);
         let status = Command::new("pixi")
-            .args(["run", "--environment", env, "build-foldit-conv"])
+            .args(["run", "--environment", env, "build-molex"])
             .current_dir("crates/foldit-runner")
             .status()?;
         if !status.success() {
-            anyhow::bail!("Failed to install foldit-conv wheel in {} environment", env);
+            anyhow::bail!("Failed to install molex wheel in {} environment", env);
         }
     }
-    println!("foldit-conv wheel rebuilt and installed in all environments.");
+    println!("molex wheel rebuilt and installed in all environments.");
     Ok(())
 }
 

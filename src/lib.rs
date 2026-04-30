@@ -1,3 +1,4 @@
+pub mod entity_store;
 pub mod puzzle;
 pub mod shared_state;
 

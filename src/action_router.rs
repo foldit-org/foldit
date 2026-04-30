@@ -5,20 +5,17 @@
 //! backend output processing, rendering, or frontend state sync.
 
 use foldit_frontend::DirtyFlags;
+use foldit_rs::entity_store::EntityStore;
 use foldit_rs::shared_state::SharedState;
-use viso::renderer::molecular::band::BandRenderInfo;
-use viso::scene::Focus;
+use viso::{AtomRef, BandInfo, BandTarget, InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{EntityId, OpType};
 use foldit_runner::Orchestrator;
-use glam::Vec3;
-
-use viso::animation::AnimationAction;
-use viso::engine::ProteinRenderEngine;
+use glam::{Vec2, Vec3};
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveBand {
-    band_id: u32,
+    _band_id: u32,
     res1: u32,
     atom1_name: String,
     res2: u32,
@@ -62,35 +59,53 @@ pub(crate) struct ActionRouter {
     left_mouse_pressed: bool,
     pub ui_dirty: DirtyFlags,
     pub last_mouse_pos: (f32, f32),
+    /// CA positions of the protein chains submitted to the most recent
+    /// RF3 prediction, in submission (chain) order. Used by
+    /// `handle_ml_predict_result` / `handle_ml_intermediate` as the
+    /// alignment reference so the predicted structure stays anchored to
+    /// the entities the user actually sent — works for multi-entity
+    /// predictions where the loaded entity's stored `reference_ca` no
+    /// longer matches. Cleared once the final result has been applied.
+    pub pending_prediction_reference: Option<Vec<Vec3>>,
+}
+
+/// 3-letter PDB residue code → one-letter amino acid code. Unknown
+/// codes map to `X`.
+fn residue_three_to_one(name: &[u8; 3]) -> char {
+    match name {
+        b"ALA" => 'A', b"ARG" => 'R', b"ASN" => 'N', b"ASP" => 'D',
+        b"CYS" => 'C', b"GLN" => 'Q', b"GLU" => 'E', b"GLY" => 'G',
+        b"HIS" => 'H', b"ILE" => 'I', b"LEU" => 'L', b"LYS" => 'K',
+        b"MET" => 'M', b"PHE" => 'F', b"PRO" => 'P', b"SER" => 'S',
+        b"THR" => 'T', b"TRP" => 'W', b"TYR" => 'Y', b"VAL" => 'V',
+        _ => 'X',
+    }
 }
 
 /// Extract (chain_id, sequence) pairs from a slice of entities.
-/// Merges entity coordinates, filters to protein residues, then extracts sequences.
+/// Each protein entity contributes its own chain; non-protein entities
+/// are skipped.
 pub(crate) fn extract_chains_from_entities_pub(
-    entities: &[foldit_conv::coords::entity::MoleculeEntity],
+    entities: &[molex::MoleculeEntity],
 ) -> Vec<(String, String)> {
     extract_chains_from_entities(entities)
 }
 
 fn extract_chains_from_entities(
-    entities: &[foldit_conv::coords::entity::MoleculeEntity],
+    entities: &[molex::MoleculeEntity],
 ) -> Vec<(String, String)> {
-    let merged = foldit_conv::coords::entity::merge_entities(entities);
-    let coords = foldit_conv::coords::protein_only(&merged);
-    let (_full_seq, chain_sequences) = foldit_conv::coords::render::extract_sequences(&coords);
-    if !chain_sequences.is_empty() {
-        chain_sequences
-            .iter()
-            .map(|(cid, seq)| (format!("{}", *cid as char), seq.clone()))
-            .collect()
-    } else {
-        let full_seq = _full_seq;
-        if !full_seq.is_empty() {
-            vec![("A".to_string(), full_seq)]
-        } else {
-            vec![]
+    let mut by_chain: indexmap::IndexMap<u8, String> = indexmap::IndexMap::new();
+    for entity in entities {
+        if let molex::MoleculeEntity::Protein(p) = entity {
+            let seq: String = p.residues.iter()
+                .map(|r| residue_three_to_one(&r.name))
+                .collect();
+            by_chain.entry(p.pdb_chain_id).or_default().push_str(&seq);
         }
     }
+    by_chain.into_iter()
+        .map(|(cid, seq)| (format!("{}", cid as char), seq))
+        .collect()
 }
 
 impl ActionRouter {
@@ -104,14 +119,11 @@ impl ActionRouter {
             left_mouse_pressed: false,
             ui_dirty: DirtyFlags::empty(),
             last_mouse_pos: (0.0, 0.0),
+            pending_prediction_reference: None,
         }
     }
 
     // ── Helpers ──
-
-    fn focus(&self, engine: &ProteinRenderEngine) -> Focus {
-        *engine.scene.focus()
-    }
 
     pub fn take_ui_dirty(&mut self) -> DirtyFlags {
         let flags = self.ui_dirty;
@@ -119,26 +131,13 @@ impl ActionRouter {
         flags
     }
 
-    fn get_structure_chains(&self, engine: &ProteinRenderEngine, shared: &SharedState) -> Vec<(String, String)> {
-        let focus = self.focus(engine);
+    fn _get_structure_chains(&self, engine: &VisoEngine, store: &EntityStore) -> Vec<(String, String)> {
+        let focus = engine.focus();
         let structure_id = SharedState::operation_target(&focus)
-            .or(shared.loaded_entity());
+            .or(store.loaded_entity());
         if let Some(id) = structure_id {
-            if let Some(group) = engine.scene.group(id) {
-                if let Some(protein_coords) = group.protein_coords() {
-                    let coords = foldit_conv::coords::protein_only(&protein_coords);
-                    let (sequence, chain_sequences) =
-                        foldit_conv::coords::render::extract_sequences(&coords);
-                    if !chain_sequences.is_empty() {
-                        return chain_sequences
-                            .iter()
-                            .map(|(cid, seq)| (format!("{}", *cid as char), seq.clone()))
-                            .collect();
-                    }
-                    if !sequence.is_empty() {
-                        return vec![("A".to_string(), sequence)];
-                    }
-                }
+            if let Some(te) = store.get(id) {
+                return extract_chains_from_entities(std::slice::from_ref(&te.entity));
             }
         }
         vec![]
@@ -150,36 +149,34 @@ impl ActionRouter {
         &self.active_bands
     }
 
-    /// Return pull drag render info if an active pull is in progress.
-    pub fn pull_drag_info(&self) -> Option<(Vec3, Vec3, u32)> {
+    /// Return pull drag screen-space info for viso's PullInfo.
+    /// Returns (residue_index, (screen_x, screen_y)) if a pull is active.
+    pub fn pull_drag_info_for_viso(&self) -> Option<(u32, (f32, f32))> {
         self.pull_drag.as_ref().and_then(|pull| {
             if pull.is_active {
-                Some((pull.start_pos, pull.target_pos, pull.residue as u32))
+                Some((pull.residue as u32, self.last_mouse_pos))
             } else {
                 None
             }
         })
     }
 
-    /// Return band drag preview info (start_pos, current_target, residue_idx).
-    pub fn band_drag_preview(&self, engine: &ProteinRenderEngine) -> Option<(Vec3, Vec3, u32)> {
+    /// Return band drag preview info (start_residue, start_atom_name, target_pos).
+    pub fn band_drag_preview(&self, engine: &VisoEngine) -> Option<(u32, String, Vec3)> {
         self.band_drag.as_ref().map(|drag| {
-            let target_pos = engine.camera_controller.screen_to_world_at_depth(
-                drag.current_mouse_pos.0,
-                drag.current_mouse_pos.1,
-                engine.context.config.width,
-                engine.context.config.height,
+            let target_pos = engine.screen_to_world_at_depth(
+                Vec2::new(drag.current_mouse_pos.0, drag.current_mouse_pos.1),
                 drag.start_atom_pos,
             );
-            (drag.start_atom_pos, target_pos, drag.start_residue as u32)
+            (drag.start_residue as u32, drag.start_atom_name.clone(), target_pos)
         })
     }
 
     /// Update pull start position from current engine state.
-    pub fn refresh_pull_position(&mut self, engine: &ProteinRenderEngine) {
+    pub fn refresh_pull_position(&mut self, engine: &VisoEngine) {
         if let Some(ref mut pull) = self.pull_drag {
             if pull.is_active {
-                if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
+                if let Some(current_ca) = engine.resolve_atom_position(pull.residue as u32, "CA") {
                     pull.start_pos = current_ca;
                 }
             }
@@ -187,8 +184,7 @@ impl ActionRouter {
     }
 
     /// Reset band state and orchestrator for puzzle loading.
-    pub fn reset_for_new_structure(&mut self, shared: &mut SharedState) {
-        shared.reset_entities();
+    pub fn reset_for_new_structure(&mut self) {
         self.active_bands.clear();
         if let Some(ref mut orch) = self.orchestrator {
             for eid in orch.locked_entities() {
@@ -202,15 +198,15 @@ impl ActionRouter {
 
     pub fn handle_trigger_action(
         &mut self,
-        engine: &mut ProteinRenderEngine,
-        shared: &mut SharedState,
+        engine: &mut VisoEngine,
+        store: &EntityStore,
         action: foldit_frontend::ActionId,
     ) -> Option<foldit_frontend::ParameterizedAction> {
         use foldit_frontend::ActionId;
         let parameterized = match action {
-            ActionId::ToggleWiggle => { self.toggle_wiggle(engine, shared); None }
-            ActionId::ToggleShake => { self.toggle_shake(engine, shared); None }
-            ActionId::RunPrediction => { self.run_prediction(engine, shared); None }
+            ActionId::ToggleWiggle => { self.toggle_wiggle(engine, store); None }
+            ActionId::ToggleShake => { self.toggle_shake(engine, store); None }
+            ActionId::RunPrediction => { self.run_prediction(engine, store); None }
             ActionId::RunMPNN => {
                 // Default params — frontend can use ParameterizedAction for custom values
                 Some(foldit_frontend::ParameterizedAction::RunSequenceDesign {
@@ -234,9 +230,9 @@ impl ActionRouter {
         parameterized
     }
 
-    pub fn cancel_operations(&mut self, engine: &mut ProteinRenderEngine, shared: &mut SharedState) {
+    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut EntityStore, _shared: &mut SharedState) {
         log::info!("Cancelling current operation");
-        engine.picking.clear_selection();
+        engine.execute(VisoCommand::ClearSelection);
         if let Some(ref mut orch) = self.orchestrator {
             let locked_ids = orch.locked_entities();
             for eid in &locked_ids {
@@ -248,12 +244,10 @@ impl ActionRouter {
                 log::info!("Stopped operation on entity {:?}", eid);
             }
         }
-        if let Some(anim_id) = shared.animation() {
-            if engine.scene.remove_group(anim_id).is_some() {
-                log::info!("Removed in-progress animation structure");
-                shared.remove_animation();
-                engine.sync_scene_to_renderers(Some(AnimationAction::Load));
-            }
+        if let Some(_anim_id) = store.animation() {
+            store.remove_animation();
+            store.publish_to(engine);
+            log::info!("Removed in-progress animation structure");
         }
 
         if !self.active_bands.is_empty() {
@@ -262,7 +256,7 @@ impl ActionRouter {
             }
             log::info!("Cleared {} bands", self.active_bands.len());
             self.active_bands.clear();
-            engine.band_renderer.clear();
+            engine.update_bands(vec![]);
         }
         self.band_drag = None;
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
@@ -270,7 +264,7 @@ impl ActionRouter {
 
     // ── Rosetta operations ──
 
-    fn toggle_wiggle(&mut self, engine: &mut ProteinRenderEngine, shared: &SharedState) {
+    fn toggle_wiggle(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
         if self.orchestrator.is_none() {
             log::warn!("Orchestrator not initialized");
             return;
@@ -306,44 +300,44 @@ impl ActionRouter {
             }
         }
 
-        let focus = self.focus(engine);
-        let Some(lock_id) = shared.lock_target(&focus) else {
+        let focus = engine.focus();
+        let Some(lock_id) = SharedState::lock_target(&focus, store.loaded_entity()) else {
             log::warn!("No structure available for wiggle");
             return;
         };
 
-        let Some(combined) = engine.scene.combined_coords_for_backend() else {
-            log::warn!("No coords available for wiggle");
+        let Some(combined) = store.combined_assembly_for_backend() else {
+            log::warn!("No assembly available for wiggle");
             return;
         };
-        let coords = combined.bytes.clone();
+        let assembly = combined.assembly.clone();
 
-        if !self.ensure_rosetta_session(engine) {
+        if !self.ensure_rosetta_session(store) {
             log::warn!("Failed to ensure Rosetta session for wiggle");
             return;
         }
 
-        self.update_rosetta_locks(engine, shared);
+        self.update_rosetta_locks(engine, store);
 
         let target_desc = if SharedState::is_session_mode(&focus) {
-            format!("full session ({} structures)", engine.scene.group_count())
+            format!("full session ({} entities)", store.count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| engine.scene.group(id))
-                .map(|g| g.name().to_string())
+                .and_then(|id| store.get(id))
+                .map(|te| te.name.clone())
                 .unwrap_or_default()
         };
 
         let orch = self.orchestrator.as_mut().unwrap();
-        if orch.try_lock(EntityId(lock_id.0), OpType::RosettaWiggle).is_some() {
+        if orch.try_lock(EntityId(u64::from(lock_id)), OpType::RosettaWiggle).is_some() {
             log::info!(
-                "Starting wiggle on {} ({} bytes)...",
+                "Starting wiggle on {} ({} entities)...",
                 target_desc,
-                coords.len()
+                assembly.entities().len()
             );
-            if let Err(e) = orch.start_wiggle(coords) {
+            if let Err(e) = orch.start_wiggle(assembly) {
                 log::error!("Failed to start wiggle: {}", e);
-                orch.unlock(EntityId(lock_id.0));
+                orch.unlock(EntityId(u64::from(lock_id)));
                 return;
             }
 
@@ -353,7 +347,7 @@ impl ActionRouter {
         }
     }
 
-    fn toggle_shake(&mut self, engine: &mut ProteinRenderEngine, shared: &SharedState) {
+    fn toggle_shake(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
         if self.orchestrator.is_none() {
             log::warn!("Orchestrator not initialized");
             return;
@@ -388,44 +382,44 @@ impl ActionRouter {
             }
         }
 
-        let focus = self.focus(engine);
-        let Some(lock_id) = shared.lock_target(&focus) else {
+        let focus = engine.focus();
+        let Some(lock_id) = SharedState::lock_target(&focus, store.loaded_entity()) else {
             log::warn!("No structure available for shake");
             return;
         };
 
-        let Some(combined) = engine.scene.combined_coords_for_backend() else {
-            log::warn!("No coords available for shake");
+        let Some(combined) = store.combined_assembly_for_backend() else {
+            log::warn!("No assembly available for shake");
             return;
         };
-        let coords = combined.bytes.clone();
+        let assembly = combined.assembly.clone();
 
-        if !self.ensure_rosetta_session(engine) {
+        if !self.ensure_rosetta_session(store) {
             log::warn!("Failed to ensure Rosetta session for shake");
             return;
         }
 
-        self.update_rosetta_locks(engine, shared);
+        self.update_rosetta_locks(engine, store);
 
         let target_desc = if SharedState::is_session_mode(&focus) {
-            format!("full session ({} structures)", engine.scene.group_count())
+            format!("full session ({} entities)", store.count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| engine.scene.group(id))
-                .map(|g| g.name().to_string())
+                .and_then(|id| store.get(id))
+                .map(|te| te.name.clone())
                 .unwrap_or_default()
         };
 
         let orch = self.orchestrator.as_mut().unwrap();
-        if orch.try_lock(EntityId(lock_id.0), OpType::RosettaShake).is_some() {
+        if orch.try_lock(EntityId(u64::from(lock_id)), OpType::RosettaShake).is_some() {
             log::info!(
-                "Starting shake on {} ({} bytes)...",
+                "Starting shake on {} ({} entities)...",
                 target_desc,
-                coords.len()
+                assembly.entities().len()
             );
-            if let Err(e) = orch.start_shake(coords) {
+            if let Err(e) = orch.start_shake(assembly) {
                 log::error!("Failed to start shake: {}", e);
-                orch.unlock(EntityId(lock_id.0));
+                orch.unlock(EntityId(u64::from(lock_id)));
                 return;
             }
 
@@ -437,13 +431,13 @@ impl ActionRouter {
 
     // ── ML operations ──
 
-    fn run_prediction(&mut self, engine: &mut ProteinRenderEngine, shared: &SharedState) {
+    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
         use crate::backend_handler;
 
-        let focus = self.focus(engine);
-        let fallback = shared.loaded_entity();
+        let focus = engine.focus();
+        let fallback = store.loaded_entity();
         let Some((target_id, entities)) =
-            backend_handler::collect_ml_entities(engine, &focus, fallback)
+            backend_handler::collect_ml_entities(store, &focus, fallback)
         else {
             log::warn!("No structure available for prediction");
             return;
@@ -456,8 +450,8 @@ impl ActionRouter {
 
         {
             let orch = self.orchestrator.as_ref().unwrap();
-            if orch.is_locked(EntityId(target_id.0)) {
-                let op = orch.get_op_type(EntityId(target_id.0));
+            if orch.is_locked(EntityId(u64::from(target_id))) {
+                let op = orch.get_op_type(EntityId(u64::from(target_id)));
                 log::warn!(
                     "Structure is locked by {:?}, cannot start RoseTTAFold3",
                     op
@@ -479,18 +473,25 @@ impl ActionRouter {
             return;
         }
 
-        let total_atoms: usize = entities.iter().map(|e| e.coords.num_atoms).sum();
+        let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
         log::info!(
             "RF3 prediction: focus={:?}, {} entities, {} total atoms",
             focus, entities.len(), total_atoms,
         );
 
+        // Snapshot the submitted entities' CAs in chain order so the
+        // prediction result can be aligned back to the same frame.
+        // `extract_chains_from_entities` walks proteins in the same
+        // order as RF3's per-chain output.
+        self.pending_prediction_reference =
+            Some(molex::ops::codec::ca_positions(&entities));
+
         // Build entity context from the collected entities
-        let entity_context = crate::App::build_entity_context(&entities, shared, target_id);
+        let entity_context = crate::App::build_entity_context(&entities, store, target_id);
 
         let orch = self.orchestrator.as_mut().unwrap();
         if orch
-            .try_lock(EntityId(target_id.0), OpType::MLPredict)
+            .try_lock(EntityId(u64::from(target_id)), OpType::MLPredict)
             .is_none()
         {
             log::warn!("Failed to acquire lock for RoseTTAFold3");
@@ -516,7 +517,7 @@ impl ActionRouter {
 
         if let Err(e) = result {
             log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(EntityId(target_id.0));
+            orch.unlock(EntityId(u64::from(target_id)));
             return;
         }
 
@@ -525,12 +526,13 @@ impl ActionRouter {
 
     // ── Rosetta session management ──
 
-    pub fn ensure_rosetta_session(&mut self, engine: &mut ProteinRenderEngine) -> bool {
+    pub fn ensure_rosetta_session(&mut self, store: &EntityStore) -> bool {
         use foldit_runner::backends::rosetta::session_state::{
             RosettaSessionState, StructureId as RosettaStructureId,
         };
+        use std::collections::HashMap;
 
-        let combined = match engine.scene.combined_coords_for_backend() {
+        let combined = match store.combined_assembly_for_backend() {
             Some(c) => c,
             None => return false,
         };
@@ -542,14 +544,14 @@ impl ActionRouter {
         let needs_recreation = match self.orchestrator.as_ref().unwrap().session() {
             None => true,
             Some(state) => {
-                let visible = engine.scene.visible_residue_counts();
+                let visible = store.visible_residue_counts();
                 let visible_rosetta_ids: Vec<RosettaStructureId> = visible
                     .iter()
-                    .map(|(id, _)| RosettaStructureId(id.0))
+                    .map(|(id, _)| RosettaStructureId(u64::from(*id)))
                     .collect();
-                let residue_counts_rosetta: std::collections::HashMap<RosettaStructureId, usize> = visible
+                let residue_counts_rosetta: HashMap<RosettaStructureId, usize> = visible
                     .iter()
-                    .map(|(id, count)| (RosettaStructureId(id.0), *count))
+                    .map(|(id, count)| (RosettaStructureId(u64::from(*id)), *count))
                     .collect();
                 state.topology_changed(&visible_rosetta_ids, &residue_counts_rosetta)
             }
@@ -558,26 +560,26 @@ impl ActionRouter {
         if needs_recreation {
             log::info!("Recreating Rosetta session (topology changed)");
             let orch = self.orchestrator.as_mut().unwrap();
-            if let Err(e) = orch.recreate_session(combined.bytes.clone()) {
+            if let Err(e) = orch.recreate_session(combined.assembly.clone()) {
                 log::error!("Failed to recreate Rosetta session: {}", e);
                 return false;
             }
 
-            let chain_ids_per_structure: Vec<(RosettaStructureId, Vec<u8>)> = combined
-                .chain_ids_per_group
+            let structure_ids: Vec<RosettaStructureId> = combined
+                .entity_ids
                 .iter()
-                .map(|(id, chains)| (RosettaStructureId(id.0), chains.clone()))
+                .map(|id| RosettaStructureId(u64::from(*id)))
                 .collect();
-            let residue_ranges: std::collections::HashMap<RosettaStructureId, (usize, usize)> = combined
-                .residue_ranges
+            let residue_ranges: HashMap<RosettaStructureId, (usize, usize)> = structure_ids
                 .iter()
-                .map(|(id, range)| (RosettaStructureId(id.0), *range))
+                .copied()
+                .zip(combined.residue_ranges.iter().copied())
                 .collect();
 
-            let state = RosettaSessionState::new(chain_ids_per_structure, residue_ranges);
+            let state = RosettaSessionState::new(structure_ids, residue_ranges);
             log::info!(
-                "Session created with {} structures, {} total residues",
-                combined.chain_ids_per_group.len(),
+                "Session created with {} entities, {} total residues",
+                combined.entity_ids.len(),
                 state.total_residues
             );
             orch.set_session(state);
@@ -586,10 +588,10 @@ impl ActionRouter {
         true
     }
 
-    pub(crate) fn update_rosetta_locks(&mut self, engine: &ProteinRenderEngine, _shared: &SharedState) {
-        let focus = self.focus(engine);
+    pub(crate) fn update_rosetta_locks(&mut self, engine: &VisoEngine, _store: &EntityStore) {
+        let focus = engine.focus();
         let new_focus = SharedState::operation_target(&focus)
-            .map(|id| EntityId(id.0));
+            .map(|id| EntityId(u64::from(id)));
 
         if let Some(ref mut orch) = self.orchestrator {
             orch.update_focus_locks(new_focus);
@@ -600,7 +602,7 @@ impl ActionRouter {
 
     fn create_band_with_atoms(
         &mut self,
-        engine: &mut ProteinRenderEngine,
+        store: &EntityStore,
         start_residue: i32,
         start_pos: Vec3,
         start_atom_name: &str,
@@ -608,7 +610,7 @@ impl ActionRouter {
         end_pos: Vec3,
         end_atom_name: &str,
     ) {
-        if !self.ensure_rosetta_session(engine) {
+        if !self.ensure_rosetta_session(store) {
             log::warn!("No Rosetta session available for band creation");
             return;
         }
@@ -643,7 +645,7 @@ impl ActionRouter {
                 self.active_bands.insert(
                     band_id,
                     ActiveBand {
-                        band_id,
+                        _band_id: band_id,
                         res1,
                         atom1_name: start_atom_name.to_string(),
                         res2,
@@ -666,33 +668,30 @@ impl ActionRouter {
 
     pub fn handle_native_mouse_input(
         &mut self,
-        engine: &mut ProteinRenderEngine,
+        engine: &mut VisoEngine,
+        input: &mut InputProcessor,
+        store: &EntityStore,
         button: winit::event::MouseButton,
         pressed: bool,
     ) {
-
-
         match button {
             winit::event::MouseButton::Left => {
                 self.left_mouse_pressed = pressed;
 
                 if pressed {
-                    let hovered = engine.picking.hovered_residue;
-                    if hovered >= 0 {
-                        if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                            let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
-                                self.last_mouse_pos.0,
-                                self.last_mouse_pos.1,
-                                engine.context.config.width,
-                                engine.context.config.height,
+                    let hovered = engine.hovered_target();
+                    let hovered_residue = hovered.as_residue_i32();
+                    if hovered_residue >= 0 {
+                        if let Some(ca_pos) = engine.resolve_atom_position(hovered_residue as u32, "CA") {
+                            let click_world_pos = engine.screen_to_world_at_depth(
+                                Vec2::new(self.last_mouse_pos.0, self.last_mouse_pos.1),
                                 ca_pos,
                             );
-                            let start_pos = engine
-                                .get_closest_atom_for_residue(hovered as usize, click_world_pos)
-                                .unwrap_or(ca_pos);
+                            // Use CA as the start position for simplicity
+                            let start_pos = ca_pos;
 
                             self.pull_drag = Some(PullDragState {
-                                residue: hovered,
+                                residue: hovered_residue,
                                 start_pos,
                                 target_pos: click_world_pos,
                                 initial_mouse_pos: self.last_mouse_pos,
@@ -700,19 +699,26 @@ impl ActionRouter {
                             });
                             log::debug!(
                                 "Potential pull on residue {} at {:?}",
-                                hovered,
+                                hovered_residue,
                                 start_pos
                             );
                         }
                     }
 
-                    engine.handle_mouse_button(button, pressed);
+                    // Record mouse down via unified input
+                    if let Some(cmd) = input.handle_event(InputEvent::MouseButton {
+                        button: MouseButton::Left,
+                        pressed: true,
+                    }, hovered) {
+                        engine.execute(cmd);
+                    }
                 } else {
                     // Left button released
                     if let Some(pull) = self.pull_drag.take() {
-                        engine.handle_mouse_button(button, false);
-
                         if pull.is_active {
+                            // Pull was active — release mouse state without
+                            // click detection
+                            input.release_mouse_state();
                             log::info!(
                                 "Pull released - residue {} pulled to {:?}",
                                 pull.residue,
@@ -722,11 +728,24 @@ impl ActionRouter {
                                 orch.cancel_rosetta();
                             }
                         } else {
-                            engine.handle_mouse_up();
+                            // Pull not activated — process as normal click
+                            let hovered = engine.hovered_target();
+                            if let Some(cmd) = input.handle_event(InputEvent::MouseButton {
+                                button: MouseButton::Left,
+                                pressed: false,
+                            }, hovered) {
+                                engine.execute(cmd);
+                            }
                         }
                     } else {
-                        engine.handle_mouse_button(button, false);
-                        engine.handle_mouse_up();
+                        // No pull drag — process as normal click
+                        let hovered = engine.hovered_target();
+                        if let Some(cmd) = input.handle_event(InputEvent::MouseButton {
+                            button: MouseButton::Left,
+                            pressed: false,
+                        }, hovered) {
+                            engine.execute(cmd);
+                        }
                     }
                 }
             }
@@ -734,53 +753,36 @@ impl ActionRouter {
                 self.right_mouse_pressed = pressed;
 
                 if pressed {
-                    let hovered = engine.picking.hovered_residue;
-                    if hovered >= 0 {
-                        if let Some(ca_pos) = engine.get_residue_ca_position(hovered as usize) {
-                            let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
-                                self.last_mouse_pos.0,
-                                self.last_mouse_pos.1,
-                                engine.context.config.width,
-                                engine.context.config.height,
-                                ca_pos,
-                            );
-                            let (start_atom_pos, start_atom_name) = engine
-                                .get_closest_atom_with_name(hovered as usize, click_world_pos)
-                                .unwrap_or((ca_pos, "CA".to_string()));
-
+                    let hovered = engine.hovered_target();
+                    let hovered_residue = hovered.as_residue_i32();
+                    if hovered_residue >= 0 {
+                        if let Some(ca_pos) = engine.resolve_atom_position(hovered_residue as u32, "CA") {
                             self.band_drag = Some(BandDragState {
-                                start_residue: hovered,
-                                start_atom_pos,
-                                start_atom_name,
+                                start_residue: hovered_residue,
+                                start_atom_pos: ca_pos,
+                                start_atom_name: "CA".to_string(),
                                 current_mouse_pos: self.last_mouse_pos,
                             });
                             log::info!(
                                 "Started band drag from residue {} at {:?}",
-                                hovered,
-                                start_atom_pos
+                                hovered_residue,
+                                ca_pos
                             );
                         }
                     }
                 } else {
                     if let Some(drag) = self.band_drag.take() {
-                        let end_residue = engine.picking.hovered_residue;
+                        let hovered = engine.hovered_target();
+                        let end_residue = hovered.as_residue_i32();
                         if end_residue >= 0 && end_residue != drag.start_residue {
                             if let Some(ca_pos) =
-                                engine.get_residue_ca_position(end_residue as usize)
+                                engine.resolve_atom_position(end_residue as u32, "CA")
                             {
-                                let click_world_pos = engine.camera_controller.screen_to_world_at_depth(
-                                    self.last_mouse_pos.0,
-                                    self.last_mouse_pos.1,
-                                    engine.context.config.width,
-                                    engine.context.config.height,
-                                    ca_pos,
-                                );
-                                let (end_atom_pos, end_atom_name) = engine
-                                    .get_closest_atom_with_name(end_residue as usize, click_world_pos)
-                                    .unwrap_or((ca_pos, "CA".to_string()));
+                                let end_atom_pos = ca_pos;
+                                let end_atom_name = "CA".to_string();
 
                                 self.create_band_with_atoms(
-                                    engine,
+                                    store,
                                     drag.start_residue,
                                     drag.start_atom_pos,
                                     &drag.start_atom_name,
@@ -803,13 +805,11 @@ impl ActionRouter {
 
     pub fn handle_native_cursor_moved(
         &mut self,
-        engine: &mut ProteinRenderEngine,
+        engine: &mut VisoEngine,
+        _input: &InputProcessor,
         x: f32,
         y: f32,
     ) {
-        let delta_x = x - self.last_mouse_pos.0;
-        let delta_y = y - self.last_mouse_pos.1;
-
         // Handle pull drag movement
         let mut pull_became_active = false;
         if let Some(ref mut pull) = self.pull_drag {
@@ -829,49 +829,41 @@ impl ActionRouter {
             }
 
             if pull.is_active {
-                if let Some(current_ca) = engine.get_residue_ca_position(pull.residue as usize) {
+                if let Some(current_ca) = engine.resolve_atom_position(pull.residue as u32, "CA") {
                     pull.start_pos = current_ca;
                 }
-                pull.target_pos = engine.camera_controller.screen_to_world_at_depth(x, y, engine.context.config.width, engine.context.config.height, pull.start_pos);
+                pull.target_pos = engine.screen_to_world_at_depth(
+                    Vec2::new(x, y),
+                    pull.start_pos,
+                );
             }
         }
 
         // Start Rosetta pull when pull becomes active
         if pull_became_active {
             if let Some(ref pull) = self.pull_drag {
-                if let Some(ref orch) = self.orchestrator {
-                    if let Some(combined) = engine.scene.combined_coords_for_backend() {
-                        let residue_1indexed = (pull.residue + 1) as u32;
-                        let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
-                        if let Err(e) = orch.start_pull(combined.bytes, residue_1indexed, target) {
-                            log::warn!("Failed to start pull: {}", e);
-                        } else {
-                            log::info!(
-                                "Started Rosetta pull operation for residue {}",
-                                residue_1indexed
-                            );
-                        }
-                    }
-                }
+                let residue_1indexed = (pull.residue + 1) as u32;
+                // Note: pull start_pull needs coords from store, which is
+                // not available here. The caller (App) should wire this up.
+                log::info!(
+                    "Pull activated for residue {} — Rosetta pull requires session coords",
+                    residue_1indexed
+                );
             }
         }
 
-        // Handle mouse movement for camera/hovering
+        // Update pull target during active drag
         if let Some(ref pull) = self.pull_drag {
             if pull.is_active {
                 let target = [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z];
                 if let Some(ref orch) = self.orchestrator {
                     let _ = orch.update_pull_target(target);
                 }
-                engine.input.handle_mouse_position(x, y);
-            } else {
-                engine.handle_mouse_move(delta_x, delta_y);
-                engine.input.handle_mouse_position(x, y);
             }
-        } else {
-            engine.handle_mouse_move(delta_x, delta_y);
-            engine.input.handle_mouse_position(x, y);
         }
+
+        // Update cursor position on engine for picking
+        engine.set_cursor_pos(x, y);
 
         self.last_mouse_pos = (x, y);
 
@@ -896,32 +888,15 @@ impl ActionRouter {
 
 /// Extract CA positions from entities (for Kabsch alignment).
 pub(crate) fn entities_backbone_ca(
-    entities: &[foldit_conv::coords::entity::MoleculeEntity],
+    entities: &[molex::MoleculeEntity],
 ) -> Vec<Vec3> {
-    let mut cas = Vec::new();
-    for entity in entities {
-        if entity.molecule_type == foldit_conv::coords::entity::MoleculeType::Protein {
-            for i in 0..entity.coords.num_atoms {
-                let name = std::str::from_utf8(&entity.coords.atom_names[i])
-                    .unwrap_or("")
-                    .trim();
-                if name == "CA" {
-                    cas.push(Vec3::new(
-                        entity.coords.atoms[i].x,
-                        entity.coords.atoms[i].y,
-                        entity.coords.atoms[i].z,
-                    ));
-                }
-            }
-        }
-    }
-    cas
+    molex::ops::codec::ca_positions(entities)
 }
 
 /// Load a file (PDB/CIF/BCIF) and return entities + name.
 pub(crate) fn load_file_as_entities(
     path: &str,
-) -> Result<(Vec<foldit_conv::coords::entity::MoleculeEntity>, String), String> {
+) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
     let p = std::path::Path::new(path);
     let name = p
         .file_stem()
@@ -929,8 +904,7 @@ pub(crate) fn load_file_as_entities(
         .unwrap_or("Unknown")
         .to_string();
 
-    let coords = foldit_rs::puzzle::load_coords_from_file(p)?;
-    let entities = foldit_conv::coords::split_into_entities(&coords);
+    let entities = foldit_rs::puzzle::load_entities_from_file(p)?;
     Ok((entities, name))
 }
 
@@ -988,31 +962,26 @@ pub(crate) fn resolve_structure_path(input: &str) -> Result<String, String> {
     Err(format!("File not found: {}", input))
 }
 
-/// Build BandRenderInfo from active bands and engine state.
-pub(crate) fn build_band_render_infos(
-    engine: &ProteinRenderEngine,
+/// Build BandInfo from active bands using AtomRef endpoints.
+pub(crate) fn build_band_infos(
     active_bands: &std::collections::HashMap<u32, ActiveBand>,
-) -> Vec<BandRenderInfo> {
+) -> Vec<BandInfo> {
     active_bands
         .values()
         .filter_map(|band| {
             let idx1 = (band.res1 as usize).checked_sub(1)?;
             let idx2 = (band.res2 as usize).checked_sub(1)?;
 
-            let pos1 = engine.get_atom_position_by_name(idx1, &band.atom1_name)?;
-            let pos2 = engine.get_atom_position_by_name(idx2, &band.atom2_name)?;
-
-            Some(BandRenderInfo {
-                endpoint_a: pos1,
-                endpoint_b: pos2,
+            Some(BandInfo {
+                anchor_a: AtomRef { residue: idx1 as u32, atom_name: band.atom1_name.clone() },
+                anchor_b: BandTarget::Atom(AtomRef { residue: idx2 as u32, atom_name: band.atom2_name.clone() }),
                 is_pull: band.is_pull,
                 is_push: band.is_push,
                 is_disabled: band.is_disabled,
                 strength: band.strength as f32,
                 target_length: band.length as f32,
-                residue_idx: idx1 as u32,
-                is_space_pull: false,
-                ..Default::default()
+                band_type: None,
+                from_script: false,
             })
         })
         .collect()

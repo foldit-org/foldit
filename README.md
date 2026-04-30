@@ -91,8 +91,8 @@ foldit-rs/
 │   └── main.rs              # Main application
 ├── crates/
 │   ├── foldit-ml/           # ML inference library
-│   ├── viso/                # GPU render engine
-│   └── foldit-conv/         # Format conversion
+│   ├── viso/                # GPU render engine (external; optional submodule)
+│   └── molex/               # Molecular structure parsing (external; optional submodule)
 ├── xtask/                   # Build automation
 ├── Cargo.toml               # Workspace manifest
 └── pixi.toml                # Pixi task aliases
@@ -119,6 +119,23 @@ cargo build --release
 ```bash
 cargo test --workspace
 ```
+
+### Working on viso or molex locally
+
+`viso` and `molex` are external crates (git tag and crates.io respectively); a
+plain clone builds against the published versions and does not need their
+submodules. To hack on either alongside foldit-rs:
+
+```bash
+# 1. Pull the submodule you want to edit
+git submodule update --init crates/viso     # or crates/molex
+
+# 2. Uncomment the matching [patch] block at the bottom of Cargo.toml
+# 3. cargo build now uses your local checkout
+```
+
+Each toggle is independent — you can have viso local and molex published, or
+vice versa, or both local.
 
 ### Create Distribution Bundle
 

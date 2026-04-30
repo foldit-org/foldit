@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Pin pyo3's Python to the pixi env so it doesn't auto-discover a
+# system Python with a different ABI (e.g. system 3.13 vs pixi 3.12).
+# Mismatch surfaces as undefined Python symbols at link time.
+[env]
+PYO3_PYTHON = { value = "crates/foldit-runner/.pixi/envs/foundry/bin/python3", relative = true }

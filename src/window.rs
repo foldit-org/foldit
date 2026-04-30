@@ -577,14 +577,10 @@ impl AppRunner {
         // Process all backend updates (Rosetta + ML) via triple buffers
         self.app.apply_backend_updates();
 
-        // Sync engine with scene if dirty (non-blocking: submits to background thread)
-        self.app.sync_engine();
-
-        // Apply any completed scene from background thread (GPU uploads only, <1ms)
-        self.app.apply_pending_scene();
-
-        // Update camera animation
-        self.app.update_camera_animation(dt.as_secs_f32());
+        // Update engine: drains pending Assembly, submits mesh rebuild
+        // for new generations, applies completed background mesh data,
+        // ticks camera animation.
+        self.app.update_engine(dt.as_secs_f32());
 
         // Update frame visuals (bands + pull tracking)
         self.app.update_frame_visuals();

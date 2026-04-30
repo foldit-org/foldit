@@ -1,12 +1,12 @@
 [submodule "crates/foldit-runner"]
 	path = crates/foldit-runner
-	url = https://github.com/petridecus/foldit-runner
-[submodule "crates/molconv"]
-	path = crates/molconv
-	url = https://github.com/petridecus/molconv
+	url = https://github.com/foldit-org/foldit-runner
+[submodule "crates/molex"]
+	path = crates/molex
+	url = https://github.com/foldit-org/molex
 [submodule "crates/foldit-frontend"]
 	path = crates/foldit-frontend
-	url = https://github.com/petridecus/foldit-frontend
+	url = https://github.com/foldit-org/foldit-gui
 [submodule "crates/viso"]
 	path = crates/viso
-	url = https://github.com/petridecus/viso
+	url = https://github.com/foldit-org/viso
