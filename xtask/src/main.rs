@@ -135,7 +135,7 @@ fn setup_ml() -> Result<()> {
     // Build the worker binary so it's next to the main executable.
     // Without this, MLClient::new() fails at runtime because
     // find_worker_binary() can't locate foldit-runner-worker.
-    // Scope to -p foldit-runner so the build doesn't drag foldit-rs's
+    // Scope to -p foldit-runner so the build doesn't drag foldit's
     // viso/wgpu dep graph into a backend-only binary.
     println!("Building foldit-runner-worker binary...");
     let status = Command::new("cargo")
@@ -342,7 +342,7 @@ fn bundle(cpu_only: bool) -> Result<()> {
         println!("Copied {} to bundle.", worker_name);
     }
 
-    let app_name = format!("foldit-rs{}", exe_ext);
+    let app_name = format!("foldit{}", exe_ext);
     let app_src = format!("target/release/{}", app_name);
     if std::path::Path::new(&app_src).exists() {
         std::fs::copy(&app_src, format!("bundle/{}", app_name))?;
@@ -382,7 +382,7 @@ fn bundle(cpu_only: bool) -> Result<()> {
 }
 
 fn build_frontend() -> Result<()> {
-    let frontend_dir = "crates/foldit-frontend/js";
+    let frontend_dir = "crates/foldit-gui/js";
     println!("Building frontend...");
 
     #[cfg(windows)]

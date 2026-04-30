@@ -4,8 +4,8 @@
 [submodule "crates/molex"]
 	path = crates/molex
 	url = https://github.com/foldit-org/molex
-[submodule "crates/foldit-frontend"]
-	path = crates/foldit-frontend
+[submodule "crates/foldit-gui"]
+	path = crates/foldit-gui
 	url = https://github.com/foldit-org/foldit-gui
 [submodule "crates/viso"]
 	path = crates/viso

@@ -1083,16 +1083,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
-name = "foldit-frontend"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.11.0",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "foldit-rs"
+name = "foldit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1100,7 +1091,7 @@ dependencies = [
  "bytemuck",
  "env_filter 0.1.4",
  "env_logger",
- "foldit-frontend",
+ "foldit-gui",
  "foldit-runner",
  "glam",
  "indexmap 2.13.0",
@@ -1119,6 +1110,15 @@ dependencies = [
  "wgpu",
  "winit",
  "wry",
+]
+
+[[package]]
+name = "foldit-gui"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -61,7 +61,7 @@ fn main() {
             std::fs::copy(dll_src, &deps_dst).ok();
         }
 
-        // Copy python312.dll (needed by foldit-rs.exe and foldit-runner-worker.exe)
+        // Copy python312.dll (needed by foldit.exe and foldit-runner-worker.exe)
         let python_dll_src = Path::new("assets/libs/python312.dll");
         if python_dll_src.exists() {
             let python_dll_dst = target_profile_dir.join("python312.dll");

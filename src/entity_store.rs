@@ -1,7 +1,7 @@
 //! Authoritative entity store: owns all entity data, assigns IDs,
 //! and holds per-entity metadata (name, origin, role, reference CA).
 //!
-//! Viso is a downstream renderer — foldit-rs pushes entity data to it.
+//! Viso is a downstream renderer — foldit pushes entity data to it.
 //! Both sides share the same ID space.
 
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
@@ -19,7 +19,7 @@ pub struct CombinedAssemblyResult {
     /// `entity_ids`. Backend-side IDs are minted fresh and meaningless;
     /// match by position, not by id.
     pub assembly: Assembly,
-    /// Local foldit-rs entity ids in the same order as
+    /// Local foldit entity ids in the same order as
     /// `assembly.entities()`.
     pub entity_ids: Vec<u32>,
     /// Per-entity Rosetta residue ranges `(start, end)`, 1-indexed and

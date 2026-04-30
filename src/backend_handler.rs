@@ -7,11 +7,11 @@ use molex::ops::codec::deserialize as deserialize_coords;
 use molex::ops::codec::split_into_entities;
 use molex::{Assembly, MoleculeEntity};
 use molex::ops::transform::{align_coords_bytes, kabsch_alignment_with_scale};
-use foldit_frontend::DirtyFlags;
+use foldit_gui::DirtyFlags;
 use foldit_runner::orchestrator::{BackendUpdate, EntityId, OpType};
 use foldit_runner::Orchestrator;
-use foldit_rs::entity_store::{EntityStore, EntityOrigin, EntityRole};
-use foldit_rs::shared_state::SharedState;
+use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
+use foldit::shared_state::SharedState;
 use glam::Vec3;
 use std::collections::HashMap;
 use viso::{Focus, Transition, VisoEngine};
@@ -167,7 +167,7 @@ fn handle_rosetta_coords(
     );
 
     // Match returned entities back to local entity ids by position. The
-    // session's structure ids are foldit-rs entity ids minted in the
+    // session's structure ids are foldit entity ids minted in the
     // order combined_assembly_for_backend stashed them, so structure
     // order maps 1:1 to local id order.
     let entity_ids: Option<Vec<u32>> = orchestrator

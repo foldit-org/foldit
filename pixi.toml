@@ -2,7 +2,7 @@
 # This file is optional and can be deleted if you prefer using cargo directly
 
 [workspace]
-name = "foldit-rs"
+name = "foldit"
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64", "win-64"]
 

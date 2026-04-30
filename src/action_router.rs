@@ -4,9 +4,9 @@
 //! user actions to the appropriate backend operations. Does NOT handle
 //! backend output processing, rendering, or frontend state sync.
 
-use foldit_frontend::DirtyFlags;
-use foldit_rs::entity_store::EntityStore;
-use foldit_rs::shared_state::SharedState;
+use foldit_gui::DirtyFlags;
+use foldit::entity_store::EntityStore;
+use foldit::shared_state::SharedState;
 use viso::{AtomRef, BandInfo, BandTarget, InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{EntityId, OpType};
 use foldit_runner::Orchestrator;
@@ -200,22 +200,22 @@ impl ActionRouter {
         &mut self,
         engine: &mut VisoEngine,
         store: &EntityStore,
-        action: foldit_frontend::ActionId,
-    ) -> Option<foldit_frontend::ParameterizedAction> {
-        use foldit_frontend::ActionId;
+        action: foldit_gui::ActionId,
+    ) -> Option<foldit_gui::ParameterizedAction> {
+        use foldit_gui::ActionId;
         let parameterized = match action {
             ActionId::ToggleWiggle => { self.toggle_wiggle(engine, store); None }
             ActionId::ToggleShake => { self.toggle_shake(engine, store); None }
             ActionId::RunPrediction => { self.run_prediction(engine, store); None }
             ActionId::RunMPNN => {
                 // Default params — frontend can use ParameterizedAction for custom values
-                Some(foldit_frontend::ParameterizedAction::RunSequenceDesign {
+                Some(foldit_gui::ParameterizedAction::RunSequenceDesign {
                     temperature: 0.1,
                     num_sequences: 4,
                 })
             }
             ActionId::RunDiffusion => {
-                Some(foldit_frontend::ParameterizedAction::RunStructureDesign {
+                Some(foldit_gui::ParameterizedAction::RunStructureDesign {
                     length: "100-100".to_string(),
                     num_steps: 50,
                     contig: None,
@@ -904,7 +904,7 @@ pub(crate) fn load_file_as_entities(
         .unwrap_or("Unknown")
         .to_string();
 
-    let entities = foldit_rs::puzzle::load_entities_from_file(p)?;
+    let entities = foldit::puzzle::load_entities_from_file(p)?;
     Ok((entities, name))
 }
 
@@ -990,8 +990,8 @@ pub(crate) fn build_band_infos(
 /// Build actions list from orchestrator state.
 pub(crate) fn build_actions_list(
     orchestrator: &Option<Orchestrator>,
-) -> Vec<foldit_frontend::state::ActionInfo> {
-    use foldit_frontend::state::ActionInfo;
+) -> Vec<foldit_gui::state::ActionInfo> {
+    use foldit_gui::state::ActionInfo;
 
     let orch = match orchestrator {
         Some(o) => o,

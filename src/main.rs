@@ -25,10 +25,10 @@ mod tee_logger;
 mod window;
 
 use action_router::ActionRouter;
-use foldit_frontend::DirtyFlags;
+use foldit_gui::DirtyFlags;
 use foldit_runner::Orchestrator;
-use foldit_rs::entity_store::{EntityStore, EntityOrigin, EntityRole};
-use foldit_rs::shared_state::SharedState;
+use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
+use foldit::shared_state::SharedState;
 use viso::{BandInfo, BandTarget, AtomRef, Focus, InputEvent, InputProcessor, PullInfo, VisoEngine, VisoCommand};
 use std::sync::Arc;
 use winit::event::MouseScrollDelta;
@@ -164,8 +164,8 @@ impl App {
 
     // ── Viewport input (from webview) ──
 
-    pub(crate) fn handle_viewport_input(&mut self, input: foldit_frontend::ViewportInput) {
-        use foldit_frontend::ViewportInput;
+    pub(crate) fn handle_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
+        use foldit_gui::ViewportInput;
         let Some(engine) = &mut self.engine else { return };
 
         match input {
@@ -259,7 +259,7 @@ impl App {
         update_all_visualizations(engine, &self.router);
     }
 
-    pub(crate) fn handle_trigger_action(&mut self, action: foldit_frontend::ActionId) {
+    pub(crate) fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
         if let Some(engine) = &mut self.engine {
             if let Some(pa) = self.router.handle_trigger_action(engine, &self.store, action) {
                 self.handle_parameterized_action(pa);
@@ -269,9 +269,9 @@ impl App {
 
     pub(crate) fn handle_parameterized_action(
         &mut self,
-        action: foldit_frontend::ParameterizedAction,
+        action: foldit_gui::ParameterizedAction,
     ) {
-        use foldit_frontend::ParameterizedAction;
+        use foldit_gui::ParameterizedAction;
         let title = self.structure_title();
         let Some(engine) = &mut self.engine else { return };
 
@@ -312,7 +312,7 @@ impl App {
                 self.store.publish_to(engine);
                 self.router.reset_for_new_structure();
 
-                match foldit_rs::puzzle::load_puzzle_structure(puzzle_id) {
+                match foldit::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
                         if let Some(preset_name) = &puzzle_data.view_preset {
                             let presets_dir = std::path::Path::new("assets/view_presets");
@@ -846,7 +846,7 @@ impl App {
 
     // ── Frontend state sync ──
 
-    pub(crate) fn populate_frontend(&mut self, frontend: &mut foldit_frontend::FrontendState) {
+    pub(crate) fn populate_frontend(&mut self, frontend: &mut foldit_gui::FrontendState) {
         let engine = match &self.engine {
             Some(e) => e,
             None => return,
@@ -909,7 +909,7 @@ impl App {
                     MoleculeType::Cofactor => "cofactor",
                     MoleculeType::Solvent => "solvent",
                 };
-                scene_entities.push(foldit_frontend::SceneEntityInfo {
+                scene_entities.push(foldit_gui::SceneEntityInfo {
                     entity_id: entity.id().raw(),
                     label: entity.label(),
                     molecule_type: mol_str.to_string(),
@@ -1097,5 +1097,5 @@ fn main() {
     log::info!("Loading structure from: {}", pdb_path);
 
     let app = App::new(pdb_path);
-    window::run(app, foldit_frontend::FrontendState::new(), log_buffer);
+    window::run(app, foldit_gui::FrontendState::new(), log_buffer);
 }

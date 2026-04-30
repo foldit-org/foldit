@@ -4,7 +4,7 @@
 //! It implements `ApplicationHandler` and delegates domain logic to `App` via method calls.
 
 use crate::App;
-use foldit_frontend::DirtyFlags;
+use foldit_gui::DirtyFlags;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -17,9 +17,9 @@ use winit::window::{Window, WindowId};
 #[derive(Debug)]
 pub(crate) enum IpcMessage {
     Ready,
-    ViewportInput(foldit_frontend::ViewportInput),
-    TriggerAction(foldit_frontend::ActionId),
-    ParameterizedAction(foldit_frontend::ParameterizedAction),
+    ViewportInput(foldit_gui::ViewportInput),
+    TriggerAction(foldit_gui::ActionId),
+    ParameterizedAction(foldit_gui::ParameterizedAction),
 }
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
@@ -27,7 +27,7 @@ pub(crate) struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
     webview: Option<wry::WebView>,
-    frontend: foldit_frontend::FrontendState,
+    frontend: foldit_gui::FrontendState,
     ipc_rx: Option<std::sync::mpsc::Receiver<IpcMessage>>,
     webview_ready: bool,
     last_frame: Instant,
@@ -46,7 +46,7 @@ pub(crate) struct AppRunner {
 }
 
 impl AppRunner {
-    fn new(app: App, frontend: foldit_frontend::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> Self {
+    fn new(app: App, frontend: foldit_gui::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> Self {
         Self {
             app,
             window: None,
@@ -226,7 +226,7 @@ impl AppRunner {
 
         use std::process::{Command, Stdio};
 
-        let frontend_dir = std::path::Path::new("crates/foldit-frontend/js");
+        let frontend_dir = std::path::Path::new("crates/foldit-gui/js");
         if !frontend_dir.exists() {
             log::warn!(
                 "Frontend directory not found at {:?}, skipping dev server",
@@ -734,7 +734,7 @@ impl Drop for AppRunner {
 }
 
 /// Run the application event loop. This function never returns.
-pub(crate) fn run(app: App, frontend: foldit_frontend::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> ! {
+pub(crate) fn run(app: App, frontend: foldit_gui::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> ! {
     let mut runner = AppRunner::new(app, frontend, log_buffer);
 
     // In debug, spawn dev server and wait for it before opening the window.

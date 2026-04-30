@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/foldit-frontend",
+    "crates/foldit-gui",
     "crates/foldit-runner",
     "xtask",
 ]
@@ -15,20 +15,20 @@ exclude = [
 ]
 
 [package]
-name = "foldit-rs"
+name = "foldit"
 version = "0.1.0"
 edition = "2021"
 description = "A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML"
-default-run = "foldit-rs"
+default-run = "foldit"
 
 # Main application binary
 [[bin]]
-name = "foldit-rs"
+name = "foldit"
 path = "src/main.rs"
 
 [dependencies]
 # Workspace crates
-foldit-frontend = { path = "crates/foldit-frontend" }
+foldit-gui = { path = "crates/foldit-gui" }
 foldit-runner = { path = "crates/foldit-runner", default-features = false, features = ["python"] }
 
 # External crates (released independently). To hack on either of these
@@ -38,7 +38,7 @@ foldit-runner = { path = "crates/foldit-runner", default-features = false, featu
 viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
 molex = "0.3.0"
 
-# Required for foldit-ml-worker binary
+# Required for foldit-runner-worker binary
 anyhow = "1.0"
 
 # Async for background ML tasks

@@ -1,4 +1,4 @@
-# Foldit-RS
+# Foldit
 
 A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML.
 
@@ -16,8 +16,8 @@ cargo build
 ```
 
 This builds both:
-- `foldit-rs` - Main application
-- `foldit-ml-worker` - ML worker process (needed at runtime)
+- `foldit` - Main application
+- `foldit-runner-worker` - ML worker process (needed at runtime)
 
 ### Run
 
@@ -34,7 +34,7 @@ To use ML-based structure prediction:
 ### 1. Install Python Environment
 
 ```bash
-cd crates/foldit-ml
+cd crates/foldit-runner
 
 # GPU-enabled
 pixi install -e foundry
@@ -62,7 +62,7 @@ cd ../..  # Back to workspace root
 cargo run -- 1bfe
 ```
 
-The application will spawn `foldit-ml-worker` processes as needed.
+The application will spawn `foldit-runner-worker` processes as needed.
 
 ## Build Tasks (xtask)
 
@@ -86,11 +86,11 @@ pixi run download-models
 ## Project Structure
 
 ```
-foldit-rs/
+foldit/
 ├── src/
 │   └── main.rs              # Main application
 ├── crates/
-│   ├── foldit-ml/           # ML inference library
+│   ├── foldit-runner/           # ML inference library
 │   ├── viso/                # GPU render engine (external; optional submodule)
 │   └── molex/               # Molecular structure parsing (external; optional submodule)
 ├── xtask/                   # Build automation
@@ -101,7 +101,7 @@ foldit-rs/
 ## Features
 
 - **GPU-accelerated rendering** via wgpu
-- **ML structure prediction** via foldit-ml (SimpleFold, RFdiffusion, ESMFold)
+- **ML structure prediction** via foldit-runner (SimpleFold, RFdiffusion, ESMFold)
 - **Zero-copy IPC** between main app and ML workers via Iceoryx2 shared memory
 - **Rosetta integration** (optional, requires separate Rosetta installation)
 - **Cross-platform**: macOS (Apple Silicon), Linux, Windows
@@ -124,7 +124,7 @@ cargo test --workspace
 
 `viso` and `molex` are external crates (git tag and crates.io respectively); a
 plain clone builds against the published versions and does not need their
-submodules. To hack on either alongside foldit-rs:
+submodules. To hack on either alongside foldit:
 
 ```bash
 # 1. Pull the submodule you want to edit
@@ -145,7 +145,7 @@ cargo xtask bundle
 ```
 
 The bundle includes:
-- `foldit-rs` binary
-- `foldit-ml-worker` binary
+- `foldit` binary
+- `foldit-runner-worker` binary
 - Python ML runtime (bundled via pixi)
 - Model weights (if downloaded)
