@@ -26,20 +26,25 @@ pub(crate) fn handle_backend_update(
     ui_dirty: &mut DirtyFlags,
     pending_prediction_reference: &mut Option<Vec<Vec3>>,
     latest_score: &mut Option<f64>,
+    scoring_mode: foldit_gui::ScoringMode,
     update: BackendUpdate,
 ) {
     match update {
         BackendUpdate::RosettaCoords {
             assembly,
             score,
+            game_score,
             cycle,
             message,
             converged,
             per_residue_scores,
+            per_residue_game_scores,
         } => {
             handle_rosetta_coords(
                 engine, store, shared, orchestrator, ui_dirty, latest_score,
-                assembly, score, cycle, message, converged, per_residue_scores,
+                scoring_mode,
+                assembly, score, game_score, cycle, message, converged,
+                per_residue_scores, per_residue_game_scores,
             );
         }
         BackendUpdate::MLIntermediate {
@@ -103,14 +108,21 @@ fn handle_rosetta_coords(
     orchestrator: &mut Option<Orchestrator>,
     ui_dirty: &mut DirtyFlags,
     latest_score: &mut Option<f64>,
+    scoring_mode: foldit_gui::ScoringMode,
     assembly: Assembly,
     score: f64,
+    game_score: f64,
     cycle: u32,
     message: Option<String>,
     converged: bool,
     per_residue_scores: Option<Vec<f64>>,
+    per_residue_game_scores: Option<Vec<f64>>,
 ) {
-    *latest_score = Some(score);
+    // Pick the score representation the GUI expects for the active mode.
+    *latest_score = Some(match scoring_mode {
+        foldit_gui::ScoringMode::Game => game_score,
+        foldit_gui::ScoringMode::Scientist => score,
+    });
     *ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS;
 
     let returned: Vec<MoleculeEntity> = assembly.entities().to_vec();
@@ -149,7 +161,13 @@ fn handle_rosetta_coords(
                 ),
             );
         }
-        cache_per_residue_scores(engine, apply_target, &per_residue_scores);
+        cache_per_residue_scores(
+            engine,
+            apply_target,
+            scoring_mode,
+            &per_residue_scores,
+            &per_residue_game_scores,
+        );
 
         if let Some(ref mut orch) = orchestrator {
             orch.unlock(mpnn_eid);
@@ -181,7 +199,13 @@ fn handle_rosetta_coords(
             entity_ids.len()
         );
         for &eid in &entity_ids {
-            cache_per_residue_scores(engine, eid, &per_residue_scores);
+            cache_per_residue_scores(
+                engine,
+                eid,
+                scoring_mode,
+                &per_residue_scores,
+                &per_residue_game_scores,
+            );
         }
         apply_combined_update(engine, store, returned, &entity_ids, Transition::smooth());
     } else {
@@ -201,7 +225,13 @@ fn handle_rosetta_coords(
                 }
                 store.update_entity_and_publish(engine, id, protein, Transition::smooth());
             }
-            cache_per_residue_scores(engine, id, &per_residue_scores);
+            cache_per_residue_scores(
+                engine,
+                id,
+                scoring_mode,
+                &per_residue_scores,
+                &per_residue_game_scores,
+            );
         }
     }
 }
@@ -668,14 +698,21 @@ fn update_animation_structure_from_backend(
     log::warn!("No coordinates in update, skipping");
 }
 
-/// Cache per-residue scores on an entity.
+/// Cache per-residue scores on an entity, picking the rosetta or game array
+/// based on the active scoring mode.
 fn cache_per_residue_scores(
     engine: &mut VisoEngine,
     entity_id: u32,
+    scoring_mode: foldit_gui::ScoringMode,
     per_residue_scores: &Option<Vec<f64>>,
+    per_residue_game_scores: &Option<Vec<f64>>,
 ) {
-    if let Some(scores) = per_residue_scores {
-        engine.set_per_residue_scores(entity_id, Some(scores.clone()));
+    let scores = match scoring_mode {
+        foldit_gui::ScoringMode::Game => per_residue_game_scores,
+        foldit_gui::ScoringMode::Scientist => per_residue_scores,
+    };
+    if let Some(s) = scores {
+        engine.set_per_residue_scores(entity_id, Some(s.clone()));
     }
 }
 

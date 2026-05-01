@@ -25,7 +25,7 @@ mod tee_logger;
 mod window;
 
 use action_router::ActionRouter;
-use foldit_gui::DirtyFlags;
+use foldit_gui::{DirtyFlags, ScoringMode};
 use foldit_runner::Orchestrator;
 use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
 use foldit::shared_state::SharedState;
@@ -44,6 +44,14 @@ pub(crate) struct App {
     shared_state: SharedState,
     pdb_path: String,
     latest_score: Option<f64>,
+    /// `Game` for tutorial/campaign/server puzzles, `Scientist` for CLI /
+    /// drag-drop loads. Drives which score representation reaches the GUI.
+    scoring_mode: ScoringMode,
+    /// Puzzle metadata from the active toml. Zero/empty in Scientist mode.
+    puzzle_id: u32,
+    puzzle_title: String,
+    starting_score: f64,
+    target_score: f64,
 }
 
 impl App {
@@ -65,6 +73,13 @@ impl App {
             shared_state: SharedState::new(),
             pdb_path,
             latest_score: None,
+            // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
+            // when an intro/campaign puzzle is loaded.
+            scoring_mode: ScoringMode::Scientist,
+            puzzle_id: 0,
+            puzzle_title: String::new(),
+            starting_score: 0.0,
+            target_score: 0.0,
         }
     }
 
@@ -121,6 +136,7 @@ impl App {
                     &mut self.router.ui_dirty,
                     &mut self.router.pending_prediction_reference,
                     &mut self.latest_score,
+                    self.scoring_mode,
                     update,
                 );
             }
@@ -298,7 +314,14 @@ impl App {
                         if let Some(&first_id) = ids.first() {
                             self.store.register_loaded(first_id, backbone_ca);
                         }
-                        self.router.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE;
+                        // Free-form file load → scientist mode.
+                        self.scoring_mode = ScoringMode::Scientist;
+                        self.puzzle_id = 0;
+                        self.puzzle_title = name;
+                        self.starting_score = 0.0;
+                        self.target_score = 0.0;
+                        self.router.ui_dirty |=
+                            DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::PUZZLE;
                     }
                     Err(e) => {
                         log::error!("Failed to load structure '{}': {}", path, e);
@@ -307,13 +330,18 @@ impl App {
                 self.router.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
             }
             ParameterizedAction::LoadPuzzle { puzzle_id } => {
-                // Clear scene
                 self.store.clear();
-                self.store.publish_to(engine);
                 self.router.reset_for_new_structure();
 
                 match foldit::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
+                        // Capture mode + puzzle metadata for the GUI.
+                        self.scoring_mode = ScoringMode::Game;
+                        self.puzzle_id = puzzle_id;
+                        self.puzzle_title = puzzle_data.name.clone();
+                        self.starting_score = puzzle_data.start_energy;
+                        self.target_score = puzzle_data.completion_score;
+
                         if let Some(preset_name) = &puzzle_data.view_preset {
                             let presets_dir = std::path::Path::new("assets/view_presets");
                             engine.load_preset(preset_name, presets_dir);
@@ -321,8 +349,10 @@ impl App {
 
                         let backbone_ca = action_router::entities_backbone_ca(&puzzle_data.entities);
                         let ss_override = puzzle_data.ss_override;
+                        let cam = &puzzle_data.camera;
+                        let cam_eye = glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
+                        let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
-                        // Insert into store
                         let mut ids = Vec::new();
                         for entity in puzzle_data.entities {
                             let id = self.store.insert(
@@ -334,9 +364,17 @@ impl App {
                             ids.push(id);
                         }
 
-                        // Push to viso
-                        self.store.publish_to(engine);
-                        engine.fit_camera_to_focus();
+                        // Atomic topology swap: tears down stale scene-local state and
+                        // force-syncs so subsequent calls see the new entities.
+                        self.store.replace_in(engine);
+
+                        // Snap so bounding_radius reflects molecule extent (fog driver),
+                        // then override the pose with the puzzle's saved eye/up but
+                        // anchor the orbit center on the protein centroid.
+                        engine.snap_camera_to_focus();
+                        if let Some(centroid) = engine.focus_centroid() {
+                            engine.set_camera_pose(centroid, cam_eye, cam_up);
+                        }
 
                         if let Some(ss) = ss_override {
                             if let Some(&first_id) = ids.first() {
@@ -347,13 +385,21 @@ impl App {
                         if let Some(&first_id) = ids.first() {
                             self.store.register_loaded(first_id, backbone_ca);
                         }
+
+                        // Recreate Rosetta session for the new topology so cycle-0
+                        // scoring fires immediately and per-residue colors land
+                        // without waiting for a user action.
+                        if !self.router.ensure_rosetta_session(&self.store) {
+                            log::warn!("Failed to create Rosetta session for puzzle {}", puzzle_id);
+                        }
                     }
                     Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
                 }
                 self.router.ui_dirty |= DirtyFlags::LOADING
                     | DirtyFlags::SCORE
                     | DirtyFlags::SELECTION
-                    | DirtyFlags::ACTIONS;
+                    | DirtyFlags::ACTIONS
+                    | DirtyFlags::PUZZLE;
             }
             ParameterizedAction::CreateBand { .. } => {
                 log::info!("CreateBand via IPC not yet wired");
@@ -861,9 +907,39 @@ impl App {
             return;
         }
 
+        // PUZZLE before SCORE: a fresh `set_puzzle_*` resets `complete=false`,
+        // and then the score check below can latch victory in the same frame
+        // without being overwritten.
+        if app_dirty.contains(DirtyFlags::PUZZLE) {
+            match self.scoring_mode {
+                ScoringMode::Game => frontend.set_puzzle_game(
+                    self.puzzle_id,
+                    self.puzzle_title.clone(),
+                    self.starting_score,
+                    self.target_score,
+                ),
+                ScoringMode::Scientist => frontend.set_puzzle_scientist(
+                    if self.puzzle_title.is_empty() {
+                        self.structure_title()
+                    } else {
+                        self.puzzle_title.clone()
+                    },
+                ),
+            }
+        }
         if app_dirty.contains(DirtyFlags::SCORE) {
             if let Some(score) = self.latest_score {
                 frontend.set_score(score, false);
+                // Victory check: in Game mode, latch puzzle as complete the
+                // first time current_score crosses the toml target. Higher
+                // game score = better fold (game-score formula negates),
+                // so the comparison is `>=`.
+                if self.scoring_mode == ScoringMode::Game
+                    && self.target_score > 0.0
+                    && score >= self.target_score
+                {
+                    frontend.mark_puzzle_complete();
+                }
             }
         }
         if app_dirty.contains(DirtyFlags::ACTIONS) {

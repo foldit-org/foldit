@@ -227,6 +227,15 @@ impl EntityStore {
         engine.set_assembly(std::sync::Arc::new(self.assembly.clone()));
     }
 
+    /// Atomic topology swap: hand the current `Assembly` to viso and
+    /// have it tear down scene-local state + force-sync in one shot.
+    /// Use this for puzzle/file reloads — `publish_to` alone leaves
+    /// stale animation/surface/per-entity state from the previous
+    /// topology around until the next render tick.
+    pub fn replace_in(&self, engine: &mut viso::VisoEngine) {
+        engine.replace_assembly(std::sync::Arc::new(self.assembly.clone()));
+    }
+
     /// Replace an entity in-place, queue an animation transition for
     /// the next sync, and publish the updated `Assembly` to the engine.
     /// The transition stages a per-sync animation (start = current

@@ -141,6 +141,12 @@ impl AppRunner {
                 serde_json::to_value(&self.frontend.score).unwrap(),
             );
         }
+        if dirty.contains(DirtyFlags::PUZZLE) {
+            update.insert(
+                "puzzle".into(),
+                serde_json::to_value(&self.frontend.puzzle).unwrap(),
+            );
+        }
         if dirty.contains(DirtyFlags::SELECTION) {
             update.insert(
                 "selection".into(),
@@ -542,6 +548,8 @@ impl AppRunner {
                 // Engine + puzzle loaded — ready to show the game view
                 self.frontend.set_puzzle_loaded(true);
                 self.frontend.set_score_title(self.app.structure_title());
+                // CLI bootstrap → scientist mode with the structure title.
+                self.frontend.set_puzzle_scientist(self.app.structure_title());
                 self.frontend.mark_all_dirty();
                 // Push full state via __onInitialState now (the Ready handler
                 // deferred this push so the JS only ever sees puzzle_loaded:true).

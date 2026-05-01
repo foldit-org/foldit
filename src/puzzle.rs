@@ -142,6 +142,12 @@ pub struct PuzzleData {
     pub ss_override: Option<Vec<molex::SSType>>,
     /// Optional view preset name from puzzle.toml `[puzzle] view_preset`.
     pub view_preset: Option<String>,
+    /// Initial camera pose from `[puzzle.camera]`.
+    pub camera: Camera,
+    /// Starting score from `[puzzle] start_energy` (rosetta units).
+    pub start_energy: f64,
+    /// Completion target from `[puzzle] completion_score` (game units).
+    pub completion_score: f64,
 }
 
 /// Load a puzzle by ID: parse its TOML and return entities for the engine.
@@ -217,6 +223,9 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         name: puzzle.puzzle.title,
         ss_override,
         view_preset: puzzle.puzzle.view_preset,
+        camera: puzzle.puzzle.camera,
+        start_energy: puzzle.puzzle.start_energy,
+        completion_score: puzzle.puzzle.completion_score,
     })
 }
 
