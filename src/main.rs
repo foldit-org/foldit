@@ -1429,9 +1429,9 @@ fn update_all_visualizations(engine: &mut VisoEngine, router: &ActionRouter) {
 // Entry point
 // ---------------------------------------------------------------------------
 fn main() {
-    let log_buffer = tee_logger::init(
-        "info,wgpu_hal::vulkan::instance=off,naga=warn",
-    );
+    let default_filter = "info,wgpu_hal::vulkan::instance=off,naga=warn";
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    let log_buffer = tee_logger::init(&filter);
 
     let input = std::env::args()
         .nth(1)
