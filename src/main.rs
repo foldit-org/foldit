@@ -20,7 +20,7 @@
 //!   Mouse - Rotate/zoom camera
 
 mod action_router;
-mod backend_handler;
+mod backend_results;
 mod tee_logger;
 mod window;
 
@@ -32,7 +32,6 @@ use foldit_gui::{
 use foldit_runner::Orchestrator;
 use foldit::entity_store::{EntityStore, EntityStoreError, EntityOrigin, EntityRole};
 use foldit::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
-use foldit::shared_state::SharedState;
 use molex::entity::molecule::id::EntityId;
 use viso::{BandInfo, BandTarget, AtomRef, Focus, InputEvent, InputProcessor, PullInfo, VisoEngine, VisoCommand};
 use std::sync::Arc;
@@ -230,7 +229,6 @@ pub(crate) struct App {
     input: InputProcessor,
     store: EntityStore,
     router: ActionRouter,
-    shared_state: SharedState,
     pdb_path: String,
     /// `Game` for tutorial/campaign/server puzzles, `Scientist` for CLI /
     /// drag-drop loads. Drives which score representation reaches the GUI.
@@ -267,7 +265,6 @@ impl App {
             input: InputProcessor::new(),
             store: EntityStore::new(),
             router: ActionRouter::new(),
-            shared_state: SharedState::new(),
             pdb_path,
             // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
             // when an intro/campaign puzzle is loaded.
@@ -321,23 +318,24 @@ impl App {
 
     pub(crate) fn apply_backend_updates(&mut self) {
         // 1. Tell orchestrator to pump internal channels → triple buffers
-        if let Some(ref mut orch) = self.router.orchestrator {
-            orch.pump_updates();
-        }
-
-        // 2. Read latest from all entity buffers
-        let updates = self.shared_state.drain_updates();
+        //    and drain readers in one pass.
+        let updates = match self.router.orchestrator.as_mut() {
+            Some(orch) => {
+                orch.pump_updates();
+                orch.drain_updates()
+            }
+            None => return,
+        };
         if updates.is_empty() {
             return;
         }
 
-        // 3. Process each update via backend_handler free functions
+        // 2. Process each update via backend_results free functions
         if let Some(engine) = &mut self.engine {
             for (_entity_id, update) in updates {
-                backend_handler::handle_backend_update(
+                backend_results::apply_backend_update(
                     engine,
                     &mut self.store,
-                    &mut self.shared_state,
                     &mut self.router.orchestrator,
                     &mut self.router.ui_dirty,
                     &mut self.router.pending_prediction_reference,
@@ -370,7 +368,7 @@ impl App {
                 }
             }
             VisoCommand::ClearSelection => {
-                self.router.cancel_operations(engine, &mut self.store, &mut self.shared_state);
+                self.router.cancel_operations(engine, &mut self.store);
             }
             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                 engine.execute(cmd);
@@ -456,7 +454,7 @@ impl App {
                                 }
                             }
                             VisoCommand::ClearSelection => {
-                                self.router.cancel_operations(engine, &mut self.store, &mut self.shared_state);
+                                self.router.cancel_operations(engine, &mut self.store);
                             }
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                                 engine.execute(cmd);
@@ -520,7 +518,7 @@ impl App {
 
         match action {
             ParameterizedAction::LoadStructure { path } => {
-                match action_router::load_file_as_entities(&path) {
+                match foldit::puzzle::load_file_as_entities(&path) {
                     Ok((entities, name)) => {
                         log::info!("Loaded structure via IPC: {}", name);
                         let backbone_ca = action_router::entities_backbone_ca(&entities);
@@ -645,13 +643,13 @@ impl App {
             }
             ParameterizedAction::RunSequenceDesign { temperature, num_sequences } => {
                 Self::run_sequence_design(
-                    &mut self.router, &self.store, engine,
+                    &mut self.router, &mut self.store, engine,
                     temperature, num_sequences,
                 );
             }
             ParameterizedAction::RunStructureDesign { length, num_steps, contig } => {
                 Self::run_structure_design(
-                    &mut self.router, &self.store, engine,
+                    &mut self.router, &mut self.store, engine,
                     &length, num_steps, contig,
                 );
             }
@@ -798,81 +796,49 @@ impl App {
     // ── ML operations (parameterized) ──
 
     /// Build entity context data from a pre-collected slice of entities.
+    ///
+    /// `focused_entity_id` switches the runner into focus-aware mode, used
+    /// by MPNN: only the focused protein is designable; every other
+    /// non-ambient entity is fixed.
     fn build_entity_context(
-        entities: &[molex::MoleculeEntity],
+        entities: Vec<molex::MoleculeEntity>,
         store: &EntityStore,
         entity_id: EntityId,
-    ) -> Option<foldit_runner::orchestrator::EntityContextData> {
-        use molex::MoleculeType;
-        use foldit_runner::orchestrator::{EntityContextData, EntityInfoData};
+        focused_entity_id: Option<u32>,
+    ) -> foldit_runner::orchestrator::EntityContextData {
+        use foldit_runner::orchestrator::{EntityContextData, EntityRoleHint};
 
-        let assembly = molex::Assembly::new(entities.to_vec());
-        let meta = store.entity_meta(entity_id);
-
-        let entity_info = entities.iter().map(|e| {
-            let mol_str = match e.molecule_type() {
-                MoleculeType::Protein => "protein",
-                MoleculeType::DNA => "dna",
-                MoleculeType::RNA => "rna",
-                MoleculeType::Ligand => "ligand",
-                MoleculeType::Ion => "ion",
-                MoleculeType::Water => "water",
-                MoleculeType::Lipid => "lipid",
-                MoleculeType::Cofactor => "cofactor",
-                MoleculeType::Solvent => "solvent",
-            };
-
-            // Count residues (unique res_nums)
-            let coords = e.to_coords();
-            let mut res_nums: Vec<i32> = coords.res_nums.iter().copied().collect();
-            res_nums.dedup();
-            let residue_count = res_nums.len() as u32;
-
-            let chain_id = coords.chain_ids.first()
-                .map(|&c| String::from(c as char))
-                .unwrap_or_default();
-
-            let is_protein = e.molecule_type() == MoleculeType::Protein;
-            let is_ambient = matches!(e.molecule_type(),
-                MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
-
-            EntityInfoData {
-                entity_id: e.id().raw(),
-                molecule_type: mol_str.to_string(),
-                chain_id,
-                residue_count,
-                designable: is_protein && meta.map_or(true, |(_, role)| role.designable),
-                foldable: is_protein && meta.map_or(true, |(_, role)| role.foldable),
-                fixed: !is_protein && !is_ambient,
-            }
-        }).collect();
-
-        Some(EntityContextData {
-            entities: entity_info,
-            assembly,
+        let target_role = store.entity_meta(entity_id).map(|(_, r)| r.clone());
+        EntityContextData::from_entities(entities, focused_entity_id, |raw_id| {
+            // Generic case (no focus) uses the *target's* role for every
+            // entity in the slice — preserves the original
+            // `App::build_entity_context` behavior, which always read
+            // `entity_meta(entity_id)` regardless of which entity was
+            // being described.
+            target_role.as_ref().map(|r| {
+                let _ = raw_id;
+                EntityRoleHint {
+                    designable: r.designable,
+                    foldable: r.foldable,
+                    ambient: r.ambient,
+                }
+            })
         })
     }
 
     fn run_sequence_design(
         router: &mut ActionRouter,
-        store: &EntityStore,
+        store: &mut EntityStore,
         engine: &mut VisoEngine,
         temperature: f32,
         num_sequences: u32,
     ) {
-        use foldit_runner::orchestrator::{
-            EntityContextData, EntityInfoData, EntityId as RunnerEntityId, OpType,
-        };
-        use molex::MoleculeType;
+        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
+        use crate::action_router::BackendOpRequest;
 
         let focus = engine.focus();
         log::info!("MPNN: focus = {:?}", focus);
 
-        // Collect entities based on focus (single entity, group, or
-        // session fallback). The old `lock_target` helper degenerated
-        // to "loaded entity for Session focus" so the new path is
-        // simply `loaded` — focus's typed `Entity(eid)` already names
-        // the target on its own.
         let loaded = store.loaded_entity();
         let Some((target_id, entities)) =
             store.collect_ml_entities(&focus, loaded)
@@ -880,8 +846,6 @@ impl App {
             log::warn!("No structure available for sequence design");
             return;
         };
-
-        let assembly = molex::Assembly::new(entities.clone());
 
         let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
         let entity_name = store.metadata(target_id).map(|m| m.name.clone());
@@ -905,126 +869,66 @@ impl App {
             }
         }
 
-        // Build focus-aware entity context
         let focused_entity_id: Option<u32> = match focus {
             Focus::Entity(eid) => Some(eid.raw()),
             _ => None,
         };
 
-        let entity_info: Vec<EntityInfoData> = entities.iter().map(|e| {
-            let is_protein = e.molecule_type() == MoleculeType::Protein;
-            let is_ambient = matches!(e.molecule_type(),
-                MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent);
-            let mol_str = match e.molecule_type() {
-                MoleculeType::Protein => "protein",
-                MoleculeType::DNA => "dna",
-                MoleculeType::RNA => "rna",
-                MoleculeType::Ligand => "ligand",
-                MoleculeType::Ion => "ion",
-                MoleculeType::Water => "water",
-                MoleculeType::Lipid => "lipid",
-                MoleculeType::Cofactor => "cofactor",
-                MoleculeType::Solvent => "solvent",
-            };
-            let coords = e.to_coords();
-            let chain_id = coords.chain_ids.first()
-                .map(|&c| String::from(c as char))
-                .unwrap_or_default();
+        let entity_context = Self::build_entity_context(
+            entities, store, target_id, focused_entity_id,
+        );
+        let assembly = entity_context.assembly.clone();
 
-            let mut res_nums: Vec<i32> = coords.res_nums.iter().copied().collect();
-            res_nums.dedup();
-
-            let raw_id = e.id().raw();
-            let designable = if let Some(focused_eid) = focused_entity_id {
-                is_protein && raw_id == focused_eid
-            } else {
-                is_protein
-            };
-            let fixed = if let Some(focused_eid) = focused_entity_id {
-                (is_protein && raw_id != focused_eid) || (!is_protein && !is_ambient)
-            } else {
-                !is_protein && !is_ambient
-            };
-
-            EntityInfoData {
-                entity_id: raw_id,
-                molecule_type: mol_str.to_string(),
-                chain_id,
-                residue_count: res_nums.len() as u32,
-                designable,
-                foldable: is_protein,
-                fixed,
-            }
-        }).collect();
-        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
-
-        let designed: Vec<&str> = entity_info.iter()
+        let designed: Vec<&str> = entity_context.entities.iter()
             .filter(|e| e.designable)
             .map(|e| e.chain_id.as_str())
             .collect();
-        let fixed: Vec<&str> = entity_info.iter()
+        let fixed_chains: Vec<&str> = entity_context.entities.iter()
             .filter(|e| e.fixed)
             .map(|e| e.chain_id.as_str())
             .collect();
         log::info!(
             "MPNN entity context: designed={:?}, fixed={:?}",
-            designed, fixed,
+            designed, fixed_chains,
         );
-
-        let entity_context = Some(EntityContextData {
-            entities: entity_info,
-            assembly: assembly.clone(),
-        });
-
-        let Some(ref mut orch) = router.orchestrator else {
-            log::warn!("Orchestrator not initialized");
-            return;
-        };
-
-        if orch.is_locked(target_runner_eid) {
-            let op = orch.get_op_type(target_runner_eid);
-            log::warn!("Structure is locked by {:?}, cannot start sequence design", op);
-            return;
-        }
-
-        if orch.try_lock(target_runner_eid, OpType::MLSequenceDesign).is_none() {
-            log::warn!("Failed to acquire lock for sequence design");
-            return;
-        }
 
         let target_name = store.metadata(target_id)
             .map(|m| m.name.clone())
             .unwrap_or_default();
-
         log::info!(
             "Starting sequence design on '{}' ({} entities, T={}, n={})...",
-            target_name, assembly.entities().len(), temperature, num_sequences
+            target_name, assembly.entities().len(), temperature, num_sequences,
         );
 
-        let result = if let Some(ctx) = entity_context {
-            orch.design_sequence_with_context(assembly, temperature, num_sequences, ctx)
-        } else {
-            orch.design_sequence(assembly, temperature, num_sequences)
-        };
-
-        if let Err(e) = result {
-            log::error!("Failed to submit sequence design: {}", e);
-            orch.unlock(target_runner_eid);
-            return;
-        }
-
-        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+        router.start_op(
+            BackendOpRequest {
+                target: RunnerEntityId(u64::from(target_id.raw())),
+                op_type: OpType::MLSequenceDesign,
+                entity_context,
+                stop_rosetta_session: false,
+                create_preview_mirror: false,
+                pending_reference_ca: None,
+                kickoff: Box::new(move |orch, ctx| {
+                    orch.design_sequence_with_context(
+                        assembly, temperature, num_sequences, ctx,
+                    )
+                }),
+            },
+            engine,
+            store,
+        );
     }
 
     fn run_structure_design(
         router: &mut ActionRouter,
-        store: &EntityStore,
-        _engine: &VisoEngine,
+        store: &mut EntityStore,
+        engine: &mut VisoEngine,
         length: &str,
         num_steps: u32,
         contig: Option<String>,
     ) {
         use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
+        use crate::action_router::BackendOpRequest;
 
         let Some(target_id) = store.loaded_entity() else {
             log::warn!("No structure available for structure design");
@@ -1058,47 +962,37 @@ impl App {
             target_id.raw(), entities.len(), total_atoms,
         );
 
-        let entity_context = Self::build_entity_context(&entities, store, target_id);
-
-        let Some(ref mut orch) = router.orchestrator else {
-            log::warn!("Orchestrator not initialized");
-            return;
-        };
-
-        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
-
-        if orch.is_locked(target_runner_eid) {
-            let op = orch.get_op_type(target_runner_eid);
-            log::warn!("Structure is locked by {:?}, cannot start structure design", op);
-            return;
-        }
-
-        if orch.try_lock(target_runner_eid, OpType::MLStructureDesign).is_none() {
-            log::warn!("Failed to acquire lock for structure design");
-            return;
-        }
-
+        let entity_context = Self::build_entity_context(entities, store, target_id, None);
         let contig_str = contig.unwrap_or_default();
-        log::info!("Starting structure design (length={}, steps={}, contig='{}')...", length, num_steps, contig_str);
 
-        let result = if let Some(ctx) = entity_context {
-            log::info!(
-                "Passing assembly context ({} info entries, {} entities in assembly)",
-                ctx.entities.len(),
-                ctx.assembly.entities().len(),
-            );
-            orch.design_structure_with_context(length.to_string(), num_steps, contig_str, ctx)
-        } else {
-            orch.design_structure(length.to_string(), num_steps, contig_str)
-        };
+        log::info!(
+            "Starting structure design (length={}, steps={}, contig='{}')...",
+            length, num_steps, contig_str,
+        );
+        log::info!(
+            "Passing assembly context ({} info entries, {} entities in assembly)",
+            entity_context.entities.len(),
+            entity_context.assembly.entities().len(),
+        );
 
-        if let Err(e) = result {
-            log::error!("Failed to submit structure design: {}", e);
-            orch.unlock(target_runner_eid);
-            return;
-        }
-
-        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+        let length_owned = length.to_string();
+        router.start_op(
+            BackendOpRequest {
+                target: RunnerEntityId(u64::from(target_id.raw())),
+                op_type: OpType::MLStructureDesign,
+                entity_context,
+                stop_rosetta_session: false,
+                create_preview_mirror: false,
+                pending_reference_ca: None,
+                kickoff: Box::new(move |orch, ctx| {
+                    orch.design_structure_with_context(
+                        length_owned, num_steps, contig_str, ctx,
+                    )
+                }),
+            },
+            engine,
+            store,
+        );
     }
 
     fn run_prediction_for_entities(
@@ -1108,6 +1002,7 @@ impl App {
         entity_ids: &[u32],
     ) {
         use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
+        use crate::action_router::BackendOpRequest;
 
         // Resolve raw u32 ids (from the GUI's entity-picker payload) to
         // typed EntityIds via the store's allocator. `mint_id` advances
@@ -1135,7 +1030,7 @@ impl App {
             return;
         }
 
-        let chains = action_router::extract_chains_from_entities_pub(&collected);
+        let chains = foldit_runner::orchestrator::chains_from_entities(&collected);
         if chains.is_empty() {
             log::warn!("No protein chains found in selected entities");
             return;
@@ -1147,78 +1042,27 @@ impl App {
             collected.len(), total_atoms,
         );
 
-        // Snapshot the submitted entities' CAs so the predicted result
-        // can be aligned back to the same frame. RF3 emits chains in
-        // the order they were submitted, matching `ca_positions`.
-        router.pending_prediction_reference =
-            Some(molex::ops::codec::ca_positions(&collected));
-
-        let entity_context = Self::build_entity_context(&collected, store, target_id);
-
-        let Some(ref mut orch) = router.orchestrator else {
-            log::warn!("Orchestrator not initialized");
-            return;
-        };
-
-        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
-
-        if orch.is_locked(target_runner_eid) {
-            let op = orch.get_op_type(target_runner_eid);
-            log::warn!("Structure is locked by {:?}, cannot start prediction", op);
-            return;
-        }
-
-        orch.stop_rosetta();
-        orch.clear_session();
-
-        if orch.try_lock(target_runner_eid, OpType::MLPredict).is_none() {
-            log::warn!("Failed to acquire lock for prediction");
-            return;
-        }
-
         let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
         log::info!("Starting RoseTTAFold3 prediction for {} residues...", total_residues);
 
-        let result = if let Some(ctx) = entity_context {
-            orch.predict_with_context(None, chains, 3, ctx)
-        } else {
-            orch.predict(None, chains, 3)
-        };
+        let pending_ca = molex::ops::codec::ca_positions(&collected);
+        let entity_context = Self::build_entity_context(collected, store, target_id, None);
 
-        if let Err(e) = result {
-            log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(target_runner_eid);
-            return;
-        }
-
-        // Mirror the loaded entity into a streaming preview, then hide
-        // the loaded entity. Streaming/final paths mutate the preview
-        // so undo never sees intermediate frames; on result, the loaded
-        // entity is updated once with the final body and reshown.
-        if let Some(loaded_id) = store.loaded_entity() {
-            let mirror = store.entity(loaded_id).cloned().zip(
-                store.metadata(loaded_id).map(|m| m.origin.clone()),
-            );
-            if let Some((mirror, origin)) = mirror {
-                // `insert_preview` overwrites the entity's id; passing
-                // the loaded one is harmless.
-                let preview_id = store.insert_preview(
-                    mirror,
-                    "Predicting...".to_string(),
-                    origin,
-                    EntityRole { foldable: false, designable: false, ambient: false },
-                );
-                engine.set_entity_visible(loaded_id.raw(), false);
-                router.pending_preview_id = Some(preview_id);
-                store.publish_to(engine);
-                log::info!(
-                    "Created RF3 preview {} mirroring loaded entity {}",
-                    preview_id.raw(), loaded_id.raw(),
-                );
-            }
-        }
-
-        router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+        router.start_op(
+            BackendOpRequest {
+                target: RunnerEntityId(u64::from(target_id.raw())),
+                op_type: OpType::MLPredict,
+                entity_context,
+                stop_rosetta_session: true,
+                create_preview_mirror: true,
+                pending_reference_ca: Some(pending_ca),
+                kickoff: Box::new(move |orch, ctx| {
+                    orch.predict_with_context(None, chains, 3, ctx)
+                }),
+            },
+            engine,
+            store,
+        );
     }
 
     // ── Native input (when webview is not ready) ──
@@ -1477,7 +1321,7 @@ impl App {
         };
 
         // Parse entities from file
-        match action_router::load_file_as_entities(&self.pdb_path) {
+        match foldit::puzzle::load_file_as_entities(&self.pdb_path) {
             Ok((entities, name)) => {
                 let backbone_ca = action_router::entities_backbone_ca(&entities);
 
@@ -1508,9 +1352,7 @@ impl App {
 
                 // Register entity triple buffers for each loaded entity
                 for &eid in &ids {
-                    let raw = eid.raw();
-                    let reader = orchestrator.register_entity(u64::from(raw));
-                    self.shared_state.register_entity(raw, reader);
+                    orchestrator.register_entity(u64::from(eid.raw()));
                 }
                 // Set first entity as the active update target
                 if let Some(&first_id) = ids.first() {
@@ -1601,7 +1443,7 @@ fn main() {
 
     log::info!("Foldit starting...");
 
-    let pdb_path = match action_router::resolve_structure_path(&input) {
+    let pdb_path = match foldit::puzzle::resolve_structure_path(&input) {
         Ok(path) => path,
         Err(e) => {
             log::error!("{}", e);

@@ -1148,6 +1148,7 @@ dependencies = [
  "env_logger",
  "glam",
  "iceoryx2",
+ "indexmap 2.13.0",
  "interprocess",
  "itoa 1.0.17",
  "lexical-core",

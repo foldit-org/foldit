@@ -10,18 +10,17 @@ use foldit_gui::DirtyFlags;
 use foldit_runner::orchestrator::{BackendUpdate, EntityId as RunnerEntityId, OpType};
 use foldit_runner::Orchestrator;
 use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
+use foldit::focus;
 use foldit::history::CheckpointKind;
-use foldit::shared_state::SharedState;
 use glam::Vec3;
 use std::collections::HashMap;
 use viso::{Focus, Transition, VisoEngine};
 
-/// Handle a single backend update. Called by the frame loop after draining
+/// Apply a single backend update. Called by the frame loop after draining
 /// triple buffers via SharedState.
-pub(crate) fn handle_backend_update(
+pub(crate) fn apply_backend_update(
     engine: &mut VisoEngine,
     store: &mut EntityStore,
-    shared: &mut SharedState,
     orchestrator: &mut Option<Orchestrator>,
     ui_dirty: &mut DirtyFlags,
     pending_prediction_reference: &mut Option<Vec<Vec3>>,
@@ -41,7 +40,7 @@ pub(crate) fn handle_backend_update(
             per_residue_game_scores,
         } => {
             handle_rosetta_coords(
-                engine, store, shared, orchestrator, ui_dirty,
+                engine, store, orchestrator, ui_dirty,
                 scoring_mode,
                 assembly, score, game_score, cycle, message, converged,
                 per_residue_scores, per_residue_game_scores,
@@ -49,7 +48,6 @@ pub(crate) fn handle_backend_update(
         }
         BackendUpdate::MLIntermediate {
             assembly,
-            backbone_positions,
             step,
             total_steps,
             confidence,
@@ -58,7 +56,7 @@ pub(crate) fn handle_backend_update(
                 engine, store, ui_dirty,
                 pending_prediction_reference.as_deref(),
                 pending_preview_id,
-                assembly, backbone_positions, step, total_steps, confidence,
+                assembly, step, total_steps, confidence,
             );
         }
         BackendUpdate::MLPredictResult {
@@ -124,7 +122,6 @@ pub(crate) fn handle_backend_update(
 fn handle_rosetta_coords(
     engine: &mut VisoEngine,
     store: &mut EntityStore,
-    _shared: &mut SharedState,
     orchestrator: &mut Option<Orchestrator>,
     ui_dirty: &mut DirtyFlags,
     scoring_mode: foldit_gui::ScoringMode,
@@ -265,7 +262,7 @@ fn handle_rosetta_coords(
         );
     } else {
         let focus = engine.focus();
-        let target = SharedState::operation_target(&focus)
+        let target = focus::operation_target(&focus)
             .map(|raw| store.mint_id(raw))
             .or_else(|| store.loaded_entity());
         if let Some(id) = target {
@@ -301,29 +298,26 @@ fn handle_ml_intermediate(
     pending_prediction_reference: Option<&[Vec3]>,
     pending_preview_id: &mut Option<EntityId>,
     assembly: Option<Assembly>,
-    backbone_positions: Vec<Vec3>,
     step: u32,
     total_steps: u32,
     confidence: f32,
 ) {
-    let has_data = assembly.is_some() || !backbone_positions.is_empty();
     log::info!(
-        "ML update: step {}/{}, confidence {:.2}, has_assembly={}, backbone_positions={}",
+        "ML update: step {}/{}, confidence {:.2}, has_assembly={}",
         step,
         total_steps,
         confidence,
         assembly.is_some(),
-        backbone_positions.len()
     );
 
     *ui_dirty |= DirtyFlags::LOADING;
 
-    if has_data {
+    if assembly.is_some() {
         update_animation_structure_from_backend(
             engine, store,
             pending_prediction_reference,
             pending_preview_id,
-            assembly, backbone_positions, step, total_steps,
+            assembly, step, total_steps,
         );
     }
 }
@@ -643,98 +637,91 @@ fn update_animation_structure_from_backend(
     pending_prediction_reference: Option<&[Vec3]>,
     pending_preview_id: &mut Option<EntityId>,
     assembly: Option<Assembly>,
-    backbone_positions: Vec<Vec3>,
     step: u32,
     total_steps: u32,
 ) {
-    log::debug!(
-        "update_animation_structure: step {}/{}, has_assembly={}, backbone_positions={}",
-        step,
-        total_steps,
-        assembly.is_some(),
-        backbone_positions.len()
-    );
+    let Some(assembly) = assembly else {
+        log::warn!("ML frame {}: no assembly, skipping", step);
+        return;
+    };
 
-    // SimpleFold / RF3: full-atom intermediate. Aligns to the
-    // submission-time CA snapshot (or the loaded entity's stored
-    // reference_ca) and writes to the *preview* mirror of the loaded
-    // entity. The loaded entity itself is never mutated during
-    // streaming, so undo doesn't capture intermediate frames.
-    if let Some(assembly) = assembly {
-        let Some(preview_id) = *pending_preview_id else {
-            log::warn!(
-                "RF3 frame {}: no pending preview id — op kickoff didn't \
-                 mirror the loaded entity; dropping frame",
-                step,
-            );
-            return;
-        };
-        let Some(orig_id) = store.loaded_entity() else {
-            return;
-        };
-        let mut entities: Vec<MoleculeEntity> = assembly
-            .entities()
-            .iter()
-            .map(|e| MoleculeEntity::clone(e))
-            .collect();
-        let predicted_ca: Vec<Vec3> = molex::ops::codec::ca_positions(&entities);
-        let original_ca: Option<Vec<Vec3>> = pending_prediction_reference
-            .map(<[Vec3]>::to_vec)
-            .or_else(|| store.reference_ca(orig_id).map(<[Vec3]>::to_vec));
-        let aligned = match original_ca.as_deref() {
-            Some(orig) if orig.len() == predicted_ca.len() => {
-                match kabsch_alignment_with_scale(orig, &predicted_ca) {
-                    Some((rotation, translation, scale)) => {
-                        if !scale.is_finite() {
+    let mut entities: Vec<MoleculeEntity> = assembly
+        .entities()
+        .iter()
+        .map(|e| MoleculeEntity::clone(e))
+        .collect();
+
+    // Two cases:
+    //   1. Predict (RF3 / SimpleFold): a preview was mirrored at op
+    //      kickoff and a reference frame is available. Align the
+    //      streamed assembly to the reference and write into the
+    //      preview, leaving the loaded entity untouched so undo
+    //      doesn't capture intermediate frames.
+    //   2. Structure design (RFD3): no preview exists on the first
+    //      frame. The runner emits a placeholder Assembly built from
+    //      streamed backbone positions; we materialize a preview
+    //      entity from it (StructureDesign origin) and reuse the same
+    //      preview on subsequent frames.
+
+    if let Some(preview_id) = *pending_preview_id {
+        // Case (a) update OR case (b) subsequent frame.
+        if let Some(orig_id) = store.loaded_entity() {
+            let predicted_ca: Vec<Vec3> = molex::ops::codec::ca_positions(&entities);
+            let original_ca: Option<Vec<Vec3>> = pending_prediction_reference
+                .map(<[Vec3]>::to_vec)
+                .or_else(|| store.reference_ca(orig_id).map(<[Vec3]>::to_vec));
+            let aligned = match original_ca.as_deref() {
+                Some(orig) if orig.len() == predicted_ca.len() => {
+                    match kabsch_alignment_with_scale(orig, &predicted_ca) {
+                        Some((rotation, translation, scale)) => {
+                            if !scale.is_finite() {
+                                log::warn!(
+                                    "RF3 frame {}: Kabsch scale non-finite ({}); leaving \
+                                     coords unaligned",
+                                    step, scale,
+                                );
+                                false
+                            } else {
+                                for entity in &mut entities {
+                                    for atom in entity.atom_set_mut() {
+                                        atom.position =
+                                            rotation * (atom.position * scale) + translation;
+                                    }
+                                }
+                                log::debug!(
+                                    "RF3 frame {}: aligned (scale {:.3}, {} CAs)",
+                                    step, scale, predicted_ca.len(),
+                                );
+                                true
+                            }
+                        }
+                        None => {
                             log::warn!(
-                                "RF3 frame {}: Kabsch scale non-finite ({}); leaving \
-                                 coords unaligned",
-                                step, scale,
+                                "RF3 frame {}: Kabsch returned None ({} CAs); skipping \
+                                 frame to avoid teleporting the entity",
+                                step, predicted_ca.len(),
                             );
                             false
-                        } else {
-                            for entity in &mut entities {
-                                for atom in entity.atom_set_mut() {
-                                    atom.position =
-                                        rotation * (atom.position * scale) + translation;
-                                }
-                            }
-                            log::debug!(
-                                "RF3 frame {}: aligned (scale {:.3}, {} CAs)",
-                                step, scale, predicted_ca.len(),
-                            );
-                            true
                         }
                     }
-                    None => {
-                        log::warn!(
-                            "RF3 frame {}: Kabsch returned None ({} CAs); skipping \
-                             frame to avoid teleporting the entity",
-                            step, predicted_ca.len(),
-                        );
-                        false
-                    }
                 }
+                Some(orig) => {
+                    log::warn!(
+                        "RF3 frame {}: CA count mismatch (reference={}, predicted={}); \
+                         skipping frame to avoid teleporting the entity",
+                        step, orig.len(), predicted_ca.len(),
+                    );
+                    false
+                }
+                None => {
+                    // No reference CA: case (b) RFD3 subsequent frame —
+                    // backbone is generated fresh, no alignment needed.
+                    true
+                }
+            };
+            if !aligned {
+                return;
             }
-            Some(orig) => {
-                log::warn!(
-                    "RF3 frame {}: CA count mismatch (reference={}, predicted={}); \
-                     skipping frame to avoid teleporting the entity",
-                    step, orig.len(), predicted_ca.len(),
-                );
-                false
-            }
-            None => {
-                log::warn!(
-                    "RF3 frame {}: no reference_ca for entity {}; skipping frame to \
-                     avoid teleporting the entity",
-                    step, orig_id,
-                );
-                false
-            }
-        };
-        if !aligned {
-            return;
         }
 
         let name = format!("Predicting... ({}/{})", step, total_steps);
@@ -743,68 +730,38 @@ fn update_animation_structure_from_backend(
         }) {
             protein.set_id(preview_id);
             store.set_entity_name(preview_id, name);
-            log::info!("Updated RF3 frame {}/{} (preview {})", step, total_steps, preview_id.raw());
+            log::info!("Updated ML frame {}/{} (preview {})", step, total_steps, preview_id.raw());
             store.update_preview(preview_id, protein);
             engine.queue_entity_transition(preview_id.raw(), Transition::smooth());
             store.publish_to(engine);
         }
-        return;
-    }
+    } else {
+        // Case (b) first frame — runner-supplied placeholder Assembly,
+        // no kickoff-time mirror exists. Mint a real preview id from
+        // the store and adopt the streamed protein.
+        let placeholder = store.mint_id(0);
+        if let Some(mut protein) = entities.into_iter().find(|e| {
+            e.molecule_type() == molex::MoleculeType::Protein
+        }) {
+            protein.set_id(placeholder);
+            let source = store.loaded_entity();
+            let new_origin = match source {
+                Some(src) => EntityOrigin::StructureDesign { source: src, confidence: 0.0 },
+                None => EntityOrigin::Loaded,
+            };
+            let inserted_id = store.insert_preview(
+                protein,
+                format!("Designing... ({}/{})", step, total_steps),
+                new_origin,
+                EntityRole { foldable: false, designable: false, ambient: false },
+            );
+            *pending_preview_id = Some(inserted_id);
+            log::info!("Created RFD3 preview entity {}", inserted_id.raw());
 
-    // RFD3: backbone-only intermediate. First frame creates the
-    // preview entity (a fresh design under construction); subsequent
-    // frames update it. Origin is StructureDesign from the start —
-    // confidence stays 0 until promote_preview stamps the final value.
-    if !backbone_positions.is_empty() {
-        let num_residues = backbone_positions.len() / 4;
-        if num_residues == 0 {
-            log::warn!("Empty backbone positions, skipping update");
-            return;
+            store.publish_to(engine);
+            engine.fit_camera_to_focus();
         }
-        log::info!(
-            "RFD3 intermediate: {} backbone positions -> {} residues",
-            backbone_positions.len(),
-            num_residues,
-        );
-
-        if let Some(preview_id) = *pending_preview_id {
-            if let Some(protein) =
-                backbone_positions_to_protein_entity(&backbone_positions, preview_id)
-            {
-                store.set_entity_name(preview_id, format!("Designing... ({}/{})", step, total_steps));
-                log::info!("Updated RFD3 preview frame {}/{}", step, total_steps);
-                store.update_preview(preview_id, protein);
-                engine.queue_entity_transition(preview_id.raw(), Transition::smooth());
-                store.publish_to(engine);
-            }
-        } else {
-            // Placeholder id — `insert_preview` mints the real one.
-            let placeholder = store.mint_id(0);
-            if let Some(protein) =
-                backbone_positions_to_protein_entity(&backbone_positions, placeholder)
-            {
-                let source = store.loaded_entity();
-                let new_origin = match source {
-                    Some(src) => EntityOrigin::StructureDesign { source: src, confidence: 0.0 },
-                    None => EntityOrigin::Loaded,
-                };
-                let inserted_id = store.insert_preview(
-                    protein,
-                    format!("Designing... ({}/{})", step, total_steps),
-                    new_origin,
-                    EntityRole { foldable: false, designable: false, ambient: false },
-                );
-                *pending_preview_id = Some(inserted_id);
-                log::info!("Created RFD3 preview entity {}", inserted_id.raw());
-
-                store.publish_to(engine);
-                engine.fit_camera_to_focus();
-            }
-        }
-        return;
     }
-
-    log::warn!("No coordinates in update, skipping");
 }
 
 /// Cache per-residue scores on an entity, picking the rosetta or game array
@@ -923,54 +880,6 @@ fn publish_with_transition(
 }
 
 // ── Helpers ──
-
-/// Build a `ProteinEntity` directly from RFD3-streamed backbone
-/// positions (flat `Vec<Vec3>` of N, CA, C, O per residue).
-fn backbone_positions_to_protein_entity(
-    positions: &[Vec3],
-    id: molex::entity::molecule::id::EntityId,
-) -> Option<MoleculeEntity> {
-    use molex::{Atom, Element};
-    use molex::entity::molecule::polymer::Residue;
-    use molex::entity::molecule::protein::ProteinEntity;
-
-    let num_residues = positions.len() / 4;
-    if num_residues == 0 {
-        return None;
-    }
-
-    let names = [*b"N   ", *b"CA  ", *b"C   ", *b"O   "];
-    let elements = [Element::N, Element::C, Element::C, Element::O];
-
-    let mut atoms = Vec::with_capacity(num_residues * 4);
-    let mut residues = Vec::with_capacity(num_residues);
-
-    for res_idx in 0..num_residues {
-        let base = res_idx * 4;
-        let atom_start = atoms.len();
-        for j in 0..4 {
-            atoms.push(Atom {
-                position: positions[base + j],
-                occupancy: 1.0,
-                b_factor: 0.0,
-                element: elements[j],
-                name: names[j],
-            });
-        }
-        residues.push(Residue {
-            name: *b"ALA",
-            number: (res_idx + 1) as i32,
-            atom_range: atom_start..atom_start + 4,
-        });
-    }
-
-    Some(MoleculeEntity::Protein(ProteinEntity::new_continuous(
-        id,
-        atoms,
-        residues,
-        b'A',
-    )))
-}
 
 /// Collect entities for ML based on current focus.
 /// Returns `(entity_id, Vec<MoleculeEntity>)` for locking + serialization.

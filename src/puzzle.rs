@@ -229,6 +229,75 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     })
 }
 
+/// Load a file (PDB/CIF/BCIF) and return entities + name (file stem).
+pub fn load_file_as_entities(
+    path: &str,
+) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
+    let p = Path::new(path);
+    let name = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
+    let entities = load_entities_from_file(p)?;
+    Ok((entities, name))
+}
+
+/// Check if a string looks like a PDB ID (4 alphanumeric characters).
+fn is_pdb_id(s: &str) -> bool {
+    s.len() == 4 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Resolve a PDB ID or path to an actual file path, downloading if necessary.
+pub fn resolve_structure_path(input: &str) -> Result<String, String> {
+    if Path::new(input).exists() {
+        return Ok(input.to_string());
+    }
+
+    if is_pdb_id(input) {
+        let pdb_id = input.to_lowercase();
+        let models_dir = Path::new("assets/models");
+        let local_path = models_dir.join(format!("{}.cif", pdb_id));
+
+        if local_path.exists() {
+            log::info!("Found local copy: {}", local_path.display());
+            return Ok(local_path.to_string_lossy().to_string());
+        }
+
+        if !models_dir.exists() {
+            std::fs::create_dir_all(models_dir)
+                .map_err(|e| format!("Failed to create models directory: {}", e))?;
+        }
+
+        let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id);
+        log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
+
+        let response = reqwest::blocking::get(&url)
+            .map_err(|e| format!("Failed to download {}: {}", pdb_id, e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Failed to download {}: HTTP {}",
+                pdb_id,
+                response.status()
+            ));
+        }
+
+        let content = response
+            .text()
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+
+        std::fs::write(&local_path, &content)
+            .map_err(|e| format!("Failed to save CIF file: {}", e))?;
+
+        log::info!("Downloaded to {}", local_path.display());
+        return Ok(local_path.to_string_lossy().to_string());
+    }
+
+    Err(format!("File not found: {}", input))
+}
+
 /// Load Coords from a file (auto-detecting format).
 /// Load a structure file and return classified entities.
 pub fn load_entities_from_file(

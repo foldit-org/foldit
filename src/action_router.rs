@@ -6,12 +6,41 @@
 
 use foldit_gui::DirtyFlags;
 use foldit::entity_store::{EntityRole, EntityStore};
+use foldit::focus;
 use foldit::history::{CheckpointKind, WiggleMask};
-use foldit::shared_state::SharedState;
 use viso::{AtomRef, BandInfo, BandTarget, InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
-use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
+use foldit_runner::orchestrator::{EntityContextData, EntityId as RunnerEntityId, OpType};
 use foldit_runner::Orchestrator;
 use glam::{Vec2, Vec3};
+
+/// Request to start a backend ML operation.
+///
+/// Centralizes the protocol shared by predict / sequence-design /
+/// structure-design: lock check → optional rosetta-stop → try_lock →
+/// op-specific kickoff → optional preview-mirror → ui_dirty.
+pub(crate) struct BackendOpRequest {
+    /// Entity to lock.
+    pub target: RunnerEntityId,
+    /// Op type for the lock.
+    pub op_type: OpType,
+    /// Owned entity context, consumed by the kickoff closure.
+    pub entity_context: EntityContextData,
+    /// True for Predict: stop the live Rosetta thread and clear the
+    /// session before locking, since prediction will rebuild topology.
+    pub stop_rosetta_session: bool,
+    /// True for Predict: mirror the loaded entity into a preview
+    /// (`Predicting...`), hide the loaded entity, and store the
+    /// preview id on the router so the streaming/result paths know
+    /// where to write.
+    pub create_preview_mirror: bool,
+    /// CA positions to remember for result alignment (Predict only).
+    pub pending_reference_ca: Option<Vec<Vec3>>,
+    /// Op-specific submission. Receives the orchestrator + the owned
+    /// entity context (which carries the assembly).
+    pub kickoff: Box<
+        dyn FnOnce(&mut Orchestrator, EntityContextData) -> Result<(), String>,
+    >,
+}
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
@@ -78,45 +107,6 @@ pub(crate) struct ActionRouter {
     pub pending_preview_id: Option<molex::entity::molecule::id::EntityId>,
 }
 
-/// 3-letter PDB residue code → one-letter amino acid code. Unknown
-/// codes map to `X`.
-fn residue_three_to_one(name: &[u8; 3]) -> char {
-    match name {
-        b"ALA" => 'A', b"ARG" => 'R', b"ASN" => 'N', b"ASP" => 'D',
-        b"CYS" => 'C', b"GLN" => 'Q', b"GLU" => 'E', b"GLY" => 'G',
-        b"HIS" => 'H', b"ILE" => 'I', b"LEU" => 'L', b"LYS" => 'K',
-        b"MET" => 'M', b"PHE" => 'F', b"PRO" => 'P', b"SER" => 'S',
-        b"THR" => 'T', b"TRP" => 'W', b"TYR" => 'Y', b"VAL" => 'V',
-        _ => 'X',
-    }
-}
-
-/// Extract (chain_id, sequence) pairs from a slice of entities.
-/// Each protein entity contributes its own chain; non-protein entities
-/// are skipped.
-pub(crate) fn extract_chains_from_entities_pub(
-    entities: &[molex::MoleculeEntity],
-) -> Vec<(String, String)> {
-    extract_chains_from_entities(entities)
-}
-
-fn extract_chains_from_entities(
-    entities: &[molex::MoleculeEntity],
-) -> Vec<(String, String)> {
-    let mut by_chain: indexmap::IndexMap<u8, String> = indexmap::IndexMap::new();
-    for entity in entities {
-        if let molex::MoleculeEntity::Protein(p) = entity {
-            let seq: String = p.residues.iter()
-                .map(|r| residue_three_to_one(&r.name))
-                .collect();
-            by_chain.entry(p.pdb_chain_id).or_default().push_str(&seq);
-        }
-    }
-    by_chain.into_iter()
-        .map(|(cid, seq)| (format!("{}", cid as char), seq))
-        .collect()
-}
-
 impl ActionRouter {
     pub fn new() -> Self {
         Self {
@@ -143,12 +133,12 @@ impl ActionRouter {
 
     fn _get_structure_chains(&self, engine: &VisoEngine, store: &mut EntityStore) -> Vec<(String, String)> {
         let focus = engine.focus();
-        let structure_id = SharedState::operation_target(&focus)
+        let structure_id = focus::operation_target(&focus)
             .map(|raw| store.mint_id(raw))
             .or_else(|| store.loaded_entity());
         if let Some(id) = structure_id {
             if let Some(entity) = store.entity(id) {
-                return extract_chains_from_entities(std::slice::from_ref(entity));
+                return foldit_runner::orchestrator::chains_from_entities(std::slice::from_ref(entity));
             }
         }
         vec![]
@@ -246,7 +236,7 @@ impl ActionRouter {
         parameterized
     }
 
-    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut EntityStore, _shared: &mut SharedState) {
+    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         log::info!("Cancelling current operation");
         engine.execute(VisoCommand::ClearSelection);
         if let Some(ref mut orch) = self.orchestrator {
@@ -339,7 +329,7 @@ impl ActionRouter {
 
         let focus = engine.focus();
         let Some(lock_id) =
-            SharedState::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
+            focus::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
         else {
             log::warn!("No structure available for wiggle");
             return;
@@ -360,10 +350,10 @@ impl ActionRouter {
 
         self.update_rosetta_locks(engine, store);
 
-        let target_desc = if SharedState::is_session_mode(&focus) {
+        let target_desc = if focus::is_session_mode(&focus) {
             format!("full session ({} entities)", store.count())
         } else {
-            SharedState::operation_target(&focus)
+            focus::operation_target(&focus)
                 .and_then(|id| {
                     let eid = store.mint_id(id);
                     store.metadata(eid).map(|m| m.name.clone())
@@ -458,7 +448,7 @@ impl ActionRouter {
 
         let focus = engine.focus();
         let Some(lock_id) =
-            SharedState::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
+            focus::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
         else {
             log::warn!("No structure available for shake");
             return;
@@ -479,10 +469,10 @@ impl ActionRouter {
 
         self.update_rosetta_locks(engine, store);
 
-        let target_desc = if SharedState::is_session_mode(&focus) {
+        let target_desc = if focus::is_session_mode(&focus) {
             format!("full session ({} entities)", store.count())
         } else {
-            SharedState::operation_target(&focus)
+            focus::operation_target(&focus)
                 .and_then(|id| {
                     let eid = store.mint_id(id);
                     store.metadata(eid).map(|m| m.name.clone())
@@ -525,44 +515,89 @@ impl ActionRouter {
 
     // ── ML operations ──
 
-    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
-        use crate::backend_handler;
-
-        let focus = engine.focus();
-        let fallback = store.loaded_entity();
-        let Some((target_id, entities)) =
-            backend_handler::collect_ml_entities(store, &focus, fallback)
-        else {
-            log::warn!("No structure available for prediction");
-            return;
-        };
-        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
-
-        if self.orchestrator.is_none() {
+    /// Run the shared kickoff protocol for an ML backend op.
+    ///
+    /// Order: lock check → (optional) stop rosetta + clear session →
+    /// try_lock → kickoff → (optional) preview mirror → ui_dirty.
+    pub(crate) fn start_op(
+        &mut self,
+        request: BackendOpRequest,
+        engine: &mut VisoEngine,
+        store: &mut EntityStore,
+    ) {
+        let Some(ref mut orch) = self.orchestrator else {
             log::warn!("Orchestrator not initialized");
             return;
+        };
+
+        if orch.is_locked(request.target) {
+            let op = orch.get_op_type(request.target);
+            log::warn!(
+                "Structure is locked by {:?}, cannot start {:?}",
+                op, request.op_type,
+            );
+            return;
         }
 
-        {
-            let orch = self.orchestrator.as_ref().unwrap();
-            if orch.is_locked(target_runner_eid) {
-                let op = orch.get_op_type(target_runner_eid);
-                log::warn!(
-                    "Structure is locked by {:?}, cannot start RoseTTAFold3",
-                    op
-                );
-                return;
-            }
-        }
-
-        {
-            let orch = self.orchestrator.as_mut().unwrap();
+        if request.stop_rosetta_session {
             orch.stop_rosetta();
             orch.clear_session();
         }
 
-        // Extract chains from collected entities
-        let chains = extract_chains_from_entities(&entities);
+        if orch.try_lock(request.target, request.op_type).is_none() {
+            log::warn!("Failed to acquire lock for {:?}", request.op_type);
+            return;
+        }
+
+        if let Some(ca) = request.pending_reference_ca {
+            self.pending_prediction_reference = Some(ca);
+        }
+
+        if let Err(e) = (request.kickoff)(orch, request.entity_context) {
+            log::error!("Failed to submit {:?}: {}", request.op_type, e);
+            orch.unlock(request.target);
+            return;
+        }
+
+        if request.create_preview_mirror {
+            if let Some(loaded_id) = store.loaded_entity() {
+                let mirror = store.entity(loaded_id).cloned().zip(
+                    store.metadata(loaded_id).map(|m| m.origin.clone()),
+                );
+                if let Some((mirror, origin)) = mirror {
+                    let preview_id = store.insert_preview(
+                        mirror,
+                        "Predicting...".to_string(),
+                        origin,
+                        EntityRole { foldable: false, designable: false, ambient: false },
+                    );
+                    engine.set_entity_visible(loaded_id.raw(), false);
+                    self.pending_preview_id = Some(preview_id);
+                    store.publish_to(engine);
+                    log::info!(
+                        "Created RF3 preview {} mirroring loaded entity {}",
+                        preview_id.raw(), loaded_id.raw(),
+                    );
+                }
+            }
+        }
+
+        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+    }
+
+    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
+        use crate::backend_results;
+
+        let focus = engine.focus();
+        let fallback = store.loaded_entity();
+        let Some((target_id, entities)) =
+            backend_results::collect_ml_entities(store, &focus, fallback)
+        else {
+            log::warn!("No structure available for prediction");
+            return;
+        };
+
+        let chains = foldit_runner::orchestrator::chains_from_entities(&entities);
         if chains.is_empty() {
             log::warn!("No sequence/chains available");
             return;
@@ -574,74 +609,36 @@ impl ActionRouter {
             focus, entities.len(), total_atoms,
         );
 
-        // Snapshot the submitted entities' CAs in chain order so the
-        // prediction result can be aligned back to the same frame.
-        // `extract_chains_from_entities` walks proteins in the same
-        // order as RF3's per-chain output.
-        self.pending_prediction_reference =
-            Some(molex::ops::codec::ca_positions(&entities));
-
-        // Build entity context from the collected entities
-        let entity_context = crate::App::build_entity_context(&entities, store, target_id);
-
-        let orch = self.orchestrator.as_mut().unwrap();
-        if orch
-            .try_lock(target_runner_eid, OpType::MLPredict)
-            .is_none()
-        {
-            log::warn!("Failed to acquire lock for RoseTTAFold3");
-            return;
-        }
-
         let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
         log::info!(
             "Starting RoseTTAFold3 prediction for {} residues...",
-            total_residues
+            total_residues,
         );
 
-        let result = if let Some(ctx) = entity_context {
-            log::info!(
-                "Passing assembly context ({} entities, {} entities in assembly)",
-                ctx.entities.len(),
-                ctx.assembly.entities().len(),
-            );
-            orch.predict_with_context(None, chains, 3, ctx)
-        } else {
-            orch.predict(None, chains, 3)
-        };
+        let pending_ca = molex::ops::codec::ca_positions(&entities);
+        let entity_context = crate::App::build_entity_context(entities, store, target_id, None);
 
-        if let Err(e) = result {
-            log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(target_runner_eid);
-            return;
-        }
+        log::info!(
+            "Passing assembly context ({} entities, {} entities in assembly)",
+            entity_context.entities.len(),
+            entity_context.assembly.entities().len(),
+        );
 
-        // Mirror the loaded entity into a streaming preview, then hide
-        // the loaded entity. Streaming/final paths mutate the preview
-        // so undo never sees intermediate frames; on result, the loaded
-        // entity is updated once and reshown.
-        if let Some(loaded_id) = store.loaded_entity() {
-            let mirror = store.entity(loaded_id).cloned().zip(
-                store.metadata(loaded_id).map(|m| m.origin.clone()),
-            );
-            if let Some((mirror, origin)) = mirror {
-                let preview_id = store.insert_preview(
-                    mirror,
-                    "Predicting...".to_string(),
-                    origin,
-                    EntityRole { foldable: false, designable: false, ambient: false },
-                );
-                engine.set_entity_visible(loaded_id.raw(), false);
-                self.pending_preview_id = Some(preview_id);
-                store.publish_to(engine);
-                log::info!(
-                    "Created RF3 preview {} mirroring loaded entity {}",
-                    preview_id.raw(), loaded_id.raw(),
-                );
-            }
-        }
-
-        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
+        self.start_op(
+            BackendOpRequest {
+                target: RunnerEntityId(u64::from(target_id.raw())),
+                op_type: OpType::MLPredict,
+                entity_context,
+                stop_rosetta_session: true,
+                create_preview_mirror: true,
+                pending_reference_ca: Some(pending_ca),
+                kickoff: Box::new(move |orch, ctx| {
+                    orch.predict_with_context(None, chains, 3, ctx)
+                }),
+            },
+            engine,
+            store,
+        );
     }
 
     // ── Rosetta session management ──
@@ -710,7 +707,7 @@ impl ActionRouter {
 
     pub(crate) fn update_rosetta_locks(&mut self, engine: &VisoEngine, _store: &EntityStore) {
         let focus = engine.focus();
-        let new_focus = SharedState::operation_target(&focus)
+        let new_focus = focus::operation_target(&focus)
             .map(|id| RunnerEntityId(u64::from(id)));
 
         if let Some(ref mut orch) = self.orchestrator {
@@ -1011,75 +1008,6 @@ pub(crate) fn entities_backbone_ca(
     entities: &[molex::MoleculeEntity],
 ) -> Vec<Vec3> {
     molex::ops::codec::ca_positions(entities)
-}
-
-/// Load a file (PDB/CIF/BCIF) and return entities + name.
-pub(crate) fn load_file_as_entities(
-    path: &str,
-) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
-    let p = std::path::Path::new(path);
-    let name = p
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Unknown")
-        .to_string();
-
-    let entities = foldit::puzzle::load_entities_from_file(p)?;
-    Ok((entities, name))
-}
-
-/// Check if a string looks like a PDB ID (4 alphanumeric characters)
-fn is_pdb_id(s: &str) -> bool {
-    s.len() == 4 && s.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
-/// Resolve a PDB ID or path to an actual file path, downloading if necessary
-pub(crate) fn resolve_structure_path(input: &str) -> Result<String, String> {
-    if std::path::Path::new(input).exists() {
-        return Ok(input.to_string());
-    }
-
-    if is_pdb_id(input) {
-        let pdb_id = input.to_lowercase();
-        let models_dir = std::path::Path::new("assets/models");
-        let local_path = models_dir.join(format!("{}.cif", pdb_id));
-
-        if local_path.exists() {
-            log::info!("Found local copy: {}", local_path.display());
-            return Ok(local_path.to_string_lossy().to_string());
-        }
-
-        if !models_dir.exists() {
-            std::fs::create_dir_all(models_dir)
-                .map_err(|e| format!("Failed to create models directory: {}", e))?;
-        }
-
-        let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id);
-        log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
-
-        let response = reqwest::blocking::get(&url)
-            .map_err(|e| format!("Failed to download {}: {}", pdb_id, e))?;
-
-        if !response.status().is_success() {
-            return Err(format!(
-                "Failed to download {}: HTTP {}",
-                pdb_id,
-                response.status()
-            ));
-        }
-
-        let content = response
-            .text()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-
-        std::fs::write(&local_path, &content)
-            .map_err(|e| format!("Failed to save CIF file: {}", e))?;
-
-        log::info!("Downloaded to {}", local_path.display());
-        return Ok(local_path.to_string_lossy().to_string());
-    }
-
-    Err(format!("File not found: {}", input))
 }
 
 /// Build BandInfo from active bands using AtomRef endpoints.
