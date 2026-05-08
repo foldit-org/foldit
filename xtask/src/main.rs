@@ -40,8 +40,8 @@ enum Commands {
     DownloadModels,
     /// Rebuild molex Python wheel from local source
     BuildMolex,
-    /// Build the frontend (pnpm build) and copy dist to assets/gui
-    BuildFrontend,
+    /// Build the GUI (pnpm build) and copy dist to assets/gui
+    BuildGui,
 }
 
 fn main() -> Result<()> {
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
         Commands::Bundle { cpu_only } => bundle(cpu_only),
         Commands::DownloadModels => download_models(),
         Commands::BuildMolex => build_molex(),
-        Commands::BuildFrontend => build_frontend(),
+        Commands::BuildGui => build_gui(),
     }
 }
 
@@ -374,37 +374,53 @@ fn bundle(cpu_only: bool) -> Result<()> {
         copy_dir("assets/gui", "bundle/gui")?;
     } else {
         println!("Warning: Frontend assets not found at assets/gui");
-        println!("  Run 'cargo xtask build-frontend' first");
+        println!("  Run 'cargo xtask build-gui' first");
     }
 
     println!("Bundle ready at ./bundle/");
     Ok(())
 }
 
-fn build_frontend() -> Result<()> {
-    let frontend_dir = "crates/foldit-gui/js";
-    println!("Building frontend...");
+fn build_gui() -> Result<()> {
+    let gui_src_dir = "crates/foldit-gui/js";
 
+    println!("Installing GUI dependencies...");
+    #[cfg(windows)]
+    let install_status = Command::new("cmd")
+        .args(["/c", "pnpm", "install", "--frozen-lockfile"])
+        .current_dir(gui_src_dir)
+        .status()?;
+    #[cfg(unix)]
+    let install_status = Command::new("pnpm")
+        .args(["install", "--frozen-lockfile"])
+        .current_dir(gui_src_dir)
+        .status()?;
+
+    if !install_status.success() {
+        anyhow::bail!("Failed to install GUI dependencies");
+    }
+
+    println!("Building GUI...");
     #[cfg(windows)]
     let status = Command::new("cmd")
         .args(["/c", "pnpm", "build"])
-        .current_dir(frontend_dir)
+        .current_dir(gui_src_dir)
         .status()?;
     #[cfg(unix)]
     let status = Command::new("pnpm")
         .arg("build")
-        .current_dir(frontend_dir)
+        .current_dir(gui_src_dir)
         .status()?;
 
     if !status.success() {
-        anyhow::bail!("Failed to build frontend");
+        anyhow::bail!("Failed to build GUI");
     }
 
-    let dist_dir = format!("{}/dist", frontend_dir);
+    let dist_dir = format!("{}/dist", gui_src_dir);
     let gui_dir = "assets/gui";
 
     if !Path::new(&dist_dir).exists() {
-        anyhow::bail!("Frontend dist directory not found at {}", dist_dir);
+        anyhow::bail!("GUI dist directory not found at {}", dist_dir);
     }
 
     // Remove old assets/gui if it exists
@@ -414,7 +430,7 @@ fn build_frontend() -> Result<()> {
     std::fs::create_dir_all(gui_dir)?;
 
     copy_dir(&dist_dir, gui_dir)?;
-    println!("Frontend built and copied to {}", gui_dir);
+    println!("GUI built and copied to {}", gui_dir);
     Ok(())
 }
 
