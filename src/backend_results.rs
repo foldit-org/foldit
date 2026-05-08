@@ -764,20 +764,22 @@ fn update_animation_structure_from_backend(
     }
 }
 
-/// Cache per-residue scores on an entity, picking the rosetta or game array
-/// based on the active scoring mode.
+/// Cache per-residue scores on an entity for color-by-score rendering.
+///
+/// Always uses the raw Rosetta values regardless of `scoring_mode`: viso's
+/// `score_to_t_absolute` is built around "lower = better" (REU convention),
+/// while game scores invert that (`game = (-rosetta + offset) * scale`,
+/// higher = better). Feeding game scores would clamp every credit-bearing
+/// residue to t=1.0 (red). The numeric score *display* still tracks the
+/// active mode — that's a separate path; this cache only drives color.
 fn cache_per_residue_scores(
     engine: &mut VisoEngine,
     entity_id: u32,
-    scoring_mode: foldit_gui::ScoringMode,
+    _scoring_mode: foldit_gui::ScoringMode,
     per_residue_scores: &Option<Vec<f64>>,
-    per_residue_game_scores: &Option<Vec<f64>>,
+    _per_residue_game_scores: &Option<Vec<f64>>,
 ) {
-    let scores = match scoring_mode {
-        foldit_gui::ScoringMode::Game => per_residue_game_scores,
-        foldit_gui::ScoringMode::Scientist => per_residue_scores,
-    };
-    if let Some(s) = scores {
+    if let Some(s) = per_residue_scores {
         engine.set_per_residue_scores(entity_id, Some(s.clone()));
     }
 }

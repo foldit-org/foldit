@@ -70,6 +70,7 @@ struct BandDragState {
 #[derive(Debug, Clone)]
 struct PullDragState {
     residue: i32,
+    atom_name: String,
     start_pos: Vec3,
     target_pos: Vec3,
     initial_mouse_pos: (f32, f32),
@@ -151,11 +152,16 @@ impl ActionRouter {
     }
 
     /// Return pull drag screen-space info for viso's PullInfo.
-    /// Returns (residue_index, (screen_x, screen_y)) if a pull is active.
-    pub fn pull_drag_info_for_viso(&self) -> Option<(u32, (f32, f32))> {
+    /// Returns (residue_index, atom_name, (screen_x, screen_y)) if a pull
+    /// is active.
+    pub fn pull_drag_info_for_viso(&self) -> Option<(u32, String, (f32, f32))> {
         self.pull_drag.as_ref().and_then(|pull| {
             if pull.is_active {
-                Some((pull.residue as u32, self.last_mouse_pos))
+                Some((
+                    pull.residue as u32,
+                    pull.atom_name.clone(),
+                    self.last_mouse_pos,
+                ))
             } else {
                 None
             }
@@ -177,8 +183,10 @@ impl ActionRouter {
     pub fn refresh_pull_position(&mut self, engine: &VisoEngine) {
         if let Some(ref mut pull) = self.pull_drag {
             if pull.is_active {
-                if let Some(current_ca) = engine.resolve_atom_position(pull.residue as u32, "CA") {
-                    pull.start_pos = current_ca;
+                if let Some(current) = engine
+                    .resolve_atom_position(pull.residue as u32, &pull.atom_name)
+                {
+                    pull.start_pos = current;
                 }
             }
         }
@@ -513,6 +521,116 @@ impl ActionRouter {
         }
     }
 
+    // ── Pull (drag-driven Rosetta minimization) ──
+
+    fn start_rosetta_pull(&mut self, engine: &VisoEngine, store: &mut EntityStore) {
+        let (residue_idx, residue_1indexed, atom_name, target) = {
+            let Some(pull) = self.pull_drag.as_ref() else { return };
+            let res_u32 = pull.residue as u32;
+            (
+                res_u32,
+                res_u32 + 1,
+                pull.atom_name.clone(),
+                [pull.target_pos.x, pull.target_pos.y, pull.target_pos.z],
+            )
+        };
+        let is_sidechain = !molex::chemistry::is_protein_backbone_atom_name(&atom_name);
+
+        if self.orchestrator.is_none() {
+            log::warn!("Orchestrator not initialized; cannot start pull");
+            return;
+        }
+        if self.orchestrator.as_ref().unwrap().is_rosetta_running() {
+            log::warn!("Rosetta op already running; ignoring pull");
+            return;
+        }
+
+        let focus = engine.focus();
+        let Some(lock_id) =
+            focus::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
+        else {
+            log::warn!("No structure available for pull");
+            return;
+        };
+
+        let Some(combined) = store.combined_assembly_for_backend() else {
+            log::warn!("No assembly available for pull");
+            return;
+        };
+        let assembly = combined.assembly.clone();
+
+        if !self.ensure_rosetta_session(store) {
+            log::warn!("Failed to ensure Rosetta session for pull");
+            return;
+        }
+        self.update_rosetta_locks(engine, store);
+
+        let runner_id = RunnerEntityId(u64::from(lock_id));
+        let orch = self.orchestrator.as_mut().unwrap();
+        if orch.try_lock(runner_id, OpType::RosettaPull).is_none() {
+            log::warn!("Failed to lock entity for pull");
+            return;
+        }
+        let kickoff = if is_sidechain {
+            orch.start_pull_sidechain(assembly, residue_1indexed, atom_name.clone(), target)
+        } else {
+            orch.start_pull(assembly, residue_1indexed, target)
+        };
+        if let Err(e) = kickoff {
+            log::error!("Failed to start pull: {}", e);
+            orch.unlock(runner_id);
+            return;
+        }
+
+        let target_eid = store.mint_id(lock_id);
+        let label = if is_sidechain {
+            format!("Pull sidechain {residue_1indexed}.{atom_name}")
+        } else {
+            format!("Pull residue {residue_1indexed}")
+        };
+        if let Err(e) = store.begin_action(
+            CheckpointKind::ManualMove {
+                entity: target_eid,
+                residues: residue_idx..residue_idx + 1,
+            },
+            label,
+        ) {
+            log::warn!("begin_action(ManualMove) refused: {e}");
+        }
+
+        self.ui_dirty |= DirtyFlags::ACTIONS;
+        if is_sidechain {
+            log::info!("Started sidechain pull on residue {residue_1indexed}.{atom_name}");
+        } else {
+            log::info!("Started backbone pull on residue {residue_1indexed} ({atom_name})");
+        }
+    }
+
+    fn finish_rosetta_pull(&mut self, store: &mut EntityStore) {
+        if let Some(ref mut orch) = self.orchestrator {
+            let pull_locks: Vec<RunnerEntityId> = orch
+                .locked_entities()
+                .into_iter()
+                .filter(|&eid| matches!(orch.get_op_type(eid), Some(OpType::RosettaPull)))
+                .collect();
+            for eid in &pull_locks {
+                orch.cancel_entity(*eid);
+            }
+            orch.cancel_rosetta();
+            for eid in pull_locks {
+                orch.unlock(eid);
+            }
+        }
+
+        if store.has_ongoing_action() {
+            if let Err(e) = store.commit_action() {
+                log::warn!("commit_action(pull) refused: {e}");
+            }
+        }
+
+        self.ui_dirty |= DirtyFlags::ACTIONS;
+    }
+
     // ── ML operations ──
 
     /// Run the shared kickoff protocol for an ML backend op.
@@ -787,7 +905,7 @@ impl ActionRouter {
         &mut self,
         engine: &mut VisoEngine,
         input: &mut InputProcessor,
-        store: &EntityStore,
+        store: &mut EntityStore,
         button: winit::event::MouseButton,
         pressed: bool,
     ) {
@@ -799,24 +917,33 @@ impl ActionRouter {
                     let hovered = engine.hovered_target();
                     let hovered_residue = hovered.as_residue_i32();
                     if hovered_residue >= 0 {
-                        if let Some(ca_pos) = engine.resolve_atom_position(hovered_residue as u32, "CA") {
+                        let atom_name = engine
+                            .closest_atom_in_residue(
+                                hovered_residue as u32,
+                                self.last_mouse_pos,
+                            )
+                            .unwrap_or_else(|| "CA".to_string());
+                        if let Some(start_pos) = engine.resolve_atom_position(
+                            hovered_residue as u32,
+                            &atom_name,
+                        ) {
                             let click_world_pos = engine.screen_to_world_at_depth(
                                 Vec2::new(self.last_mouse_pos.0, self.last_mouse_pos.1),
-                                ca_pos,
+                                start_pos,
                             );
-                            // Use CA as the start position for simplicity
-                            let start_pos = ca_pos;
 
                             self.pull_drag = Some(PullDragState {
                                 residue: hovered_residue,
+                                atom_name: atom_name.clone(),
                                 start_pos,
                                 target_pos: click_world_pos,
                                 initial_mouse_pos: self.last_mouse_pos,
                                 is_active: false,
                             });
                             log::debug!(
-                                "Potential pull on residue {} at {:?}",
+                                "Potential pull on residue {}.{} at {:?}",
                                 hovered_residue,
+                                atom_name,
                                 start_pos
                             );
                         }
@@ -841,9 +968,7 @@ impl ActionRouter {
                                 pull.residue,
                                 pull.target_pos
                             );
-                            if let Some(ref orch) = self.orchestrator {
-                                orch.cancel_rosetta();
-                            }
+                            self.finish_rosetta_pull(store);
                         } else {
                             // Pull not activated — process as normal click
                             let hovered = engine.hovered_target();
@@ -924,6 +1049,7 @@ impl ActionRouter {
         &mut self,
         engine: &mut VisoEngine,
         _input: &InputProcessor,
+        store: &mut EntityStore,
         x: f32,
         y: f32,
     ) {
@@ -946,8 +1072,10 @@ impl ActionRouter {
             }
 
             if pull.is_active {
-                if let Some(current_ca) = engine.resolve_atom_position(pull.residue as u32, "CA") {
-                    pull.start_pos = current_ca;
+                if let Some(current) = engine
+                    .resolve_atom_position(pull.residue as u32, &pull.atom_name)
+                {
+                    pull.start_pos = current;
                 }
                 pull.target_pos = engine.screen_to_world_at_depth(
                     Vec2::new(x, y),
@@ -958,15 +1086,7 @@ impl ActionRouter {
 
         // Start Rosetta pull when pull becomes active
         if pull_became_active {
-            if let Some(ref pull) = self.pull_drag {
-                let residue_1indexed = (pull.residue + 1) as u32;
-                // Note: pull start_pull needs coords from store, which is
-                // not available here. The caller (App) should wire this up.
-                log::info!(
-                    "Pull activated for residue {} — Rosetta pull requires session coords",
-                    residue_1indexed
-                );
-            }
+            self.start_rosetta_pull(engine, store);
         }
 
         // Update pull target during active drag

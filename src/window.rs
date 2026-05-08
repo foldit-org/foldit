@@ -145,12 +145,6 @@ impl AppRunner {
                 serde_json::to_value(&self.frontend.view).unwrap(),
             );
         }
-        if dirty.contains(DirtyFlags::PANELS) {
-            update.insert(
-                "panels".into(),
-                serde_json::to_value(&self.frontend.panels).unwrap(),
-            );
-        }
         if dirty.contains(DirtyFlags::UI) {
             update.insert(
                 "ui".into(),

@@ -405,8 +405,8 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &self.store, winit_button, true);
+                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
+                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, winit_button, true);
             }
             ViewportInput::PointerUp {
                 x, y, button, shift, ..
@@ -424,8 +424,8 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &self.store, winit_button, false);
+                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
+                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, winit_button, false);
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
                 if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
@@ -435,7 +435,7 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, x, y);
+                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
             }
             ViewportInput::Scroll { delta } => {
                 if let Some(cmd) = self.input.handle_event(InputEvent::Scroll { delta }, engine.hovered_target()) {
@@ -1073,14 +1073,14 @@ impl App {
         pressed: bool,
     ) {
         if let Some(engine) = &mut self.engine {
-            self.router.handle_native_mouse_input(engine, &mut self.input, &self.store, button, pressed);
+            self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, button, pressed);
             update_all_visualizations(engine, &self.router);
         }
     }
 
     pub(crate) fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
         if let Some(engine) = &mut self.engine {
-            self.router.handle_native_cursor_moved(engine, &self.input, x, y);
+            self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
             update_all_visualizations(engine, &self.router);
         }
     }
@@ -1415,9 +1415,9 @@ fn update_all_visualizations(engine: &mut VisoEngine, router: &ActionRouter) {
     engine.update_bands(band_infos);
 
     // Update pull visualization
-    if let Some((residue, screen_target)) = router.pull_drag_info_for_viso() {
+    if let Some((residue, atom_name, screen_target)) = router.pull_drag_info_for_viso() {
         engine.update_pull(Some(PullInfo {
-            atom: AtomRef { residue, atom_name: "CA".to_string() },
+            atom: AtomRef { residue, atom_name },
             screen_target,
         }));
     } else {
