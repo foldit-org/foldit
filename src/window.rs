@@ -33,10 +33,15 @@ pub(crate) struct AppRunner {
     last_frame: Instant,
     /// Last applied render size, to avoid redundant resizes
     last_render_size: (u32, u32),
-    /// Engine initialization is deferred until the webview loading screen is visible
+    /// Structure load is deferred until the webview loading screen is visible
     init_pending: bool,
-    /// Timeout for webview readiness — initialize anyway if webview takes too long
+    /// Timeout for webview readiness — load anyway if webview takes too long
     init_deadline: Option<Instant>,
+    /// Set after `load_initial_structure` returns; cleared once the Rosetta
+    /// backend delivers its first score update. Gates the Loading → InPuzzle
+    /// transition so the GUI never reveals the in-game UI before the engine
+    /// has a real score and the camera has rendered the loaded structure.
+    awaiting_initial_score: bool,
     /// Shared log buffer from tee_logger (drained each frame into frontend state)
     log_buffer: crate::tee_logger::LogBuffer,
     #[cfg(debug_assertions)]
@@ -58,6 +63,7 @@ impl AppRunner {
             last_render_size: (0, 0),
             init_pending: false,
             init_deadline: None,
+            awaiting_initial_score: false,
             log_buffer,
             #[cfg(debug_assertions)]
             dev_server: None,
@@ -78,38 +84,18 @@ impl AppRunner {
                 IpcMessage::Ready => {
                     log::info!("Webview ready");
                     self.webview_ready = true;
+                    // Mark all dirty so the next `push_dirty_state_to_webview`
+                    // emits a full snapshot via the single `__onStateUpdate`
+                    // channel (which includes `app_state: Loading`). All state
+                    // flows through one path → no `__onInitialState` Promise
+                    // race to worry about.
                     self.frontend.mark_all_dirty();
-                    // Only push full state if engine init is already done.
-                    // If init is still pending, the init block will push state
-                    // once it completes (with puzzle_loaded: true).
-                    // This avoids a race where __onInitialState sends puzzle_loaded:false
-                    // and a subsequent __onStateUpdate sends puzzle_loaded:true,
-                    // but the Promise .then() microtask overwrites it back to false.
-                    if !self.init_pending {
-                        self.push_full_state_to_webview();
-                    }
                 }
                 IpcMessage::ViewportInput(input) => self.app.handle_viewport_input(input),
                 IpcMessage::TriggerAction(action) => self.app.handle_trigger_action(action),
                 IpcMessage::ParameterizedAction(action) => {
                     self.app.handle_parameterized_action(action)
                 }
-            }
-        }
-    }
-
-    /// Push the full FrontendState to the webview as initial state.
-    fn push_full_state_to_webview(&self) {
-        if let Some(ref webview) = self.webview {
-            match serde_json::to_string(&self.frontend) {
-                Ok(json) => {
-                    let script = format!(
-                        "if(window.__onInitialState)window.__onInitialState({})",
-                        json
-                    );
-                    let _ = webview.evaluate_script(&script);
-                }
-                Err(e) => log::warn!("Failed to serialize initial state: {}", e),
             }
         }
     }
@@ -189,6 +175,18 @@ impl AppRunner {
                 serde_json::to_value(&self.frontend.scene).unwrap(),
             );
         }
+        if dirty.contains(DirtyFlags::HISTORY) {
+            update.insert(
+                "history".into(),
+                serde_json::to_value(self.frontend.history()).unwrap(),
+            );
+        }
+        if dirty.contains(DirtyFlags::APP_STATE) {
+            update.insert(
+                "app_state".into(),
+                serde_json::to_value(self.frontend.app_state()).unwrap(),
+            );
+        }
 
         if let Some(ref webview) = self.webview {
             let payload = serde_json::Value::Object(update);
@@ -211,9 +209,9 @@ impl AppRunner {
         }
     }
 
-    /// Check if the frontend dev server is reachable at localhost:5173.
+    /// True if *something* is listening on TCP 5173.
     #[cfg(debug_assertions)]
-    fn frontend_server_available() -> bool {
+    fn dev_server_port_bound() -> bool {
         use std::net::TcpStream;
         use std::time::Duration;
         let timeout = Duration::from_millis(200);
@@ -221,13 +219,113 @@ impl AppRunner {
             || TcpStream::connect_timeout(&"127.0.0.1:5173".parse().unwrap(), timeout).is_ok()
     }
 
-    /// Spawn the Vite dev server and block until it's ready (called before event loop).
+    /// Verify whatever is on 5173 is *our* Vite dev server, not an orphan from
+    /// another checkout or a wedged previous run. The foldit GUI's index.html
+    /// has `<title>Foldit</title>` — that's our fingerprint.
+    #[cfg(debug_assertions)]
+    fn dev_server_serves_foldit() -> bool {
+        use std::time::Duration;
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let resp = match client.get("http://127.0.0.1:5173/").send() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if !resp.status().is_success() {
+            return false;
+        }
+        match resp.text() {
+            Ok(body) => body.contains("<title>Foldit</title>"),
+            Err(_) => false,
+        }
+    }
+
+    /// SIGKILL whatever is bound to port 5173 (and its process group). Used to
+    /// evict an orphan vite from a crashed previous run before respawning.
+    #[cfg(all(debug_assertions, unix))]
+    fn kill_orphan_on_port_5173() {
+        use std::process::Command;
+        // lsof -ti :5173 → PIDs of every process with port 5173 open.
+        let lsof_out = match Command::new("lsof").args(["-ti", ":5173"]).output() {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => return,
+        };
+        let pids: Vec<i32> = String::from_utf8_lossy(&lsof_out)
+            .lines()
+            .filter_map(|s| s.trim().parse::<i32>().ok())
+            .collect();
+        for pid in pids {
+            // Kill the whole process group (pnpm + node/vite + esbuild) by
+            // looking up its pgid; fall back to pid-only kill if that fails.
+            let pgid = Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i32>().ok());
+            if let Some(pgid) = pgid {
+                log::warn!("Killing orphan dev server process group pgid={}", pgid);
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", pgid)])
+                    .status();
+            } else {
+                log::warn!("Killing orphan dev server pid={}", pid);
+                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, windows))]
+    fn kill_orphan_on_port_5173() {
+        use std::process::Command;
+        // PowerShell: find PIDs owning TCP 5173 and force-kill each tree.
+        let ps_cmd = "Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess";
+        let out = match Command::new("powershell").args(["-NoProfile", "-Command", ps_cmd]).output() {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => return,
+        };
+        for pid in String::from_utf8_lossy(&out).lines().filter_map(|s| s.trim().parse::<u32>().ok()) {
+            log::warn!("Killing orphan dev server pid={}", pid);
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .status();
+        }
+    }
+
+    /// Spawn the Vite dev server and block until it serves the foldit GUI.
+    /// Detects and evicts orphan vite instances from crashed previous runs
+    /// (those leak when foldit is killed by SIGINT, since `process_group(0)`
+    /// isolates the spawned tree from terminal signal forwarding).
     #[cfg(debug_assertions)]
     fn ensure_dev_server(&mut self) {
-        if Self::frontend_server_available() {
-            log::info!("Dev server already running at localhost:5173");
-            self.dev_server_available = true;
-            return;
+        if Self::dev_server_port_bound() {
+            if Self::dev_server_serves_foldit() {
+                log::info!("Dev server already running and serving foldit at localhost:5173");
+                self.dev_server_available = true;
+                return;
+            }
+            log::warn!(
+                "Port 5173 occupied but not serving foldit (likely an orphan from a \
+                 previous run or another checkout) — evicting."
+            );
+            Self::kill_orphan_on_port_5173();
+
+            use std::thread;
+            use std::time::Duration;
+            for _ in 0..50 {
+                if !Self::dev_server_port_bound() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            if Self::dev_server_port_bound() {
+                log::error!("Failed to free port 5173; cannot start fresh dev server");
+                return;
+            }
         }
 
         use std::process::{Command, Stdio};
@@ -275,17 +373,18 @@ impl AppRunner {
             }
         }
 
+        // Wait until vite is not just port-bound but actually serving foldit.
         use std::thread;
         use std::time::Duration;
         for i in 0..75 {
-            if Self::frontend_server_available() {
+            if Self::dev_server_serves_foldit() {
                 log::info!("Dev server ready after ~{}ms", i * 200);
                 self.dev_server_available = true;
                 return;
             }
             thread::sleep(Duration::from_millis(200));
         }
-        log::error!("Dev server did not become available within 15s");
+        log::error!("Dev server did not start serving foldit within 15s");
     }
 
     /// Kill the dev server child process if running.
@@ -532,31 +631,32 @@ impl AppRunner {
         // Process IPC messages (needed to detect webview_ready during init)
         self.process_ipc_messages();
 
-        // Deferred initialization: wait for the webview to show the loading screen
-        // before blocking the main thread with engine/structure creation.
+        // Deferred structure load: wait for the webview to show the loading
+        // screen before blocking the main thread with file I/O and Rosetta
+        // session creation. The wgpu RenderContext is already initialized
+        // (in `resumed()` before webview attachment) so the engine is alive
+        // and rendering throughout this period.
         if self.init_pending {
             let should_init = self.webview_ready
                 || self.webview.is_none()
                 || self.init_deadline.is_some_and(|d| now > d);
 
             if should_init {
-                log::info!("Deferred init starting (webview_ready={})", self.webview_ready);
+                log::info!("Deferred structure load starting (webview_ready={})", self.webview_ready);
                 self.init_pending = false;
                 self.init_deadline = None;
-                let window = self.window.as_ref().unwrap().clone();
-                self.app.initialize_with_window(window);
-                // Engine + puzzle loaded — ready to show the game view
+                self.app.load_initial_structure();
+                // Structure parsed and engine populated, but the Rosetta
+                // worker hasn't delivered its first score yet. Set puzzle
+                // metadata so it's ready when the GUI flips to InPuzzle, but
+                // keep `app_state` on Loading until `awaiting_initial_score`
+                // clears (see post-`apply_backend_updates` block below).
                 self.frontend.set_puzzle_loaded(true);
                 self.frontend.set_score_title(self.app.structure_title());
-                // CLI bootstrap → scientist mode with the structure title.
                 self.frontend.set_puzzle_scientist(self.app.structure_title());
                 self.frontend.mark_all_dirty();
-                // Push full state via __onInitialState now (the Ready handler
-                // deferred this push so the JS only ever sees puzzle_loaded:true).
-                if self.webview_ready {
-                    self.push_full_state_to_webview();
-                }
-                log::info!("Deferred init complete, puzzle_loaded={}", self.frontend.loading().puzzle_loaded);
+                self.awaiting_initial_score = true;
+                log::info!("Structure loaded, awaiting Rosetta initial score");
                 // Fall through to render the first frame
             } else {
                 // Webview still loading — keep pumping frames so it can paint
@@ -584,6 +684,17 @@ impl AppRunner {
 
         // Process all backend updates (Rosetta + ML) via triple buffers
         self.app.apply_backend_updates();
+
+        // Loading → InPuzzle transition gate. We waited for the Rosetta
+        // worker to deliver its first score for the loaded session before
+        // flipping the top-level state — otherwise the GUI reveals the
+        // in-game UI while the backend is still spinning up and the camera
+        // hasn't yet rendered the loaded structure with a real score.
+        if self.awaiting_initial_score && self.app.has_initial_score() {
+            self.frontend.set_app_state(foldit_gui::AppState::InPuzzle);
+            self.awaiting_initial_score = false;
+            log::info!("Initial Rosetta score received — app_state=InPuzzle");
+        }
 
         // Update engine: drains pending Assembly, submits mesh rebuild
         // for new generations, applies completed background mesh data,
@@ -627,7 +738,16 @@ impl ApplicationHandler for AppRunner {
                     .expect("Failed to create window"),
             );
 
-            // Create webview first so the loading screen is visible before heavy init
+            // CRITICAL ORDERING (macOS): create the wgpu Surface BEFORE attaching
+            // the wry WebView. `wgpu::Instance::create_surface` calls `setLayer:`
+            // on the contentView, replacing it with a CAMetalLayer. If the
+            // WKWebView is already a subview at that point its backing layer
+            // never recovers and only `toggleFullScreen` heals it. Matches the
+            // canonical wry/examples/wgpu.rs ordering. The slow part of init
+            // (structure load, Rosetta session) stays deferred to tick_frame so
+            // the webview loading screen is visible during it.
+            self.app.create_render_context(window.clone());
+
             #[cfg(debug_assertions)]
             {
                 if self.dev_server_available {
@@ -646,9 +766,10 @@ impl ApplicationHandler for AppRunner {
                 self.ipc_rx = Some(ipc_rx);
             }
 
-            // Defer engine initialization until the webview loading screen is up.
-            // tick_frame will call initialize_with_window once webview_ready fires
-            // (or after a timeout if the webview is slow / absent).
+            // Defer the slow part (structure load, Rosetta session) until the
+            // webview loading screen is visible. tick_frame calls
+            // load_initial_structure once webview_ready fires (or after a
+            // timeout if the webview is slow / absent).
             self.init_pending = true;
             self.init_deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
 

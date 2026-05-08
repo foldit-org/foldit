@@ -5,10 +5,11 @@
 //! backend output processing, rendering, or frontend state sync.
 
 use foldit_gui::DirtyFlags;
-use foldit::entity_store::EntityStore;
+use foldit::entity_store::{EntityRole, EntityStore};
+use foldit::history::{CheckpointKind, WiggleMask};
 use foldit::shared_state::SharedState;
 use viso::{AtomRef, BandInfo, BandTarget, InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
-use foldit_runner::orchestrator::{EntityId, OpType};
+use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
 use foldit_runner::Orchestrator;
 use glam::{Vec2, Vec3};
 
@@ -67,6 +68,14 @@ pub(crate) struct ActionRouter {
     /// predictions where the loaded entity's stored `reference_ca` no
     /// longer matches. Cleared once the final result has been applied.
     pub pending_prediction_reference: Option<Vec<Vec3>>,
+    /// ID of the mirror preview entity backing the active ML op, if any.
+    ///
+    /// RF3: created at op kickoff (clone of the loaded entity, loaded
+    /// hidden); streaming and final paths mutate the preview instead of
+    /// the loaded entity, so undo never sees intermediate frames.
+    /// RFD3: created lazily on the first streaming frame.
+    /// Cleared on final result / cancel.
+    pub pending_preview_id: Option<molex::entity::molecule::id::EntityId>,
 }
 
 /// 3-letter PDB residue code → one-letter amino acid code. Unknown
@@ -120,6 +129,7 @@ impl ActionRouter {
             ui_dirty: DirtyFlags::empty(),
             last_mouse_pos: (0.0, 0.0),
             pending_prediction_reference: None,
+            pending_preview_id: None,
         }
     }
 
@@ -131,13 +141,14 @@ impl ActionRouter {
         flags
     }
 
-    fn _get_structure_chains(&self, engine: &VisoEngine, store: &EntityStore) -> Vec<(String, String)> {
+    fn _get_structure_chains(&self, engine: &VisoEngine, store: &mut EntityStore) -> Vec<(String, String)> {
         let focus = engine.focus();
         let structure_id = SharedState::operation_target(&focus)
-            .or(store.loaded_entity());
+            .map(|raw| store.mint_id(raw))
+            .or_else(|| store.loaded_entity());
         if let Some(id) = structure_id {
-            if let Some(te) = store.get(id) {
-                return extract_chains_from_entities(std::slice::from_ref(&te.entity));
+            if let Some(entity) = store.entity(id) {
+                return extract_chains_from_entities(std::slice::from_ref(entity));
             }
         }
         vec![]
@@ -199,7 +210,7 @@ impl ActionRouter {
     pub fn handle_trigger_action(
         &mut self,
         engine: &mut VisoEngine,
-        store: &EntityStore,
+        store: &mut EntityStore,
         action: foldit_gui::ActionId,
     ) -> Option<foldit_gui::ParameterizedAction> {
         use foldit_gui::ActionId;
@@ -222,7 +233,12 @@ impl ActionRouter {
                 })
             }
             ActionId::Undo | ActionId::Redo => {
-                log::warn!("Undo/Redo not yet implemented");
+                // Routed by App::handle_trigger_action — main.rs intercepts
+                // these so it can call store.undo / store.redo with the
+                // engine handle. Reaching this branch means the router
+                // got the action without the App-level intercept; that's
+                // a bug.
+                log::error!("Undo/Redo reached the router; should be handled at App level");
                 None
             }
         };
@@ -244,10 +260,23 @@ impl ActionRouter {
                 log::info!("Stopped operation on entity {:?}", eid);
             }
         }
-        if let Some(_anim_id) = store.animation() {
-            store.remove_animation();
+        // Continuous Rosetta actions: cancel = commit. The user keeps
+        // whatever the wiggle/shake had reached; the tentative Solution
+        // becomes a permanent undo entry. ML preview ops use a different
+        // surface (`is_preview`) and are torn down below.
+        if store.has_ongoing_action() {
+            if let Err(e) = store.commit_action() {
+                log::warn!("cancel_operations: commit_action refused: {e}");
+            }
+        }
+        let preview_ids: Vec<molex::entity::molecule::id::EntityId> =
+            store.preview_ids().collect();
+        if !preview_ids.is_empty() {
+            for id in &preview_ids {
+                store.remove_preview(*id);
+            }
             store.publish_to(engine);
-            log::info!("Removed in-progress animation structure");
+            log::info!("Removed {} in-progress preview entities", preview_ids.len());
         }
 
         if !self.active_bands.is_empty() {
@@ -264,7 +293,7 @@ impl ActionRouter {
 
     // ── Rosetta operations ──
 
-    fn toggle_wiggle(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
+    fn toggle_wiggle(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         if self.orchestrator.is_none() {
             log::warn!("Orchestrator not initialized");
             return;
@@ -294,6 +323,14 @@ impl ActionRouter {
                     }
                     orch.stop_rosetta();
 
+                    // Toggle-off: commit the ongoing action so all the
+                    // intermediate cycles collapse into one undo entry.
+                    if store.has_ongoing_action() {
+                        if let Err(e) = store.commit_action() {
+                            log::warn!("toggle_wiggle: commit_action refused: {e}");
+                        }
+                    }
+
                     self.ui_dirty |= DirtyFlags::ACTIONS;
                 }
                 return;
@@ -301,7 +338,9 @@ impl ActionRouter {
         }
 
         let focus = engine.focus();
-        let Some(lock_id) = SharedState::lock_target(&focus, store.loaded_entity()) else {
+        let Some(lock_id) =
+            SharedState::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
+        else {
             log::warn!("No structure available for wiggle");
             return;
         };
@@ -311,6 +350,8 @@ impl ActionRouter {
             return;
         };
         let assembly = combined.assembly.clone();
+        let session_entity_ids: Vec<molex::entity::molecule::id::EntityId> =
+            combined.entity_ids.clone();
 
         if !self.ensure_rosetta_session(store) {
             log::warn!("Failed to ensure Rosetta session for wiggle");
@@ -323,13 +364,15 @@ impl ActionRouter {
             format!("full session ({} entities)", store.count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| store.get(id))
-                .map(|te| te.name.clone())
+                .and_then(|id| {
+                    let eid = store.mint_id(id);
+                    store.metadata(eid).map(|m| m.name.clone())
+                })
                 .unwrap_or_default()
         };
 
         let orch = self.orchestrator.as_mut().unwrap();
-        if orch.try_lock(EntityId(u64::from(lock_id)), OpType::RosettaWiggle).is_some() {
+        if orch.try_lock(RunnerEntityId(u64::from(lock_id)), OpType::RosettaWiggle).is_some() {
             log::info!(
                 "Starting wiggle on {} ({} entities)...",
                 target_desc,
@@ -337,8 +380,33 @@ impl ActionRouter {
             );
             if let Err(e) = orch.start_wiggle(assembly) {
                 log::error!("Failed to start wiggle: {}", e);
-                orch.unlock(EntityId(u64::from(lock_id)));
+                orch.unlock(RunnerEntityId(u64::from(lock_id)));
                 return;
+            }
+
+            // Toggle-on: begin an ongoing action on the lock target.
+            // The new History API's begin_action takes the entity from
+            // the kind; cycle writebacks land via action_update; commit
+            // happens on toggle-off or Esc.
+            let target_eid = store.mint_id(lock_id);
+            log::info!(
+                "toggle_wiggle: begin_action on entity {} (session has {} eids)",
+                target_eid.raw(),
+                session_entity_ids.len(),
+            );
+            match store.begin_action(
+                CheckpointKind::Wiggle {
+                    entity: target_eid,
+                    mask: WiggleMask {
+                        backbone: true,
+                        sidechains: true,
+                    },
+                    duration_ms: 0,
+                },
+                format!("Wiggle {target_desc}"),
+            ) {
+                Ok(id) => log::info!("toggle_wiggle: begin_action Ok, tentative {:?}", id),
+                Err(e) => log::warn!("toggle_wiggle: begin_action refused: {e}"),
             }
 
             self.ui_dirty |= DirtyFlags::ACTIONS;
@@ -347,7 +415,7 @@ impl ActionRouter {
         }
     }
 
-    fn toggle_shake(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
+    fn toggle_shake(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         if self.orchestrator.is_none() {
             log::warn!("Orchestrator not initialized");
             return;
@@ -376,6 +444,12 @@ impl ActionRouter {
                     }
                     orch.stop_rosetta();
 
+                    if store.has_ongoing_action() {
+                        if let Err(e) = store.commit_action() {
+                            log::warn!("toggle_shake: commit_action refused: {e}");
+                        }
+                    }
+
                     self.ui_dirty |= DirtyFlags::ACTIONS;
                 }
                 return;
@@ -383,7 +457,9 @@ impl ActionRouter {
         }
 
         let focus = engine.focus();
-        let Some(lock_id) = SharedState::lock_target(&focus, store.loaded_entity()) else {
+        let Some(lock_id) =
+            SharedState::lock_target(&focus, store.loaded_entity().map(|id| id.raw()))
+        else {
             log::warn!("No structure available for shake");
             return;
         };
@@ -393,6 +469,8 @@ impl ActionRouter {
             return;
         };
         let assembly = combined.assembly.clone();
+        let session_entity_ids: Vec<molex::entity::molecule::id::EntityId> =
+            combined.entity_ids.clone();
 
         if !self.ensure_rosetta_session(store) {
             log::warn!("Failed to ensure Rosetta session for shake");
@@ -405,13 +483,15 @@ impl ActionRouter {
             format!("full session ({} entities)", store.count())
         } else {
             SharedState::operation_target(&focus)
-                .and_then(|id| store.get(id))
-                .map(|te| te.name.clone())
+                .and_then(|id| {
+                    let eid = store.mint_id(id);
+                    store.metadata(eid).map(|m| m.name.clone())
+                })
                 .unwrap_or_default()
         };
 
         let orch = self.orchestrator.as_mut().unwrap();
-        if orch.try_lock(EntityId(u64::from(lock_id)), OpType::RosettaShake).is_some() {
+        if orch.try_lock(RunnerEntityId(u64::from(lock_id)), OpType::RosettaShake).is_some() {
             log::info!(
                 "Starting shake on {} ({} entities)...",
                 target_desc,
@@ -419,8 +499,22 @@ impl ActionRouter {
             );
             if let Err(e) = orch.start_shake(assembly) {
                 log::error!("Failed to start shake: {}", e);
-                orch.unlock(EntityId(u64::from(lock_id)));
+                orch.unlock(RunnerEntityId(u64::from(lock_id)));
                 return;
+            }
+
+            let target_eid = store.mint_id(lock_id);
+            let _ = session_entity_ids; // session covers more, but the
+                                        // running action targets one entity
+                                        // (Shake is per-entity by kind).
+            if let Err(e) = store.begin_action(
+                CheckpointKind::Shake {
+                    entity: target_eid,
+                    duration_ms: 0,
+                },
+                format!("Shake {target_desc}"),
+            ) {
+                log::warn!("begin_action(Shake) refused: {e}");
             }
 
             self.ui_dirty |= DirtyFlags::ACTIONS;
@@ -431,7 +525,7 @@ impl ActionRouter {
 
     // ── ML operations ──
 
-    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &EntityStore) {
+    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         use crate::backend_handler;
 
         let focus = engine.focus();
@@ -442,6 +536,7 @@ impl ActionRouter {
             log::warn!("No structure available for prediction");
             return;
         };
+        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
 
         if self.orchestrator.is_none() {
             log::warn!("Orchestrator not initialized");
@@ -450,8 +545,8 @@ impl ActionRouter {
 
         {
             let orch = self.orchestrator.as_ref().unwrap();
-            if orch.is_locked(EntityId(u64::from(target_id))) {
-                let op = orch.get_op_type(EntityId(u64::from(target_id)));
+            if orch.is_locked(target_runner_eid) {
+                let op = orch.get_op_type(target_runner_eid);
                 log::warn!(
                     "Structure is locked by {:?}, cannot start RoseTTAFold3",
                     op
@@ -491,7 +586,7 @@ impl ActionRouter {
 
         let orch = self.orchestrator.as_mut().unwrap();
         if orch
-            .try_lock(EntityId(u64::from(target_id)), OpType::MLPredict)
+            .try_lock(target_runner_eid, OpType::MLPredict)
             .is_none()
         {
             log::warn!("Failed to acquire lock for RoseTTAFold3");
@@ -506,9 +601,9 @@ impl ActionRouter {
 
         let result = if let Some(ctx) = entity_context {
             log::info!(
-                "Passing assembly context ({} entities, {} bytes)",
+                "Passing assembly context ({} entities, {} entities in assembly)",
                 ctx.entities.len(),
-                ctx.assembly_coords.len(),
+                ctx.assembly.entities().len(),
             );
             orch.predict_with_context(None, chains, 3, ctx)
         } else {
@@ -517,8 +612,33 @@ impl ActionRouter {
 
         if let Err(e) = result {
             log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(EntityId(u64::from(target_id)));
+            orch.unlock(target_runner_eid);
             return;
+        }
+
+        // Mirror the loaded entity into a streaming preview, then hide
+        // the loaded entity. Streaming/final paths mutate the preview
+        // so undo never sees intermediate frames; on result, the loaded
+        // entity is updated once and reshown.
+        if let Some(loaded_id) = store.loaded_entity() {
+            let mirror = store.entity(loaded_id).cloned().zip(
+                store.metadata(loaded_id).map(|m| m.origin.clone()),
+            );
+            if let Some((mirror, origin)) = mirror {
+                let preview_id = store.insert_preview(
+                    mirror,
+                    "Predicting...".to_string(),
+                    origin,
+                    EntityRole { foldable: false, designable: false, ambient: false },
+                );
+                engine.set_entity_visible(loaded_id.raw(), false);
+                self.pending_preview_id = Some(preview_id);
+                store.publish_to(engine);
+                log::info!(
+                    "Created RF3 preview {} mirroring loaded entity {}",
+                    preview_id.raw(), loaded_id.raw(),
+                );
+            }
         }
 
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
@@ -547,11 +667,11 @@ impl ActionRouter {
                 let visible = store.visible_residue_counts();
                 let visible_rosetta_ids: Vec<RosettaStructureId> = visible
                     .iter()
-                    .map(|(id, _)| RosettaStructureId(u64::from(*id)))
+                    .map(|(id, _)| RosettaStructureId(u64::from(id.raw())))
                     .collect();
                 let residue_counts_rosetta: HashMap<RosettaStructureId, usize> = visible
                     .iter()
-                    .map(|(id, count)| (RosettaStructureId(u64::from(*id)), *count))
+                    .map(|(id, count)| (RosettaStructureId(u64::from(id.raw())), *count))
                     .collect();
                 state.topology_changed(&visible_rosetta_ids, &residue_counts_rosetta)
             }
@@ -568,7 +688,7 @@ impl ActionRouter {
             let structure_ids: Vec<RosettaStructureId> = combined
                 .entity_ids
                 .iter()
-                .map(|id| RosettaStructureId(u64::from(*id)))
+                .map(|id| RosettaStructureId(u64::from(id.raw())))
                 .collect();
             let residue_ranges: HashMap<RosettaStructureId, (usize, usize)> = structure_ids
                 .iter()
@@ -591,7 +711,7 @@ impl ActionRouter {
     pub(crate) fn update_rosetta_locks(&mut self, engine: &VisoEngine, _store: &EntityStore) {
         let focus = engine.focus();
         let new_focus = SharedState::operation_target(&focus)
-            .map(|id| EntityId(u64::from(id)));
+            .map(|id| RunnerEntityId(u64::from(id)));
 
         if let Some(ref mut orch) = self.orchestrator {
             orch.update_focus_locks(new_focus);
@@ -998,7 +1118,7 @@ pub(crate) fn build_actions_list(
         None => return vec![],
     };
 
-    let locked: Vec<EntityId> = orch.locked_entities();
+    let locked: Vec<RunnerEntityId> = orch.locked_entities();
     let has_any_lock = !locked.is_empty();
     let has_rosetta_op = locked.iter().any(|&id| {
         matches!(

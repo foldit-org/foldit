@@ -25,15 +25,204 @@ mod tee_logger;
 mod window;
 
 use action_router::ActionRouter;
-use foldit_gui::{DirtyFlags, ScoringMode};
+use foldit_gui::{
+    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, HistoryCommand, HistoryLiveUpdate,
+    HistorySection, ScoringMode, WireId,
+};
 use foldit_runner::Orchestrator;
-use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
+use foldit::entity_store::{EntityStore, EntityStoreError, EntityOrigin, EntityRole};
+use foldit::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use foldit::shared_state::SharedState;
+use molex::entity::molecule::id::EntityId;
 use viso::{BandInfo, BandTarget, AtomRef, Focus, InputEvent, InputProcessor, PullInfo, VisoEngine, VisoCommand};
 use std::sync::Arc;
+use std::time::{Instant, UNIX_EPOCH};
 use winit::event::MouseScrollDelta;
 use winit::keyboard::ModifiersState;
 use winit::window::Window;
+
+/// Pick the score on a checkpoint that matches the active `ScoringMode`
+/// (G7: no place in the *write* path consults the mode; the read /
+/// projection path picks).
+fn score_for_mode(
+    raw: Option<f64>,
+    game: Option<f64>,
+    mode: ScoringMode,
+) -> Option<f64> {
+    match mode {
+        ScoringMode::Game => game,
+        ScoringMode::Scientist => raw,
+    }
+}
+
+fn timestamp_ms(t: std::time::SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
+    match k {
+        CheckpointKind::Loaded { .. } => CheckpointKindTag::Load,
+        CheckpointKind::Wiggle { .. } => CheckpointKindTag::Wiggle,
+        CheckpointKind::Shake { .. } => CheckpointKindTag::Shake,
+        CheckpointKind::Minimize { .. } => CheckpointKindTag::Minimize,
+        CheckpointKind::ManualMove { .. } => CheckpointKindTag::ManualMove,
+        CheckpointKind::Mutate { .. } => CheckpointKindTag::Mutate,
+        CheckpointKind::Rfd3 { .. } => CheckpointKindTag::Rfd3,
+        CheckpointKind::Mpnn { .. } => CheckpointKindTag::Mpnn,
+        CheckpointKind::PromotedPreview { .. } => CheckpointKindTag::PromotedPreview,
+        CheckpointKind::AddEntity { .. } => CheckpointKindTag::AddEntity,
+        CheckpointKind::RemoveEntity { .. } => CheckpointKindTag::RemoveEntity,
+        CheckpointKind::LaneUndo { .. } => CheckpointKindTag::LaneUndo,
+    }
+}
+
+fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
+    match s {
+        HistoryFilterStatus::Pass => FilterStatus::Pass,
+        HistoryFilterStatus::Fail(_) => FilterStatus::Fail,
+        HistoryFilterStatus::NotEvaluated => FilterStatus::NotEvaluated,
+    }
+}
+
+/// Project the backend `History` into the wire payload consumed by
+/// the `HistoryPanel`.
+fn project_history(store: &EntityStore) -> HistorySection {
+    let history = store.history();
+    let cps = history.checkpoints();
+    let head_id = cps.head();
+    let root_id = cps.root();
+
+    let checkpoints: Vec<CheckpointInfo> = cps
+        .iter()
+        .map(|(id, ckpt)| {
+            let entity_heads = ckpt
+                .entity_heads
+                .iter()
+                .map(|(eid, snap)| (*eid, WireId::new(*snap)))
+                .collect();
+            CheckpointInfo {
+                id: WireId::new(id),
+                parent: ckpt.parent.map(WireId::new),
+                children: ckpt.children.iter().copied().map(WireId::new).collect(),
+                entity_heads,
+                entity: ckpt.kind.entity(),
+                kind: checkpoint_kind_tag(&ckpt.kind),
+                label: ckpt.label.to_string(),
+                timestamp_ms: timestamp_ms(ckpt.timestamp),
+                raw_score: ckpt.raw_score,
+                game_score: ckpt.game_score,
+                filter_status: filter_status_wire(&ckpt.filter_status),
+                tentative: ckpt.tentative,
+                pinned: cps.is_pinned(id),
+                exclude_from_best: ckpt.exclude_from_best,
+            }
+        })
+        .collect();
+
+    HistorySection {
+        checkpoints,
+        checkpoint_head: Some(WireId::new(head_id)),
+        checkpoint_root: Some(WireId::new(root_id)),
+        best: cps.best().map(WireId::new),
+        best_that_counts: cps.best_that_counts().map(WireId::new),
+        topology_version: history.topology_version() as f64,
+    }
+}
+
+/// Build the small `HistoryLiveUpdate` payload for the current head
+/// (always the tentative when `ongoing == Active`; when Idle, the head
+/// is the recently-stamped checkpoint).
+fn project_history_live(history: &History) -> Option<HistoryLiveUpdate> {
+    let head_id = history.checkpoints().head();
+    let ckpt = history.checkpoint(head_id)?;
+    Some(HistoryLiveUpdate {
+        checkpoint_id: WireId::new(head_id),
+        raw_score: ckpt.raw_score,
+        game_score: ckpt.game_score,
+        label: ckpt.label.to_string(),
+        filter_status: filter_status_wire(&ckpt.filter_status),
+    })
+}
+
+/// Outcome of a [`HistoryCommand`] dispatch — drives the per-frame
+/// follow-up the dispatcher must run (republish to viso, mark dirty,
+/// or nothing at all).
+enum HistoryOutcome {
+    /// Checkpoint head moved; rerun [`App::after_head_move`].
+    HeadMoved,
+    /// Curation flag changed (pin / unpin / exclude from best). No
+    /// head move; just mark `ACTIONS` dirty so the GUI reflects it.
+    Curated,
+    /// The command was a no-op (e.g., undo at root). No follow-up.
+    Noop,
+}
+
+/// Read the score for the *current head checkpoint*, projected through
+/// the active scoring mode. Replaces the old `App::latest_score` field
+/// (G1: derive, don't store).
+fn head_score(store: &EntityStore, mode: ScoringMode) -> Option<f64> {
+    let head_id = store.history().checkpoints().head();
+    let ckpt = store.history().checkpoint(head_id)?;
+    score_for_mode(ckpt.raw_score, ckpt.game_score, mode)
+}
+
+/// Move one freshly-loaded entity through the preview→promote pipeline
+/// so it lands in history with an `AddEntity` checkpoint. Returns the
+/// committed [`EntityId`].
+///
+/// Ambient (water / ion / solvent) and zero-residue entities — the
+/// hetatm stubs that the parser emits for cofactors / waters in many
+/// PDB files — are kept as previews (transient) so viso still renders
+/// them, but they DO NOT push a history checkpoint. They aren't
+/// undoable from the user's perspective; pushing one `AddEntity` per
+/// stub clutters the history (`1bfe` produced 3 root-level dots: one
+/// `Loaded` + two `AddEntity` for chain A and a water).
+fn load_entity_into_history(
+    store: &mut EntityStore,
+    entity: molex::MoleculeEntity,
+    name: String,
+) -> Option<EntityId> {
+    use molex::MoleculeType;
+    let mol_type = entity.molecule_type();
+    let is_ambient = matches!(
+        mol_type,
+        MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent
+    );
+    let zero_residue = entity.residue_count() == 0;
+    let id = store.insert_preview(
+        entity,
+        name.clone(),
+        EntityOrigin::Loaded,
+        EntityRole {
+            foldable: !is_ambient && !zero_residue,
+            designable: !is_ambient && !zero_residue,
+            ambient: is_ambient,
+        },
+    );
+    if is_ambient || zero_residue {
+        // Leave it transient: visible in viso, absent from history.
+        return Some(id);
+    }
+    match store.promote_preview(
+        id,
+        CheckpointKind::AddEntity {
+            entity: id,
+            kind: mol_type,
+        },
+        None,
+        None,
+        None,
+        std::borrow::Cow::Owned(format!("Loaded {name}")),
+    ) {
+        Ok(_) => Some(id),
+        Err(e) => {
+            log::error!("Failed to promote loaded entity '{name}': {e}");
+            None
+        }
+    }
+}
 
 /// Main application state — thin glue connecting the render engine and action router.
 pub(crate) struct App {
@@ -43,7 +232,6 @@ pub(crate) struct App {
     router: ActionRouter,
     shared_state: SharedState,
     pdb_path: String,
-    latest_score: Option<f64>,
     /// `Game` for tutorial/campaign/server puzzles, `Scientist` for CLI /
     /// drag-drop loads. Drives which score representation reaches the GUI.
     scoring_mode: ScoringMode,
@@ -52,6 +240,15 @@ pub(crate) struct App {
     puzzle_title: String,
     starting_score: f64,
     target_score: f64,
+    /// Last `History::topology_version()` that was pushed to the frontend.
+    /// `None` forces an initial push (G5: no `u64::MAX` sentinel).
+    last_history_topology: Option<u64>,
+    /// Last `History::live_version()` pushed; mid-action score updates
+    /// only — full-graph reproject is gated on `last_history_topology`.
+    last_history_live: Option<u64>,
+    /// Wall-clock of the last live history push. Gates the 50ms (20Hz)
+    /// debounce so per-cycle Rosetta updates don't saturate the IPC.
+    last_history_live_push_at: Option<Instant>,
 }
 
 impl App {
@@ -72,7 +269,6 @@ impl App {
             router: ActionRouter::new(),
             shared_state: SharedState::new(),
             pdb_path,
-            latest_score: None,
             // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
             // when an intro/campaign puzzle is loaded.
             scoring_mode: ScoringMode::Scientist,
@@ -80,7 +276,17 @@ impl App {
             puzzle_title: String::new(),
             starting_score: 0.0,
             target_score: 0.0,
+            last_history_topology: None,
+            last_history_live: None,
+            last_history_live_push_at: None,
         }
+    }
+
+    /// True once the Rosetta backend has delivered its first score update
+    /// for the current session. Replaces the old `latest_score`
+    /// shadow-field check; the truth source is now the head checkpoint.
+    pub(crate) fn has_initial_score(&self) -> bool {
+        head_score(&self.store, self.scoring_mode).is_some()
     }
 
     // ── Engine-only delegation (no router interaction) ──
@@ -135,7 +341,7 @@ impl App {
                     &mut self.router.orchestrator,
                     &mut self.router.ui_dirty,
                     &mut self.router.pending_prediction_reference,
-                    &mut self.latest_score,
+                    &mut self.router.pending_preview_id,
                     self.scoring_mode,
                     update,
                 );
@@ -276,8 +482,22 @@ impl App {
     }
 
     pub(crate) fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
+        // Undo / Redo intercept the dispatch chain because they need
+        // &mut self to call store + engine; the router can't reach
+        // those fields.
+        match action {
+            foldit_gui::ActionId::Undo => {
+                self.handle_undo();
+                return;
+            }
+            foldit_gui::ActionId::Redo => {
+                self.handle_redo();
+                return;
+            }
+            _ => {}
+        }
         if let Some(engine) = &mut self.engine {
-            if let Some(pa) = self.router.handle_trigger_action(engine, &self.store, action) {
+            if let Some(pa) = self.router.handle_trigger_action(engine, &mut self.store, action) {
                 self.handle_parameterized_action(pa);
             }
         }
@@ -288,6 +508,13 @@ impl App {
         action: foldit_gui::ParameterizedAction,
     ) {
         use foldit_gui::ParameterizedAction;
+
+        // History-side commands take &mut self (no engine borrow held).
+        if let ParameterizedAction::History { cmd } = action {
+            self.run_history_command(cmd);
+            return;
+        }
+
         let title = self.structure_title();
         let Some(engine) = &mut self.engine else { return };
 
@@ -297,18 +524,12 @@ impl App {
                     Ok((entities, name)) => {
                         log::info!("Loaded structure via IPC: {}", name);
                         let backbone_ca = action_router::entities_backbone_ca(&entities);
-                        // Insert into store first, then push to viso
                         let mut ids = Vec::new();
                         for entity in entities {
-                            let id = self.store.insert(
-                                entity,
-                                name.clone(),
-                                EntityOrigin::Loaded,
-                                EntityRole { foldable: true, designable: true, ambient: false },
-                            );
-                            ids.push(id);
+                            if let Some(id) = load_entity_into_history(&mut self.store, entity, name.clone()) {
+                                ids.push(id);
+                            }
                         }
-                        // Push to viso
                         self.store.publish_to(engine);
                         engine.fit_camera_to_focus();
                         if let Some(&first_id) = ids.first() {
@@ -330,7 +551,7 @@ impl App {
                 self.router.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
             }
             ParameterizedAction::LoadPuzzle { puzzle_id } => {
-                self.store.clear();
+                self.store.reset();
                 self.router.reset_for_new_structure();
 
                 match foldit::puzzle::load_puzzle_structure(puzzle_id) {
@@ -353,15 +574,11 @@ impl App {
                         let cam_eye = glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
                         let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
-                        let mut ids = Vec::new();
+                        let mut ids: Vec<EntityId> = Vec::new();
                         for entity in puzzle_data.entities {
-                            let id = self.store.insert(
-                                entity,
-                                title.clone(),
-                                EntityOrigin::Loaded,
-                                EntityRole { foldable: true, designable: true, ambient: false },
-                            );
-                            ids.push(id);
+                            if let Some(id) = load_entity_into_history(&mut self.store, entity, title.clone()) {
+                                ids.push(id);
+                            }
                         }
 
                         // Atomic topology swap: tears down stale scene-local state and
@@ -378,7 +595,7 @@ impl App {
 
                         if let Some(ss) = ss_override {
                             if let Some(&first_id) = ids.first() {
-                                engine.set_ss_override(first_id, ss);
+                                engine.set_ss_override(first_id.raw(), ss);
                             }
                         }
 
@@ -440,10 +657,141 @@ impl App {
             }
             ParameterizedAction::RunPrediction { entity_ids } => {
                 Self::run_prediction_for_entities(
-                    &mut self.router, &self.store, engine,
+                    &mut self.router, &mut self.store, engine,
                     &entity_ids,
                 );
             }
+            ParameterizedAction::History { .. } => {
+                // Handled in the early-return block above. The match is
+                // exhaustive over `ParameterizedAction` (G10): a new
+                // variant without a handler is a compile error.
+            }
+        }
+    }
+
+    // ── History navigation (Undo / Redo / Jump / Pin) ──
+
+    pub(crate) fn handle_undo(&mut self) {
+        self.run_history_command(HistoryCommand::Undo);
+    }
+
+    pub(crate) fn handle_redo(&mut self) {
+        self.run_history_command(HistoryCommand::Redo { branch: None });
+    }
+
+    /// Common tail for undo / redo / jump_checkpoint: republish to viso
+    /// via `replace_in` (unconditional rederive — the snapshot swap
+    /// installs an Assembly with stale generation that `set_assembly`
+    /// would otherwise skip), clear cached per-residue scores (the
+    /// values were computed against the *previous* head and become
+    /// meaningless on a head move; v1 just blanks them so the structure
+    /// renders neutral instead of "gray", v2 will async-reeval), and
+    /// mark UI dirty. Score is no longer cached in `App`; the GUI
+    /// projection reads it off the new head checkpoint on the next
+    /// `populate_frontend` (G1).
+    fn after_head_move(&mut self) {
+        if let Some(engine) = self.engine.as_mut() {
+            self.store.replace_in(engine);
+            let ids: Vec<EntityId> = self.store.ids().collect();
+            for eid in ids {
+                engine.set_per_residue_scores(eid.raw(), None);
+            }
+        }
+
+        // Push the new pose to Rosetta and trigger a cycle-0 re-score.
+        // Without this, the head move installs the right coordinates in
+        // viso but the Rosetta session keeps the *previous* head's pose
+        // — `head_score` (which now reads off the head checkpoint)
+        // returns the snapshot's stamped score, frozen in time, and
+        // `set_per_residue_scores` above stays cleared (gray
+        // structure). `recreate_session` rebuilds Rosetta's pose from
+        // the current `head_assembly()`; the cycle-0 init score lands
+        // back through the normal `BackendUpdate::RosettaCoords` path,
+        // which `apply_ongoing_update`'s idle branch then stamps via
+        // `set_head_scores`. Per-residue colors restore via
+        // `cache_per_residue_scores`. Same mechanism as load-time
+        // scoring — just retriggered on every head move.
+        if let Some(combined) = self.store.combined_assembly_for_backend() {
+            if let Some(orch) = self.router.orchestrator.as_ref() {
+                if let Err(e) = orch.recreate_session(combined.assembly.clone()) {
+                    log::warn!(
+                        "after_head_move: failed to recreate Rosetta session: {e}"
+                    );
+                }
+            }
+        }
+
+        self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
+    }
+
+    /// Dispatch a [`HistoryCommand`] from the GUI to the matching
+    /// `EntityStore` method. Refusals are logged; the GUI surface
+    /// shows the result by virtue of the head not moving (no separate
+    /// toast / error channel — single-client mode never produces a
+    /// `LockedByClient` refusal, and `HistoryError::EntityLocked` only
+    /// fires while the user's own action is still running, where the
+    /// running indicator is the natural feedback). The match is
+    /// exhaustive (G10): adding a variant without a handler is a
+    /// compile error.
+    fn run_history_command(&mut self, cmd: HistoryCommand) {
+        if self.engine.is_none() {
+            return;
+        }
+        let result: Result<HistoryOutcome, EntityStoreError> = match cmd {
+            HistoryCommand::JumpCheckpoint { id } => self
+                .store
+                .jump_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::Undo => self.store.undo().map(|opt| match opt {
+                Some(_) => HistoryOutcome::HeadMoved,
+                None => {
+                    log::info!("Undo: already at root");
+                    HistoryOutcome::Noop
+                }
+            }),
+            HistoryCommand::Redo { branch } => self
+                .store
+                .redo(branch.map(|w| w.into_inner()))
+                .map(|opt| match opt {
+                    Some(_) => HistoryOutcome::HeadMoved,
+                    None => {
+                        log::info!("Redo: nowhere forward to go");
+                        HistoryOutcome::Noop
+                    }
+                }),
+            HistoryCommand::LaneUndo { entity, target } => self
+                .store
+                .lane_undo(entity, target.into_inner())
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::LaneRedo { entity, branch } => self
+                .store
+                .lane_redo(entity, branch.map(|w| w.into_inner()))
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::PinCheckpoint { id } => self
+                .store
+                .pin_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::UnpinCheckpoint { id } => self
+                .store
+                .unpin_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::SetExcludeFromBest { id, exclude } => self
+                .store
+                .set_exclude_from_best(id.into_inner(), exclude)
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::AbortAction => self
+                .store
+                .abort_action()
+                .map(|_| HistoryOutcome::HeadMoved),
+        };
+
+        match result {
+            Ok(HistoryOutcome::HeadMoved) => self.after_head_move(),
+            Ok(HistoryOutcome::Curated) => {
+                self.router.ui_dirty |= DirtyFlags::ACTIONS;
+            }
+            Ok(HistoryOutcome::Noop) => {}
+            Err(e) => log::warn!("history command refused: {e}"),
         }
     }
 
@@ -453,12 +801,12 @@ impl App {
     fn build_entity_context(
         entities: &[molex::MoleculeEntity],
         store: &EntityStore,
-        entity_id: u32,
+        entity_id: EntityId,
     ) -> Option<foldit_runner::orchestrator::EntityContextData> {
         use molex::MoleculeType;
         use foldit_runner::orchestrator::{EntityContextData, EntityInfoData};
 
-        let assembly_coords = crate::backend_handler::entities_to_assembly_bytes(entities)?;
+        let assembly = molex::Assembly::new(entities.to_vec());
         let meta = store.entity_meta(entity_id);
 
         let entity_info = entities.iter().map(|e| {
@@ -501,7 +849,7 @@ impl App {
 
         Some(EntityContextData {
             entities: entity_info,
-            assembly_coords,
+            assembly,
         })
     }
 
@@ -512,35 +860,37 @@ impl App {
         temperature: f32,
         num_sequences: u32,
     ) {
-        use foldit_runner::orchestrator::{EntityContextData, EntityInfoData, EntityId, OpType};
+        use foldit_runner::orchestrator::{
+            EntityContextData, EntityInfoData, EntityId as RunnerEntityId, OpType,
+        };
         use molex::MoleculeType;
 
         let focus = engine.focus();
         log::info!("MPNN: focus = {:?}", focus);
 
-        // Collect entities based on focus (single entity, group, or session fallback).
-        let fallback = store.loaded_entity().or_else(|| SharedState::lock_target(&focus, store.loaded_entity()));
+        // Collect entities based on focus (single entity, group, or
+        // session fallback). The old `lock_target` helper degenerated
+        // to "loaded entity for Session focus" so the new path is
+        // simply `loaded` — focus's typed `Entity(eid)` already names
+        // the target on its own.
+        let loaded = store.loaded_entity();
         let Some((target_id, entities)) =
-            store.collect_ml_entities(&focus, fallback)
+            store.collect_ml_entities(&focus, loaded)
         else {
             log::warn!("No structure available for sequence design");
             return;
         };
 
-        let Some(assembly_bytes) = backend_handler::entities_to_assembly_bytes(&entities) else {
-            log::warn!("No coords available for sequence design");
-            return;
-        };
+        let assembly = molex::Assembly::new(entities.clone());
 
         let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
-        let entity_name = store.get(target_id).map(|te| te.name.clone());
+        let entity_name = store.metadata(target_id).map(|m| m.name.clone());
         log::info!(
-            "MPNN: target_id={}, entity='{}', {} entities, {} total atoms, {} assembly bytes",
-            target_id,
+            "MPNN: target_id={}, entity='{}', {} entities, {} total atoms",
+            target_id.raw(),
             entity_name.as_deref().unwrap_or("?"),
             entities.len(),
             total_atoms,
-            assembly_bytes.len(),
         );
 
         // Role validation: target must be designable
@@ -606,6 +956,7 @@ impl App {
                 fixed,
             }
         }).collect();
+        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
 
         let designed: Vec<&str> = entity_info.iter()
             .filter(|e| e.designable)
@@ -622,7 +973,7 @@ impl App {
 
         let entity_context = Some(EntityContextData {
             entities: entity_info,
-            assembly_coords: assembly_bytes.clone(),
+            assembly: assembly.clone(),
         });
 
         let Some(ref mut orch) = router.orchestrator else {
@@ -630,35 +981,35 @@ impl App {
             return;
         };
 
-        if orch.is_locked(EntityId(u64::from(target_id))) {
-            let op = orch.get_op_type(EntityId(u64::from(target_id)));
+        if orch.is_locked(target_runner_eid) {
+            let op = orch.get_op_type(target_runner_eid);
             log::warn!("Structure is locked by {:?}, cannot start sequence design", op);
             return;
         }
 
-        if orch.try_lock(EntityId(u64::from(target_id)), OpType::MLSequenceDesign).is_none() {
+        if orch.try_lock(target_runner_eid, OpType::MLSequenceDesign).is_none() {
             log::warn!("Failed to acquire lock for sequence design");
             return;
         }
 
-        let target_name = store.get(target_id)
-            .map(|te| te.name.clone())
+        let target_name = store.metadata(target_id)
+            .map(|m| m.name.clone())
             .unwrap_or_default();
 
         log::info!(
-            "Starting sequence design on '{}' ({} bytes, T={}, n={})...",
-            target_name, assembly_bytes.len(), temperature, num_sequences
+            "Starting sequence design on '{}' ({} entities, T={}, n={})...",
+            target_name, assembly.entities().len(), temperature, num_sequences
         );
 
         let result = if let Some(ctx) = entity_context {
-            orch.design_sequence_with_context(assembly_bytes, temperature, num_sequences, ctx)
+            orch.design_sequence_with_context(assembly, temperature, num_sequences, ctx)
         } else {
-            orch.design_sequence(assembly_bytes, temperature, num_sequences)
+            orch.design_sequence(assembly, temperature, num_sequences)
         };
 
         if let Err(e) = result {
             log::error!("Failed to submit sequence design: {}", e);
-            orch.unlock(EntityId(u64::from(target_id)));
+            orch.unlock(target_runner_eid);
             return;
         }
 
@@ -673,17 +1024,16 @@ impl App {
         num_steps: u32,
         contig: Option<String>,
     ) {
-        use foldit_runner::orchestrator::{EntityId, OpType};
+        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
 
         let Some(target_id) = store.loaded_entity() else {
             log::warn!("No structure available for structure design");
             return;
         };
-        let Some(te) = store.get(target_id) else {
+        let Some(entity) = store.entity(target_id).cloned() else {
             log::warn!("No structure available for structure design");
             return;
         };
-        let entity = te.entity.clone();
 
         // Role validation: target must be foldable
         if let Some((_, role)) = store.entity_meta(target_id) {
@@ -698,14 +1048,14 @@ impl App {
         }
 
         use molex::MoleculeType;
-        let entities: Vec<_> = vec![entity].into_iter().filter(|e| {
+        let entities: Vec<molex::MoleculeEntity> = vec![entity].into_iter().filter(|e| {
             !matches!(e.molecule_type(), MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent)
         }).collect();
 
         let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
         log::info!(
-            "RFD3 structure design: source={:?}, {} entities, {} total atoms",
-            target_id, entities.len(), total_atoms,
+            "RFD3 structure design: source={}, {} entities, {} total atoms",
+            target_id.raw(), entities.len(), total_atoms,
         );
 
         let entity_context = Self::build_entity_context(&entities, store, target_id);
@@ -715,13 +1065,15 @@ impl App {
             return;
         };
 
-        if orch.is_locked(EntityId(u64::from(target_id))) {
-            let op = orch.get_op_type(EntityId(u64::from(target_id)));
+        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
+
+        if orch.is_locked(target_runner_eid) {
+            let op = orch.get_op_type(target_runner_eid);
             log::warn!("Structure is locked by {:?}, cannot start structure design", op);
             return;
         }
 
-        if orch.try_lock(EntityId(u64::from(target_id)), OpType::MLStructureDesign).is_none() {
+        if orch.try_lock(target_runner_eid, OpType::MLStructureDesign).is_none() {
             log::warn!("Failed to acquire lock for structure design");
             return;
         }
@@ -731,9 +1083,9 @@ impl App {
 
         let result = if let Some(ctx) = entity_context {
             log::info!(
-                "Passing assembly context ({} entities, {} bytes)",
+                "Passing assembly context ({} info entries, {} entities in assembly)",
                 ctx.entities.len(),
-                ctx.assembly_coords.len(),
+                ctx.assembly.entities().len(),
             );
             orch.design_structure_with_context(length.to_string(), num_steps, contig_str, ctx)
         } else {
@@ -742,7 +1094,7 @@ impl App {
 
         if let Err(e) = result {
             log::error!("Failed to submit structure design: {}", e);
-            orch.unlock(EntityId(u64::from(target_id)));
+            orch.unlock(target_runner_eid);
             return;
         }
 
@@ -751,27 +1103,31 @@ impl App {
 
     fn run_prediction_for_entities(
         router: &mut ActionRouter,
-        store: &EntityStore,
-        _engine: &mut VisoEngine,
+        store: &mut EntityStore,
+        engine: &mut VisoEngine,
         entity_ids: &[u32],
     ) {
-        use foldit_runner::orchestrator::{EntityId, OpType};
+        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
 
-        // Collect entities matching the given IDs
-        let mut collected = Vec::new();
-        let mut target_id = None;
-        for id in entity_ids {
-            if let Some(te) = store.get(*id) {
-                collected.push(te.entity.clone());
-                if target_id.is_none() {
-                    target_id = Some(*id);
-                }
+        // Resolve raw u32 ids (from the GUI's entity-picker payload) to
+        // typed EntityIds via the store's allocator. `mint_id` advances
+        // the allocator past `raw` so future allocations don't collide;
+        // for ids the store already knows, that's a no-op.
+        let mut resolved: Vec<EntityId> = Vec::new();
+        let mut collected: Vec<molex::MoleculeEntity> = Vec::new();
+        for raw in entity_ids {
+            let id = store.mint_id(*raw);
+            if let Some(entity) = store.entity(id) {
+                collected.push(entity.clone());
+                resolved.push(id);
             }
         }
-
-        let Some(target_id) = target_id else {
-            log::warn!("No matching entities found for prediction");
-            return;
+        let target_id = match resolved.first().copied() {
+            Some(id) => id,
+            None => {
+                log::warn!("No matching entities found for prediction");
+                return;
+            }
         };
 
         if collected.is_empty() {
@@ -804,8 +1160,10 @@ impl App {
             return;
         };
 
-        if orch.is_locked(EntityId(u64::from(target_id))) {
-            let op = orch.get_op_type(EntityId(u64::from(target_id)));
+        let target_runner_eid = RunnerEntityId(u64::from(target_id.raw()));
+
+        if orch.is_locked(target_runner_eid) {
+            let op = orch.get_op_type(target_runner_eid);
             log::warn!("Structure is locked by {:?}, cannot start prediction", op);
             return;
         }
@@ -813,7 +1171,7 @@ impl App {
         orch.stop_rosetta();
         orch.clear_session();
 
-        if orch.try_lock(EntityId(u64::from(target_id)), OpType::MLPredict).is_none() {
+        if orch.try_lock(target_runner_eid, OpType::MLPredict).is_none() {
             log::warn!("Failed to acquire lock for prediction");
             return;
         }
@@ -829,8 +1187,35 @@ impl App {
 
         if let Err(e) = result {
             log::error!("Failed to submit prediction task: {}", e);
-            orch.unlock(EntityId(u64::from(target_id)));
+            orch.unlock(target_runner_eid);
             return;
+        }
+
+        // Mirror the loaded entity into a streaming preview, then hide
+        // the loaded entity. Streaming/final paths mutate the preview
+        // so undo never sees intermediate frames; on result, the loaded
+        // entity is updated once with the final body and reshown.
+        if let Some(loaded_id) = store.loaded_entity() {
+            let mirror = store.entity(loaded_id).cloned().zip(
+                store.metadata(loaded_id).map(|m| m.origin.clone()),
+            );
+            if let Some((mirror, origin)) = mirror {
+                // `insert_preview` overwrites the entity's id; passing
+                // the loaded one is harmless.
+                let preview_id = store.insert_preview(
+                    mirror,
+                    "Predicting...".to_string(),
+                    origin,
+                    EntityRole { foldable: false, designable: false, ambient: false },
+                );
+                engine.set_entity_visible(loaded_id.raw(), false);
+                router.pending_preview_id = Some(preview_id);
+                store.publish_to(engine);
+                log::info!(
+                    "Created RF3 preview {} mirroring loaded entity {}",
+                    preview_id.raw(), loaded_id.raw(),
+                );
+            }
         }
 
         router.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
@@ -928,7 +1313,7 @@ impl App {
             }
         }
         if app_dirty.contains(DirtyFlags::SCORE) {
-            if let Some(score) = self.latest_score {
+            if let Some(score) = head_score(&self.store, self.scoring_mode) {
                 frontend.set_score(score, false);
                 // Victory check: in Game mode, latch puzzle as complete the
                 // first time current_score crosses the toml target. Higher
@@ -972,8 +1357,10 @@ impl App {
         if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SELECTION) {
             use molex::MoleculeType;
             let mut scene_entities = Vec::new();
-            for (_, te) in self.store.iter() {
-                let entity = &te.entity;
+            for (eid, _meta) in self.store.iter() {
+                let Some(entity) = self.store.entity(eid) else {
+                    continue;
+                };
                 let mol_str = match entity.molecule_type() {
                     MoleculeType::Protein => "protein",
                     MoleculeType::DNA => "dna",
@@ -994,24 +1381,65 @@ impl App {
                 });
             }
             frontend.set_scene_entities(scene_entities);
+            let focused = match engine.focus() {
+                Focus::Entity(eid) => Some(eid.raw()),
+                Focus::Session => None,
+            };
+            frontend.set_focused_entity(focused);
         }
+
+        // History push (two-channel):
+        //   - topology bump → full `HistorySection`
+        //   - live bump only → small `HistoryLiveUpdate` patch, with a
+        //     50ms (20Hz) debounce so per-cycle Rosetta scores don't
+        //     saturate the IPC. The final cycle on commit always lands
+        //     because committing also bumps `topology_version`.
+        let topology = self.store.history().topology_version();
+        let live = self.store.history().live_version();
+        let topology_changed = self.last_history_topology != Some(topology);
+        let live_changed = self.last_history_live != Some(live);
+
+        if topology_changed {
+            frontend.set_history(project_history(&self.store));
+            self.last_history_topology = Some(topology);
+            self.last_history_live = Some(live);
+            self.last_history_live_push_at = Some(Instant::now());
+        } else if live_changed {
+            let now = Instant::now();
+            let debounced = self
+                .last_history_live_push_at
+                .map_or(false, |t| now.duration_since(t).as_millis() < 50);
+            if !debounced {
+                if let Some(update) = project_history_live(self.store.history()) {
+                    frontend.set_history_live(update);
+                    self.last_history_live = Some(live);
+                    self.last_history_live_push_at = Some(now);
+                }
+            }
+        }
+
     }
 
     // ── Complex methods (touch both engine and router) ──
 
-    /// Initialize domain state once a window is available.
-    pub(crate) fn initialize_with_window(&mut self, window: Arc<Window>) {
+    /// Phase 1: create the wgpu RenderContext and empty VisoEngine. This must
+    /// run BEFORE the wry WebView is attached as a child of the window — on
+    /// macOS, `wgpu::Instance::create_surface` calls `setLayer:` on the
+    /// contentView, replacing it with a CAMetalLayer; if the WKWebView is
+    /// already a subview at that point its backing layer never recovers and
+    /// only `toggleFullScreen` heals it (Apple Forums 124688, wry#1335).
+    /// Matches the canonical wry/examples/wgpu.rs ordering.
+    pub(crate) fn create_render_context(&mut self, window: Arc<Window>) {
         let size = window.inner_size();
         let scale = window.scale_factor();
         log::info!(
-            "initialize_with_window: inner_size={}x{}, scale_factor={}",
+            "create_render_context: inner_size={}x{}, scale_factor={}",
             size.width,
             size.height,
             scale
         );
 
-        // Create render context and empty engine
-        let context = match pollster::block_on(viso::RenderContext::new(window.clone(), (size.width, size.height))) {
+        let context = match pollster::block_on(viso::RenderContext::new(window, (size.width, size.height))) {
             Ok(ctx) => ctx,
             Err(e) => {
                 log::error!("Failed to initialize GPU render context: {:?}", e);
@@ -1033,21 +1461,31 @@ impl App {
 
         engine.set_render_scale(if scale < 2.0 { 2 } else { 1 });
 
+        self.engine = Some(engine);
+    }
+
+    /// Phase 2: load the initial structure, register entities, and create the
+    /// initial Rosetta session. Runs AFTER the webview's loading screen is
+    /// visible so the user has feedback during the (potentially slow) load.
+    /// Requires `create_render_context` to have run first.
+    pub(crate) fn load_initial_structure(&mut self) {
+        // Take engine out so we can hold a `&mut engine` alongside `&mut self.store`
+        // etc. without borrow-checker grief; restored at end.
+        let Some(mut engine) = self.engine.take() else {
+            log::error!("load_initial_structure called before create_render_context");
+            return;
+        };
+
         // Parse entities from file
         match action_router::load_file_as_entities(&self.pdb_path) {
             Ok((entities, name)) => {
                 let backbone_ca = action_router::entities_backbone_ca(&entities);
 
-                // Insert into store (assigns IDs)
-                let mut ids = Vec::new();
+                let mut ids: Vec<EntityId> = Vec::new();
                 for entity in entities {
-                    let id = self.store.insert(
-                        entity,
-                        name.clone(),
-                        EntityOrigin::Loaded,
-                        EntityRole { foldable: true, designable: true, ambient: false },
-                    );
-                    ids.push(id);
+                    if let Some(id) = load_entity_into_history(&mut self.store, entity, name.clone()) {
+                        ids.push(id);
+                    }
                 }
 
                 // Push to viso (viso inherits our IDs). update(0.0)
@@ -1070,12 +1508,13 @@ impl App {
 
                 // Register entity triple buffers for each loaded entity
                 for &eid in &ids {
-                    let reader = orchestrator.register_entity(u64::from(eid));
-                    self.shared_state.register_entity(eid, reader);
+                    let raw = eid.raw();
+                    let reader = orchestrator.register_entity(u64::from(raw));
+                    self.shared_state.register_entity(raw, reader);
                 }
                 // Set first entity as the active update target
                 if let Some(&first_id) = ids.first() {
-                    orchestrator.set_update_target(u64::from(first_id));
+                    orchestrator.set_update_target(u64::from(first_id.raw()));
                 }
 
                 self.router.orchestrator = Some(orchestrator);

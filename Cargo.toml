@@ -36,7 +36,7 @@ foldit-runner = { path = "crates/foldit-runner", default-features = false, featu
 # crates/viso` and uncomment the matching [patch] block at the bottom
 # of this file.
 viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
-molex = "0.3.0"
+molex = { version = "0.3.0", features = ["serde", "specta"] }
 
 # Required for foldit-runner-worker binary
 anyhow = "1.0"
@@ -47,6 +47,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 # Core
 glam = "0.30"
 indexmap = "2"
+slotmap = "1.0"
+smallvec = "1"
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
@@ -75,6 +77,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 base64 = "0.22"
+
+[dev-dependencies]
+proptest = "1"
 
 # ── Local development overrides ───────────────────────────────────────
 # Each block below redirects a published dep to its local submodule
