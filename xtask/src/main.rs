@@ -42,6 +42,16 @@ enum Commands {
     BuildMolex,
     /// Build the GUI (pnpm build) and copy dist to assets/gui
     BuildGui,
+    /// Build the foldit-web cdylib + run wasm-bindgen, emit JS glue to
+    /// `crates/foldit-gui/js/public/pkg/`. Requires nightly toolchain.
+    BuildWeb {
+        /// Build in debug mode (default: release)
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Build the web wasm artifact AND run `pnpm build:web` to produce a
+    /// static `dist/` ready for deployment.
+    BundleWeb,
 }
 
 fn main() -> Result<()> {
@@ -64,7 +74,100 @@ fn main() -> Result<()> {
         Commands::DownloadModels => download_models(),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
+        Commands::BuildWeb { debug } => build_web(debug),
+        Commands::BundleWeb => bundle_web(),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Web build: foldit-web cdylib → wasm-bindgen JS glue → public/pkg/
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `RUSTFLAGS` for the multithreaded wasm build. atomics + bulk-memory +
+/// shared-memory are required for `wasm-bindgen-rayon` (which viso's
+/// pipeline processor depends on). Cribbed from viso's xtask, which has
+/// the same shape working in production on its GitHub Pages deploy.
+const WASM_RUSTFLAGS: &str = "\
+    -C target-feature=+atomics,+bulk-memory,+mutable-globals \
+    -C link-arg=--shared-memory \
+    -C link-arg=--import-memory \
+    -C link-arg=--max-memory=1073741824 \
+    -C link-arg=--export=__wasm_init_tls \
+    -C link-arg=--export=__tls_size \
+    -C link-arg=--export=__tls_align \
+    -C link-arg=--export=__tls_base \
+    -C link-arg=--export=__heap_base \
+    -C link-arg=--export=__data_end";
+
+fn build_web(debug: bool) -> Result<()> {
+    let profile = if debug { "debug" } else { "release" };
+    println!("Building foldit-web for wasm32-unknown-unknown ({profile})...");
+
+    let mut args = vec![
+        "+nightly",
+        "build",
+        "--target",
+        "wasm32-unknown-unknown",
+        "-p",
+        "foldit-web",
+        "-Z",
+        "build-std=panic_abort,std,alloc",
+    ];
+    if !debug {
+        args.push("--release");
+    }
+
+    let status = Command::new("cargo")
+        .args(&args)
+        .env("RUSTFLAGS", WASM_RUSTFLAGS)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("cargo build failed for foldit-web (wasm32). \
+            Hint: nightly toolchain required (rustup toolchain install nightly).");
+    }
+
+    let wasm_path = Path::new("target/wasm32-unknown-unknown")
+        .join(profile)
+        .join("foldit_web.wasm");
+    if !wasm_path.exists() {
+        anyhow::bail!("expected wasm artifact missing: {}", wasm_path.display());
+    }
+
+    let pkg_dir = Path::new("crates/foldit-gui/js/public/pkg");
+    std::fs::create_dir_all(pkg_dir)?;
+
+    println!("Running wasm-bindgen → {}", pkg_dir.display());
+    let status = Command::new("wasm-bindgen")
+        .args(["--target", "web", "--out-dir"])
+        .arg(pkg_dir)
+        .arg(&wasm_path)
+        .status()
+        .map_err(|e| anyhow::anyhow!(
+            "wasm-bindgen failed to invoke ({e}). Install: cargo install wasm-bindgen-cli"
+        ))?;
+    if !status.success() {
+        anyhow::bail!("wasm-bindgen step failed");
+    }
+
+    println!("✓ foldit-web wasm built; JS glue at crates/foldit-gui/js/public/pkg/");
+    Ok(())
+}
+
+fn bundle_web() -> Result<()> {
+    build_web(false)?;
+
+    let js_dir = Path::new("crates/foldit-gui/js");
+    println!("Running pnpm build:web in {}...", js_dir.display());
+    let status = Command::new("pnpm")
+        .args(["build:web"])
+        .current_dir(js_dir)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("pnpm build:web failed");
+    }
+
+    println!("✓ web bundle ready at crates/foldit-gui/js/dist/");
+    Ok(())
 }
 
 fn python_lib_name() -> &'static str {

@@ -3,8 +3,9 @@
 //! `AppRunner` owns the window-layer state and holds `App` by value.
 //! It implements `ApplicationHandler` and delegates domain logic to `App` via method calls.
 
-use crate::App;
-use foldit_gui::DirtyFlags;
+use foldit_core::App;
+use foldit_gui::bridge;
+use foldit_gui::IpcMessage;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -12,15 +13,6 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
-
-/// Messages from JS (via wry ipc_handler) to Rust
-#[derive(Debug)]
-pub(crate) enum IpcMessage {
-    Ready,
-    ViewportInput(foldit_gui::ViewportInput),
-    TriggerAction(foldit_gui::ActionId),
-    ParameterizedAction(foldit_gui::ParameterizedAction),
-}
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
 pub(crate) struct AppRunner {
@@ -74,6 +66,7 @@ impl AppRunner {
 
     /// Drain IPC messages from the webview and dispatch them.
     fn process_ipc_messages(&mut self) {
+        use foldit_gui::Dispatcher;
         let rx = match &self.ipc_rx {
             Some(rx) => rx,
             None => return,
@@ -90,14 +83,39 @@ impl AppRunner {
                     // flows through one path → no `__onInitialState` Promise
                     // race to worry about.
                     self.frontend.mark_all_dirty();
+                    self.app.on_ready();
                 }
-                IpcMessage::ViewportInput(input) => self.app.handle_viewport_input(input),
-                IpcMessage::TriggerAction(action) => self.app.handle_trigger_action(action),
-                IpcMessage::ParameterizedAction(action) => {
-                    self.app.handle_parameterized_action(action)
+                IpcMessage::ViewportInput(input) => self.app.on_viewport_input(input),
+                IpcMessage::TriggerAction(action) => self.app.on_trigger_action(action),
+                IpcMessage::ParameterizedAction(action) => self.app.on_parameterized_action(action),
+                IpcMessage::Request { wish_id, kind, payload } => {
+                    let result = self.app.handle_request(kind, payload);
+                    self.send_response_to_webview(&wish_id, &result);
                 }
             }
         }
+    }
+
+    /// Resolve or reject a JS-side pending request via window.__onResponse.
+    fn send_response_to_webview(
+        &self,
+        wish_id: &str,
+        result: &foldit_gui::RequestResult,
+    ) {
+        let Some(ref webview) = self.webview else {
+            return;
+        };
+        let (ok, payload) = match result {
+            Ok(v) => (true, v.clone()),
+            Err(msg) => (false, serde_json::Value::String(msg.clone())),
+        };
+        let script = format!(
+            "if(window.__onResponse)window.__onResponse({},{},{})",
+            serde_json::to_string(wish_id).unwrap(),
+            ok,
+            payload,
+        );
+        let _ = webview.evaluate_script(&script);
     }
 
     /// Push dirty FrontendState sections to the webview.
@@ -113,77 +131,13 @@ impl AppRunner {
         // Transfer App domain state into FrontendState
         self.app.populate_frontend(&mut self.frontend);
 
-        // Emit dirty sections to webview
-        let dirty = self.frontend.take_dirty();
-        if dirty.is_empty() || !self.webview_ready {
+        if !self.webview_ready {
             return;
         }
-
-        let mut update = serde_json::Map::new();
-
-        if dirty.contains(DirtyFlags::SCORE) {
-            update.insert(
-                "score".into(),
-                serde_json::to_value(&self.frontend.score).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::PUZZLE) {
-            update.insert(
-                "puzzle".into(),
-                serde_json::to_value(&self.frontend.puzzle).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::SELECTION) {
-            update.insert(
-                "selection".into(),
-                serde_json::to_value(&self.frontend.selection).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::VIEW) {
-            update.insert(
-                "view".into(),
-                serde_json::to_value(&self.frontend.view).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::UI) {
-            update.insert(
-                "ui".into(),
-                serde_json::to_value(&self.frontend.ui).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::ACTIONS) {
-            update.insert(
-                "actions".into(),
-                serde_json::to_value(&self.frontend.actions).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::LOADING) {
-            update.insert(
-                "loading".into(),
-                serde_json::to_value(&self.frontend.loading).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::SCENE) {
-            update.insert(
-                "scene".into(),
-                serde_json::to_value(&self.frontend.scene).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::HISTORY) {
-            update.insert(
-                "history".into(),
-                serde_json::to_value(self.frontend.history()).unwrap(),
-            );
-        }
-        if dirty.contains(DirtyFlags::APP_STATE) {
-            update.insert(
-                "app_state".into(),
-                serde_json::to_value(self.frontend.app_state()).unwrap(),
-            );
-        }
-
+        let Some(payload) = bridge::push::serialize_dirty(&mut self.frontend) else {
+            return;
+        };
         if let Some(ref webview) = self.webview {
-            let payload = serde_json::Value::Object(update);
             let script = format!(
                 "if(window.__onStateUpdate)window.__onStateUpdate({})",
                 payload
@@ -533,46 +487,28 @@ impl AppRunner {
     "#;
 
     /// Shared IPC handler for webview messages.
+    ///
+    /// `console` is handled inline as a desktop-only logging side effect.
+    /// Everything else delegates to `foldit_gui::bridge::decode::from_json`.
     fn handle_ipc(ipc_tx: &std::sync::mpsc::Sender<IpcMessage>, req: wry::http::Request<String>) {
         let body = req.body();
-        match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(val) => {
-                let cmd = val.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-                let msg = match cmd {
-                    "ready" => Some(IpcMessage::Ready),
-                    "viewport_input" => val
-                        .get("data")
-                        .and_then(|d| serde_json::from_value(d.clone()).ok())
-                        .map(IpcMessage::ViewportInput),
-                    "trigger_action" => val
-                        .get("data")
-                        .and_then(|d| serde_json::from_value(d.clone()).ok())
-                        .map(IpcMessage::TriggerAction),
-                    "parameterized_action" => val
-                        .get("data")
-                        .and_then(|d| serde_json::from_value(d.clone()).ok())
-                        .map(IpcMessage::ParameterizedAction),
-                    "console" => {
-                        let level =
-                            val.get("level").and_then(|v| v.as_str()).unwrap_or("log");
-                        let msg = val.get("msg").and_then(|v| v.as_str()).unwrap_or("");
-                        match level {
-                            "error" => log::error!("[JS] {}", msg),
-                            "warn" => log::warn!("[JS] {}", msg),
-                            _ => log::info!("[JS] {}", msg),
-                        }
-                        None
-                    }
-                    _ => {
-                        log::debug!("Unknown IPC command: {}", cmd);
-                        None
-                    }
-                };
-                if let Some(msg) = msg {
-                    let _ = ipc_tx.send(msg);
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+            if val.get("cmd").and_then(|v| v.as_str()) == Some("console") {
+                let level = val.get("level").and_then(|v| v.as_str()).unwrap_or("log");
+                let msg = val.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+                match level {
+                    "error" => log::error!("[JS] {}", msg),
+                    "warn" => log::warn!("[JS] {}", msg),
+                    _ => log::info!("[JS] {}", msg),
                 }
+                return;
             }
-            Err(e) => log::warn!("Failed to parse IPC message: {}", e),
+        }
+        match bridge::decode::from_json(body) {
+            Some(msg) => {
+                let _ = ipc_tx.send(msg);
+            }
+            None => log::debug!("Unrecognized IPC body: {}", body),
         }
     }
 
@@ -740,7 +676,7 @@ impl ApplicationHandler for AppRunner {
             // canonical wry/examples/wgpu.rs ordering. The slow part of init
             // (structure load, Rosetta session) stays deferred to tick_frame so
             // the webview loading screen is visible during it.
-            self.app.create_render_context(window.clone());
+            create_render_context(&mut self.app, window.clone());
 
             #[cfg(debug_assertions)]
             {
@@ -812,7 +748,7 @@ impl ApplicationHandler for AppRunner {
                 if !self.webview_ready && event.state == ElementState::Pressed =>
             {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    self.app.handle_keybinding(key);
+                    self.app.handle_keybinding(&format!("{key:?}"));
                 }
             }
 
@@ -822,7 +758,13 @@ impl ApplicationHandler for AppRunner {
 
             WindowEvent::MouseInput { button, state, .. } if !self.webview_ready => {
                 let pressed = state == ElementState::Pressed;
-                self.app.handle_native_mouse_input(button, pressed);
+                let viso_button = match button {
+                    winit::event::MouseButton::Left => viso::MouseButton::Left,
+                    winit::event::MouseButton::Right => viso::MouseButton::Right,
+                    winit::event::MouseButton::Middle => viso::MouseButton::Middle,
+                    _ => return,
+                };
+                self.app.handle_native_mouse_input(viso_button, pressed);
             }
 
             WindowEvent::CursorMoved { position, .. } if !self.webview_ready => {
@@ -834,14 +776,18 @@ impl ApplicationHandler for AppRunner {
             }
 
             WindowEvent::MouseWheel { delta, .. } if !self.webview_ready => {
-                self.app.handle_native_mouse_wheel(delta);
+                let scroll_delta = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
+                };
+                self.app.handle_native_mouse_wheel(scroll_delta);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
 
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.app.handle_native_modifiers(modifiers.state());
+                self.app.handle_native_modifiers(modifiers.state().shift_key());
             }
 
             _ => (),
@@ -868,4 +814,46 @@ pub(crate) fn run(app: App, frontend: foldit_gui::FrontendState, log_buffer: cra
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut runner).expect("Event loop error");
     std::process::exit(0);
+}
+
+/// Build a wgpu `RenderContext` against a winit window, construct the
+/// `VisoEngine`, apply desktop-only tweaks (default view preset, render
+/// scale based on DPI), and hand the engine to `App`.
+///
+/// Must run BEFORE the wry WebView is attached as a child of the window —
+/// on macOS, `wgpu::Instance::create_surface` calls `setLayer:` on the
+/// contentView, replacing it with a CAMetalLayer; if the WKWebView is
+/// already a subview at that point its backing layer never recovers.
+/// (Apple Forums 124688, wry#1335.) Matches wry/examples/wgpu.rs ordering.
+fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
+    let size = window.inner_size();
+    let scale = window.scale_factor();
+    log::info!(
+        "create_render_context: inner_size={}x{}, scale_factor={}",
+        size.width,
+        size.height,
+        scale
+    );
+
+    let context = match pollster::block_on(viso::RenderContext::new(window, (size.width, size.height))) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log::error!("Failed to initialize GPU render context: {:?}", e);
+            return;
+        }
+    };
+
+    let mut engine = match viso::VisoEngine::new(context, viso::options::VisoOptions::default()) {
+        Ok(e) => e,
+        Err(e) => {
+            log::error!("Failed to initialize engine: {:?}", e);
+            return;
+        }
+    };
+
+    let presets_dir = std::path::Path::new("assets/view_presets");
+    engine.load_preset("default", presets_dir);
+    engine.set_render_scale(if scale < 2.0 { 2 } else { 1 });
+
+    app.attach_engine(engine);
 }

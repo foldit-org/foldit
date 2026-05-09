@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::SystemTime;
+use web_time::SystemTime;
 
 use molex::entity::molecule::id::EntityId;
 use molex::MoleculeEntity;

@@ -9,16 +9,16 @@ use molex::ops::transform::{align_to_reference, kabsch_alignment_with_scale};
 use foldit_gui::DirtyFlags;
 use foldit_runner::orchestrator::{BackendUpdate, EntityId as RunnerEntityId, OpType};
 use foldit_runner::Orchestrator;
-use foldit::entity_store::{EntityStore, EntityOrigin, EntityRole};
-use foldit::focus;
-use foldit::history::CheckpointKind;
+use crate::entity_store::{EntityStore, EntityOrigin, EntityRole};
+use crate::focus;
+use crate::history::CheckpointKind;
 use glam::Vec3;
 use std::collections::HashMap;
 use viso::{Focus, Transition, VisoEngine};
 
 /// Apply a single backend update. Called by the frame loop after draining
 /// triple buffers via SharedState.
-pub(crate) fn apply_backend_update(
+pub fn apply_backend_update(
     engine: &mut VisoEngine,
     store: &mut EntityStore,
     orchestrator: &mut Option<Orchestrator>,
@@ -453,10 +453,10 @@ fn handle_sequence_design_result(
 
     // Store all designed sequences associated with the target
     if let Some(target_id) = target_entity {
-        let designed: Vec<foldit::entity_store::DesignedSequence> = sequences
+        let designed: Vec<crate::entity_store::DesignedSequence> = sequences
             .iter()
             .zip(scores.iter())
-            .map(|(seq, score)| foldit::entity_store::DesignedSequence {
+            .map(|(seq, score)| crate::entity_store::DesignedSequence {
                 sequence: seq.clone(),
                 score: *score,
                 designed_for: target_id,
@@ -805,7 +805,7 @@ fn apply_ongoing_update(
     raw_score: Option<f64>,
     game_score: Option<f64>,
 ) {
-    use foldit::history::OngoingState;
+    use crate::history::OngoingState;
 
     let active_entity = match store.history().ongoing() {
         OngoingState::Active { entity, .. } => Some(*entity),
@@ -888,7 +888,7 @@ fn publish_with_transition(
 ///
 /// - `Focus::Entity(eid)` → returns only that single entity.
 /// - `Focus::Session` → falls back to `fallback_entity`.
-pub(crate) fn collect_ml_entities(
+pub fn collect_ml_entities(
     store: &EntityStore,
     focus: &Focus,
     fallback_entity: Option<EntityId>,

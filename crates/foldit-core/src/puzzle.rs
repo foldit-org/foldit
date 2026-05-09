@@ -256,46 +256,65 @@ pub fn resolve_structure_path(input: &str) -> Result<String, String> {
     }
 
     if is_pdb_id(input) {
-        let pdb_id = input.to_lowercase();
-        let models_dir = Path::new("assets/models");
-        let local_path = models_dir.join(format!("{}.cif", pdb_id));
-
-        if local_path.exists() {
-            log::info!("Found local copy: {}", local_path.display());
-            return Ok(local_path.to_string_lossy().to_string());
-        }
-
-        if !models_dir.exists() {
-            std::fs::create_dir_all(models_dir)
-                .map_err(|e| format!("Failed to create models directory: {}", e))?;
-        }
-
-        let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id);
-        log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
-
-        let response = reqwest::blocking::get(&url)
-            .map_err(|e| format!("Failed to download {}: {}", pdb_id, e))?;
-
-        if !response.status().is_success() {
-            return Err(format!(
-                "Failed to download {}: HTTP {}",
-                pdb_id,
-                response.status()
-            ));
-        }
-
-        let content = response
-            .text()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-
-        std::fs::write(&local_path, &content)
-            .map_err(|e| format!("Failed to save CIF file: {}", e))?;
-
-        log::info!("Downloaded to {}", local_path.display());
-        return Ok(local_path.to_string_lossy().to_string());
+        return resolve_pdb_id(input);
     }
 
     Err(format!("File not found: {}", input))
+}
+
+/// Native: download a PDB by id from RCSB, cache to `assets/models/`, return the path.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_pdb_id(input: &str) -> Result<String, String> {
+    let pdb_id = input.to_lowercase();
+    let models_dir = Path::new("assets/models");
+    let local_path = models_dir.join(format!("{}.cif", pdb_id));
+
+    if local_path.exists() {
+        log::info!("Found local copy: {}", local_path.display());
+        return Ok(local_path.to_string_lossy().to_string());
+    }
+
+    if !models_dir.exists() {
+        std::fs::create_dir_all(models_dir)
+            .map_err(|e| format!("Failed to create models directory: {}", e))?;
+    }
+
+    let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id);
+    log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
+
+    let response = reqwest::blocking::get(&url)
+        .map_err(|e| format!("Failed to download {}: {}", pdb_id, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download {}: HTTP {}",
+            pdb_id,
+            response.status()
+        ));
+    }
+
+    let content = response
+        .text()
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    std::fs::write(&local_path, &content)
+        .map_err(|e| format!("Failed to save CIF file: {}", e))?;
+
+    log::info!("Downloaded to {}", local_path.display());
+    Ok(local_path.to_string_lossy().to_string())
+}
+
+/// Wasm: PDB-ID resolution from inside foldit-core isn't supported. The web
+/// entry crate (foldit-web) is responsible for fetching `.cif` bytes via
+/// `web_sys::window().fetch_with_str(...)` and feeding them through the
+/// bytes-loading entry point (`load_entities_from_file` after a temp write,
+/// or a future `load_entities_from_bytes`).
+#[cfg(target_arch = "wasm32")]
+fn resolve_pdb_id(input: &str) -> Result<String, String> {
+    Err(format!(
+        "RCSB download for PDB id '{input}' must be performed by the host on web; \
+         foldit-core does not contain an HTTP client on wasm targets"
+    ))
 }
 
 /// Load Coords from a file (auto-detecting format).

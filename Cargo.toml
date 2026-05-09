@@ -1,10 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/foldit-core",
+    "crates/foldit-desktop",
     "crates/foldit-gui",
     "crates/foldit-runner",
+    "crates/foldit-web",
     "xtask",
 ]
+default-members = ["crates/foldit-desktop"]
+
 # Submodule directories that exist in-tree but are NOT workspace members.
 # Without this, cargo's workspace discovery walks into these from outside
 # (e.g., maturin running `cargo metadata` on crates/molex/Cargo.toml) and
@@ -13,73 +18,6 @@ exclude = [
     "crates/viso",
     "crates/molex",
 ]
-
-[package]
-name = "foldit"
-version = "0.1.0"
-edition = "2021"
-description = "A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML"
-default-run = "foldit"
-
-# Main application binary
-[[bin]]
-name = "foldit"
-path = "src/main.rs"
-
-[dependencies]
-# Workspace crates
-foldit-gui = { path = "crates/foldit-gui" }
-foldit-runner = { path = "crates/foldit-runner", default-features = false, features = ["python"] }
-
-# External crates (released independently). To hack on either of these
-# from the local submodule, run e.g. `git submodule update --init
-# crates/viso` and uncomment the matching [patch] block at the bottom
-# of this file.
-viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.3.0", features = ["serde", "specta"] }
-
-# Required for foldit-runner-worker binary
-anyhow = "1.0"
-
-# Async for background ML tasks
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-
-# Core
-glam = "0.30"
-indexmap = "2"
-slotmap = "1.0"
-smallvec = "1"
-winit = "0.30"
-pollster = "0.4"
-bytemuck = { version = "1.21", features = ["derive"] }
-wgpu = "26"
-
-# Direct mmCIF parsing for atom names and residue info
-pdbtbx = "0.12"
-
-# Lock-free per-entity coord buffering
-triple_buffer = "8"
-
-# Utilities
-log = "0.4"
-env_logger = "0.11"
-env_filter = "0.1"
-lazy_static = "1.4"
-
-# HTTP client for downloading from RCSB
-reqwest = { version = "0.11", features = ["blocking"] }
-
-# Embedded webview (lightweight replacement for Tauri)
-wry = { version = "0.50", features = ["transparent"] }
-
-# Serialization for IPC and FrontendState
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-base64 = "0.22"
-
-[dev-dependencies]
-proptest = "1"
 
 # ── Local development overrides ───────────────────────────────────────
 # Each block below redirects a published dep to its local submodule

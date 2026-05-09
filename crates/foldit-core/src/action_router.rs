@@ -5,9 +5,9 @@
 //! backend output processing, rendering, or frontend state sync.
 
 use foldit_gui::DirtyFlags;
-use foldit::entity_store::{EntityRole, EntityStore};
-use foldit::focus;
-use foldit::history::{CheckpointKind, WiggleMask};
+use crate::entity_store::{EntityRole, EntityStore};
+use crate::focus;
+use crate::history::{CheckpointKind, WiggleMask};
 use viso::{AtomRef, BandInfo, BandTarget, InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{EntityContextData, EntityId as RunnerEntityId, OpType};
 use foldit_runner::Orchestrator;
@@ -18,7 +18,7 @@ use glam::{Vec2, Vec3};
 /// Centralizes the protocol shared by predict / sequence-design /
 /// structure-design: lock check → optional rosetta-stop → try_lock →
 /// op-specific kickoff → optional preview-mirror → ui_dirty.
-pub(crate) struct BackendOpRequest {
+pub struct BackendOpRequest {
     /// Entity to lock.
     pub target: RunnerEntityId,
     /// Op type for the lock.
@@ -44,7 +44,7 @@ pub(crate) struct BackendOpRequest {
 
 /// Information about an active band for UI tracking
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveBand {
+pub struct ActiveBand {
     _band_id: u32,
     res1: u32,
     atom1_name: String,
@@ -81,7 +81,7 @@ struct PullDragState {
 const PULL_DRAG_THRESHOLD: f32 = 5.0;
 
 /// Central mediator for action dispatch, owning all routing state.
-pub(crate) struct ActionRouter {
+pub struct ActionRouter {
     pub orchestrator: Option<Orchestrator>,
     active_bands: std::collections::HashMap<u32, ActiveBand>,
     band_drag: Option<BandDragState>,
@@ -215,7 +215,13 @@ impl ActionRouter {
         let parameterized = match action {
             ActionId::ToggleWiggle => { self.toggle_wiggle(engine, store); None }
             ActionId::ToggleShake => { self.toggle_shake(engine, store); None }
-            ActionId::RunPrediction => { self.run_prediction(engine, store); None }
+            ActionId::RunPrediction => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.run_prediction(engine, store);
+                #[cfg(target_arch = "wasm32")]
+                { let _ = (engine, store); }
+                None
+            }
             ActionId::RunMPNN => {
                 // Default params — frontend can use ParameterizedAction for custom values
                 Some(foldit_gui::ParameterizedAction::RunSequenceDesign {
@@ -637,7 +643,7 @@ impl ActionRouter {
     ///
     /// Order: lock check → (optional) stop rosetta + clear session →
     /// try_lock → kickoff → (optional) preview mirror → ui_dirty.
-    pub(crate) fn start_op(
+    pub fn start_op(
         &mut self,
         request: BackendOpRequest,
         engine: &mut VisoEngine,
@@ -703,6 +709,7 @@ impl ActionRouter {
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_prediction(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         use crate::backend_results;
 
@@ -734,7 +741,7 @@ impl ActionRouter {
         );
 
         let pending_ca = molex::ops::codec::ca_positions(&entities);
-        let entity_context = crate::App::build_entity_context(entities, store, target_id, None);
+        let entity_context = build_entity_context(entities, store, target_id, None);
 
         log::info!(
             "Passing assembly context ({} entities, {} entities in assembly)",
@@ -823,7 +830,7 @@ impl ActionRouter {
         true
     }
 
-    pub(crate) fn update_rosetta_locks(&mut self, engine: &VisoEngine, _store: &EntityStore) {
+    pub fn update_rosetta_locks(&mut self, engine: &VisoEngine, _store: &EntityStore) {
         let focus = engine.focus();
         let new_focus = focus::operation_target(&focus)
             .map(|id| RunnerEntityId(u64::from(id)));
@@ -906,11 +913,11 @@ impl ActionRouter {
         engine: &mut VisoEngine,
         input: &mut InputProcessor,
         store: &mut EntityStore,
-        button: winit::event::MouseButton,
+        button: MouseButton,
         pressed: bool,
     ) {
         match button {
-            winit::event::MouseButton::Left => {
+            MouseButton::Left => {
                 self.left_mouse_pressed = pressed;
 
                 if pressed {
@@ -991,7 +998,7 @@ impl ActionRouter {
                     }
                 }
             }
-            winit::event::MouseButton::Right => {
+            MouseButton::Right => {
                 self.right_mouse_pressed = pressed;
 
                 if pressed {
@@ -1124,14 +1131,14 @@ impl ActionRouter {
 // ---------------------------------------------------------------------------
 
 /// Extract CA positions from entities (for Kabsch alignment).
-pub(crate) fn entities_backbone_ca(
+pub fn entities_backbone_ca(
     entities: &[molex::MoleculeEntity],
 ) -> Vec<Vec3> {
     molex::ops::codec::ca_positions(entities)
 }
 
 /// Build BandInfo from active bands using AtomRef endpoints.
-pub(crate) fn build_band_infos(
+pub fn build_band_infos(
     active_bands: &std::collections::HashMap<u32, ActiveBand>,
 ) -> Vec<BandInfo> {
     active_bands
@@ -1156,7 +1163,7 @@ pub(crate) fn build_band_infos(
 }
 
 /// Build actions list from orchestrator state.
-pub(crate) fn build_actions_list(
+pub fn build_actions_list(
     orchestrator: &Option<Orchestrator>,
 ) -> Vec<foldit_gui::state::ActionInfo> {
     use foldit_gui::state::ActionInfo;
@@ -1230,7 +1237,7 @@ pub(crate) fn build_actions_list(
 }
 
 /// Get the trajectory path from command-line arguments.
-pub(crate) fn trajectory_path_from_args() -> Option<String> {
+pub fn trajectory_path_from_args() -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.windows(2).find_map(|w| {
         if w[0] == "--trajectory" {
@@ -1238,5 +1245,29 @@ pub(crate) fn trajectory_path_from_args() -> Option<String> {
         } else {
             None
         }
+    })
+}
+
+/// Build the per-entity context bundle that ML-side ops (predict, MPNN,
+/// RFD3) require. Pure helper — no router/app state. Originally lived as
+/// `impl App::build_entity_context` in foldit-desktop; relocated here to
+/// keep the call site host-agnostic.
+pub fn build_entity_context(
+    entities: Vec<molex::MoleculeEntity>,
+    store: &EntityStore,
+    entity_id: molex::entity::molecule::id::EntityId,
+    focused_entity_id: Option<u32>,
+) -> foldit_runner::orchestrator::EntityContextData {
+    use foldit_runner::orchestrator::{EntityContextData, EntityRoleHint};
+    let target_role = store.entity_meta(entity_id).map(|(_, r)| r.clone());
+    EntityContextData::from_entities(entities, focused_entity_id, |raw_id| {
+        target_role.as_ref().map(|r| {
+            let _ = raw_id;
+            EntityRoleHint {
+                designable: r.designable,
+                foldable: r.foldable,
+                ambient: r.ambient,
+            }
+        })
     })
 }

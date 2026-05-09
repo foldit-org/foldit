@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::SystemTime;
+use web_time::SystemTime;
 
 use indexmap::IndexMap;
 use molex::entity::molecule::id::EntityId;

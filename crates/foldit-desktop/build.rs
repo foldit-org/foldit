@@ -1,3 +1,8 @@
+// build.rs runs from this package's root: crates/foldit-desktop/
+// `assets/libs` lives at the workspace root, so paths here are `../../assets/libs`.
+// rpath flags (@loader_path / $ORIGIN) are runtime-resolved relative to the
+// produced binary in target/<profile>/, so they are unchanged by the move.
+
 fn main() {
     // Bundle mode: libraries in same directory as the binary
     #[cfg(target_os = "macos")]
@@ -30,17 +35,17 @@ fn main() {
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../assets/libs");
 
-    // Link rosetta_interactive library
-    // At build time, look in assets/libs/
-    println!("cargo:rustc-link-search=native=assets/libs");
+    // Link rosetta_interactive library — assets/libs is at the workspace root.
+    println!("cargo:rustc-link-search=native=../../assets/libs");
     println!("cargo:rustc-link-lib=dylib=rosetta_interactive");
 
     // Rerun if the library changes
     #[cfg(target_os = "windows")]
     {
-        println!("cargo:rerun-if-changed=assets/libs/rosetta_interactive.lib");
-        println!("cargo:rerun-if-changed=assets/libs/rosetta_interactive.dll");
-        println!("cargo:rerun-if-changed=assets/libs/python312.dll");
+        use std::path::Path;
+        println!("cargo:rerun-if-changed=../../assets/libs/rosetta_interactive.lib");
+        println!("cargo:rerun-if-changed=../../assets/libs/rosetta_interactive.dll");
+        println!("cargo:rerun-if-changed=../../assets/libs/python312.dll");
 
         // Windows has no rpath — copy DLLs next to the output binary so they're found at runtime
         let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -51,7 +56,7 @@ fn main() {
             .expect("couldn't find target profile directory");
 
         // Copy rosetta_interactive.dll
-        let dll_src = Path::new("assets/libs/rosetta_interactive.dll");
+        let dll_src = Path::new("../../assets/libs/rosetta_interactive.dll");
         if dll_src.exists() {
             // Copy to target/<profile>/ (where the binary lives)
             let dll_dst = target_profile_dir.join("rosetta_interactive.dll");
@@ -62,7 +67,7 @@ fn main() {
         }
 
         // Copy python312.dll (needed by foldit.exe and foldit-runner-worker.exe)
-        let python_dll_src = Path::new("assets/libs/python312.dll");
+        let python_dll_src = Path::new("../../assets/libs/python312.dll");
         if python_dll_src.exists() {
             let python_dll_dst = target_profile_dir.join("python312.dll");
             std::fs::copy(python_dll_src, &python_dll_dst).ok();
@@ -72,12 +77,12 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     {
-        println!("cargo:rerun-if-changed=assets/libs/librosetta_interactive.dylib");
-        println!("cargo:rerun-if-changed=assets/libs/libpython3.12.dylib");
+        println!("cargo:rerun-if-changed=../../assets/libs/librosetta_interactive.dylib");
+        println!("cargo:rerun-if-changed=../../assets/libs/libpython3.12.dylib");
     }
     #[cfg(target_os = "linux")]
     {
-        println!("cargo:rerun-if-changed=assets/libs/librosetta_interactive.so");
-        println!("cargo:rerun-if-changed=assets/libs/libpython3.12.so");
+        println!("cargo:rerun-if-changed=../../assets/libs/librosetta_interactive.so");
+        println!("cargo:rerun-if-changed=../../assets/libs/libpython3.12.so");
     }
 }

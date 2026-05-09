@@ -1,48 +1,35 @@
-//! Foldit-RS: A reimagined Foldit
+//! Foldit application state — host-agnostic.
 //!
-//! Decoupled architecture with GUI, render engine, and backends
-//! for Rosetta and ML-powered structure prediction and design.
+//! `App` owns the `Orchestrator` (in `ActionRouter`), `EntityStore`,
+//! `History`, and the cross-cutting bookkeeping (puzzle, scoring mode,
+//! viso engine handle, history-version trackers). Both the desktop
+//! (`foldit-desktop`) and web (`foldit-web`) builds wrap this in their
+//! host-specific lifecycle:
 //!
-//! Controls:
-//!   W - Wiggle (Rosetta minimize, toggle on/off)
-//!   S - Shake (Rosetta repack sidechains, toggle on/off)
-//!   P - Predict (RoseTTAFold3 structure prediction)
-//!   M - MPNN (design sequence for structure)
-//!   R - Toggle auto-rotate (turntable spin)
-//!   I - Toggle water and ion visibility
-//!   Q - Recenter camera on focused entity
-//!   T - Toggle trajectory playback (load with --trajectory <path.dcd>)
-//!   Tab - Cycle focus (Session -> Structure 1 -> ... -> Session)
-//!   ` (backtick) - Reset focus to full scene
-//!   Esc - Cancel operation / clear selection / clear bands
-//!   Left-drag on residue - Pull (coming soon)
-//!   Right-drag residue to residue - Create band
-//!   Mouse - Rotate/zoom camera
+//! - desktop: `window::AppRunner` holds the wry webview + winit window
+//!   alongside `App`; winit events are converted to host-agnostic
+//!   types before being forwarded to `App`'s methods.
+//! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
+//!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
 
-mod action_router;
-mod backend_results;
-mod tee_logger;
-mod window;
+use web_time::{Instant, UNIX_EPOCH};
 
-use action_router::ActionRouter;
 use foldit_gui::{
-    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, HistoryCommand, HistoryLiveUpdate,
-    HistorySection, ScoringMode, WireId,
+    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, HistoryCommand,
+    HistoryLiveUpdate, HistorySection, ScoringMode, WireId,
 };
 use foldit_runner::Orchestrator;
-use foldit::entity_store::{EntityStore, EntityStoreError, EntityOrigin, EntityRole};
-use foldit::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use molex::entity::molecule::id::EntityId;
-use viso::{BandInfo, BandTarget, AtomRef, Focus, InputEvent, InputProcessor, PullInfo, VisoEngine, VisoCommand};
-use std::sync::Arc;
-use std::time::{Instant, UNIX_EPOCH};
-use winit::event::MouseScrollDelta;
-use winit::keyboard::ModifiersState;
-use winit::window::Window;
+use viso::{
+    AtomRef, BandInfo, BandTarget, Focus, InputEvent, InputProcessor, MouseButton, PullInfo,
+    VisoCommand, VisoEngine,
+};
 
-/// Pick the score on a checkpoint that matches the active `ScoringMode`
-/// (G7: no place in the *write* path consults the mode; the read /
-/// projection path picks).
+use crate::action_router::{self, ActionRouter};
+use crate::backend_results;
+use crate::entity_store::{EntityOrigin, EntityRole, EntityStore, EntityStoreError};
+use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
+
 fn score_for_mode(
     raw: Option<f64>,
     game: Option<f64>,
@@ -54,7 +41,7 @@ fn score_for_mode(
     }
 }
 
-fn timestamp_ms(t: std::time::SystemTime) -> f64 {
+fn timestamp_ms(t: web_time::SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0)
@@ -224,7 +211,7 @@ fn load_entity_into_history(
 }
 
 /// Main application state — thin glue connecting the render engine and action router.
-pub(crate) struct App {
+pub struct App {
     engine: Option<VisoEngine>,
     input: InputProcessor,
     store: EntityStore,
@@ -251,7 +238,7 @@ pub(crate) struct App {
 
 impl App {
     /// Get a display title derived from the PDB path (e.g. "1BFE" from ".../1bfe.cif")
-    pub(crate) fn structure_title(&self) -> String {
+    pub fn structure_title(&self) -> String {
         std::path::Path::new(&self.pdb_path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -259,7 +246,7 @@ impl App {
             .to_uppercase()
     }
 
-    pub(crate) fn new(pdb_path: String) -> Self {
+    pub fn new(pdb_path: String) -> Self {
         Self {
             engine: None,
             input: InputProcessor::new(),
@@ -282,31 +269,31 @@ impl App {
     /// True once the Rosetta backend has delivered its first score update
     /// for the current session. Replaces the old `latest_score`
     /// shadow-field check; the truth source is now the head checkpoint.
-    pub(crate) fn has_initial_score(&self) -> bool {
+    pub fn has_initial_score(&self) -> bool {
         head_score(&self.store, self.scoring_mode).is_some()
     }
 
     // ── Engine-only delegation (no router interaction) ──
 
-    pub(crate) fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32) {
         if let Some(engine) = &mut self.engine {
             engine.resize(width, height);
         }
     }
 
-    pub(crate) fn set_surface_scale(&mut self, scale_factor: f64) {
+    pub fn set_surface_scale(&mut self, scale_factor: f64) {
         if let Some(ref mut engine) = self.engine {
             engine.set_render_scale(if scale_factor < 2.0 { 2 } else { 1 });
         }
     }
 
-    pub(crate) fn update_engine(&mut self, dt: f32) {
+    pub fn update_engine(&mut self, dt: f32) {
         if let Some(engine) = &mut self.engine {
             engine.update(dt);
         }
     }
 
-    pub(crate) fn render(&mut self) {
+    pub fn render(&mut self) {
         if let Some(engine) = &mut self.engine {
             if let Err(e) = engine.render() {
                 log::error!("Render error: {:?}", e);
@@ -316,7 +303,7 @@ impl App {
 
     // ── Backend update processing ──
 
-    pub(crate) fn apply_backend_updates(&mut self) {
+    pub fn apply_backend_updates(&mut self) {
         // 1. Tell orchestrator to pump internal channels → triple buffers
         //    and drain readers in one pass.
         let updates = match self.router.orchestrator.as_mut() {
@@ -349,10 +336,12 @@ impl App {
 
     // ── Keybinding dispatch (engine + router) ──
 
-    pub(crate) fn handle_keybinding(&mut self, key: winit::keyboard::KeyCode) -> bool {
+    /// Dispatch a keybinding by physical-key string ("KeyR", "KeyT",
+    /// "Tab", ...). Hosts convert their native keycode to this string
+    /// before calling (winit: `format!("{key:?}")`; web: DOM `code`).
+    pub fn handle_keybinding(&mut self, key_str: &str) -> bool {
         let Some(engine) = &mut self.engine else { return false };
-        let key_str = format!("{key:?}");
-        let Some(cmd) = self.input.handle_key_press(&key_str) else {
+        let Some(cmd) = self.input.handle_key_press(key_str) else {
             return false;
         };
 
@@ -384,7 +373,7 @@ impl App {
 
     // ── Viewport input (from webview) ──
 
-    pub(crate) fn handle_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
+    pub fn handle_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
         use foldit_gui::ViewportInput;
         let Some(engine) = &mut self.engine else { return };
 
@@ -392,10 +381,10 @@ impl App {
             ViewportInput::PointerDown {
                 x, y, button, shift, ..
             } => {
-                let winit_button = match button {
-                    0 => winit::event::MouseButton::Left,
-                    2 => winit::event::MouseButton::Right,
-                    1 => winit::event::MouseButton::Middle,
+                let viso_button = match button {
+                    0 => viso::MouseButton::Left,
+                    2 => viso::MouseButton::Right,
+                    1 => viso::MouseButton::Middle,
                     _ => return,
                 };
                 if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
@@ -406,15 +395,15 @@ impl App {
                     engine.execute(cmd);
                 }
                 self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, winit_button, true);
+                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, viso_button, true);
             }
             ViewportInput::PointerUp {
                 x, y, button, shift, ..
             } => {
-                let winit_button = match button {
-                    0 => winit::event::MouseButton::Left,
-                    2 => winit::event::MouseButton::Right,
-                    1 => winit::event::MouseButton::Middle,
+                let viso_button = match button {
+                    0 => viso::MouseButton::Left,
+                    2 => viso::MouseButton::Right,
+                    1 => viso::MouseButton::Middle,
                     _ => return,
                 };
                 if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
@@ -425,7 +414,7 @@ impl App {
                     engine.execute(cmd);
                 }
                 self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, winit_button, false);
+                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, viso_button, false);
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
                 if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
@@ -446,6 +435,9 @@ impl App {
                 if pressed {
                     if let Some(cmd) = self.input.handle_key_press(&code) {
                         match cmd {
+                            // Drop viso's R-binding for turntable auto-rotate;
+                            // we don't expose a rotate keybinding in foldit.
+                            VisoCommand::ToggleAutoRotate => {}
                             VisoCommand::ToggleTrajectory => {
                                 if engine.has_trajectory() {
                                     engine.execute(VisoCommand::ToggleTrajectory);
@@ -479,7 +471,7 @@ impl App {
         update_all_visualizations(engine, &self.router);
     }
 
-    pub(crate) fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
+    pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
         // Undo / Redo intercept the dispatch chain because they need
         // &mut self to call store + engine; the router can't reach
         // those fields.
@@ -501,7 +493,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_parameterized_action(
+    pub fn handle_parameterized_action(
         &mut self,
         action: foldit_gui::ParameterizedAction,
     ) {
@@ -518,7 +510,7 @@ impl App {
 
         match action {
             ParameterizedAction::LoadStructure { path } => {
-                match foldit::puzzle::load_file_as_entities(&path) {
+                match crate::puzzle::load_file_as_entities(&path) {
                     Ok((entities, name)) => {
                         log::info!("Loaded structure via IPC: {}", name);
                         let backbone_ca = action_router::entities_backbone_ca(&entities);
@@ -552,7 +544,7 @@ impl App {
                 self.store.reset();
                 self.router.reset_for_new_structure();
 
-                match foldit::puzzle::load_puzzle_structure(puzzle_id) {
+                match crate::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
                         // Capture mode + puzzle metadata for the GUI.
                         self.scoring_mode = ScoringMode::Game;
@@ -561,6 +553,7 @@ impl App {
                         self.starting_score = puzzle_data.start_energy;
                         self.target_score = puzzle_data.completion_score;
 
+                        #[cfg(not(target_arch = "wasm32"))]
                         if let Some(preset_name) = &puzzle_data.view_preset {
                             let presets_dir = std::path::Path::new("assets/view_presets");
                             engine.load_preset(preset_name, presets_dir);
@@ -632,32 +625,51 @@ impl App {
                 }
             }
             ParameterizedAction::LoadViewPreset { name } => {
-                let presets_dir = std::path::Path::new("assets/view_presets");
-                engine.load_preset(&name, presets_dir);
-                self.router.ui_dirty |= DirtyFlags::VIEW;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let presets_dir = std::path::Path::new("assets/view_presets");
+                    engine.load_preset(&name, presets_dir);
+                    self.router.ui_dirty |= DirtyFlags::VIEW;
+                }
+                #[cfg(target_arch = "wasm32")]
+                { let _ = name; let _ = engine; }
             }
             ParameterizedAction::SaveViewPreset { name } => {
-                let presets_dir = std::path::Path::new("assets/view_presets");
-                engine.save_preset(&name, presets_dir);
-                self.router.ui_dirty |= DirtyFlags::VIEW;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let presets_dir = std::path::Path::new("assets/view_presets");
+                    engine.save_preset(&name, presets_dir);
+                    self.router.ui_dirty |= DirtyFlags::VIEW;
+                }
+                #[cfg(target_arch = "wasm32")]
+                { let _ = name; let _ = engine; }
             }
             ParameterizedAction::RunSequenceDesign { temperature, num_sequences } => {
+                #[cfg(not(target_arch = "wasm32"))]
                 Self::run_sequence_design(
                     &mut self.router, &mut self.store, engine,
                     temperature, num_sequences,
                 );
+                #[cfg(target_arch = "wasm32")]
+                { let _ = (temperature, num_sequences, engine); }
             }
             ParameterizedAction::RunStructureDesign { length, num_steps, contig } => {
+                #[cfg(not(target_arch = "wasm32"))]
                 Self::run_structure_design(
                     &mut self.router, &mut self.store, engine,
                     &length, num_steps, contig,
                 );
+                #[cfg(target_arch = "wasm32")]
+                { let _ = (length, num_steps, contig, engine); }
             }
             ParameterizedAction::RunPrediction { entity_ids } => {
+                #[cfg(not(target_arch = "wasm32"))]
                 Self::run_prediction_for_entities(
                     &mut self.router, &mut self.store, engine,
                     &entity_ids,
                 );
+                #[cfg(target_arch = "wasm32")]
+                { let _ = (entity_ids, engine); }
             }
             ParameterizedAction::History { .. } => {
                 // Handled in the early-return block above. The match is
@@ -669,11 +681,11 @@ impl App {
 
     // ── History navigation (Undo / Redo / Jump / Pin) ──
 
-    pub(crate) fn handle_undo(&mut self) {
+    pub fn handle_undo(&mut self) {
         self.run_history_command(HistoryCommand::Undo);
     }
 
-    pub(crate) fn handle_redo(&mut self) {
+    pub fn handle_redo(&mut self) {
         self.run_history_command(HistoryCommand::Redo { branch: None });
     }
 
@@ -800,6 +812,7 @@ impl App {
     /// `focused_entity_id` switches the runner into focus-aware mode, used
     /// by MPNN: only the focused protein is designable; every other
     /// non-ambient entity is fixed.
+    #[cfg(not(target_arch = "wasm32"))]
     fn build_entity_context(
         entities: Vec<molex::MoleculeEntity>,
         store: &EntityStore,
@@ -826,6 +839,7 @@ impl App {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_sequence_design(
         router: &mut ActionRouter,
         store: &mut EntityStore,
@@ -919,6 +933,7 @@ impl App {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_structure_design(
         router: &mut ActionRouter,
         store: &mut EntityStore,
@@ -995,6 +1010,7 @@ impl App {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_prediction_for_entities(
         router: &mut ActionRouter,
         store: &mut EntityStore,
@@ -1067,9 +1083,9 @@ impl App {
 
     // ── Native input (when webview is not ready) ──
 
-    pub(crate) fn handle_native_mouse_input(
+    pub fn handle_native_mouse_input(
         &mut self,
-        button: winit::event::MouseButton,
+        button: viso::MouseButton,
         pressed: bool,
     ) {
         if let Some(engine) = &mut self.engine {
@@ -1078,29 +1094,28 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
+    pub fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
         if let Some(engine) = &mut self.engine {
             self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
             update_all_visualizations(engine, &self.router);
         }
     }
 
-    pub(crate) fn handle_native_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+    /// Forward a scroll delta in viso "logical scroll units" (winit
+    /// `LineDelta(_, y)` passes `y` directly; `PixelDelta(_, y)` should
+    /// pass `y * 0.01`). Conversion lives in the host.
+    pub fn handle_native_mouse_wheel(&mut self, scroll_delta: f32) {
         if let Some(engine) = &mut self.engine {
-            let scroll_delta = match delta {
-                MouseScrollDelta::LineDelta(_, y) => y,
-                MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
-            };
             if let Some(cmd) = self.input.handle_event(InputEvent::Scroll { delta: scroll_delta }, engine.hovered_target()) {
                 engine.execute(cmd);
             }
         }
     }
 
-    pub(crate) fn handle_native_modifiers(&mut self, state: ModifiersState) {
+    pub fn handle_native_modifiers(&mut self, shift: bool) {
         if let Some(engine) = &mut self.engine {
             if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged {
-                shift: state.shift_key(),
+                shift,
             }, engine.hovered_target()) {
                 engine.execute(cmd);
             }
@@ -1109,7 +1124,7 @@ impl App {
 
     // ── Per-frame visual updates ──
 
-    pub(crate) fn update_frame_visuals(&mut self) {
+    pub fn update_frame_visuals(&mut self) {
         let Some(engine) = &mut self.engine else { return };
 
         // Refresh pull drag position from current atom positions
@@ -1121,7 +1136,7 @@ impl App {
 
     // ── Frontend state sync ──
 
-    pub(crate) fn populate_frontend(&mut self, frontend: &mut foldit_gui::FrontendState) {
+    pub fn populate_frontend(&mut self, frontend: &mut foldit_gui::FrontendState) {
         let engine = match &self.engine {
             Some(e) => e,
             None => return,
@@ -1187,9 +1202,12 @@ impl App {
                         .unwrap_or_default();
             }
 
-            let presets_dir = std::path::Path::new("assets/view_presets");
-            frontend.view.available_presets =
-                viso::options::VisoOptions::list_presets(presets_dir);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let presets_dir = std::path::Path::new("assets/view_presets");
+                frontend.view.available_presets =
+                    viso::options::VisoOptions::list_presets(presets_dir);
+            }
             frontend.view.active_preset = engine.active_preset().map(String::from);
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {
@@ -1266,45 +1284,23 @@ impl App {
 
     // ── Complex methods (touch both engine and router) ──
 
-    /// Phase 1: create the wgpu RenderContext and empty VisoEngine. This must
-    /// run BEFORE the wry WebView is attached as a child of the window — on
-    /// macOS, `wgpu::Instance::create_surface` calls `setLayer:` on the
-    /// contentView, replacing it with a CAMetalLayer; if the WKWebView is
-    /// already a subview at that point its backing layer never recovers and
-    /// only `toggleFullScreen` heals it (Apple Forums 124688, wry#1335).
-    /// Matches the canonical wry/examples/wgpu.rs ordering.
-    pub(crate) fn create_render_context(&mut self, window: Arc<Window>) {
-        let size = window.inner_size();
-        let scale = window.scale_factor();
-        log::info!(
-            "create_render_context: inner_size={}x{}, scale_factor={}",
-            size.width,
-            size.height,
-            scale
-        );
+    /// Attach a host-built `VisoEngine` to this App. Hosts are
+    /// responsible for constructing the wgpu `RenderContext` against
+    /// their own surface (winit window on desktop, `<canvas>` on web)
+    /// and applying any preset / render-scale tweaks they want before
+    /// handing it over.
+    pub fn attach_engine(&mut self, engine: VisoEngine) {
+        self.engine = Some(engine);
+    }
 
-        let context = match pollster::block_on(viso::RenderContext::new(window, (size.width, size.height))) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                log::error!("Failed to initialize GPU render context: {:?}", e);
-                return;
-            }
-        };
+    /// Take the engine back out for a brief moment (used during
+    /// load_initial_structure-style flows that need disjoint borrows).
+    pub fn engine_take(&mut self) -> Option<VisoEngine> {
+        self.engine.take()
+    }
 
-        let mut engine = match VisoEngine::new(context, viso::options::VisoOptions::default()) {
-            Ok(e) => e,
-            Err(e) => {
-                log::error!("Failed to initialize engine: {:?}", e);
-                return;
-            }
-        };
-
-        // Load default view preset if available
-        let presets_dir = std::path::Path::new("assets/view_presets");
-        engine.load_preset("default", presets_dir);
-
-        engine.set_render_scale(if scale < 2.0 { 2 } else { 1 });
-
+    /// Replace the engine after a `engine_take`/inspection.
+    pub fn engine_replace(&mut self, engine: VisoEngine) {
         self.engine = Some(engine);
     }
 
@@ -1312,7 +1308,7 @@ impl App {
     /// initial Rosetta session. Runs AFTER the webview's loading screen is
     /// visible so the user has feedback during the (potentially slow) load.
     /// Requires `create_render_context` to have run first.
-    pub(crate) fn load_initial_structure(&mut self) {
+    pub fn load_initial_structure(&mut self) {
         // Take engine out so we can hold a `&mut engine` alongside `&mut self.store`
         // etc. without borrow-checker grief; restored at end.
         let Some(mut engine) = self.engine.take() else {
@@ -1321,7 +1317,7 @@ impl App {
         };
 
         // Parse entities from file
-        match foldit::puzzle::load_file_as_entities(&self.pdb_path) {
+        match crate::puzzle::load_file_as_entities(&self.pdb_path) {
             Ok((entities, name)) => {
                 let backbone_ca = action_router::entities_backbone_ca(&entities);
 
@@ -1379,10 +1375,68 @@ impl App {
     }
 
     /// Shut down backends and scene processor.
-    pub(crate) fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) {
         self.router.shutdown();
         if let Some(engine) = &mut self.engine {
             engine.shutdown();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge: Dispatcher trait impl
+// ---------------------------------------------------------------------------
+
+impl foldit_gui::Dispatcher for App {
+    fn on_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
+        self.handle_viewport_input(input);
+    }
+
+    fn on_trigger_action(&mut self, action: foldit_gui::ActionId) {
+        self.handle_trigger_action(action);
+    }
+
+    fn on_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
+        self.handle_parameterized_action(action);
+    }
+
+    fn handle_request(
+        &mut self,
+        kind: foldit_gui::RequestKind,
+        payload: serde_json::Value,
+    ) -> foldit_gui::RequestResult {
+        use foldit_gui::RequestKind;
+        match kind {
+            RequestKind::ReadResourceFile => {
+                let filepath = payload
+                    .get("filepath")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing 'filepath'".to_string())?;
+                let bytes = std::fs::read(filepath)
+                    .map_err(|e| format!("read {}: {}", filepath, e))?;
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                Ok(serde_json::json!({ "encoding": "base64", "content": b64 }))
+            }
+            RequestKind::GetHotkeyText => {
+                // Stub: real implementation would look up display strings
+                // for hotkey ids. Until that surface lands, return empty so
+                // HelpMenuPanel rejects gracefully instead of timing out.
+                let hotkey = payload
+                    .get("hotkey")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Err(format!("hotkey lookup not implemented (hotkey={})", hotkey))
+            }
+            RequestKind::ServerRequest => {
+                // Stub: server requests (news, etc.) require an HTTP client
+                // bound here. Defer until a dedicated request handler exists.
+                let endpoint = payload
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Err(format!("server request not implemented (endpoint={})", endpoint))
+            }
         }
     }
 }
@@ -1428,31 +1482,3 @@ fn update_all_visualizations(engine: &mut VisoEngine, router: &ActionRouter) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-fn main() {
-    let default_filter = "info,wgpu_hal::vulkan::instance=off,naga=warn";
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
-    let log_buffer = tee_logger::init(&filter);
-
-    let input = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "1bfe".to_string());
-
-    // Install signal handlers that kill ML worker process groups on
-    // SIGINT/SIGTERM, preventing orphaned Python subprocesses.
-    foldit_runner::install_cleanup_signal_handlers();
-
-    log::info!("Foldit starting...");
-
-    let pdb_path = match foldit::puzzle::resolve_structure_path(&input) {
-        Ok(path) => path,
-        Err(e) => {
-            log::error!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    log::info!("Loading structure from: {}", pdb_path);
-
-    let app = App::new(pdb_path);
-    window::run(app, foldit_gui::FrontendState::new(), log_buffer);
-}
