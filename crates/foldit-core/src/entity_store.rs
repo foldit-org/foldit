@@ -1,8 +1,4 @@
-//! Authoritative entity store atop the new two-layer [`History`].
-//!
-//! See `docs/undo-strategy.md` § Mutation API for the design contract
-//! and `docs/undo-fix-plan.md` § 3 for the build-order section that
-//! lands these types. The short version:
+//! Authoritative entity store atop the two-layer [`History`].
 //!
 //! `EntityStore` owns:
 //! - [`History`] — the full per-entity timelines + checkpoint graph.
@@ -28,6 +24,25 @@
 //! There is no `mutate(closure)`-style API. Every checkpoint-bearing
 //! event funnels through `History::record` via a thin shim
 //! here; the single-root invariant from G3 is preserved end to end.
+//!
+//! **Broadcast invariant.** Every public method that changes the
+//! observable assembly (any mutation visible through
+//! [`Self::head_assembly`]) must queue exactly one
+//! [`foldit_runner::orchestrator::BroadcastPayload`] via
+//! [`Self::queue_full_broadcast`] /
+//! [`Self::queue_delta_broadcast`] (the latter behind
+//! [`Self::queue_single_entity_update_broadcast`] /
+//! [`Self::queue_assembly_update_broadcast`]). The orchestrator
+//! stamps gen counters on each payload and fans it out to peer
+//! plugins so their Assembly mirrors stay in sync. Bypassing the
+//! queue leaves plugins one generation behind the host; the
+//! orchestrator's `STALE_GEN` recovery catches divergence after
+//! the fact, but the invariant is what prevents it in the first
+//! place. Metadata-only setters
+//! ([`Self::set_entity_name`], [`Self::set_reference_ca`],
+//! [`Self::add_designed_sequences`], [`Self::set_entity_role`],
+//! [`Self::set_entity_origin`]) are exempt — they don't appear in
+//! `head_assembly` output.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -37,6 +52,7 @@ use std::sync::Arc;
 use glam::Vec3;
 use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
+use molex::ops::edit::AssemblyEdit;
 use molex::{Assembly, MoleculeEntity, MoleculeType};
 
 use crate::history::{
@@ -118,8 +134,7 @@ impl EntityMetadata {
 /// runs server-side and clients are remote) will move ownership to a
 /// dedicated Orchestrator and pass `&LockSet` into `EntityStore`'s
 /// navigation methods. The interface is the same either way: a set of
-/// entity ids plus `acquire` / `release` / `contains`. See
-/// `docs/undo-strategy.md` § Lock semantics.
+/// entity ids plus `acquire` / `release` / `contains`.
 ///
 /// The `History` layer enforces the *action lock* (the entity owned by
 /// the running [`crate::history::OngoingState::Active`]). `LockSet`
@@ -213,8 +228,7 @@ impl std::error::Error for EntityStoreError {}
 /// per entity in the produced assembly. The parallelism is the
 /// load-bearing invariant for downstream callers (focus locking, score
 /// projection); zero-residue entities are dropped from both arrays
-/// together so the indexing stays consistent (the prior bug — see
-/// `docs/undo-fix-plan.md` § 3).
+/// together so the indexing stays consistent.
 pub struct CombinedAssemblyResult {
     /// Assembly with one entity per protein, in the same order as
     /// `entity_ids`. Backend-side IDs are minted fresh; match by
@@ -296,6 +310,12 @@ pub struct EntityStore {
     /// every publish after the first. Increment on every
     /// `publish_to` / `replace_in`.
     publish_seq: u64,
+    /// Drain queue of pending plugin broadcasts produced by
+    /// authoritative mutations on this store. `App` pumps this after
+    /// each action / keybind / head-move and forwards each payload to
+    /// the orchestrator's `broadcast_to_plugins`, which stamps the
+    /// gen counters and cache. Always empty in steady state.
+    pending_broadcasts: Vec<foldit_runner::orchestrator::BroadcastPayload>,
 }
 
 impl Default for EntityStore {
@@ -317,6 +337,156 @@ impl EntityStore {
             history: History::new(std::iter::empty(), PathBuf::new()),
             locks: LockSet::new(),
             publish_seq: 0,
+            pending_broadcasts: Vec::new(),
+        }
+    }
+
+    /// Drain pending plugin broadcasts. Callers pump this after each
+    /// action handler / keybinding / head-move and forward each entry
+    /// to the orchestrator's `broadcast_to_plugins`. Always returns
+    /// an empty vec in steady state.
+    pub fn take_pending_broadcasts(
+        &mut self,
+    ) -> Vec<foldit_runner::orchestrator::BroadcastPayload> {
+        std::mem::take(&mut self.pending_broadcasts)
+    }
+
+    /// Mark an authoritative mutation as complete: serialize the
+    /// current `head_assembly()` and queue a `Full` broadcast for the
+    /// orchestrator to fan out. Centralizes the serialize + queue
+    /// logic so individual mutation sites don't open-code it.
+    ///
+    /// Errors only if `serialize_assembly` fails — currently
+    /// impossible for in-memory Assemblies, but kept fallible for
+    /// future format-version churn. Mutation-site callers ignore the
+    /// error since they have no clean recovery path; the worst case
+    /// is a plugin missing a broadcast and falling back to STALE_GEN
+    /// recovery on its next dispatch.
+    pub fn queue_full_broadcast(&mut self) -> Result<(), molex::ops::codec::AdapterError> {
+        let asm = self.head_assembly();
+        let bytes = molex::ops::wire::serialize_assembly(&asm)?;
+        self.pending_broadcasts
+            .push(foldit_runner::orchestrator::BroadcastPayload::Full(bytes));
+        Ok(())
+    }
+
+    /// Queue a `Delta` broadcast carrying the given edits as DELTA01
+    /// bytes. Falls back to a `Full` broadcast on any serialize error
+    /// (e.g. topology edits — `AddEntity` / `RemoveEntity` — which
+    /// DELTA01 rejects). The fallback keeps the broadcast queue
+    /// invariant ("one payload per authoritative mutation") intact
+    /// even when an unrepresentable edit slips in.
+    fn queue_delta_broadcast(&mut self, edits: &[AssemblyEdit]) {
+        match molex::ops::wire::delta::serialize_edits(edits) {
+            Ok(bytes) => self
+                .pending_broadcasts
+                .push(foldit_runner::orchestrator::BroadcastPayload::Delta(bytes)),
+            Err(_) => {
+                let _ = self.queue_full_broadcast();
+            }
+        }
+    }
+
+    /// Decide whether a single-entity mutation can be broadcast as a
+    /// coord-only `SetEntityCoords` delta. Returns `Some(edit)` when
+    /// the prior and new payloads share id, type, atom count, and
+    /// full polymer topology (residue layout + per-residue variants);
+    /// returns `None` when anything else changed — at which point the
+    /// caller should fall back to a `Full` broadcast.
+    ///
+    /// Atom-level fields beyond `position` (element, name,
+    /// formal_charge, occupancy, b_factor) are intentionally not
+    /// re-checked here: action lifecycle mutations only touch
+    /// positions, and a delta receiver that applies `SetEntityCoords`
+    /// preserves its own copy of those fields. A receiver that needs
+    /// non-position atom updates falls back through the Full path.
+    fn coord_only_delta(prior: &MoleculeEntity, new: &MoleculeEntity) -> Option<AssemblyEdit> {
+        if prior.id() != new.id() {
+            return None;
+        }
+        if prior.molecule_type() != new.molecule_type() {
+            return None;
+        }
+        if prior.atom_count() != new.atom_count() {
+            return None;
+        }
+        match (prior.residues(), new.residues()) {
+            (Some(p_res), Some(n_res)) => {
+                if p_res.len() != n_res.len() {
+                    return None;
+                }
+                for (p, n) in p_res.iter().zip(n_res.iter()) {
+                    if p.name != n.name
+                        || p.atom_range != n.atom_range
+                        || p.variants != n.variants
+                    {
+                        return None;
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => return None,
+        }
+        Some(AssemblyEdit::SetEntityCoords {
+            entity: new.id(),
+            coords: new.positions(),
+        })
+    }
+
+    /// Queue the appropriate broadcast for a single-entity mutation:
+    /// `Delta` (one `SetEntityCoords` edit) when the change is
+    /// coord-only, otherwise `Full`. Centralizes the prior/new diff so
+    /// `commit_action` and `record_entity_update` route through one
+    /// decision point.
+    fn queue_single_entity_update_broadcast(
+        &mut self,
+        prior: &MoleculeEntity,
+        new: &MoleculeEntity,
+    ) {
+        if let Some(edit) = Self::coord_only_delta(prior, new) {
+            self.queue_delta_broadcast(std::slice::from_ref(&edit));
+        } else {
+            let _ = self.queue_full_broadcast();
+        }
+    }
+
+    /// Whole-assembly coord diff. Returns `Some(edits)` (possibly empty
+    /// when nothing moved) when every entity in `new` shares id +
+    /// topology with the entity at the same position in `prior`;
+    /// returns `None` otherwise (entity added, removed, reordered, or
+    /// any per-entity topology divergence). Used by history navigation:
+    /// same-topology nav emits Delta, cross-topology jumps fall back
+    /// to Full.
+    fn assembly_coord_delta(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {
+        let prior_entities = prior.entities();
+        let new_entities = new.entities();
+        if prior_entities.len() != new_entities.len() {
+            return None;
+        }
+        let mut edits = Vec::new();
+        for (p, n) in prior_entities.iter().zip(new_entities.iter()) {
+            let edit = Self::coord_only_delta(p, n)?;
+            if p.positions() == n.positions() {
+                continue;
+            }
+            edits.push(edit);
+        }
+        Some(edits)
+    }
+
+    /// Queue the appropriate broadcast after a multi-entity mutation
+    /// (history navigation): `Delta` when the post-state shares
+    /// topology with `prior`, otherwise `Full`. Empty edit lists still
+    /// queue a Delta — the orchestrator's gen counter advances on
+    /// every authoritative mutation regardless of whether the
+    /// assembly content changed.
+    fn queue_assembly_update_broadcast(&mut self, prior: &Assembly) {
+        let new = self.head_assembly();
+        match Self::assembly_coord_delta(prior, &new) {
+            Some(edits) => self.queue_delta_broadcast(&edits),
+            None => {
+                let _ = self.queue_full_broadcast();
+            }
         }
     }
 
@@ -487,7 +657,40 @@ impl EntityStore {
     /// best cursors; transitions to `Idle`. Returns the now-committed
     /// checkpoint id.
     pub fn commit_action(&mut self) -> Result<CheckpointId, EntityStoreError> {
-        Ok(self.history.commit_action()?)
+        // Capture the active entity + prior lane-head payload before
+        // delegating: after commit_action lands, `ongoing` flips to
+        // `Idle` and the tentative's parent linkage stays intact, but
+        // grabbing both up front keeps the diff site straightforward.
+        let prior = self.history.ongoing().locked_entity().and_then(|e| {
+            let lane = self.history.lane(e)?;
+            let snap = lane.snapshot(lane.head())?;
+            // The tentative snapshot's parent is the pre-action lane
+            // head — i.e. the payload plugins last saw via broadcast.
+            let parent_id = snap.parent?;
+            Some((e, Arc::clone(&lane.snapshot(parent_id)?.payload)))
+        });
+        let ckpt = self.history.commit_action()?;
+        match prior {
+            Some((entity, prior_payload)) => {
+                let new_payload = self
+                    .history
+                    .lane(entity)
+                    .and_then(|l| l.snapshot(l.head()))
+                    .map(|s| Arc::clone(&s.payload));
+                if let Some(new_payload) = new_payload {
+                    self.queue_single_entity_update_broadcast(
+                        &prior_payload,
+                        &new_payload,
+                    );
+                } else {
+                    let _ = self.queue_full_broadcast();
+                }
+            }
+            None => {
+                let _ = self.queue_full_broadcast();
+            }
+        }
+        Ok(ckpt)
     }
 
     /// Abort the in-flight action. Removes the tentative snapshot and
@@ -511,14 +714,32 @@ impl EntityStore {
         if self.locks.contains(entity) {
             return Err(EntityStoreError::LockedByClient { entity });
         }
-        Ok(self.history.record_entity_update(
+        // Capture the prior lane-head payload before the history push
+        // so the post-push diff has something to compare against. A
+        // None here means the entity wasn't tracked yet (history will
+        // reject the call with `UnknownEntity` anyway) — the Full
+        // fallback handles the post-error path harmlessly.
+        let prior = self
+            .history
+            .lane(entity)
+            .and_then(|l| l.snapshot(l.head()))
+            .map(|s| Arc::clone(&s.payload));
+        let payload = Arc::new(payload);
+        let payload_for_history = Arc::clone(&payload);
+        let ckpt = self.history.record_entity_update(
             entity,
             kind,
-            Arc::new(payload),
+            payload_for_history,
             label.into(),
             raw_score,
             game_score,
-        )?)
+        )?;
+        if let Some(prior_payload) = prior {
+            self.queue_single_entity_update_broadcast(&prior_payload, &payload);
+        } else {
+            let _ = self.queue_full_broadcast();
+        }
+        Ok(ckpt)
     }
 
     // ── Navigation (lock-checked via the LockSet client lock; the
@@ -536,7 +757,12 @@ impl EntityStore {
             None => return Ok(None),
         };
         self.check_target_locks(parent)?;
-        Ok(self.history.undo()?)
+        let prior = self.head_assembly();
+        let moved = self.history.undo()?;
+        if moved.is_some() {
+            self.queue_assembly_update_broadcast(&prior);
+        }
+        Ok(moved)
     }
 
     /// Move checkpoint head forward to a child. `branch` picks among
@@ -563,13 +789,21 @@ impl EntityStore {
             }
         };
         self.check_target_locks(target)?;
-        Ok(self.history.redo(branch)?)
+        let prior = self.head_assembly();
+        let moved = self.history.redo(branch)?;
+        if moved.is_some() {
+            self.queue_assembly_update_broadcast(&prior);
+        }
+        Ok(moved)
     }
 
     /// Jump checkpoint head to `id`.
     pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, EntityStoreError> {
         self.check_target_locks(id)?;
-        Ok(self.history.jump_checkpoint(id)?)
+        let prior = self.head_assembly();
+        let ckpt = self.history.jump_checkpoint(id)?;
+        self.queue_assembly_update_broadcast(&prior);
+        Ok(ckpt)
     }
 
     /// Per-entity revert: move `entity`'s lane head to `target`. Pushes
@@ -582,7 +816,10 @@ impl EntityStore {
         if self.locks.contains(entity) {
             return Err(EntityStoreError::LockedByClient { entity });
         }
-        Ok(self.history.lane_undo(entity, target)?)
+        let prior = self.head_assembly();
+        let ckpt = self.history.lane_undo(entity, target)?;
+        self.queue_assembly_update_broadcast(&prior);
+        Ok(ckpt)
     }
 
     /// Per-entity redo: move `entity`'s lane head to a child of the
@@ -595,7 +832,10 @@ impl EntityStore {
         if self.locks.contains(entity) {
             return Err(EntityStoreError::LockedByClient { entity });
         }
-        Ok(self.history.lane_redo(entity, branch)?)
+        let prior = self.head_assembly();
+        let ckpt = self.history.lane_redo(entity, branch)?;
+        self.queue_assembly_update_broadcast(&prior);
+        Ok(ckpt)
     }
 
     /// Refuse if any client-locked entity's payload would change going to
@@ -714,6 +954,9 @@ impl EntityStore {
         let _ = self
             .metadata
             .insert(id, Arc::new(EntityMetadata::new(name, origin, role)));
+        // Topology edit (entity added) — DELTA01 rejects AddEntity, so
+        // this stays Full.
+        let _ = self.queue_full_broadcast();
         id
     }
 
@@ -733,16 +976,21 @@ impl EntityStore {
         let _ = self
             .metadata
             .insert(id, Arc::new(EntityMetadata::new(name, origin, role)));
+        // Topology edit (entity added) — DELTA01 rejects AddEntity, so
+        // this stays Full.
+        let _ = self.queue_full_broadcast();
     }
 
     /// Replace the entity body of an existing preview. No-op if `id`
     /// is not currently a preview.
     pub fn update_preview(&mut self, id: EntityId, mut entity: MoleculeEntity) {
-        if !self.transient.contains_key(&id) {
+        let Some(prior_arc) = self.transient.get(&id).map(Arc::clone) else {
             return;
-        }
+        };
         entity.set_id(id);
-        let _ = self.transient.insert(id, Arc::new(entity));
+        let new_arc = Arc::new(entity);
+        let _ = self.transient.insert(id, Arc::clone(&new_arc));
+        self.queue_single_entity_update_broadcast(&prior_arc, &new_arc);
     }
 
     /// Remove a preview (cancel / error path). Drops the metadata too.
@@ -752,6 +1000,9 @@ impl EntityStore {
             return false;
         }
         let _ = self.metadata.shift_remove(&id);
+        // Topology edit (entity removed) — DELTA01 rejects RemoveEntity,
+        // so this stays Full.
+        let _ = self.queue_full_broadcast();
         true
     }
 
@@ -788,7 +1039,12 @@ impl EntityStore {
         }
 
         match self.history.add_entity(id, payload, kind, label.into()) {
-            Ok(ckpt) => Ok(ckpt),
+            Ok(ckpt) => {
+                // Topology edit (preview moves from transient into a
+                // committed checkpoint) — Full broadcast.
+                let _ = self.queue_full_broadcast();
+                Ok(ckpt)
+            }
             Err(e) => {
                 // Restore the transient entry on failure so the caller
                 // can retry. We can't recover the original payload
@@ -816,6 +1072,14 @@ impl EntityStore {
         self.allocator = EntityIdAllocator::new();
         self.locks = LockSet::new();
         self.history = History::new(std::iter::empty(), PathBuf::new());
+        // Drop any queued payloads from the prior session — they
+        // describe state that no longer exists. Broadcast gen is
+        // intentionally NOT reset: a fresh empty-assembly broadcast
+        // still progresses the host's gen counter, and resetting it
+        // would let plugins see from_gen go backwards.
+        self.pending_broadcasts.clear();
+        // Hard topology reset — every entity disappears, Full broadcast.
+        let _ = self.queue_full_broadcast();
     }
 
     /// One-shot animation lerp / visualization-only operation: builds a
@@ -921,7 +1185,7 @@ impl EntityStore {
     /// types).
     pub fn get_entity_assembly_bytes(&self, id: EntityId) -> Option<Vec<u8>> {
         let entity = self.entity(id)?;
-        molex::ops::codec::assembly_bytes(std::slice::from_ref(entity)).ok()
+        molex::ops::wire::assembly_bytes(std::slice::from_ref(entity)).ok()
     }
 
     /// Collect entities for an ML kickoff based on the current focus.
@@ -997,6 +1261,7 @@ impl EntityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::WiggleMask;
     use molex::entity::molecule::atom::Atom;
     use molex::entity::molecule::bulk::BulkEntity;
     use molex::entity::molecule::protein::ProteinEntity;
@@ -1010,6 +1275,7 @@ mod tests {
             b_factor: 0.0,
             element: Element::O,
             name: *b"O   ",
+            formal_charge: 0,
         }
     }
 
@@ -1049,25 +1315,29 @@ mod tests {
                     b_factor: 0.0,
                     element: *element,
                     name: **name,
+                    formal_charge: 0,
                 });
             }
             let end = atoms.len();
             residues.push(Residue {
                 name: *b"ALA",
-                number: i as i32 + 1,
+                label_seq_id: i as i32 + 1,
+                auth_seq_id: None,
+                auth_comp_id: None,
+                ins_code: None,
                 atom_range: start..end,
+                variants: Vec::new(),
             });
         }
-        MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, b'A'))
+        MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, b'A', None))
     }
 
     // ── combined_assembly_for_backend zero-residue alignment fix ──────
 
     #[test]
     fn combined_assembly_drops_zero_residue_entities_from_all_arrays() {
-        // Mandated by docs/undo-fix-plan.md § 3: a fixture with one
-        // zero-residue entity must produce parallel arrays of equal
-        // length.
+        // A fixture with one zero-residue entity must produce parallel
+        // arrays of equal length.
         let mut alloc = EntityIdAllocator::new();
         let id_a = alloc.allocate();
         let id_b = alloc.allocate();
@@ -1367,5 +1637,597 @@ mod tests {
             n_ckpts,
             "metadata edit must not push a checkpoint"
         );
+    }
+
+    // ── plugin-broadcast queue ────────────────────────────────────────
+
+    #[test]
+    fn pending_broadcasts_empty_at_construction() {
+        let mut store = EntityStore::new();
+        assert!(store.take_pending_broadcasts().is_empty());
+    }
+
+    #[test]
+    fn insert_preview_queues_one_full_broadcast() {
+        let mut store = EntityStore::new();
+        let _id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 2),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Full(bytes) => {
+                assert!(!bytes.is_empty(), "Full payload bytes should be non-empty");
+            }
+            other => panic!("expected Full payload, got {other:?}"),
+        }
+        // Drain is destructive — second take returns empty.
+        assert!(store.take_pending_broadcasts().is_empty());
+    }
+
+    #[test]
+    fn remove_preview_also_queues_a_broadcast() {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 1),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        // Drain the insert broadcast.
+        let _ = store.take_pending_broadcasts();
+        assert!(store.remove_preview(id));
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1, "remove_preview must queue a broadcast");
+    }
+
+    #[test]
+    fn record_entity_update_queues_one_broadcast() {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 1),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        store
+            .promote_preview(
+                id,
+                CheckpointKind::PromotedPreview { entity: id },
+                None,
+                None,
+                None,
+                "promote",
+            )
+            .expect("promote_preview");
+        // Drain the insert + promote broadcasts.
+        let _ = store.take_pending_broadcasts();
+
+        let updated = mk_protein(id, 1);
+        store
+            .record_entity_update(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                id,
+                updated,
+                "wiggle",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+    }
+
+    // ── Single-entity mutation Delta-payload emission ────────────────
+
+    /// Helper: drive an entity through promote_preview → drain so the
+    /// broadcast queue is at a known-empty starting point.
+    fn store_with_protein(n_residues: usize) -> (EntityStore, EntityId) {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), n_residues),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        store
+            .promote_preview(
+                id,
+                CheckpointKind::PromotedPreview { entity: id },
+                None,
+                None,
+                None,
+                "promote",
+            )
+            .expect("promote_preview");
+        let _ = store.take_pending_broadcasts();
+        (store, id)
+    }
+
+    #[test]
+    fn record_entity_update_with_matching_topology_emits_delta() {
+        let (mut store, id) = store_with_protein(2);
+
+        // Re-issue the same shape but with shifted positions.
+        let mut updated = mk_protein(id, 2);
+        for atom in updated.atom_set_mut() {
+            atom.position = glam::Vec3::new(1.5, 2.5, 3.5);
+        }
+        store
+            .record_entity_update(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                id,
+                updated,
+                "wiggle",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(bytes) => {
+                let edits = molex::ops::wire::delta::deserialize_edits(bytes)
+                    .expect("delta decodes");
+                assert_eq!(edits.len(), 1);
+                assert!(matches!(
+                    edits[0],
+                    AssemblyEdit::SetEntityCoords { .. }
+                ));
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_entity_update_with_topology_change_falls_back_to_full() {
+        let (mut store, id) = store_with_protein(2);
+
+        // Different residue count → topology change → Full.
+        let updated = mk_protein(id, 5);
+        store
+            .record_entity_update(
+                CheckpointKind::Mutate {
+                    entity: id,
+                    residue: 0,
+                    from: b'A',
+                    to: b'W',
+                },
+                id,
+                updated,
+                "mutate",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0],
+            foldit_runner::orchestrator::BroadcastPayload::Full(_)
+        ));
+    }
+
+    #[test]
+    fn record_entity_update_delta_round_trips_through_apply_edit() {
+        // Round-trip invariant: applying the emitted delta to the
+        // *prior* assembly must produce the same post-mutation
+        // assembly the host now holds.
+        let (mut store, id) = store_with_protein(2);
+
+        // Prior assembly is the current head_assembly() before the
+        // update — capture it for the receiver-side replay.
+        let prior_asm = store.head_assembly();
+
+        let mut updated = mk_protein(id, 2);
+        for (i, atom) in updated.atom_set_mut().iter_mut().enumerate() {
+            atom.position = glam::Vec3::new(i as f32, i as f32 * 2.0, -1.0);
+        }
+        store
+            .record_entity_update(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                id,
+                updated,
+                "wiggle",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+
+        let payloads = store.take_pending_broadcasts();
+        let bytes = match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(b) => b.clone(),
+            other => panic!("expected Delta, got {other:?}"),
+        };
+        let edits = molex::ops::wire::delta::deserialize_edits(&bytes)
+            .expect("delta decodes");
+
+        // Replay: clone prior, apply edits, compare positions to host head.
+        let mut replay = prior_asm;
+        replay.apply_edits(&edits).expect("apply_edits");
+
+        let host_head = store.head_assembly();
+        let replay_positions = replay
+            .entities()
+            .iter()
+            .find(|e| e.id() == id)
+            .expect("entity in replay")
+            .positions();
+        let host_positions = host_head
+            .entities()
+            .iter()
+            .find(|e| e.id() == id)
+            .expect("entity in host head")
+            .positions();
+        assert_eq!(replay_positions, host_positions);
+    }
+
+    #[test]
+    fn commit_action_with_coord_only_mutation_emits_delta() {
+        let (mut store, id) = store_with_protein(2);
+
+        store
+            .begin_action(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                "wiggle",
+            )
+            .expect("begin_action");
+        // Drain the broadcast emitted during begin (currently none —
+        // begin_action does not queue; sanity-check by clearing).
+        let _ = store.take_pending_broadcasts();
+
+        store
+            .action_update(None, None, None, |e| {
+                for atom in e.atom_set_mut() {
+                    atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
+                }
+            })
+            .expect("action_update");
+
+        store.commit_action().expect("commit_action");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(bytes) => {
+                let edits = molex::ops::wire::delta::deserialize_edits(bytes)
+                    .expect("delta decodes");
+                assert_eq!(edits.len(), 1);
+                let AssemblyEdit::SetEntityCoords { entity, coords } = &edits[0]
+                else {
+                    panic!("expected SetEntityCoords, got {:?}", edits[0]);
+                };
+                assert_eq!(*entity, id);
+                assert!(coords.iter().all(|c| *c == glam::Vec3::new(9.0, 9.0, 9.0)));
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+    }
+
+    // ── History navigation Delta emission ─────────────────────────────
+
+    #[test]
+    fn lane_undo_with_coord_only_history_emits_delta() {
+        let (mut store, id) = store_with_protein(2);
+        let original_snap = store.history().lane(id).expect("lane").head();
+
+        // Move the lane head forward with a coord-only update.
+        let mut updated = mk_protein(id, 2);
+        for atom in updated.atom_set_mut() {
+            atom.position = glam::Vec3::new(4.0, 5.0, 6.0);
+        }
+        store
+            .record_entity_update(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                id,
+                updated,
+                "wiggle",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+
+        // Drain the wiggle broadcast; the next take only sees lane_undo.
+        let _ = store.take_pending_broadcasts();
+        let prior_asm = store.head_assembly();
+
+        store.lane_undo(id, original_snap).expect("lane_undo");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        let bytes = match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(b) => b.clone(),
+            other => panic!("expected Delta, got {other:?}"),
+        };
+        let edits = molex::ops::wire::delta::deserialize_edits(&bytes)
+            .expect("delta decodes");
+
+        let mut replay = prior_asm;
+        replay.apply_edits(&edits).expect("apply_edits");
+        let host_head = store.head_assembly();
+        assert_eq!(
+            replay
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+            host_head
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+        );
+    }
+
+    #[test]
+    fn undo_within_topology_emits_delta() {
+        let (mut store, id) = store_with_protein(2);
+
+        let mut updated = mk_protein(id, 2);
+        for atom in updated.atom_set_mut() {
+            atom.position = glam::Vec3::new(7.0, 8.0, 9.0);
+        }
+        store
+            .record_entity_update(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                id,
+                updated,
+                "wiggle",
+                None,
+                None,
+            )
+            .expect("record_entity_update");
+        let _ = store.take_pending_broadcasts();
+        let prior_asm = store.head_assembly();
+
+        store.undo().expect("undo");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        let bytes = match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(b) => b.clone(),
+            other => panic!("expected Delta, got {other:?}"),
+        };
+        let edits = molex::ops::wire::delta::deserialize_edits(&bytes)
+            .expect("delta decodes");
+        let mut replay = prior_asm;
+        replay.apply_edits(&edits).expect("apply_edits");
+        let host_head = store.head_assembly();
+        assert_eq!(
+            replay
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+            host_head
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+        );
+    }
+
+    #[test]
+    fn jump_checkpoint_topology_change_falls_back_to_full() {
+        // Start with one entity, capture its checkpoint. Add a second
+        // entity via promote_preview (new checkpoint with both
+        // entities). Jumping back to the single-entity checkpoint is a
+        // topology change → Full broadcast.
+        let (mut store, _id_a) = store_with_protein(2);
+        let single_entity_ckpt = store.history().checkpoints().head();
+
+        let id_b = store.insert_preview(
+            mk_protein(mk_dummy_id(), 3),
+            "b".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        store
+            .promote_preview(
+                id_b,
+                CheckpointKind::PromotedPreview { entity: id_b },
+                None,
+                None,
+                None,
+                "promote b",
+            )
+            .expect("promote b");
+        let _ = store.take_pending_broadcasts();
+
+        store
+            .jump_checkpoint(single_entity_ckpt)
+            .expect("jump_checkpoint");
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0],
+            foldit_runner::orchestrator::BroadcastPayload::Full(_)
+        ));
+    }
+
+    // ── Preview lifecycle Delta + Full emission ──────────────────────
+
+    #[test]
+    fn update_preview_coord_only_emits_delta() {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 2),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        let _ = store.take_pending_broadcasts();
+        let prior_asm = store.head_assembly();
+
+        let mut updated = mk_protein(id, 2);
+        for atom in updated.atom_set_mut() {
+            atom.position = glam::Vec3::new(11.0, 22.0, 33.0);
+        }
+        store.update_preview(id, updated);
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        let bytes = match &payloads[0] {
+            foldit_runner::orchestrator::BroadcastPayload::Delta(b) => b.clone(),
+            other => panic!("expected Delta, got {other:?}"),
+        };
+        let edits = molex::ops::wire::delta::deserialize_edits(&bytes)
+            .expect("delta decodes");
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits[0], AssemblyEdit::SetEntityCoords { .. }));
+
+        let mut replay = prior_asm;
+        replay.apply_edits(&edits).expect("apply_edits");
+        let host_head = store.head_assembly();
+        assert_eq!(
+            replay
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+            host_head
+                .entities()
+                .iter()
+                .find(|e| e.id() == id)
+                .expect("entity")
+                .positions(),
+        );
+    }
+
+    #[test]
+    fn remove_preview_emits_full() {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 1),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        let _ = store.take_pending_broadcasts();
+        assert!(store.remove_preview(id));
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0],
+            foldit_runner::orchestrator::BroadcastPayload::Full(_)
+        ));
+    }
+
+    #[test]
+    fn promote_preview_emits_full() {
+        let mut store = EntityStore::new();
+        let id = store.insert_preview(
+            mk_protein(mk_dummy_id(), 1),
+            "p".to_string(),
+            EntityOrigin::Loaded,
+            EntityRole {
+                foldable: true,
+                designable: false,
+                ambient: false,
+            },
+        );
+        let _ = store.take_pending_broadcasts();
+        store
+            .promote_preview(
+                id,
+                CheckpointKind::PromotedPreview { entity: id },
+                None,
+                None,
+                None,
+                "promote",
+            )
+            .expect("promote_preview");
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0],
+            foldit_runner::orchestrator::BroadcastPayload::Full(_)
+        ));
+    }
+
+    #[test]
+    fn reset_emits_full() {
+        let (mut store, _id) = store_with_protein(2);
+        // Queue a couple of stale payloads to confirm reset clears them
+        // before emitting its own Full.
+        let _ = store.queue_full_broadcast();
+        let _ = store.queue_full_broadcast();
+
+        store.reset();
+
+        let payloads = store.take_pending_broadcasts();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "reset drops queued payloads and emits exactly one Full",
+        );
+        assert!(matches!(
+            payloads[0],
+            foldit_runner::orchestrator::BroadcastPayload::Full(_)
+        ));
     }
 }

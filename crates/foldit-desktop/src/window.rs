@@ -87,6 +87,7 @@ impl AppRunner {
                 }
                 IpcMessage::ViewportInput(input) => self.app.on_viewport_input(input),
                 IpcMessage::TriggerAction(action) => self.app.on_trigger_action(action),
+                IpcMessage::DispatchOp(op) => self.app.on_dispatch_op(op),
                 IpcMessage::ParameterizedAction(action) => self.app.on_parameterized_action(action),
                 IpcMessage::Request { wish_id, kind, payload } => {
                     let result = self.app.handle_request(kind, payload);
@@ -157,40 +158,22 @@ impl AppRunner {
         }
     }
 
-    /// True if *something* is listening on TCP 5173.
+    /// True if *something* is listening on TCP 5173. Tries IPv6 and
+    /// IPv4 because vite's default `localhost` binding is IPv6-only on
+    /// macOS, IPv4-only on some Linux distros, and dual-stack
+    /// elsewhere -- a single-family probe loses to that.
     #[cfg(debug_assertions)]
     fn dev_server_port_bound() -> bool {
         use std::net::TcpStream;
         use std::time::Duration;
         let timeout = Duration::from_millis(200);
-        TcpStream::connect_timeout(&"[::1]:5173".parse().unwrap(), timeout).is_ok()
-            || TcpStream::connect_timeout(&"127.0.0.1:5173".parse().unwrap(), timeout).is_ok()
-    }
-
-    /// Verify whatever is on 5173 is *our* Vite dev server, not an orphan from
-    /// another checkout or a wedged previous run. The foldit GUI's index.html
-    /// has `<title>Foldit</title>` — that's our fingerprint.
-    #[cfg(debug_assertions)]
-    fn dev_server_serves_foldit() -> bool {
-        use std::time::Duration;
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let resp = match client.get("http://127.0.0.1:5173/").send() {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        if !resp.status().is_success() {
-            return false;
-        }
-        match resp.text() {
-            Ok(body) => body.contains("<title>Foldit</title>"),
-            Err(_) => false,
-        }
+        TcpStream::connect_timeout(&"[::1]:5173".parse().unwrap(), timeout)
+            .is_ok()
+            || TcpStream::connect_timeout(
+                &"127.0.0.1:5173".parse().unwrap(),
+                timeout,
+            )
+            .is_ok()
     }
 
     /// SIGKILL whatever is bound to port 5173 (and its process group). Used to
@@ -244,21 +227,66 @@ impl AppRunner {
         }
     }
 
-    /// Spawn the Vite dev server and block until it serves the foldit GUI.
-    /// Detects and evicts orphan vite instances from crashed previous runs
-    /// (those leak when foldit is killed by SIGINT, since `process_group(0)`
-    /// isolates the spawned tree from terminal signal forwarding).
+    /// Resolve the absolute path to `crates/foldit-gui/js`. Tries
+    /// (in order):
+    ///
+    ///   1. `FOLDIT_FRONTEND_DIR` env override.
+    ///   2. Walk up from `CARGO_MANIFEST_DIR` (= this crate's dir at
+    ///      compile time) looking for `crates/foldit-gui/js`.
+    ///   3. Walk up from `current_exe()` looking for the same.
+    ///
+    /// Returns `None` if none resolve. Used by the dev server spawn
+    /// so we never feed `pnpm` a relative path that depends on
+    /// whatever cwd `cargo run` happened to inherit.
+    #[cfg(debug_assertions)]
+    fn locate_frontend_dir() -> Option<std::path::PathBuf> {
+        if let Some(env) = std::env::var_os("FOLDIT_FRONTEND_DIR") {
+            let p = std::path::PathBuf::from(env);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        // CARGO_MANIFEST_DIR is the compile-time dir of foldit-desktop,
+        // i.e. .../foldit/crates/foldit-desktop. Two levels up is
+        // workspace root.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let mut cursor = std::path::PathBuf::from(manifest_dir);
+        loop {
+            let candidate = cursor.join("crates/foldit-gui/js");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !cursor.pop() {
+                break;
+            }
+        }
+        let exe = std::env::current_exe().ok()?;
+        let mut cursor = exe.parent()?.to_path_buf();
+        loop {
+            let candidate = cursor.join("crates/foldit-gui/js");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !cursor.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Spawn a fresh Vite dev server and block until it serves the
+    /// foldit GUI. Always evicts whatever owns 5173 first -- prior
+    /// runs leak (SIGINT doesn't propagate across the dev server's
+    /// own process group), other vite instances on the same port
+    /// would shadow this one, etc. Cheaper to start clean than to
+    /// reason about whose vite we inherited.
     #[cfg(debug_assertions)]
     fn ensure_dev_server(&mut self) {
         if Self::dev_server_port_bound() {
-            if Self::dev_server_serves_foldit() {
-                log::info!("Dev server already running and serving foldit at localhost:5173");
-                self.dev_server_available = true;
-                return;
-            }
             log::warn!(
-                "Port 5173 occupied but not serving foldit (likely an orphan from a \
-                 previous run or another checkout) — evicting."
+                "Port 5173 already bound -- evicting before spawning a fresh \
+                 Vite dev server (orphan from a previous run, another foldit \
+                 checkout, or unrelated server)."
             );
             Self::kill_orphan_on_port_5173();
 
@@ -271,29 +299,45 @@ impl AppRunner {
                 thread::sleep(Duration::from_millis(100));
             }
             if Self::dev_server_port_bound() {
-                log::error!("Failed to free port 5173; cannot start fresh dev server");
+                log::error!(
+                    "Failed to free port 5173 within ~5s; cannot start fresh \
+                     dev server. Run `lsof -ti :5173 | xargs kill -9` and \
+                     retry."
+                );
                 return;
             }
         }
 
         use std::process::{Command, Stdio};
 
-        let frontend_dir = std::path::Path::new("crates/foldit-gui/js");
-        if !frontend_dir.exists() {
+        // Resolve the frontend dir absolutely. Don't trust the
+        // process cwd -- `cargo run` from anywhere other than the
+        // workspace root would land us somewhere wrong, and the
+        // failure mode is invisible (pnpm hangs in a stale dir
+        // without printing anything if stdout was piped to /dev/null).
+        let Some(frontend_dir) = Self::locate_frontend_dir() else {
             log::warn!(
-                "Frontend directory not found at {:?}, skipping dev server",
-                frontend_dir
+                "Frontend directory not found (looked next to executable + \
+                 walked up from CARGO_MANIFEST_DIR for crates/foldit-gui/js); \
+                 skipping dev server"
             );
             return;
-        }
+        };
+        log::info!(
+            "Spawning Vite dev server (pnpm run dev) in {}",
+            frontend_dir.display()
+        );
 
-        log::info!("Spawning Vite dev server...");
-
+        // Inherit stdout + stderr so vite's own logs ("VITE v5.x ready
+        // in 320 ms ... Local: http://localhost:5173/") land in the
+        // user's terminal -- without this, a pnpm/vite startup hang
+        // is invisible and the only signal is our 5-second waiting
+        // ticks.
         #[cfg(windows)]
         let result = Command::new("pnpm.cmd")
-            .arg("dev")
-            .current_dir(frontend_dir)
-            .stdout(Stdio::null())
+            .args(["run", "dev"])
+            .current_dir(&frontend_dir)
+            .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn();
 
@@ -301,41 +345,56 @@ impl AppRunner {
         let result = {
             use std::os::unix::process::CommandExt;
             Command::new("pnpm")
-                .arg("dev")
-                .current_dir(frontend_dir)
+                .args(["run", "dev"])
+                .current_dir(&frontend_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .process_group(0) // Own process group so we can kill the whole tree
                 .spawn()
         };
 
-        match result {
-            Ok(child) => {
-                log::info!("Vite dev server spawned (pid: {})", child.id());
-                self.dev_server = Some(child);
-            }
+        let child = match result {
+            Ok(c) => c,
             Err(e) => {
                 log::error!("Failed to spawn Vite dev server: {}", e);
                 return;
             }
-        }
+        };
+        let pid = child.id();
+        log::info!("Vite dev server spawned (pid: {})", pid);
+        // Register the dev server's pgid with the cleanup module so
+        // SIGINT/SIGTERM tear it down alongside ML workers. Drop /
+        // explicit kill_dev_server unregisters it.
+        foldit_runner::register_worker_pgid(pid);
+        self.dev_server = Some(child);
 
-        // Wait until vite is not just port-bound but actually serving foldit.
+        // Wait for vite to bind 5173. We always evict orphans before
+        // spawning, so port_bound becoming true after our spawn
+        // unambiguously means *our* vite is up -- no fingerprint
+        // probe needed. Cap at 30 s; vite's own log says "ready in
+        // <1s" once it's actually started, and any longer pause
+        // means pnpm/vite hung on something visible (now that
+        // stdout/stderr are inherited).
         use std::thread;
         use std::time::Duration;
-        for i in 0..75 {
-            if Self::dev_server_serves_foldit() {
+        let total_ticks = 150; // 150 * 200ms = 30s
+        for i in 0..total_ticks {
+            if Self::dev_server_port_bound() {
                 log::info!("Dev server ready after ~{}ms", i * 200);
                 self.dev_server_available = true;
                 return;
             }
             thread::sleep(Duration::from_millis(200));
         }
-        log::error!("Dev server did not start serving foldit within 15s");
+        log::error!(
+            "Dev server did not bind 5173 within 30s. Inspect the inherited \
+             pnpm/vite output above for the cause."
+        );
     }
 
-    /// Kill the dev server child process if running.
+    /// Kill the dev server child process if running. Idempotent --
+    /// safe to call from both signal-driven and Drop paths.
     #[cfg(debug_assertions)]
     fn kill_dev_server(&mut self) {
         if let Some(ref mut child) = self.dev_server {
@@ -355,12 +414,17 @@ impl AppRunner {
                 // The child was spawned with process_group(0) so its pid IS
                 // the pgid. Negative pid tells kill(1) to signal the group.
                 let _ = std::process::Command::new("kill")
-                    .args(["--", &format!("-{}", pid)])
+                    .args(["-9", "--", &format!("-{}", pid)])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
             }
             let _ = child.wait();
+            // Drop the cleanup-module registration so the signal
+            // handler doesn't try to kill a stale pgid on a later
+            // SIGINT (a fresh ensure_dev_server may reuse the pid
+            // space).
+            foldit_runner::unregister_worker_pgid(pid);
         }
         self.dev_server = None;
     }
@@ -376,17 +440,48 @@ impl AppRunner {
             use wry::dpi::{PhysicalPosition, PhysicalSize};
             let inner = window.inner_size();
 
+            // Resolved once at builder construction so the protocol
+            // closure (Fn, called many times) captures a cheap clone
+            // rather than re-walking on every request.
+            let plugins_root = crate::plugin_assets::resolve_plugins_root();
+
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
                 .with_initialization_script(Self::INIT_SCRIPT)
-                .with_custom_protocol("foldit".into(), |_webview_id, request| {
+                .with_custom_protocol("foldit".into(), move |_webview_id, request| {
                     use std::borrow::Cow;
 
-                    let path = request.uri().path();
-                    let path = if path == "/" || path.is_empty() {
+                    let request_path = request.uri().path();
+
+                    if request_path.starts_with("/plugins/") {
+                        let Some(root) = plugins_root.as_ref() else {
+                            return wry::http::Response::builder()
+                                .status(404)
+                                .body(Cow::Borrowed(b"Not Found" as &[u8]))
+                                .unwrap();
+                        };
+                        return match crate::plugin_assets::serve(request_path, root) {
+                            crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
+                                wry::http::Response::builder()
+                                    .status(200)
+                                    .header("Content-Type", mime)
+                                    .header("Access-Control-Allow-Origin", "*")
+                                    .body(Cow::Owned(bytes))
+                                    .unwrap()
+                            }
+                            crate::plugin_assets::AssetResponse::NotFound => {
+                                wry::http::Response::builder()
+                                    .status(404)
+                                    .body(Cow::Borrowed(b"Not Found" as &[u8]))
+                                    .unwrap()
+                            }
+                        };
+                    }
+
+                    let path = if request_path == "/" || request_path.is_empty() {
                         "index.html"
                     } else {
-                        path.trim_start_matches('/')
+                        request_path.trim_start_matches('/')
                     };
 
                     let asset_path = std::path::Path::new("assets/gui").join(path);
@@ -813,6 +908,10 @@ pub(crate) fn run(app: App, frontend: foldit_gui::FrontendState, log_buffer: cra
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut runner).expect("Event loop error");
+    // Explicit drop before process::exit -- otherwise the runner's
+    // Drop (which kills the dev server in debug builds) is skipped
+    // and pnpm/vite leak as orphans on a clean shutdown.
+    drop(runner);
     std::process::exit(0);
 }
 

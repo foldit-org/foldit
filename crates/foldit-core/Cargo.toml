@@ -7,8 +7,8 @@ description = "Pure-logic core: entity store, focus, history, puzzle loading"
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
-viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.3.0", features = ["serde", "specta"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
+molex = { version = "0.4.2", features = ["serde", "specta"] }
 
 # Core
 glam = "0.30"

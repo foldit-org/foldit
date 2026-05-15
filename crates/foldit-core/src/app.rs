@@ -16,17 +16,16 @@ use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
     CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, HistoryCommand,
-    HistoryLiveUpdate, HistorySection, ScoringMode, WireId,
+    HistoryLiveUpdate, HistorySection, ScoringMode, TextBubbleButton, TextBubblePayload,
+    WireId,
 };
 use foldit_runner::Orchestrator;
 use molex::entity::molecule::id::EntityId;
 use viso::{
-    AtomRef, BandInfo, BandTarget, Focus, InputEvent, InputProcessor, MouseButton, PullInfo,
-    VisoCommand, VisoEngine,
+    Focus, InputEvent, InputProcessor, VisoCommand, VisoEngine,
 };
 
 use crate::action_router::{self, ActionRouter};
-use crate::backend_results;
 use crate::entity_store::{EntityOrigin, EntityRole, EntityStore, EntityStoreError};
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 
@@ -47,6 +46,29 @@ fn timestamp_ms(t: web_time::SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Convert a parsed [`crate::puzzle::Bubble`] into the GUI-bound IPC
+/// twin. Tier-1 conversion: text/color/image pass through; buttons are
+/// built from `bubble.button` (defaulting to `"Next"`) plus an optional
+/// `alt_button`, with `goto` left `None` since clicks close locally.
+fn bubble_to_payload(b: &crate::puzzle::Bubble) -> TextBubblePayload {
+    let mut buttons = vec![TextBubbleButton {
+        text: b.button.clone().unwrap_or_else(|| "Next".to_string()),
+        goto: None,
+    }];
+    if let Some(alt) = b.alt_button.as_ref() {
+        buttons.push(TextBubbleButton {
+            text: alt.clone(),
+            goto: None,
+        });
+    }
+    TextBubblePayload {
+        text: b.text.clone(),
+        color: b.color.clone(),
+        image: b.image.clone(),
+        buttons,
+    }
+}
+
 fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
     match k {
         CheckpointKind::Loaded { .. } => CheckpointKindTag::Load,
@@ -61,6 +83,7 @@ fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
         CheckpointKind::AddEntity { .. } => CheckpointKindTag::AddEntity,
         CheckpointKind::RemoveEntity { .. } => CheckpointKindTag::RemoveEntity,
         CheckpointKind::LaneUndo { .. } => CheckpointKindTag::LaneUndo,
+        CheckpointKind::PluginOp { .. } => CheckpointKindTag::PluginOp,
     }
 }
 
@@ -210,6 +233,63 @@ fn load_entity_into_history(
     }
 }
 
+/// First protein entity in the head checkpoint, used as a fallback
+/// focus when an op-dispatch carries no `focused_entity_id`. Wave-1
+/// puzzles ship 1-chain proteins; a missing focus is the rule, not
+/// the exception. Returns `None` when no protein entity exists.
+fn first_protein_entity(store: &EntityStore) -> Option<EntityId> {
+    store.proteins().next().map(|(eid, _, _)| eid)
+}
+
+/// Translate the runner-side manifest enum to a concrete viso
+/// [`Transition`]. The variant names are kept in 1:1 sync — this is a
+/// mechanical mapping, not a semantic rename.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_transition(
+    kind: foldit_runner::orchestrator::TransitionKind,
+) -> viso::Transition {
+    use foldit_runner::orchestrator::TransitionKind;
+    match kind {
+        TransitionKind::Snap => viso::Transition::snap(),
+        TransitionKind::Smooth => viso::Transition::smooth(),
+        TransitionKind::CollapseExpand => viso::Transition::collapse_expand(
+            std::time::Duration::from_millis(150),
+            std::time::Duration::from_millis(150),
+        ),
+        TransitionKind::BackboneThenExpand => viso::Transition::backbone_then_expand(
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(100),
+        ),
+    }
+}
+
+/// Overwrite the ongoing action's tentative payload from a streaming
+/// assembly. Only the entity locked by `begin_action` is rewritten;
+/// peer entities in the same incoming Assembly are ignored (whole-pose
+/// streams under the single-entity action model). Score fields are
+/// propagated when the plugin embedded a total; per-residue / game
+/// scoring stay on their own refresh path.
+///
+/// Returns `true` if a payload swap actually fired.
+fn apply_streaming_assembly(
+    store: &mut EntityStore,
+    incoming: &molex::Assembly,
+    raw_score: Option<f64>,
+) -> bool {
+    let mut applied = false;
+    let res = store.action_update(raw_score, raw_score, None, |entity_mut| {
+        if let Some(src) = incoming.entity(entity_mut.id()) {
+            *entity_mut = src.clone();
+            applied = true;
+        }
+    });
+    if let Err(e) = res {
+        log::trace!("action_update skipped: {e}");
+        return false;
+    }
+    applied
+}
+
 /// Main application state — thin glue connecting the render engine and action router.
 pub struct App {
     engine: Option<VisoEngine>,
@@ -225,6 +305,13 @@ pub struct App {
     puzzle_title: String,
     starting_score: f64,
     target_score: f64,
+    /// Tutorial bubbles parsed from the puzzle TOML's `[[sequence]]`.
+    /// Empty for scientist-mode loads.
+    puzzle_bubbles: Vec<crate::puzzle::Bubble>,
+    /// Index into `puzzle_bubbles` for the currently-displayed bubble.
+    /// Reset to 0 on load. When `>= puzzle_bubbles.len()` the sequence
+    /// has been exhausted and no bubble is shown.
+    current_bubble: usize,
     /// Last `History::topology_version()` that was pushed to the frontend.
     /// `None` forces an initial push (G5: no `u64::MAX` sentinel).
     last_history_topology: Option<u64>,
@@ -234,6 +321,50 @@ pub struct App {
     /// Wall-clock of the last live history push. Gates the 50ms (20Hz)
     /// debounce so per-cycle Rosetta updates don't saturate the IPC.
     last_history_live_push_at: Option<Instant>,
+    /// In-flight stream handles keyed by request_id. Populated by
+    /// `handle_dispatch_op` on `StartStream`; the matching
+    /// `release_dispatch_locks` runs in `apply_backend_updates` when
+    /// the stream's terminal `PluginUpdate` arrives. The stored
+    /// `plugin_id` is the dispatch target for `dispatch_cancel_stream`
+    /// when the user hits ESC.
+    #[cfg(not(target_arch = "wasm32"))]
+    active_streams: std::collections::HashMap<
+        u64,
+        ActiveStreamEntry,
+    >,
+    /// Live pull-drag state. `Some(...)` between pointer-down on an
+    /// atom and pointer-up / stream-terminal / ESC cancel. The drag's
+    /// stream id also lives in `active_streams` so Final/Error
+    /// handling flows through the unified stream-cleanup path; this
+    /// field carries the extra viso-side bookkeeping needed for
+    /// pointer-move (PullInfo + op id).
+    #[cfg(not(target_arch = "wasm32"))]
+    pull_drag: Option<crate::pull_drag::PullDrag>,
+}
+
+/// Bundle stored per running stream so `apply_backend_updates` /
+/// `cancel_operations` can release locks and dispatch cancel against
+/// the right plugin worker without re-querying the orchestrator.
+/// `transition` is the viso animation preset to queue on each Pending
+/// snapshot — resolved from the manifest catalog once at dispatch
+/// time so per-poll handling stays orchestrator-free.
+#[cfg(not(target_arch = "wasm32"))]
+struct ActiveStreamEntry {
+    handle: foldit_runner::orchestrator::DispatchHandle,
+    plugin_id: String,
+    transition: foldit_runner::orchestrator::TransitionKind,
+}
+
+/// Discriminated result of a dispatch — wraps the two return shapes
+/// `dispatch_invoke` and `dispatch_start_stream` produce so
+/// `handle_dispatch_op` can post-process either uniformly.
+#[cfg(not(target_arch = "wasm32"))]
+enum OpOutcome {
+    Invoke(Vec<u8>),
+    Stream {
+        rid: u64,
+        handle: foldit_runner::orchestrator::DispatchHandle,
+    },
 }
 
 impl App {
@@ -260,9 +391,15 @@ impl App {
             puzzle_title: String::new(),
             starting_score: 0.0,
             target_score: 0.0,
+            puzzle_bubbles: Vec::new(),
+            current_bubble: 0,
             last_history_topology: None,
             last_history_live: None,
             last_history_live_push_at: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            active_streams: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pull_drag: None,
         }
     }
 
@@ -304,34 +441,247 @@ impl App {
     // ── Backend update processing ──
 
     pub fn apply_backend_updates(&mut self) {
-        // 1. Tell orchestrator to pump internal channels → triple buffers
-        //    and drain readers in one pass.
-        let updates = match self.router.orchestrator.as_mut() {
-            Some(orch) => {
-                orch.pump_updates();
-                orch.drain_updates()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use foldit_runner::orchestrator::PluginUpdate;
+
+            let updates = match self.router.orchestrator.as_mut() {
+                Some(orch) => orch.drain_plugin_updates(),
+                None => return,
+            };
+            if updates.is_empty() {
+                return;
             }
-            None => return,
-        };
-        if updates.is_empty() {
+
+            let mut visual_dirty = false;
+            let mut had_terminal = false;
+            // Resolved animation preset for whichever stream produced
+            // the latest visual update in this drain — queued on the
+            // engine right before `publish_to` so the new assembly
+            // animates in instead of snapping. Single-action invariant
+            // means at most one stream is mutating at a time, so
+            // last-write-wins is correct. The entity is captured
+            // alongside the transition (not re-resolved via
+            // `ongoing().locked_entity()` after the loop) because the
+            // `Final` arm commits the action inline and moves
+            // OngoingState to Idle, after which locked_entity is
+            // None — the Invoke path's apply_invoke_result captures
+            // the same way for the same reason.
+            let mut pending_transition: Option<(
+                molex::entity::molecule::id::EntityId,
+                foldit_runner::orchestrator::TransitionKind,
+            )> = None;
+            for update in updates {
+                match update {
+                    PluginUpdate::Pending {
+                        request_id,
+                        latest_assembly,
+                        progress,
+                        stage,
+                    } => {
+                        let Some(assembly) = latest_assembly else {
+                            log::trace!(
+                                "plugin update Pending rid={request_id} \
+                                 progress={progress:?} stage={stage:?} \
+                                 entities=0 (skipped: no assembly)"
+                            );
+                            continue;
+                        };
+                        if apply_streaming_assembly(
+                            &mut self.store,
+                            &assembly,
+                            None,
+                        ) {
+                            visual_dirty = true;
+                            if let (Some(entry), Some(entity)) = (
+                                self.active_streams.get(&request_id),
+                                self.store
+                                    .history()
+                                    .ongoing()
+                                    .locked_entity(),
+                            ) {
+                                pending_transition =
+                                    Some((entity, entry.transition));
+                            }
+                            // Per-frame score refresh while a stream
+                            // runs. Pendings don't trigger the
+                            // broadcast-driven refresh path (only
+                            // committed mutations do), so without this
+                            // the score widget + per-residue color
+                            // overlay sit stale until Final/Cancel
+                            // commits. The query is synchronous and
+                            // cheap (~ms for rosetta); Pending cadence
+                            // is gated by `POLL_INTERVAL` (50ms), so
+                            // worst case is ~20 score queries/sec.
+                            if let Some(orch) =
+                                self.router.orchestrator.as_mut()
+                            {
+                                refresh_scores(
+                                    orch,
+                                    &mut self.store,
+                                    self.engine.as_mut(),
+                                );
+                                self.router.ui_dirty |= DirtyFlags::SCORE;
+                            }
+                        }
+                    }
+                    PluginUpdate::Final {
+                        request_id,
+                        assembly,
+                        ..
+                    } => {
+                        had_terminal = true;
+                        let stream_transition = self
+                            .active_streams
+                            .get(&request_id)
+                            .map(|e| e.transition);
+                        if apply_streaming_assembly(
+                            &mut self.store,
+                            &assembly,
+                            None,
+                        ) {
+                            // Capture the locked entity *before*
+                            // commit_action moves OngoingState to Idle:
+                            // queue_entity_transition runs after this
+                            // loop and would otherwise have nothing to
+                            // key against.
+                            let locked_for_transition = self
+                                .store
+                                .history()
+                                .ongoing()
+                                .locked_entity();
+                            // Stream completed cleanly: commit the
+                            // tentative so the partial result becomes
+                            // a permanent undo entry.
+                            if let Err(e) = self.store.commit_action() {
+                                log::warn!(
+                                    "plugin update Final rid={request_id} \
+                                     commit_action failed: {e}"
+                                );
+                            }
+                            visual_dirty = true;
+                            if let (Some(t), Some(entity)) =
+                                (stream_transition, locked_for_transition)
+                            {
+                                pending_transition = Some((entity, t));
+                            }
+                        }
+                        if let Some(entry) =
+                            self.active_streams.remove(&request_id)
+                        {
+                            if let Some(orch) =
+                                self.router.orchestrator.as_mut()
+                            {
+                                orch.release_dispatch_locks(entry.handle);
+                            }
+                        }
+                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.pull_drag = None;
+                        }
+                        log::info!(
+                            "plugin update Final rid={request_id} \
+                             entities={}",
+                            assembly.entities().len()
+                        );
+                    }
+                    PluginUpdate::Error {
+                        request_id,
+                        message,
+                    } => {
+                        had_terminal = true;
+                        // Treat host-cancel / watchdog-eviction the
+                        // same way the GUI "cancel = commit" semantics
+                        // would: any tentative the stream had already
+                        // landed via Pending stays as a committed undo
+                        // entry. A plain transport error leaves the
+                        // tentative; commit_action is idempotent w.r.t.
+                        // an idle store.
+                        if self.store.has_ongoing_action() {
+                            if let Err(e) = self.store.commit_action() {
+                                log::warn!(
+                                    "plugin update Error rid={request_id} \
+                                     commit_action after cancel failed: {e}"
+                                );
+                            } else {
+                                visual_dirty = true;
+                            }
+                        }
+                        if let Some(entry) =
+                            self.active_streams.remove(&request_id)
+                        {
+                            if let Some(orch) =
+                                self.router.orchestrator.as_mut()
+                            {
+                                orch.release_dispatch_locks(entry.handle);
+                            }
+                        }
+                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.pull_drag = None;
+                        }
+                        log::warn!(
+                            "plugin update Error rid={request_id} \
+                             message={message}"
+                        );
+                    }
+                }
+            }
+
+            if visual_dirty {
+                if let Some(engine) = self.engine.as_mut() {
+                    // Queue the animation preset for the streaming
+                    // entity *before* set_assembly. The next
+                    // engine.update tick picks both up together and
+                    // animates from current GPU positions to the new
+                    // pose; without the transition, sync_scene_to_renderers
+                    // snaps. The entity was captured at update time
+                    // (single-action invariant — at most one in flight
+                    // at a time).
+                    if let Some((entity, kind)) = pending_transition {
+                        engine.queue_entity_transition(
+                            entity.raw(),
+                            resolve_transition(kind),
+                        );
+                    }
+                    self.store.publish_to(engine);
+                }
+            }
+            if had_terminal {
+                self.router.ui_dirty |= DirtyFlags::SCORE
+                    | DirtyFlags::ACTIONS
+                    | DirtyFlags::SCENE
+                    | DirtyFlags::HISTORY;
+            } else if visual_dirty {
+                // Mid-stream visual updates without a terminal event:
+                // the scene needs a re-publish but not a full UI sync.
+                self.router.ui_dirty |= DirtyFlags::SCENE;
+            }
+        }
+    }
+
+    /// Drain `EntityStore::take_pending_broadcasts` and forward each
+    /// payload to the orchestrator. Call at the end of every action /
+    /// keybind / head-move handler — the store queues a broadcast per
+    /// authoritative mutation, but doesn't reach into the orchestrator
+    /// itself; this is the bridge.
+    fn pump_pending_broadcasts(&mut self) {
+        let payloads = self.store.take_pending_broadcasts();
+        if payloads.is_empty() {
             return;
         }
-
-        // 2. Process each update via backend_results free functions
-        if let Some(engine) = &mut self.engine {
-            for (_entity_id, update) in updates {
-                backend_results::apply_backend_update(
-                    engine,
-                    &mut self.store,
-                    &mut self.router.orchestrator,
-                    &mut self.router.ui_dirty,
-                    &mut self.router.pending_prediction_reference,
-                    &mut self.router.pending_preview_id,
-                    self.scoring_mode,
-                    update,
-                );
-            }
+        let Some(orch) = self.router.orchestrator.as_mut() else {
+            // Without an orchestrator we have no plugins to notify;
+            // drop the queued payloads.
+            return;
+        };
+        for payload in &payloads {
+            orch.broadcast_to_plugins(payload);
         }
+        // Re-score after every broadcast so the head checkpoint
+        // reflects the post-edit state. Synchronous: the score query
+        // is cheap (~ms) compared to the user-visible cost of a stale
+        // score lingering across frames.
+        refresh_scores(orch, &mut self.store, self.engine.as_mut());
+        self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
     }
 
     // ── Keybinding dispatch (engine + router) ──
@@ -357,17 +707,34 @@ impl App {
                 }
             }
             VisoCommand::ClearSelection => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(orch) = self.router.orchestrator.as_mut() {
+                    for (rid, entry) in &self.active_streams {
+                        if let Err(e) = orch
+                            .dispatch_cancel_stream(&entry.plugin_id, *rid)
+                        {
+                            log::warn!(
+                                "dispatch_cancel_stream plugin={} rid={rid} \
+                                 failed: {e}",
+                                entry.plugin_id
+                            );
+                        }
+                    }
+                }
                 self.router.cancel_operations(engine, &mut self.store);
             }
             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                 engine.execute(cmd);
                 log::info!("Focus: {}", self.store.focus_description(&engine.focus()));
-                self.router.update_rosetta_locks(engine, &self.store);
+                // Focus-driven lock update lands when the bridge
+                // plugin's `update_assembly` + selection-derived locks
+                // are wired.
                 self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
             }
             // All other commands: delegate entirely to viso
             other => { engine.execute(other); }
         }
+        self.pump_pending_broadcasts();
         true
     }
 
@@ -375,6 +742,42 @@ impl App {
 
     pub fn handle_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
         use foldit_gui::ViewportInput;
+
+        // Pull-drag interception runs ahead of viso's regular input
+        // routing so an active drag suppresses camera rotation/pan.
+        // Pointer-down on an atom that resolves to a valid pull route
+        // opens the drag; pointer-move re-targets the endpoint;
+        // pointer-up tears down. Anything that falls through is normal
+        // viso input handling.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match &input {
+                ViewportInput::PointerDown { x, y, button, .. }
+                    if *button == 0 && self.pull_drag.is_none() =>
+                {
+                    if self.try_begin_pull_drag(*x, *y) {
+                        self.finalize_viewport_input();
+                        return;
+                    }
+                }
+                ViewportInput::PointerMove { x, y, .. }
+                    if self.pull_drag.is_some() =>
+                {
+                    self.update_pull_drag(*x, *y);
+                    self.finalize_viewport_input();
+                    return;
+                }
+                ViewportInput::PointerUp { .. }
+                    if self.pull_drag.is_some() =>
+                {
+                    self.end_pull_drag();
+                    self.finalize_viewport_input();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let Some(engine) = &mut self.engine else { return };
 
         match input {
@@ -446,11 +849,31 @@ impl App {
                                 }
                             }
                             VisoCommand::ClearSelection => {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                if let Some(orch) =
+                                    self.router.orchestrator.as_mut()
+                                {
+                                    for (rid, entry) in &self.active_streams {
+                                        if let Err(e) = orch
+                                            .dispatch_cancel_stream(
+                                                &entry.plugin_id,
+                                                *rid,
+                                            )
+                                        {
+                                            log::warn!(
+                                                "dispatch_cancel_stream \
+                                                 plugin={} rid={rid} \
+                                                 failed: {e}",
+                                                entry.plugin_id
+                                            );
+                                        }
+                                    }
+                                }
                                 self.router.cancel_operations(engine, &mut self.store);
                             }
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                                 engine.execute(cmd);
-                                self.router.update_rosetta_locks(engine, &self.store);
+                                // (lock update deferred — see comment above)
                                 self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
                             }
                             other => { engine.execute(other); }
@@ -468,32 +891,422 @@ impl App {
         self.router.ui_dirty |= DirtyFlags::UI;
 
         // Update drag/pull/band visualizations after input
-        update_all_visualizations(engine, &self.router);
+        #[cfg(not(target_arch = "wasm32"))]
+        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        #[cfg(target_arch = "wasm32")]
+        let pull: Option<viso::PullInfo> = None;
+        update_all_visualizations(engine, &self.router, pull);
+        self.pump_pending_broadcasts();
+    }
+
+    /// Called after the pull-drag interception path. Mirrors the
+    /// trailing cleanup the regular `handle_viewport_input` flow does
+    /// (visualizations + broadcast pump) without double-running the
+    /// match-arm body. Pre-snapshots the pull info so the engine
+    /// borrow doesn't overlap with `&self.pull_drag`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finalize_viewport_input(&mut self) {
+        self.router.ui_dirty |= DirtyFlags::UI;
+        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        if let Some(engine) = self.engine.as_mut() {
+            update_all_visualizations(engine, &self.router, pull);
+        }
+        self.pump_pending_broadcasts();
+    }
+
+    /// Pointer-down on an atom: classify the pick, dispatch the matching
+    /// pull op-id, install drag state, and feed viso the initial
+    /// PullInfo. Returns true if a drag was initiated (so the caller
+    /// suppresses the regular viso input flow), false otherwise.
+    ///
+    /// Rejected picks (non-protein entity, hydrogen atom, no atom under
+    /// the cursor, dispatch failure) leave `self.pull_drag = None`
+    /// and return false, letting the click fall through to camera /
+    /// selection handling.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
+        use foldit_runner::orchestrator::{
+            EntityId as RunnerEntityId, ResidueRef,
+            SessionContext as RunnerSessionContext, TransitionKind,
+        };
+
+        let Some(engine) = self.engine.as_ref() else { return false };
+        let target = engine.hovered_target();
+        let store = &self.store;
+        let route = match target {
+            viso::PickTarget::Atom { entity_id, atom_idx } => {
+                crate::pull_drag::route_atom_pick(store, entity_id, atom_idx)
+            }
+            viso::PickTarget::Residue(flat) => engine
+                .picked_residue_atom(flat, (x, y))
+                .and_then(|picked| {
+                    let molex_id = store
+                        .ids()
+                        .find(|id| id.raw() == picked.entity_id)?;
+                    crate::pull_drag::route_residue_pick(
+                        store,
+                        flat,
+                        &picked.atom_name,
+                        molex_id,
+                        picked.local_residue,
+                    )
+                }),
+            viso::PickTarget::None => None,
+        };
+        let Some(route) = route else { return false };
+
+        let params = crate::pull_drag::build_start_params(&route);
+        let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
+
+        let ctx = RunnerSessionContext {
+            focused_entity_id: Some(RunnerEntityId(u64::from(route.entity_id.raw()))),
+            selection: vec![ResidueRef {
+                entity_id: RunnerEntityId(u64::from(route.entity_id.raw())),
+                residue_index: route.residue_in_entity,
+            }],
+        };
+
+        let Some(orch) = self.router.orchestrator.as_mut() else { return false };
+        let Some(cached) = orch.plugin_registry().get_op(route.op_id).cloned() else {
+            log::warn!(
+                "try_begin_pull_drag: op id {:?} missing from registry",
+                route.op_id,
+            );
+            return false;
+        };
+        let plugin_id = cached.plugin_id.clone();
+
+        let (rid, handle) = match orch.dispatch_start_stream(
+            route.op_id,
+            ctx,
+            params,
+            |_| None,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(
+                    "try_begin_pull_drag: dispatch_start_stream {:?} failed: {e}",
+                    route.op_id,
+                );
+                return false;
+            }
+        };
+
+        // History side-effect — same shape as button-driven dispatch
+        // so the drag's eventual commit_action lands as a regular
+        // PluginOp entry. Failure is non-fatal (commit_action becomes
+        // a no-op on an idle store).
+        let action_entity = self
+            .store
+            .ids()
+            .find(|id| id.raw() == route.entity_id.raw());
+        if let Some(entity) = action_entity {
+            let kind = CheckpointKind::PluginOp {
+                entity,
+                plugin_id: plugin_id.clone(),
+                op_id: String::from(route.op_id),
+                display: String::from("Pull"),
+            };
+            if let Err(e) =
+                self.store.begin_action(kind, String::from("Pull"))
+            {
+                log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
+            }
+        }
+
+        let _ = self.active_streams.insert(
+            rid,
+            ActiveStreamEntry {
+                handle,
+                plugin_id: plugin_id.clone(),
+                transition: TransitionKind::default(),
+            },
+        );
+        self.pull_drag = Some(crate::pull_drag::PullDrag {
+            request_id: rid,
+            plugin_id,
+            pull_info,
+        });
+        true
+    }
+
+    /// Pointer-move during an active drag: re-resolve the world-space
+    /// drag target through the camera, and push a single-key
+    /// `endpoint` Vec3 update to the running stream. Also refreshes
+    /// `pull_info.screen_target` so the next visualization pass moves
+    /// the cone tip with the cursor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn update_pull_drag(&mut self, x: f32, y: f32) {
+        use foldit_runner::orchestrator::ParamValue;
+
+        let Some(drag) = self.pull_drag.as_mut() else { return };
+        drag.pull_info.screen_target = (x, y);
+
+        let (residue, atom_name, plugin_id, request_id) = (
+            drag.pull_info.atom.residue,
+            drag.pull_info.atom.atom_name.clone(),
+            drag.plugin_id.clone(),
+            drag.request_id,
+        );
+
+        let Some(engine) = self.engine.as_ref() else { return };
+        let Some(atom_pos) = engine.resolve_atom_position(residue, &atom_name)
+        else {
+            return;
+        };
+        let target =
+            engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
+
+        let Some(orch) = self.router.orchestrator.as_ref() else { return };
+        let mut params = std::collections::HashMap::new();
+        let _ = params.insert(
+            String::from("endpoint"),
+            ParamValue::Vec3([target.x, target.y, target.z]),
+        );
+        if let Err(e) = orch.dispatch_update_stream(&plugin_id, request_id, params)
+        {
+            log::trace!(
+                "update_pull_drag: dispatch_update_stream rid={request_id} failed: {e}"
+            );
+        }
+    }
+
+    /// Pointer-up (or any cancel signal): tear down the drag state
+    /// and ask the orchestrator to cancel the stream. The stream's
+    /// terminal `Error{STREAM_CANCELLED}` flows through
+    /// `apply_backend_updates` → `commit_action` per the
+    /// cancel-as-commit semantics, so the partial pull becomes a
+    /// permanent undo entry.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn end_pull_drag(&mut self) {
+        let Some(drag) = self.pull_drag.take() else { return };
+        let Some(orch) = self.router.orchestrator.as_ref() else { return };
+        if let Err(e) =
+            orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id)
+        {
+            log::trace!(
+                "end_pull_drag: dispatch_cancel_stream rid={} failed: {e}",
+                drag.request_id,
+            );
+        }
     }
 
     pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
-        // Undo / Redo intercept the dispatch chain because they need
-        // &mut self to call store + engine; the router can't reach
-        // those fields.
+        // Undo / Redo are not plugin ops -- they operate on the
+        // EntityStore history directly, with `&mut self` to reach
+        // both store + engine.
         match action {
-            foldit_gui::ActionId::Undo => {
-                self.handle_undo();
-                return;
-            }
-            foldit_gui::ActionId::Redo => {
-                self.handle_redo();
-                return;
-            }
-            _ => {}
+            foldit_gui::ActionId::Undo => self.handle_undo(),
+            foldit_gui::ActionId::Redo => self.handle_redo(),
         }
-        if let Some(engine) = &mut self.engine {
-            if let Some(pa) = self.router.handle_trigger_action(engine, &mut self.store, action) {
-                self.handle_parameterized_action(pa);
+        self.pump_pending_broadcasts();
+    }
+
+    /// Dispatch a plugin op by op-id. Resolves the op against the
+    /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
+    /// builds a `SessionContext` from the GUI-provided focus +
+    /// selection. Op-ids unknown to the registry are logged and
+    /// dropped (the catalog couldn't have surfaced them, so this is
+    /// either a stale GUI cache or a misrouted message).
+    pub fn handle_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use foldit_runner::orchestrator::{
+                EntityId as RunnerEntityId, OpKind, ResidueRef,
+                SessionContext as RunnerSessionContext,
+            };
+
+            let Some(orch) = self.router.orchestrator.as_mut() else {
+                log::warn!(
+                    "handle_dispatch_op({:?}): orchestrator not initialized",
+                    op.op_id
+                );
+                return;
+            };
+
+            let Some(cached) =
+                orch.plugin_registry().get_op(&op.op_id).cloned()
+            else {
+                log::warn!(
+                    "handle_dispatch_op: op-id {:?} not in registry",
+                    op.op_id
+                );
+                return;
+            };
+
+            // Resolve display label + animation preset from the
+            // manifest catalog. Falls back to the op id + Smooth when
+            // the op isn't surfaced as a button (the dispatcher still
+            // routes; the history entry just shows the op id, and
+            // animation gets the host default).
+            let (display, transition) = orch
+                .ops_catalog()
+                .into_iter()
+                .find(|e| e.plugin_id == cached.plugin_id && e.op_id == op.op_id)
+                .map_or_else(
+                    || {
+                        (
+                            op.op_id.clone(),
+                            foldit_runner::orchestrator::TransitionKind::default(),
+                        )
+                    },
+                    |e| (e.display, e.transition),
+                );
+            let plugin_id = cached.plugin_id.clone();
+
+            let ctx = RunnerSessionContext {
+                focused_entity_id: op.focused_entity_id.map(RunnerEntityId),
+                selection: op
+                    .selection
+                    .iter()
+                    .map(|r| ResidueRef {
+                        entity_id: RunnerEntityId(r.entity_id),
+                        residue_index: r.residue_index,
+                    })
+                    .collect(),
+            };
+            let params = std::collections::HashMap::new();
+
+            let dispatch_outcome: Result<
+                OpOutcome,
+                String,
+            > = match cached.kind {
+                OpKind::Invoke => orch
+                    .dispatch_invoke(&op.op_id, ctx, params, |_| None)
+                    .map(OpOutcome::Invoke)
+                    .map_err(|e| e.to_string()),
+                OpKind::Stream => orch
+                    .dispatch_start_stream(&op.op_id, ctx, params, |_| None)
+                    .map(|(rid, handle)| OpOutcome::Stream { rid, handle })
+                    .map_err(|e| e.to_string()),
+            };
+            let _ = orch;
+
+            // Resolve which entity this op targets. The focused entity
+            // wins; otherwise pick the lone protein in the head
+            // checkpoint. For multi-entity sessions with no focus we
+            // skip the history side-effect entirely (the action still
+            // runs plugin-side, the viewport just won't reflect the
+            // tentative until a per-op multi-entity action kind
+            // exists). `EntityId` is opaque — look the raw u32 up
+            // against the store's existing ids instead of minting a
+            // new one (which would advance the allocator).
+            let action_entity = op
+                .focused_entity_id
+                .and_then(|raw| {
+                    self.store
+                        .ids()
+                        .find(|id| u64::from(id.raw()) == raw)
+                })
+                .or_else(|| first_protein_entity(&self.store));
+
+            if let Some(entity) = action_entity {
+                let kind = CheckpointKind::PluginOp {
+                    entity,
+                    plugin_id: plugin_id.clone(),
+                    op_id: op.op_id.clone(),
+                    display: display.clone(),
+                };
+                if let Err(e) = self.store.begin_action(kind, display) {
+                    log::trace!(
+                        "handle_dispatch_op({:?}): begin_action skipped: {e}",
+                        op.op_id
+                    );
+                }
             }
+
+            match dispatch_outcome {
+                Ok(OpOutcome::Stream { rid, handle }) => {
+                    let _ = self.active_streams.insert(
+                        rid,
+                        ActiveStreamEntry {
+                            handle,
+                            plugin_id,
+                            transition,
+                        },
+                    );
+                }
+                Ok(OpOutcome::Invoke(bytes)) => {
+                    self.apply_invoke_result(&bytes, transition);
+                }
+                Err(e) => {
+                    // Dispatch failed: roll back the tentative we just
+                    // started so the lane stays clean.
+                    if self.store.has_ongoing_action() {
+                        let _ = self.store.commit_action();
+                    }
+                    log::error!(
+                        "handle_dispatch_op({:?}): dispatch failed: {e}",
+                        op.op_id
+                    );
+                }
+            }
+            self.router.ui_dirty |=
+                DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
+            self.pump_pending_broadcasts();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = op;
+        }
+    }
+
+    /// Apply the assembly bytes returned by a one-shot `dispatch_invoke`
+    /// to the ongoing tentative and commit it. Mirrors the Stream-side
+    /// `Final` path; called from `handle_dispatch_op` for `OpKind::Invoke`.
+    /// `transition` is the manifest-declared animation preset, queued on
+    /// the locked entity right before `publish_to` so the result eases
+    /// in rather than snapping.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_invoke_result(
+        &mut self,
+        bytes: &[u8],
+        transition: foldit_runner::orchestrator::TransitionKind,
+    ) {
+        let assembly = match molex::ops::wire::deserialize_assembly(bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("dispatch_invoke: decode failed: {e:?}");
+                if self.store.has_ongoing_action() {
+                    let _ = self.store.commit_action();
+                }
+                return;
+            }
+        };
+        let applied =
+            apply_streaming_assembly(&mut self.store, &assembly, None);
+        if applied {
+            let entity = self.store.history().ongoing().locked_entity();
+            if let Err(e) = self.store.commit_action() {
+                log::warn!("dispatch_invoke: commit_action failed: {e}");
+            }
+            if let Some(engine) = self.engine.as_mut() {
+                if let Some(eid) = entity {
+                    engine.queue_entity_transition(
+                        eid.raw(),
+                        resolve_transition(transition),
+                    );
+                }
+                self.store.publish_to(engine);
+            }
+            self.router.ui_dirty |=
+                DirtyFlags::SCENE | DirtyFlags::HISTORY;
+        } else if self.store.has_ongoing_action() {
+            // Nothing matched (e.g. plugin returned an empty / unrelated
+            // assembly): drop the tentative.
+            let _ = self.store.commit_action();
         }
     }
 
     pub fn handle_parameterized_action(
+        &mut self,
+        action: foldit_gui::ParameterizedAction,
+    ) {
+        self.handle_parameterized_action_inner(action);
+        self.pump_pending_broadcasts();
+    }
+
+    fn handle_parameterized_action_inner(
         &mut self,
         action: foldit_gui::ParameterizedAction,
     ) {
@@ -502,6 +1315,14 @@ impl App {
         // History-side commands take &mut self (no engine borrow held).
         if let ParameterizedAction::History { cmd } = action {
             self.run_history_command(cmd);
+            return;
+        }
+
+        // Bubble cursor advance is engine-independent — handle before
+        // the engine borrow so it works whether or not a puzzle's wgpu
+        // surface is live.
+        if let ParameterizedAction::AdvanceBubble { back } = action {
+            self.advance_bubble(back);
             return;
         }
 
@@ -531,6 +1352,8 @@ impl App {
                         self.puzzle_title = name;
                         self.starting_score = 0.0;
                         self.target_score = 0.0;
+                        self.puzzle_bubbles.clear();
+                        self.current_bubble = 0;
                         self.router.ui_dirty |=
                             DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::PUZZLE;
                     }
@@ -552,6 +1375,8 @@ impl App {
                         self.puzzle_title = puzzle_data.name.clone();
                         self.starting_score = puzzle_data.start_energy;
                         self.target_score = puzzle_data.completion_score;
+                        self.puzzle_bubbles = puzzle_data.bubbles;
+                        self.current_bubble = 0;
 
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(preset_name) = &puzzle_data.view_preset {
@@ -594,12 +1419,13 @@ impl App {
                             self.store.register_loaded(first_id, backbone_ca);
                         }
 
-                        // Recreate Rosetta session for the new topology so cycle-0
-                        // scoring fires immediately and per-residue colors land
-                        // without waiting for a user action.
-                        if !self.router.ensure_rosetta_session(&self.store) {
-                            log::warn!("Failed to create Rosetta session for puzzle {}", puzzle_id);
-                        }
+                        // Rosetta session init via bridge plugin's
+                        // `init` + auto-`update_assembly` fan-out happens
+                        // when the orchestrator's ensure_plugin_registered
+                        // path is invoked for "rosetta" with the new
+                        // assembly (lands when bridge/ wires the eager
+                        // sync path, items 64 + 68).
+                        let _ = puzzle_id;
                     }
                     Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
                 }
@@ -671,7 +1497,8 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 { let _ = (entity_ids, engine); }
             }
-            ParameterizedAction::History { .. } => {
+            ParameterizedAction::History { .. }
+            | ParameterizedAction::AdvanceBubble { .. } => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `ParameterizedAction` (G10): a new
                 // variant without a handler is a compile error.
@@ -679,14 +1506,31 @@ impl App {
         }
     }
 
+    // ── Tutorial-bubble cursor ──
+
+    /// Step the tutorial-bubble cursor and mark the bubble dirty so
+    /// `populate_frontend` re-pushes the new head. Forward saturates at
+    /// `puzzle_bubbles.len()` (one past the end — the GUI sees `None`
+    /// and clears); back saturates at 0.
+    fn advance_bubble(&mut self, back: bool) {
+        if back {
+            self.current_bubble = self.current_bubble.saturating_sub(1);
+        } else if self.current_bubble < self.puzzle_bubbles.len() {
+            self.current_bubble += 1;
+        }
+        self.router.ui_dirty |= DirtyFlags::TEXT_BUBBLE;
+    }
+
     // ── History navigation (Undo / Redo / Jump / Pin) ──
 
     pub fn handle_undo(&mut self) {
         self.run_history_command(HistoryCommand::Undo);
+        self.pump_pending_broadcasts();
     }
 
     pub fn handle_redo(&mut self) {
         self.run_history_command(HistoryCommand::Redo { branch: None });
+        self.pump_pending_broadcasts();
     }
 
     /// Common tail for undo / redo / jump_checkpoint: republish to viso
@@ -716,20 +1560,15 @@ impl App {
         // `set_per_residue_scores` above stays cleared (gray
         // structure). `recreate_session` rebuilds Rosetta's pose from
         // the current `head_assembly()`; the cycle-0 init score lands
-        // back through the normal `BackendUpdate::RosettaCoords` path,
-        // which `apply_ongoing_update`'s idle branch then stamps via
+        // back through the backend update path, which
+        // `apply_ongoing_update`'s idle branch then stamps via
         // `set_head_scores`. Per-residue colors restore via
         // `cache_per_residue_scores`. Same mechanism as load-time
         // scoring — just retriggered on every head move.
-        if let Some(combined) = self.store.combined_assembly_for_backend() {
-            if let Some(orch) = self.router.orchestrator.as_ref() {
-                if let Err(e) = orch.recreate_session(combined.assembly.clone()) {
-                    log::warn!(
-                        "after_head_move: failed to recreate Rosetta session: {e}"
-                    );
-                }
-            }
-        }
+        // Rosetta session refresh after head move flows through the
+        // bridge plugin's `update_assembly` (eager pattern — items 64
+        // + 68). Not wired until bridge/ implementing update_assembly.
+        let _ = self.store.combined_assembly_for_backend();
 
         self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
     }
@@ -818,25 +1657,15 @@ impl App {
         store: &EntityStore,
         entity_id: EntityId,
         focused_entity_id: Option<u32>,
-    ) -> foldit_runner::orchestrator::EntityContextData {
-        use foldit_runner::orchestrator::{EntityContextData, EntityRoleHint};
-
-        let target_role = store.entity_meta(entity_id).map(|(_, r)| r.clone());
-        EntityContextData::from_entities(entities, focused_entity_id, |raw_id| {
-            // Generic case (no focus) uses the *target's* role for every
-            // entity in the slice — preserves the original
-            // `App::build_entity_context` behavior, which always read
-            // `entity_meta(entity_id)` regardless of which entity was
-            // being described.
-            target_role.as_ref().map(|r| {
-                let _ = raw_id;
-                EntityRoleHint {
-                    designable: r.designable,
-                    foldable: r.foldable,
-                    ambient: r.ambient,
-                }
-            })
-        })
+    ) -> foldit_runner::orchestrator::SessionContext {
+        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, SessionContext};
+        let _ = (entities, store);
+        SessionContext {
+            focused_entity_id: focused_entity_id
+                .map(|id| RunnerEntityId(u64::from(id)))
+                .or_else(|| Some(RunnerEntityId(u64::from(entity_id.raw())))),
+            selection: Vec::new(),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -891,27 +1720,13 @@ impl App {
         let entity_context = Self::build_entity_context(
             entities, store, target_id, focused_entity_id,
         );
-        let assembly = entity_context.assembly.clone();
-
-        let designed: Vec<&str> = entity_context.entities.iter()
-            .filter(|e| e.designable)
-            .map(|e| e.chain_id.as_str())
-            .collect();
-        let fixed_chains: Vec<&str> = entity_context.entities.iter()
-            .filter(|e| e.fixed)
-            .map(|e| e.chain_id.as_str())
-            .collect();
-        log::info!(
-            "MPNN entity context: designed={:?}, fixed={:?}",
-            designed, fixed_chains,
-        );
 
         let target_name = store.metadata(target_id)
             .map(|m| m.name.clone())
             .unwrap_or_default();
         log::info!(
-            "Starting sequence design on '{}' ({} entities, T={}, n={})...",
-            target_name, assembly.entities().len(), temperature, num_sequences,
+            "Starting sequence design on '{}' (T={}, n={})...",
+            target_name, temperature, num_sequences,
         );
 
         router.start_op(
@@ -919,13 +1734,28 @@ impl App {
                 target: RunnerEntityId(u64::from(target_id.raw())),
                 op_type: OpType::MLSequenceDesign,
                 entity_context,
-                stop_rosetta_session: false,
                 create_preview_mirror: false,
                 pending_reference_ca: None,
                 kickoff: Box::new(move |orch, ctx| {
-                    orch.design_sequence_with_context(
-                        assembly, temperature, num_sequences, ctx,
-                    )
+                    use foldit_runner::orchestrator::ParamValue;
+                    let mut params = std::collections::HashMap::new();
+                    params.insert(
+                        "temperature".to_string(),
+                        ParamValue::Float(temperature),
+                    );
+                    params.insert(
+                        "num_sequences".to_string(),
+                        ParamValue::Int(num_sequences as i32),
+                    );
+                    // sequence_design is a Query in the plugin protocol
+                    // (read-only, returns candidate sequences). Designed/
+                    // fixed chain encoding flows via SessionContext + the
+                    // plugin's MPNN convention (focused entity → designed,
+                    // selection → fixed). Capture-time population of the
+                    // selection list is not yet wired.
+                    orch.dispatch_query("sequence_design", ctx, params)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 }),
             },
             engine,
@@ -984,25 +1814,23 @@ impl App {
             "Starting structure design (length={}, steps={}, contig='{}')...",
             length, num_steps, contig_str,
         );
-        log::info!(
-            "Passing assembly context ({} info entries, {} entities in assembly)",
-            entity_context.entities.len(),
-            entity_context.assembly.entities().len(),
-        );
-
         let length_owned = length.to_string();
         router.start_op(
             BackendOpRequest {
                 target: RunnerEntityId(u64::from(target_id.raw())),
                 op_type: OpType::MLStructureDesign,
                 entity_context,
-                stop_rosetta_session: false,
                 create_preview_mirror: false,
                 pending_reference_ca: None,
                 kickoff: Box::new(move |orch, ctx| {
-                    orch.design_structure_with_context(
-                        length_owned, num_steps, contig_str, ctx,
-                    )
+                    use foldit_runner::orchestrator::ParamValue;
+                    let mut params = std::collections::HashMap::new();
+                    params.insert("length".to_string(), ParamValue::String(length_owned));
+                    params.insert("contig".to_string(), ParamValue::String(contig_str));
+                    params.insert("num_steps".to_string(), ParamValue::Int(num_steps as i32));
+                    orch.dispatch_invoke("design", ctx, params, |_| None)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 }),
             },
             engine,
@@ -1046,34 +1874,33 @@ impl App {
             return;
         }
 
-        let chains = foldit_runner::orchestrator::chains_from_entities(&collected);
-        if chains.is_empty() {
-            log::warn!("No protein chains found in selected entities");
-            return;
-        }
-
         let total_atoms: usize = collected.iter().map(|e| e.atom_count()).sum();
         log::info!(
             "RF3 prediction (entity picker): {} entities, {} total atoms",
             collected.len(), total_atoms,
         );
 
-        let total_residues: usize = chains.iter().map(|(_, s)| s.len()).sum();
-        log::info!("Starting RoseTTAFold3 prediction for {} residues...", total_residues);
-
         let pending_ca = molex::ops::codec::ca_positions(&collected);
         let entity_context = Self::build_entity_context(collected, store, target_id, None);
+        let num_recycles: i32 = 3;
 
         router.start_op(
             BackendOpRequest {
                 target: RunnerEntityId(u64::from(target_id.raw())),
                 op_type: OpType::MLPredict,
                 entity_context,
-                stop_rosetta_session: true,
                 create_preview_mirror: true,
                 pending_reference_ca: Some(pending_ca),
                 kickoff: Box::new(move |orch, ctx| {
-                    orch.predict_with_context(None, chains, 3, ctx)
+                    use foldit_runner::orchestrator::ParamValue;
+                    let mut params = std::collections::HashMap::new();
+                    params.insert(
+                        "num_recycles".to_string(),
+                        ParamValue::Int(num_recycles),
+                    );
+                    orch.dispatch_invoke("predict", ctx, params, |_| None)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 }),
             },
             engine,
@@ -1090,14 +1917,14 @@ impl App {
     ) {
         if let Some(engine) = &mut self.engine {
             self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, button, pressed);
-            update_all_visualizations(engine, &self.router);
+            update_all_visualizations(engine, &self.router, None);
         }
     }
 
     pub fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
         if let Some(engine) = &mut self.engine {
             self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-            update_all_visualizations(engine, &self.router);
+            update_all_visualizations(engine, &self.router, None);
         }
     }
 
@@ -1125,13 +1952,14 @@ impl App {
     // ── Per-frame visual updates ──
 
     pub fn update_frame_visuals(&mut self) {
+        // Pre-snapshot pull info under an immutable borrow so the
+        // subsequent `&mut engine` doesn't conflict.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        #[cfg(target_arch = "wasm32")]
+        let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else { return };
-
-        // Refresh pull drag position from current atom positions
-        self.router.refresh_pull_position(engine);
-
-        // Update all visualizations (bands, pull, band preview)
-        update_all_visualizations(engine, &self.router);
+        update_all_visualizations(engine, &self.router, pull);
     }
 
     // ── Frontend state sync ──
@@ -1170,6 +1998,18 @@ impl App {
                     },
                 ),
             }
+            // Bubble push on puzzle swap: render the cursor's current
+            // bubble (always index 0 right after LoadPuzzle, since the
+            // cursor is reset there). Subsequent AdvanceBubble actions
+            // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
+            frontend.set_text_bubble(
+                self.puzzle_bubbles.get(self.current_bubble).map(bubble_to_payload),
+            );
+        }
+        if app_dirty.contains(DirtyFlags::TEXT_BUBBLE) {
+            frontend.set_text_bubble(
+                self.puzzle_bubbles.get(self.current_bubble).map(bubble_to_payload),
+            );
         }
         if app_dirty.contains(DirtyFlags::SCORE) {
             if let Some(score) = head_score(&self.store, self.scoring_mode) {
@@ -1304,10 +2144,10 @@ impl App {
         self.engine = Some(engine);
     }
 
-    /// Phase 2: load the initial structure, register entities, and create the
-    /// initial Rosetta session. Runs AFTER the webview's loading screen is
-    /// visible so the user has feedback during the (potentially slow) load.
-    /// Requires `create_render_context` to have run first.
+    /// Load the initial structure, register entities, and create the
+    /// initial Rosetta session. Runs AFTER the webview's loading screen
+    /// is visible so the user has feedback during the (potentially
+    /// slow) load. Requires `create_render_context` to have run first.
     pub fn load_initial_structure(&mut self) {
         // Take engine out so we can hold a `&mut engine` alongside `&mut self.store`
         // etc. without borrow-checker grief; restored at end.
@@ -1344,18 +2184,17 @@ impl App {
                     self.store.register_loaded(first_id, backbone_ca);
                 }
 
-                let mut orchestrator = Orchestrator::new();
-
-                // Register entity triple buffers for each loaded entity
-                for &eid in &ids {
-                    orchestrator.register_entity(u64::from(eid.raw()));
-                }
-                // Set first entity as the active update target
-                if let Some(&first_id) = ids.first() {
-                    orchestrator.set_update_target(u64::from(first_id.raw()));
-                }
-
-                self.router.orchestrator = Some(orchestrator);
+                // Plugin streaming updates land via plugin_update_rx;
+                // canonical state is the EntityStore.
+                let _ = &ids;
+                let mut orch = Orchestrator::new();
+                bootstrap_plugins(&mut orch, &self.store);
+                refresh_scores(
+                    &mut orch,
+                    &mut self.store,
+                    Some(&mut engine),
+                );
+                self.router.orchestrator = Some(orch);
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", self.pdb_path, e);
@@ -1365,13 +2204,16 @@ impl App {
 
         self.engine = Some(engine);
 
-        if self.router.ensure_rosetta_session(&self.store) {
-            log::info!("Rosetta session created, will receive score asynchronously");
-        } else {
-            log::warn!("Failed to create initial Rosetta session");
-        }
-
-        self.router.ui_dirty |= DirtyFlags::VIEW;
+        // Push the now-populated state to the GUI on the next frame:
+        // VIEW for the engine options, ACTIONS so the catalog (wiggle
+        // etc.) renders, SCORE so the initial number from
+        // refresh_scores reaches the score widget, SCENE for the
+        // entity list, LOADING to flip out of the loading screen.
+        self.router.ui_dirty |= DirtyFlags::VIEW
+            | DirtyFlags::ACTIONS
+            | DirtyFlags::SCORE
+            | DirtyFlags::SCENE
+            | DirtyFlags::LOADING;
     }
 
     /// Shut down backends and scene processor.
@@ -1394,6 +2236,10 @@ impl foldit_gui::Dispatcher for App {
 
     fn on_trigger_action(&mut self, action: foldit_gui::ActionId) {
         self.handle_trigger_action(action);
+    }
+
+    fn on_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
+        self.handle_dispatch_op(op);
     }
 
     fn on_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
@@ -1445,37 +2291,233 @@ impl foldit_gui::Dispatcher for App {
 // Visualization helpers (free functions for split-borrow friendliness)
 // ---------------------------------------------------------------------------
 
-/// Update all drag/pull/band visualizations from router state.
-fn update_all_visualizations(engine: &mut VisoEngine, router: &ActionRouter) {
-    // Build band render infos using AtomRef-based BandInfo
-    let mut band_infos = action_router::build_band_infos(router.active_bands());
+/// Update drag/pull/band visualizations. Bands are still inert (the
+/// band-router state machine is the next item to come back online).
+/// The pull capsule + cone arrow renders whenever the caller hands a
+/// `Some(PullInfo)` from a live drag; clears otherwise so a finished
+/// or cancelled drag leaves no overlay.
+fn update_all_visualizations(
+    engine: &mut VisoEngine,
+    _router: &ActionRouter,
+    pull: Option<viso::PullInfo>,
+) {
+    engine.update_bands(vec![]);
+    engine.update_pull(pull);
+}
 
-    // Add band drag preview if active
-    if let Some((start_residue, start_atom_name, target_pos)) = router.band_drag_preview(engine) {
-        band_infos.push(BandInfo {
-            anchor_a: AtomRef { residue: start_residue, atom_name: start_atom_name },
-            anchor_b: BandTarget::Position(target_pos),
-            is_pull: true,
-            is_push: false,
-            is_disabled: false,
-            strength: 1.0,
-            target_length: 0.0,
-            band_type: None,
-            from_script: false,
-        });
+/// Locate the runtime plugins directory.
+///
+/// Resolution order:
+///   1. `FOLDIT_PLUGINS_ROOT` environment override (production /
+///      bundled deployments point this at the bundle's plugins dir).
+///   2. `<exe_dir>/plugins/` if it exists (bundle layout).
+///   3. Walk up from `current_exe()` looking for
+///      `crates/foldit-runner/plugins/` (dev workflow under cargo).
+///
+/// Returns `None` if none of these resolve. The caller logs and skips
+/// plugin discovery in that case -- the desktop app degrades to viewer-
+/// only mode rather than failing the load.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
+    if let Some(env) = std::env::var_os("FOLDIT_PLUGINS_ROOT") {
+        let p = std::path::PathBuf::from(env);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    if let Some(dir) = exe.parent() {
+        let bundle = dir.join("plugins");
+        if bundle.is_dir() {
+            return Some(bundle);
+        }
+    }
+    let mut cursor = exe.parent()?.to_path_buf();
+    loop {
+        let candidate =
+            cursor.join("crates/foldit-runner/plugins");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !cursor.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Discover plugins under the runtime plugin root and bring up the
+/// always-on Rosetta session with the just-loaded structure as the
+/// initial assembly. Errors are logged and dropped: a missing plugin
+/// dir / dylib should degrade the app to viewer-only, not crash the
+/// load.
+#[cfg(not(target_arch = "wasm32"))]
+fn bootstrap_plugins(orch: &mut Orchestrator, store: &EntityStore) {
+    let Some(plugins_root) = locate_plugins_root() else {
+        log::warn!(
+            "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
+             from a workspace checkout); plugins disabled"
+        );
+        return;
+    };
+    log::info!(
+        "[App] discovering plugins under {}",
+        plugins_root.display()
+    );
+    let discovered = match orch.discover_plugins(&plugins_root) {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::warn!(
+                "[App] discover_plugins({}) failed: {e}; plugins disabled",
+                plugins_root.display()
+            );
+            return;
+        }
+    };
+    log::info!("[App] discovered plugins: {discovered:?}");
+
+    if !discovered.iter().any(|id| id == "rosetta") {
+        return;
+    }
+    let initial_assembly = molex::ops::wire::serialize_assembly(
+        &store.head_assembly(),
+    );
+    let initial_assembly = match initial_assembly {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!(
+                "[App] failed to serialize initial assembly for rosetta: \
+                 {e:?}; rosetta plugin disabled"
+            );
+            return;
+        }
+    };
+    if let Err(e) =
+        orch.ensure_plugin_registered("rosetta", initial_assembly)
+    {
+        log::warn!(
+            "[App] ensure_plugin_registered('rosetta') failed: {e}; \
+             rosetta plugin disabled"
+        );
+        return;
+    }
+    log::info!("[App] rosetta plugin ready");
+}
+
+/// Fan out the well-known `score` query across every plugin that
+/// registered it, merge totals into the head checkpoint, and push
+/// per-residue scores to the render engine for color-by-score modes.
+///
+/// Called once at bootstrap (flips `has_initial_score()`, opening the
+/// loading gate) and again after every host-originated broadcast (so
+/// post-edit rescores update both the score widget and the residue
+/// colors).
+///
+/// Today only Rosetta returns a non-trivial report. When more scorers
+/// come online the merge becomes app-wide -- the host stays generic
+/// either way.
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_scores(
+    orch: &mut Orchestrator,
+    store: &mut EntityStore,
+    engine: Option<&mut VisoEngine>,
+) {
+    use foldit_runner::orchestrator::SessionContext;
+
+    let reports = orch.collect_scores(&SessionContext::default());
+    if reports.is_empty() {
+        return;
     }
 
-    // Update bands
-    engine.update_bands(band_infos);
+    use std::collections::HashMap;
 
-    // Update pull visualization
-    if let Some((residue, atom_name, screen_target)) = router.pull_drag_info_for_viso() {
-        engine.update_pull(Some(PullInfo {
-            atom: AtomRef { residue, atom_name },
-            screen_target,
-        }));
-    } else {
-        engine.update_pull(None);
+    let mut total: Option<f64> = None;
+    // entity_id -> Vec<(residue_index, score)>; merged across all
+    // reporting plugins (later writers stack on top of earlier ones
+    // for now -- when multiple plugins score per-residue we'll need a
+    // merge strategy choice).
+    let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
+    for (plugin_id, report) in &reports {
+        if total.is_none() {
+            total = Some(f64::from(report.total));
+        }
+        log::info!(
+            "[App] score from {plugin_id}: total={} terms={} per_residue={}",
+            report.total,
+            report.terms.len(),
+            report.per_residue.len()
+        );
+        for rs in &report.per_residue {
+            let Some(rref) = rs.residue.as_ref() else { continue };
+            #[allow(clippy::cast_possible_truncation)]
+            let entity_id = rref.entity_id as u32;
+            per_entity.entry(entity_id).or_default().push((
+                rref.residue_index,
+                f64::from(rs.score),
+            ));
+        }
+    }
+    if let Some(t) = total {
+        // Convert the rosetta raw score (REU) to foldit's game-mode
+        // display. Verbatim port of the
+        // `rosetta_score_to_game_score_either(use_minimum=true,
+        // internal=false)` branch at
+        // `external/rosetta-interactive/source/src/interactive/
+        // rosetta_util/rosetta_util.cc:2702`, using the constants
+        // declared on lines 2662-2663 + 2664 of the same file.
+        // Bridge-side the converter slot
+        // (`rosetta_score_to_game_score`) is null because nothing in
+        // the new plugin-host architecture calls
+        // `register_score_functions`; doing the linear map here is
+        // the right home anyway -- the formula is universal foldit
+        // policy, not rosetta-specific, and lives next to the
+        // `ScoringMode` selector that decides which view reaches the
+        // GUI.
+        const SCORE_OFFSET: f64 = 800.0;
+        const SCORE_SCALE: f64 = 10.0;
+        const SCORE_MINIMUM: f64 = 0.0;
+        let raw = t;
+        let game = ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM);
+        store.set_head_scores(Some(raw), Some(game));
+    }
+
+    // Push per-residue scores into the engine so Score / ScoreRelative
+    // color schemes have data. Each entity's score Vec is sized to
+    // its full residue count; missing residues default to 0.0 (the
+    // mid-palette stop in absolute mode, the lower quantile in
+    // relative mode -- close enough for a first-pass render).
+    let Some(engine) = engine else { return };
+    // Build (raw_entity_id -> residue_count) once via head_assembly so
+    // we don't need a mut borrow on store to mint molex EntityIds.
+    let head = store.head_assembly();
+    let residue_counts: HashMap<u32, usize> = head
+        .entities()
+        .iter()
+        .map(|e| (e.id().raw(), e.residue_count()))
+        .collect();
+    for (entity_id, mut entries) in per_entity {
+        let Some(&residue_count) = residue_counts.get(&entity_id) else {
+            log::warn!(
+                "[App] per-residue scores arrived for unknown entity \
+                 {entity_id} (host has entities {:?})",
+                residue_counts.keys().collect::<Vec<_>>()
+            );
+            continue;
+        };
+        let mut scores = vec![0.0_f64; residue_count];
+        entries.sort_unstable_by_key(|(idx, _)| *idx);
+        let entry_count = entries.len();
+        for (idx, val) in entries {
+            let i = idx as usize;
+            if i < scores.len() {
+                scores[i] = val;
+            }
+        }
+        log::info!(
+            "[App] applied {entry_count} per-residue scores to viso entity \
+             {entity_id} (residue_count={residue_count})"
+        );
+        engine.set_per_residue_scores(entity_id, Some(scores));
     }
 }
 

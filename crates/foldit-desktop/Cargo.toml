@@ -13,11 +13,11 @@ path = "src/main.rs"
 # Workspace crates
 foldit-core = { path = "../foldit-core" }
 foldit-gui = { path = "../foldit-gui" }
-foldit-runner = { path = "../foldit-runner", default-features = false, features = ["python"] }
+foldit-runner = { path = "../foldit-runner" }
 
 # External deps
-viso = { git = "https://github.com/petridecus/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.3.0", features = ["serde", "specta"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
+molex = { version = "0.4.2", features = ["serde", "specta"] }
 
 anyhow = "1.0"
 
@@ -57,3 +57,4 @@ base64 = "0.22"
 
 [dev-dependencies]
 proptest = "1"
+tempfile = "3.10"

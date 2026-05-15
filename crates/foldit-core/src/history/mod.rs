@@ -1,9 +1,5 @@
 //! Undo / redo history: per-entity timelines + a unified checkpoint graph.
 //!
-//! See `docs/undo-strategy.md` for the design contract and
-//! `docs/undo-fix-plan.md` § 2 for the build-order section that lands these
-//! types. The short version:
-//!
 //! Two cooperating DAGs.
 //!
 //! 1. **Entity timelines** ("swim lanes") — each [`EntityId`] has its own
@@ -18,20 +14,20 @@
 //!
 //! **Cross-DAG invariant.** For every `e ∈ keys(checkpoint_head.entity_heads)`,
 //! `checkpoint_head.entity_heads[e] == lane_head(e)`. Asserted at the tail of
-//! every DAG-bearing event under `debug_assertions` (G8 in the fix plan).
+//! every DAG-bearing event under `debug_assertions`.
 //!
 //! **Single record root.** Every checkpoint-bearing event funnels through
 //! the private [`History::record`]; the public methods are thin shims
 //! that build a [`HistoryEvent`] variant and delegate. Per-cycle byte
 //! mutation (`action_update`) and curation (pin / unpin / exclude / budget)
-//! do not change DAG topology and do not go through the root (G3).
+//! do not change DAG topology and do not go through the root.
 //!
 //! **Lock layering.** `History` enforces only the *action lock* — refusing
 //! navigation/mutation that would touch the entity held by an in-flight
 //! [`OngoingState::Active`]. Multi-client locks (Orchestrator-owned
 //! `LockSet`, including the case where the runner is server-side and clients
-//! are remote) are layered above by `EntityStore` in section 3 of the fix
-//! plan; do not push them into this module.
+//! are remote) are layered above by `EntityStore`; do not push them into
+//! this module.
 
 use std::borrow::Cow;
 use std::collections::HashSet;

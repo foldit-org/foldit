@@ -38,7 +38,9 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 
 use foldit_core::App;
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
-use foldit_gui::{ActionId, Dispatcher, FrontendState, ParameterizedAction, ViewportInput};
+use foldit_gui::{
+    ActionId, Dispatcher, FrontendState, OpDispatch, ParameterizedAction, ViewportInput,
+};
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
 
@@ -170,6 +172,16 @@ impl FolditApp {
         let action: ParameterizedAction = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("parameterized_action parse: {e}")))?;
         self.app.borrow_mut().on_parameterized_action(action);
+        Ok(())
+    }
+
+    /// Forward a catalog-driven plugin op dispatch. `json` is the
+    /// JSON-encoded `OpDispatch` payload.
+    #[wasm_bindgen(js_name = dispatchOp)]
+    pub fn dispatch_op(&self, json: &str) -> Result<(), JsValue> {
+        let op: OpDispatch = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("dispatch_op parse: {e}")))?;
+        self.app.borrow_mut().on_dispatch_op(op);
         Ok(())
     }
 

@@ -170,15 +170,6 @@ fn bundle_web() -> Result<()> {
     Ok(())
 }
 
-fn python_lib_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    { "python312.dll" }
-    #[cfg(target_os = "macos")]
-    { "libpython3.12.dylib" }
-    #[cfg(target_os = "linux")]
-    { "libpython3.12.so" }
-}
-
 fn setup_ml() -> Result<()> {
     println!("Setting up ML environments (foundry + simplefold)...");
     let status = Command::new("pixi")
@@ -193,59 +184,21 @@ fn setup_ml() -> Result<()> {
     // `cargo xtask build-molex` separately. Don't force a local
     // rebuild here — it's only needed when actively developing molex.
 
-    // Copy Python shared library to assets/libs/ (mirrors the Rosetta pattern).
-    // All pixi envs share the same Python 3.12 runtime, so we just need to find
-    // any installed env (GPU or CPU variant).
-    let pixi_envs_dir = Path::new("crates/foldit-runner/.pixi/envs");
-    let candidate_envs = ["foundry", "foundry-cpu", "simplefold", "simplefold-cpu"];
-    let lib_name = python_lib_name();
-
-    let python_lib_src = candidate_envs.iter().find_map(|env_name| {
-        let env_path = pixi_envs_dir.join(env_name);
-        #[cfg(target_os = "windows")]
-        let lib_path = env_path.join(lib_name);
-        #[cfg(not(target_os = "windows"))]
-        let lib_path = env_path.join("lib").join(lib_name);
-        if lib_path.exists() { Some(lib_path) } else { None }
-    });
-
-    if let Some(python_lib_src) = python_lib_src {
-        std::fs::create_dir_all("assets/libs")?;
-        let python_lib_dst = format!("assets/libs/{}", lib_name);
-        std::fs::copy(&python_lib_src, &python_lib_dst)?;
-        println!("Copied {} -> {}", python_lib_src.display(), python_lib_dst);
-    } else {
-        println!(
-            "Warning: Python library ({}) not found in any pixi env (expected after pixi setup)",
-            lib_name
-        );
-    }
-
-    // On Windows, also copy the import library if present (for future link-time use)
-    #[cfg(target_os = "windows")]
-    {
-        let import_lib_src = candidate_envs.iter().find_map(|env_name| {
-            let path = pixi_envs_dir.join(env_name).join("libs").join("python312.lib");
-            if path.exists() { Some(path) } else { None }
-        });
-        if let Some(import_lib_src) = import_lib_src {
-            let import_lib_dst = "assets/libs/python312.lib";
-            std::fs::copy(&import_lib_src, import_lib_dst)?;
-            println!("Copied {} -> {}", import_lib_src.display(), import_lib_dst);
-        }
-    }
+    // libpython is brought into the process via foldit-python-host's
+    // build.rs (resolves via $CONDA_PREFIX or .pixi/envs/<env>/lib);
+    // no host-binary link path, no copy to assets/libs/.
 
     // Build the worker binary so it's next to the main executable.
     // Without this, MLClient::new() fails at runtime because
-    // find_worker_binary() can't locate foldit-runner-worker.
+    // find_worker_binary() can't locate foldit-worker.
     // Scope to -p foldit-runner so the build doesn't drag foldit's
     // viso/wgpu dep graph into a backend-only binary.
-    println!("Building foldit-runner-worker binary...");
+    println!("Building foldit-worker binary...");
     let status = Command::new("cargo")
-        .args(["build", "-p", "foldit-runner", "--bin", "foldit-runner-worker"])
+        .args(["build", "-p", "foldit-runner", "--bin", "foldit-worker"])
         .status()?;
     if !status.success() {
-        anyhow::bail!("Failed to build foldit-runner-worker");
+        anyhow::bail!("Failed to build foldit-worker");
     }
 
     println!("ML environments setup complete.");
@@ -281,20 +234,59 @@ fn build_rosetta_interactive() -> Result<()> {
         );
     }
 
+    // Build the molex static lib first; the bridge dylib links against
+    // it for ASSEM01 IO and Assembly walks. Items 68/69 in
+    // crates/foldit-runner/docs/PLUGIN_MIGRATION_PLAN.md. Invoke via
+    // --manifest-path so cargo treats this as a standalone build,
+    // bypassing the workspace resolver. crates/molex is workspace-
+    // excluded; the workspace itself pins published molex ^0.3.0 for
+    // foldit-core, which does not resolve against the in-tree 0.4.x.
+    // Running outside the workspace sidesteps that conflict.
+    println!("Building molex static library (release, c-api feature)...");
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--manifest-path", "crates/molex/Cargo.toml",
+            "--release",
+            "--features", "c-api",
+        ])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build molex static library");
+    }
+    let molex_include = std::fs::canonicalize("crates/molex/include")?;
+    let molex_lib = std::fs::canonicalize("crates/molex/target/release/libmolex.a")?;
+    let molex_include_arg = format!("-DMOLEX_INCLUDE_DIR={}", molex_include.display());
+    let molex_lib_arg = format!("-DMOLEX_STATIC_LIB={}", molex_lib.display());
+
     // Create release directory if needed
     std::fs::create_dir_all(&release_dir)?;
 
-    // Run cmake configure if needed
+    // Run cmake configure if needed. We always pass molex paths even
+    // on subsequent runs (cmake caches them but explicit override
+    // beats stale cache after molex moves).
     let cache_file = format!("{}/CMakeCache.txt", release_dir);
     if !Path::new(&cache_file).exists() {
         println!("Configuring Rosetta cmake build...");
         let status = Command::new("cmake")
-            .args(["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", ".."])
+            .args([
+                "-G", "Ninja",
+                "-DCMAKE_BUILD_TYPE=Release",
+                &molex_include_arg,
+                &molex_lib_arg,
+                "..",
+            ])
             .current_dir(&release_dir)
             .status()?;
         if !status.success() {
             anyhow::bail!("Failed to configure Rosetta cmake build");
         }
+    } else {
+        // Refresh molex cache vars in case the staticlib path changed.
+        let _ = Command::new("cmake")
+            .args([&molex_include_arg, &molex_lib_arg, "."])
+            .current_dir(&release_dir)
+            .status()?;
     }
 
     // Build
@@ -306,33 +298,20 @@ fn build_rosetta_interactive() -> Result<()> {
         anyhow::bail!("Failed to build Rosetta");
     }
 
-    // Copy library into assets/libs/
+    // Copy the dylib into the plugin directory. That's the single
+    // sink: `Orchestrator::discover_plugins` + `spawn_native_worker`
+    // dlopen it from there. No host-binary link path; the foldit-
+    // plugin-vtable contract is the only surface.
     let lib_src = format!("{}/release/bin/{}", cmake_dir, rosetta_lib_name());
-    let lib_dst = format!("assets/libs/{}", rosetta_lib_name());
-    if Path::new(&lib_src).exists() {
-        std::fs::create_dir_all("assets/libs")?;
-        std::fs::copy(&lib_src, &lib_dst)?;
-        println!("Copied {} -> {}", lib_src, lib_dst);
-    } else {
+    if !Path::new(&lib_src).exists() {
         anyhow::bail!("Built library not found at {}", lib_src);
     }
 
-    // On Windows, also copy the import library (.lib) needed for linking at build time
-    #[cfg(target_os = "windows")]
-    {
-        let import_lib_src = format!("{}/release/bin/rosetta_interactive.lib", cmake_dir);
-        let import_lib_dst = "assets/libs/rosetta_interactive.lib";
-        if Path::new(&import_lib_src).exists() {
-            std::fs::copy(&import_lib_src, import_lib_dst)?;
-            println!("Copied {} -> {}", import_lib_src, import_lib_dst);
-        } else {
-            anyhow::bail!(
-                "Import library not found at {}. \
-                 Check that the CMake build produced a .lib file.",
-                import_lib_src
-            );
-        }
-    }
+    let plugin_dir = "crates/foldit-runner/plugins/rosetta";
+    let lib_dst_plugin = format!("{}/{}", plugin_dir, rosetta_lib_name());
+    std::fs::create_dir_all(plugin_dir)?;
+    std::fs::copy(&lib_src, &lib_dst_plugin)?;
+    println!("Copied {} -> {}", lib_src, lib_dst_plugin);
 
     // Copy compact database to assets/database (generated by make_database.py)
     let db_src = format!("{}/cmp-database/database", cmake_dir);
@@ -438,7 +417,7 @@ fn bundle(cpu_only: bool) -> Result<()> {
     // 4. Copy Rust binaries
     let exe_ext = if cfg!(windows) { ".exe" } else { "" };
 
-    let worker_name = format!("foldit-runner-worker{}", exe_ext);
+    let worker_name = format!("foldit-worker{}", exe_ext);
     let worker_src = format!("target/release/{}", worker_name);
     if std::path::Path::new(&worker_src).exists() {
         std::fs::copy(&worker_src, format!("bundle/{}", worker_name))?;
@@ -452,8 +431,12 @@ fn bundle(cpu_only: bool) -> Result<()> {
         println!("Copied {} to bundle.", app_name);
     }
 
-    // 5. Copy Rosetta resources
-    let lib_src = format!("assets/libs/{}", rosetta_lib_name());
+    // 5. Copy Rosetta resources. Source of truth is the plugin
+    // directory, written by `build-rosetta-interactive`.
+    let lib_src = format!(
+        "crates/foldit-runner/plugins/rosetta/{}",
+        rosetta_lib_name()
+    );
 
     if Path::new(&lib_src).exists() {
         println!("Copying Rosetta library...");

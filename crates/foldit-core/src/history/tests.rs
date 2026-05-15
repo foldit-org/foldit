@@ -16,6 +16,7 @@ fn mk_entity(id: EntityId) -> MoleculeEntity {
         b_factor: 0.0,
         element: Element::O,
         name: *b"O   ",
+        formal_charge: 0,
     };
     MoleculeEntity::Bulk(BulkEntity::new(
         id,

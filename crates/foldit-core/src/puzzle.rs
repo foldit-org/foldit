@@ -148,16 +148,52 @@ pub struct PuzzleData {
     pub start_energy: f64,
     /// Completion target from `[puzzle] completion_score` (game units).
     pub completion_score: f64,
+    /// Ordered tutorial bubbles from `[[sequence]]`. Empty for puzzles
+    /// with no intro. Tier-1 wiring pushes `bubbles[0]` to the GUI on
+    /// load; advancement is unimplemented.
+    pub bubbles: Vec<Bubble>,
+}
+
+/// Resolve the absolute path to the `assets/levels` directory by
+/// walking up from the running executable. Stops at the first
+/// ancestor that contains an `assets/levels` directory.
+///
+/// Works in three shapes:
+/// - test binaries (`target/debug/deps/foo-HASH`) → walks up to the
+///   workspace root,
+/// - dev binaries (`target/debug/foo`, `cargo run`) → same,
+/// - installed binaries (`<prefix>/bin/foldit` shipped with sibling
+///   `<prefix>/bin/assets/`) → finds the sibling.
+///
+/// Returns an `Err` if no ancestor carries `assets/levels` — better
+/// than a CWD-dependent silent miss, since the caller can surface the
+/// problem with the actual exe path.
+pub fn levels_root() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe lookup failed: {e}"))?;
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("assets/levels");
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+        dir = d.parent();
+    }
+    Err(format!(
+        "levels_root: no `assets/levels` directory found in any ancestor of {}",
+        exe.display()
+    ))
 }
 
 /// Load a puzzle by ID: parse its TOML and return entities for the engine.
 ///
-/// Looks up `assets/levels/{puzzle_id:010}/puzzle.toml`, resolves the
-/// structure from `[puzzle.structure]` — either via `path` (file reference)
-/// or `data` (base64-encoded inline BinaryCIF).
+/// Looks up `<levels_root>/{puzzle_id:010}/puzzle.toml` (see
+/// [`levels_root`]) and resolves the structure from
+/// `[puzzle.structure]` — either via `path` (file reference) or
+/// `data` (base64-encoded inline BinaryCIF).
 pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
-    let puzzle_dir = PathBuf::from(format!("assets/levels/{:010}", puzzle_id));
-    let puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
+    let puzzle_dir = levels_root()?.join(format!("{:010}", puzzle_id));
+    let mut puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
     let structure = &puzzle.puzzle.structure;
 
     let entities = match (&structure.path, &structure.data) {
@@ -184,12 +220,6 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
                 .map_err(|e| format!("Failed to decode base64 structure data: {}", e))?;
 
             match structure.format.as_str() {
-                "coords" => {
-                    use molex::ops::codec::deserialize;
-                    let coords = deserialize(&raw)
-                        .map_err(|e| format!("Failed to parse COORDS: {:?}", e))?;
-                    molex::ops::codec::split_into_entities(&coords)
-                }
                 "bcif" => {
                     use molex::adapters::bcif::bcif_to_entities;
                     bcif_to_entities(&raw)
@@ -226,6 +256,7 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         camera: puzzle.puzzle.camera,
         start_energy: puzzle.puzzle.start_energy,
         completion_score: puzzle.puzzle.completion_score,
+        bubbles: std::mem::take(&mut puzzle.sequence),
     })
 }
 
@@ -317,8 +348,7 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
     ))
 }
 
-/// Load Coords from a file (auto-detecting format).
-/// Load a structure file and return classified entities.
+/// Load a structure file and return classified entities (auto-detecting format).
 pub fn load_entities_from_file(
     path: &Path,
 ) -> Result<Vec<molex::MoleculeEntity>, String> {
@@ -350,7 +380,7 @@ mod tests {
     use super::*;
 
     fn levels_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/levels")
+        levels_root().expect("levels_root must resolve under cargo test")
     }
 
     #[test]

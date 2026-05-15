@@ -20,6 +20,8 @@
 //!   Right-drag residue to residue - Create band
 //!   Mouse - Rotate/zoom camera
 
+#[cfg(any(not(debug_assertions), test))]
+mod plugin_assets;
 mod tee_logger;
 mod window;
 

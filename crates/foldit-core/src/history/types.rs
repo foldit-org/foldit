@@ -39,6 +39,9 @@ pub enum EntityActionKind {
     Predict,
     /// Promoted from a transient preview (e.g., a streamed ML result).
     PromotedPreview,
+    /// Generic plugin-op effect — identity carried by the matching
+    /// [`CheckpointKind::PluginOp`] checkpoint, not by this enum.
+    PluginOp,
 }
 
 /// User-visible action across the whole assembly. Carried on a
@@ -82,6 +85,18 @@ pub enum CheckpointKind {
     /// `target`; no new snapshot pushed; this checkpoint references the
     /// existing target snapshot.
     LaneUndo { entity: EntityId, target: EntitySnapshotId },
+    /// Plugin-dispatched op on `entity`. Identity carried by
+    /// (`plugin_id`, `op_id`); `display` is the manifest-supplied label
+    /// captured at dispatch time so the history projection doesn't
+    /// have to look the plugin up later (and so the label survives
+    /// plugin reload / removal). This is the plugin-agnostic variant
+    /// — foldit-core records it without enumerating plugin internals.
+    PluginOp {
+        entity: EntityId,
+        plugin_id: String,
+        op_id: String,
+        display: String,
+    },
 }
 
 impl CheckpointKind {
@@ -109,7 +124,8 @@ impl CheckpointKind {
             | CheckpointKind::PromotedPreview { entity, .. }
             | CheckpointKind::AddEntity { entity, .. }
             | CheckpointKind::RemoveEntity { entity, .. }
-            | CheckpointKind::LaneUndo { entity, .. } => Some(*entity),
+            | CheckpointKind::LaneUndo { entity, .. }
+            | CheckpointKind::PluginOp { entity, .. } => Some(*entity),
         }
     }
 
@@ -128,6 +144,7 @@ impl CheckpointKind {
             CheckpointKind::Mpnn { .. } => Some(EntityActionKind::Mpnn),
             CheckpointKind::PromotedPreview { .. } => Some(EntityActionKind::PromotedPreview),
             CheckpointKind::AddEntity { .. } => Some(EntityActionKind::Loaded),
+            CheckpointKind::PluginOp { .. } => Some(EntityActionKind::PluginOp),
             CheckpointKind::RemoveEntity { .. } | CheckpointKind::LaneUndo { .. } => None,
         }
     }
