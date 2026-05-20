@@ -4,16 +4,22 @@ use std::path::Path;
 use std::process::Command;
 
 fn rosetta_interactive_path() -> String {
-    "crates/foldit-runner/external/rosetta-interactive".to_string()
+    "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_string()
 }
 
 fn rosetta_lib_name() -> &'static str {
     #[cfg(target_os = "windows")]
-    { "rosetta_interactive.dll" }
+    {
+        "rosetta_interactive.dll"
+    }
     #[cfg(target_os = "macos")]
-    { "librosetta_interactive.dylib" }
+    {
+        "librosetta_interactive.dylib"
+    }
     #[cfg(target_os = "linux")]
-    { "librosetta_interactive.so" }
+    {
+        "librosetta_interactive.so"
+    }
 }
 
 #[derive(Parser)]
@@ -29,8 +35,6 @@ enum Commands {
     SetupMl,
     /// Build Rosetta from ~/rosetta-interactive
     BuildRosettaInteractive,
-    /// Copy Rosetta resources to bundle (lib + database)
-    SetupRosettaInteractive,
     /// Create distribution bundle
     Bundle {
         #[arg(long)]
@@ -69,7 +73,6 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::SetupMl => setup_ml(),
         Commands::BuildRosettaInteractive => build_rosetta_interactive(),
-        Commands::SetupRosettaInteractive => setup_rosetta_interactive(),
         Commands::Bundle { cpu_only } => bundle(cpu_only),
         Commands::DownloadModels => download_models(),
         Commands::BuildMolex => build_molex(),
@@ -122,8 +125,10 @@ fn build_web(debug: bool) -> Result<()> {
         .env("RUSTFLAGS", WASM_RUSTFLAGS)
         .status()?;
     if !status.success() {
-        anyhow::bail!("cargo build failed for foldit-web (wasm32). \
-            Hint: nightly toolchain required (rustup toolchain install nightly).");
+        anyhow::bail!(
+            "cargo build failed for foldit-web (wasm32). \
+            Hint: nightly toolchain required (rustup toolchain install nightly)."
+        );
     }
 
     let wasm_path = Path::new("target/wasm32-unknown-unknown")
@@ -142,9 +147,11 @@ fn build_web(debug: bool) -> Result<()> {
         .arg(pkg_dir)
         .arg(&wasm_path)
         .status()
-        .map_err(|e| anyhow::anyhow!(
-            "wasm-bindgen failed to invoke ({e}). Install: cargo install wasm-bindgen-cli"
-        ))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "wasm-bindgen failed to invoke ({e}). Install: cargo install wasm-bindgen-cli"
+            )
+        })?;
     if !status.success() {
         anyhow::bail!("wasm-bindgen step failed");
     }
@@ -224,19 +231,17 @@ fn build_molex() -> Result<()> {
 fn build_rosetta_interactive() -> Result<()> {
     let rosetta_path = rosetta_interactive_path();
     let cmake_dir = format!("{}/source/cmake_4", rosetta_path);
-    let release_dir = format!("{}/release", cmake_dir);
 
     if !Path::new(&cmake_dir).exists() {
         anyhow::bail!(
             "Rosetta cmake directory not found at {}. \
-             Make sure ~/rosetta-interactive is set up correctly.",
+             Make sure the rosetta-interactive submodule is initialized.",
             cmake_dir
         );
     }
 
     // Build the molex static lib first; the bridge dylib links against
-    // it for ASSEM01 IO and Assembly walks. Items 68/69 in
-    // crates/foldit-runner/docs/PLUGIN_MIGRATION_PLAN.md. Invoke via
+    // it for ASSEM01 IO and Assembly walks. Invoke via
     // --manifest-path so cargo treats this as a standalone build,
     // bypassing the workspace resolver. crates/molex is workspace-
     // excluded; the workspace itself pins published molex ^0.3.0 for
@@ -246,9 +251,11 @@ fn build_rosetta_interactive() -> Result<()> {
     let status = Command::new("cargo")
         .args([
             "build",
-            "--manifest-path", "crates/molex/Cargo.toml",
+            "--manifest-path",
+            "crates/molex/Cargo.toml",
             "--release",
-            "--features", "c-api",
+            "--features",
+            "c-api",
         ])
         .status()?;
     if !status.success() {
@@ -256,46 +263,23 @@ fn build_rosetta_interactive() -> Result<()> {
     }
     let molex_include = std::fs::canonicalize("crates/molex/include")?;
     let molex_lib = std::fs::canonicalize("crates/molex/target/release/libmolex.a")?;
-    let molex_include_arg = format!("-DMOLEX_INCLUDE_DIR={}", molex_include.display());
-    let molex_lib_arg = format!("-DMOLEX_STATIC_LIB={}", molex_lib.display());
+    let proto_dir = std::fs::canonicalize("crates/foldit-runner/proto")?;
 
-    // Create release directory if needed
-    std::fs::create_dir_all(&release_dir)?;
-
-    // Run cmake configure if needed. We always pass molex paths even
-    // on subsequent runs (cmake caches them but explicit override
-    // beats stale cache after molex moves).
-    let cache_file = format!("{}/CMakeCache.txt", release_dir);
-    if !Path::new(&cache_file).exists() {
-        println!("Configuring Rosetta cmake build...");
-        let status = Command::new("cmake")
-            .args([
-                "-G", "Ninja",
-                "-DCMAKE_BUILD_TYPE=Release",
-                &molex_include_arg,
-                &molex_lib_arg,
-                "..",
-            ])
-            .current_dir(&release_dir)
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("Failed to configure Rosetta cmake build");
-        }
-    } else {
-        // Refresh molex cache vars in case the staticlib path changed.
-        let _ = Command::new("cmake")
-            .args([&molex_include_arg, &molex_lib_arg, "."])
-            .current_dir(&release_dir)
-            .status()?;
-    }
-
-    // Build
-    println!("Building Rosetta (this may take a while)...");
-    let status = Command::new("ninja")
-        .current_dir(&release_dir)
+    // Delegate the cmake configure + build (and the make.py /
+    // make_database.py preprocessing) to rosetta-interactive's own
+    // build.sh. Molex paths flow through env vars that build.sh
+    // appends to its CMAKE_ARGS. This avoids drift between the
+    // canonical script and a parallel xtask reimplementation; any
+    // future build-flag change in build.sh propagates automatically.
+    println!("Running build.sh in {}...", rosetta_path);
+    let status = Command::new("./build.sh")
+        .env("MOLEX_INCLUDE_DIR", molex_include.as_os_str())
+        .env("MOLEX_STATIC_LIB", molex_lib.as_os_str())
+        .env("FOLDIT_PROTO_DIR", proto_dir.as_os_str())
+        .current_dir(&rosetta_path)
         .status()?;
     if !status.success() {
-        anyhow::bail!("Failed to build Rosetta");
+        anyhow::bail!("rosetta-interactive build.sh failed");
     }
 
     // Copy the dylib into the plugin directory. That's the single
@@ -313,21 +297,21 @@ fn build_rosetta_interactive() -> Result<()> {
     std::fs::copy(&lib_src, &lib_dst_plugin)?;
     println!("Copied {} -> {}", lib_src, lib_dst_plugin);
 
-    // Copy compact database to assets/database (generated by make_database.py)
+    // Copy compact database into the plugin's own assets dir, alongside
+    // the dylib. Bridge `find_rosetta_database` walks up from the plugin
+    // dir looking for `assets/database/`, so this is exactly where it
+    // wants to find it.
     let db_src = format!("{}/cmp-database/database", cmake_dir);
     if Path::new(&db_src).exists() {
-        let db_dst = "assets/database";
-        if Path::new(db_dst).exists() {
-            std::fs::remove_dir_all(db_dst)?;
+        let db_dst = format!("{}/assets/database", plugin_dir);
+        if Path::new(&db_dst).exists() {
+            std::fs::remove_dir_all(&db_dst)?;
         }
-        std::fs::create_dir_all("assets")?;
-        copy_dir(&db_src, db_dst)?;
+        std::fs::create_dir_all(format!("{}/assets", plugin_dir))?;
+        copy_dir(&db_src, &db_dst)?;
         println!("Copied compact database -> {}", db_dst);
     } else {
-        println!(
-            "Warning: Compact database not found at {}",
-            db_src
-        );
+        println!("Warning: Compact database not found at {}", db_src);
         println!(
             "  Run 'python3 make_database.py' in {}/source/cmake_4/ first",
             rosetta_interactive_path()
@@ -335,56 +319,6 @@ fn build_rosetta_interactive() -> Result<()> {
     }
 
     println!("Rosetta build complete.");
-    Ok(())
-}
-
-fn setup_rosetta_interactive() -> Result<()> {
-    let rosetta_path = rosetta_interactive_path();
-
-    // Source paths
-    let lib_src = format!("{}/source/cmake_4/release/bin/{}", rosetta_path, rosetta_lib_name());
-    let db_src = "assets/database";
-
-    // Destination paths
-    let lib_dst = format!("bundle/{}", rosetta_lib_name());
-    let db_dst = "bundle/rosetta_database";
-
-    // Check source exists
-    if !Path::new(&lib_src).exists() {
-        anyhow::bail!(
-            "Rosetta library not found at {}. \
-             Run 'cargo xtask build-rosetta-interactive' first.",
-            lib_src
-        );
-    }
-
-    if !Path::new(db_src).exists() {
-        anyhow::bail!(
-            "Rosetta database not found at {}. \
-             Run 'cargo xtask build-rosetta-interactive' first (requires make_database.py to have been run).",
-            db_src
-        );
-    }
-
-    // Create bundle directory if needed
-    std::fs::create_dir_all("bundle")?;
-
-    // Copy library
-    println!("Copying Rosetta library...");
-    std::fs::copy(&lib_src, &lib_dst)?;
-    println!("  {} -> {}", lib_src, lib_dst);
-
-    // Remove old database if exists
-    if Path::new(db_dst).exists() {
-        std::fs::remove_dir_all(db_dst)?;
-    }
-
-    // Copy database
-    println!("Copying Rosetta database...");
-    copy_dir(db_src, db_dst)?;
-    println!("  {} -> {}", db_src, db_dst);
-
-    println!("Rosetta interactive setup complete.");
     Ok(())
 }
 

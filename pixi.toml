@@ -10,7 +10,6 @@ platforms = ["osx-arm64", "linux-64", "win-64"]
 # These just call cargo xtask
 setup-ml = "cargo xtask setup-ml"
 build-rosetta-interactive = "cargo xtask build-rosetta-interactive"
-setup-rosetta-interactive = "cargo xtask setup-rosetta-interactive"
 bundle = "cargo xtask bundle"
 bundle-cpu = "cargo xtask bundle --cpu-only"
 download-models = "cargo xtask download-models"

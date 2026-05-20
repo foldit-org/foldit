@@ -443,7 +443,9 @@ impl App {
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use foldit_runner::orchestrator::PluginUpdate;
+            use foldit_runner::orchestrator::{
+                EntityId as RunnerEntityId, PluginUpdate,
+            };
 
             let updates = match self.router.orchestrator.as_mut() {
                 Some(orch) => orch.drain_plugin_updates(),
@@ -525,6 +527,57 @@ impl App {
                             }
                         }
                     }
+                    PluginUpdate::Cancelled {
+                        request_id,
+                        assembly,
+                    } => {
+                        // Cancel-as-commit: same shape as Final below.
+                        had_terminal = true;
+                        let stream_transition = self
+                            .active_streams
+                            .get(&request_id)
+                            .map(|e| e.transition);
+                        if apply_streaming_assembly(
+                            &mut self.store,
+                            &assembly,
+                            None,
+                        ) {
+                            let locked_for_transition = self
+                                .store
+                                .history()
+                                .ongoing()
+                                .locked_entity();
+                            if let Err(e) = self.store.commit_action() {
+                                log::warn!(
+                                    "plugin update Cancelled rid={request_id} \
+                                     commit_action failed: {e}"
+                                );
+                            }
+                            visual_dirty = true;
+                            if let (Some(t), Some(entity)) =
+                                (stream_transition, locked_for_transition)
+                            {
+                                pending_transition = Some((entity, t));
+                            }
+                        }
+                        if let Some(entry) =
+                            self.active_streams.remove(&request_id)
+                        {
+                            if let Some(orch) =
+                                self.router.orchestrator.as_mut()
+                            {
+                                orch.release_dispatch_locks(entry.handle);
+                            }
+                        }
+                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.pull_drag = None;
+                        }
+                        log::info!(
+                            "plugin update Cancelled rid={request_id} \
+                             entities={}",
+                            assembly.entities().len()
+                        );
+                    }
                     PluginUpdate::Final {
                         request_id,
                         assembly,
@@ -588,27 +641,40 @@ impl App {
                         request_id,
                         message,
                     } => {
+                        // Spontaneous failure only (timeout, exception,
+                        // transport, STALE_GEN). Never commits; abort
+                        // is gated to this stream's entity so a stale
+                        // Error can't drop another op's tentative.
                         had_terminal = true;
-                        // Treat host-cancel / watchdog-eviction the
-                        // same way the GUI "cancel = commit" semantics
-                        // would: any tentative the stream had already
-                        // landed via Pending stays as a committed undo
-                        // entry. A plain transport error leaves the
-                        // tentative; commit_action is idempotent w.r.t.
-                        // an idle store.
-                        if self.store.has_ongoing_action() {
-                            if let Err(e) = self.store.commit_action() {
+                        let entry = self.active_streams.remove(&request_id);
+                        let owns_tentative = entry
+                            .as_ref()
+                            .and_then(|e| {
+                                self.store
+                                    .history()
+                                    .ongoing()
+                                    .locked_entity()
+                                    .map(|locked| {
+                                        e.handle.entities.iter().any(
+                                            |runner_eid: &RunnerEntityId| {
+                                                runner_eid.0
+                                                    == u64::from(locked.raw())
+                                            },
+                                        )
+                                    })
+                            })
+                            .unwrap_or(false);
+                        if owns_tentative {
+                            if let Err(e) = self.store.abort_action() {
                                 log::warn!(
                                     "plugin update Error rid={request_id} \
-                                     commit_action after cancel failed: {e}"
+                                     abort_action failed: {e}"
                                 );
                             } else {
                                 visual_dirty = true;
                             }
                         }
-                        if let Some(entry) =
-                            self.active_streams.remove(&request_id)
-                        {
+                        if let Some(entry) = entry {
                             if let Some(orch) =
                                 self.router.orchestrator.as_mut()
                             {
@@ -686,14 +752,45 @@ impl App {
 
     // ── Keybinding dispatch (engine + router) ──
 
+    /// Catalog hotkey fallback. Runs only after a viso built-in
+    /// `handle_key_press` *miss*, so built-ins always win. On a match
+    /// against a plugin manifest `[[buttons]]` hotkey, dispatch the op
+    /// through the same `handle_dispatch_op` sink a button click uses
+    /// (focus/selection not captured here yet — same as a click with
+    /// no GUI selection). Returns true if an op was dispatched.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_hotkey_dispatch(&mut self, key_str: &str) -> bool {
+        let op_id = self.router.orchestrator.as_ref().and_then(|orch| {
+            orch.ops_catalog()
+                .into_iter()
+                .find(|e| e.hotkey.as_deref() == Some(key_str))
+                .map(|e| e.op_id)
+        });
+        let Some(op_id) = op_id else { return false };
+        log::info!("hotkey {key_str:?} -> dispatch plugin op {op_id:?}");
+        self.handle_dispatch_op(foldit_gui::OpDispatch {
+            op_id,
+            focused_entity_id: None,
+            selection: Vec::new(),
+        });
+        true
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn try_hotkey_dispatch(&mut self, _key_str: &str) -> bool {
+        false
+    }
+
     /// Dispatch a keybinding by physical-key string ("KeyR", "KeyT",
     /// "Tab", ...). Hosts convert their native keycode to this string
     /// before calling (winit: `format!("{key:?}")`; web: DOM `code`).
+    /// On a viso built-in miss, falls through to the plugin hotkey
+    /// catalog (built-ins win by being checked first).
     pub fn handle_keybinding(&mut self, key_str: &str) -> bool {
-        let Some(engine) = &mut self.engine else { return false };
         let Some(cmd) = self.input.handle_key_press(key_str) else {
-            return false;
+            return self.try_hotkey_dispatch(key_str);
         };
+        let Some(engine) = &mut self.engine else { return false };
 
         // Actions that need foldit-specific pre/post processing
         match cmd {
@@ -745,17 +842,26 @@ impl App {
 
         // Pull-drag interception runs ahead of viso's regular input
         // routing so an active drag suppresses camera rotation/pan.
-        // Pointer-down on an atom that resolves to a valid pull route
-        // opens the drag; pointer-move re-targets the endpoint;
-        // pointer-up tears down. Anything that falls through is normal
-        // viso input handling.
+        // A pull opens on *drag*, not press: a left-press on an atom
+        // falls through to viso (which records the down-target, so a
+        // press+release with no move resolves to a residue selection);
+        // the first pointer-move with the button still held that
+        // resolves to a valid pull route opens the drag instead.
+        // `mouse_pressed()` is viso's own press bit, set by the
+        // preceding PointerDown's normal-path handling below.
         #[cfg(not(target_arch = "wasm32"))]
         {
             match &input {
-                ViewportInput::PointerDown { x, y, button, .. }
-                    if *button == 0 && self.pull_drag.is_none() =>
+                ViewportInput::PointerMove { x, y, .. }
+                    if self.input.mouse_pressed()
+                        && self.pull_drag.is_none() =>
                 {
                     if self.try_begin_pull_drag(*x, *y) {
+                        // viso recorded the press; drop its mouse
+                        // state so the now-suppressed pointer-up
+                        // can't fire a stray click → selection.
+                        self.input.release_mouse_state();
+                        self.update_pull_drag(*x, *y);
                         self.finalize_viewport_input();
                         return;
                     }
@@ -777,6 +883,14 @@ impl App {
                 _ => {}
             }
         }
+
+        // Hotkey resolved in the `Key` arm below via a disjoint field
+        // borrow (`self.router`, not `self.engine`); the actual
+        // dispatch is deferred to after the match so the `engine`
+        // borrow is released before `handle_dispatch_op` takes
+        // `&mut self`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut pending_hotkey_op: Option<String> = None;
 
         let Some(engine) = &mut self.engine else { return };
 
@@ -879,7 +993,34 @@ impl App {
                             other => { engine.execute(other); }
                         }
                     } else {
-                        log::debug!("Unhandled key code from frontend: {}", code);
+                        // No viso built-in claims this key — resolve it
+                        // against the plugin hotkey catalog. Disjoint
+                        // field borrow (`self.router`) so it coexists
+                        // with the live `engine` borrow; dispatch is
+                        // deferred to after the match.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            pending_hotkey_op = self
+                                .router
+                                .orchestrator
+                                .as_ref()
+                                .and_then(|orch| {
+                                    orch.ops_catalog()
+                                        .into_iter()
+                                        .find(|e| {
+                                            e.hotkey.as_deref()
+                                                == Some(code.as_str())
+                                        })
+                                        .map(|e| e.op_id)
+                                });
+                            if pending_hotkey_op.is_none() {
+                                log::debug!(
+                                    "Unhandled key code from frontend: {code}"
+                                );
+                            }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        log::debug!("Unhandled key code from frontend: {code}");
                     }
                 }
             }
@@ -896,6 +1037,21 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, &self.router, pull);
+
+        // `engine`'s last use was above — `&mut self` is free again. A
+        // hotkey resolved in the `Key` arm dispatches through the same
+        // sink a button click uses (item 78); built-ins already won by
+        // `handle_key_press` being checked first.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(op_id) = pending_hotkey_op {
+            log::info!("hotkey -> dispatch plugin op {op_id:?}");
+            self.handle_dispatch_op(foldit_gui::OpDispatch {
+                op_id,
+                focused_entity_id: None,
+                selection: Vec::new(),
+            });
+        }
+
         self.pump_pending_broadcasts();
     }
 
@@ -1073,10 +1229,9 @@ impl App {
 
     /// Pointer-up (or any cancel signal): tear down the drag state
     /// and ask the orchestrator to cancel the stream. The stream's
-    /// terminal `Error{STREAM_CANCELLED}` flows through
-    /// `apply_backend_updates` → `commit_action` per the
-    /// cancel-as-commit semantics, so the partial pull becomes a
-    /// permanent undo entry.
+    /// terminal `PluginUpdate::Cancelled` flows through
+    /// `apply_backend_updates` → `commit_action`, so the partial pull
+    /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
         let Some(drag) = self.pull_drag.take() else { return };
@@ -1111,6 +1266,10 @@ impl App {
     pub fn handle_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // Drain pending terminals so rapid follow-up dispatches
+            // see released locks.
+            self.apply_backend_updates();
+
             use foldit_runner::orchestrator::{
                 EntityId as RunnerEntityId, OpKind, ResidueRef,
                 SessionContext as RunnerSessionContext,
@@ -1200,18 +1359,22 @@ impl App {
                 })
                 .or_else(|| first_protein_entity(&self.store));
 
-            if let Some(entity) = action_entity {
-                let kind = CheckpointKind::PluginOp {
-                    entity,
-                    plugin_id: plugin_id.clone(),
-                    op_id: op.op_id.clone(),
-                    display: display.clone(),
-                };
-                if let Err(e) = self.store.begin_action(kind, display) {
-                    log::trace!(
-                        "handle_dispatch_op({:?}): begin_action skipped: {e}",
-                        op.op_id
-                    );
+            // Skip on dispatch failure: any open tentative belongs to
+            // a prior op, not this one.
+            if dispatch_outcome.is_ok() {
+                if let Some(entity) = action_entity {
+                    let kind = CheckpointKind::PluginOp {
+                        entity,
+                        plugin_id: plugin_id.clone(),
+                        op_id: op.op_id.clone(),
+                        display: display.clone(),
+                    };
+                    if let Err(e) = self.store.begin_action(kind, display) {
+                        log::trace!(
+                            "handle_dispatch_op({:?}): begin_action skipped: {e}",
+                            op.op_id
+                        );
+                    }
                 }
             }
 
@@ -1230,11 +1393,6 @@ impl App {
                     self.apply_invoke_result(&bytes, transition);
                 }
                 Err(e) => {
-                    // Dispatch failed: roll back the tentative we just
-                    // started so the lane stays clean.
-                    if self.store.has_ongoing_action() {
-                        let _ = self.store.commit_action();
-                    }
                     log::error!(
                         "handle_dispatch_op({:?}): dispatch failed: {e}",
                         op.op_id
@@ -2188,7 +2346,11 @@ impl App {
                 // canonical state is the EntityStore.
                 let _ = &ids;
                 let mut orch = Orchestrator::new();
-                bootstrap_plugins(&mut orch, &self.store);
+                bootstrap_plugins(
+                    &mut orch,
+                    &mut self.store,
+                    Some(&mut engine),
+                );
                 refresh_scores(
                     &mut orch,
                     &mut self.store,
@@ -2351,8 +2513,19 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
 /// initial assembly. Errors are logged and dropped: a missing plugin
 /// dir / dylib should degrade the app to viewer-only, not crash the
 /// load.
+///
+/// If Rosetta's Init returns a non-empty normalized assembly (full-atom
+/// pose with hydrogens / terminal O / etc. added), it is committed as
+/// a follow-up `PluginOp` checkpoint and republished so that
+/// `scene.positions` is seeded at the normalized atom count before any
+/// user action runs. Without this, the first user op would cross an
+/// atom-set boundary mid-action and snap.
 #[cfg(not(target_arch = "wasm32"))]
-fn bootstrap_plugins(orch: &mut Orchestrator, store: &EntityStore) {
+fn bootstrap_plugins(
+    orch: &mut Orchestrator,
+    store: &mut EntityStore,
+    mut engine: Option<&mut VisoEngine>,
+) {
     let Some(plugins_root) = locate_plugins_root() else {
         log::warn!(
             "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
@@ -2379,9 +2552,8 @@ fn bootstrap_plugins(orch: &mut Orchestrator, store: &EntityStore) {
     if !discovered.iter().any(|id| id == "rosetta") {
         return;
     }
-    let initial_assembly = molex::ops::wire::serialize_assembly(
-        &store.head_assembly(),
-    );
+    let head_before = store.head_assembly();
+    let initial_assembly = molex::ops::wire::serialize_assembly(&head_before);
     let initial_assembly = match initial_assembly {
         Ok(b) => b,
         Err(e) => {
@@ -2392,16 +2564,89 @@ fn bootstrap_plugins(orch: &mut Orchestrator, store: &EntityStore) {
             return;
         }
     };
-    if let Err(e) =
-        orch.ensure_plugin_registered("rosetta", initial_assembly)
+    let post_init_bytes = match orch
+        .ensure_plugin_registered("rosetta", initial_assembly)
     {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!(
+                "[App] ensure_plugin_registered('rosetta') failed: {e}; \
+                 rosetta plugin disabled"
+            );
+            return;
+        }
+    };
+    log::info!("[App] rosetta plugin ready");
+
+    // Apply the post-Init normalized assembly (full-atom pose) so the
+    // host's canonical assembly matches the plugin's internal pose
+    // before any user action runs.
+    if post_init_bytes.is_empty() {
         log::warn!(
-            "[App] ensure_plugin_registered('rosetta') failed: {e}; \
-             rosetta plugin disabled"
+            "[App] rosetta post-Init returned no normalized assembly; \
+             first user action will likely snap because scene.positions \
+             stays at the pre-Init atom count."
         );
         return;
     }
-    log::info!("[App] rosetta plugin ready");
+    let normalized = match molex::ops::wire::deserialize_assembly(
+        &post_init_bytes,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!(
+                "[App] rosetta post-Init assembly decode failed: {e:?}; \
+                 skipping normalization apply"
+            );
+            return;
+        }
+    };
+    let Some(target_entity) = first_protein_entity(store) else {
+        log::warn!(
+            "[App] rosetta post-Init: no protein entity in store; \
+             skipping normalization apply"
+        );
+        return;
+    };
+    let kind = CheckpointKind::PluginOp {
+        entity: target_entity,
+        plugin_id: String::from("rosetta"),
+        op_id: String::from("_init_normalize"),
+        display: String::from("Init"),
+    };
+    if let Err(e) =
+        store.begin_action(kind, String::from("Init"))
+    {
+        log::warn!(
+            "[App] rosetta post-Init begin_action failed: {e}; \
+             skipping normalization apply"
+        );
+        return;
+    }
+    let applied = apply_streaming_assembly(store, &normalized, None);
+    if !applied {
+        log::warn!(
+            "[App] rosetta post-Init apply_streaming_assembly did not \
+             update any entity; rolling back tentative. This usually means \
+             the rosetta-returned entity ID does not match any store \
+             entity ID."
+        );
+        let _ = store.commit_action();
+        return;
+    }
+    if let Err(e) = store.commit_action() {
+        log::warn!(
+            "[App] rosetta post-Init commit_action failed: {e}"
+        );
+        return;
+    }
+    log::info!(
+        "[App] rosetta post-Init assembly applied ({} bytes)",
+        post_init_bytes.len()
+    );
+    if let Some(eng) = engine.as_deref_mut() {
+        store.publish_to(eng);
+    }
 }
 
 /// Fan out the well-known `score` query across every plugin that
@@ -2462,7 +2707,7 @@ fn refresh_scores(
         // display. Verbatim port of the
         // `rosetta_score_to_game_score_either(use_minimum=true,
         // internal=false)` branch at
-        // `external/rosetta-interactive/source/src/interactive/
+        // `plugins/rosetta/deps/rosetta-interactive/source/src/interactive/
         // rosetta_util/rosetta_util.cc:2702`, using the constants
         // declared on lines 2662-2663 + 2664 of the same file.
         // Bridge-side the converter slot

@@ -121,25 +121,9 @@ impl ActionRouter {
     pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
         log::info!("Cancelling current operation");
         engine.execute(VisoCommand::ClearSelection);
-        if let Some(ref mut orch) = self.orchestrator {
-            let locked_ids = orch.locked_entities();
-            for eid in &locked_ids {
-                orch.cancel_entity(*eid);
-            }
-            for eid in locked_ids {
-                orch.unlock(eid);
-                log::info!("Stopped operation on entity {:?}", eid);
-            }
-        }
-        // Continuous Rosetta actions: cancel = commit. The user keeps
-        // whatever the wiggle/shake had reached; the tentative Solution
-        // becomes a permanent undo entry. ML preview ops use a different
-        // surface (`is_preview`) and are torn down below.
-        if store.has_ongoing_action() {
-            if let Err(e) = store.commit_action() {
-                log::warn!("cancel_operations: commit_action refused: {e}");
-            }
-        }
+        // Stream lock release + commit live in apply_backend_updates'
+        // terminal arms; doing them here races a follow-up dispatch
+        // that's quick enough to slip in before the terminal drains.
         let preview_ids: Vec<molex::entity::molecule::id::EntityId> =
             store.preview_ids().collect();
         if !preview_ids.is_empty() {
@@ -149,7 +133,6 @@ impl ActionRouter {
             store.publish_to(engine);
             log::info!("Removed {} in-progress preview entities", preview_ids.len());
         }
-
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
     }
 
@@ -350,6 +333,8 @@ pub fn build_actions_list(
             icon_path: entry.icon_path.to_string_lossy().into_owned(),
             enabled: !any_lock_held,
             active: false,
+            hotkey: entry.hotkey,
+            tooltip: entry.tooltip,
         })
         .collect()
 }
