@@ -2549,38 +2549,54 @@ fn bootstrap_plugins(
     };
     log::info!("[App] discovered plugins: {discovered:?}");
 
-    if !discovered.iter().any(|id| id == "rosetta") {
-        return;
-    }
     let head_before = store.head_assembly();
-    let initial_assembly = molex::ops::wire::serialize_assembly(&head_before);
-    let initial_assembly = match initial_assembly {
+    let initial_assembly = match molex::ops::wire::serialize_assembly(
+        &head_before,
+    ) {
         Ok(b) => b,
         Err(e) => {
             log::warn!(
-                "[App] failed to serialize initial assembly for rosetta: \
-                 {e:?}; rosetta plugin disabled"
+                "[App] failed to serialize initial assembly for plugin \
+                 registration: {e:?}; plugins disabled"
             );
             return;
         }
     };
-    let post_init_bytes = match orch
-        .ensure_plugin_registered("rosetta", initial_assembly)
-    {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::warn!(
-                "[App] ensure_plugin_registered('rosetta') failed: {e}; \
-                 rosetta plugin disabled"
-            );
-            return;
-        }
-    };
-    log::info!("[App] rosetta plugin ready");
 
-    // Apply the post-Init normalized assembly (full-atom pose) so the
-    // host's canonical assembly matches the plugin's internal pose
-    // before any user action runs.
+    for plugin_id in &discovered {
+        let post_init_bytes = match orch
+            .ensure_plugin_registered(plugin_id, initial_assembly.clone())
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!(
+                    "[App] ensure_plugin_registered('{plugin_id}') failed: \
+                     {e}; {plugin_id} plugin disabled"
+                );
+                continue;
+            }
+        };
+        log::info!("[App] {plugin_id} plugin ready");
+
+        if plugin_id == "rosetta" {
+            apply_rosetta_post_init(
+                store,
+                engine.as_deref_mut(),
+                &post_init_bytes,
+            );
+        }
+    }
+}
+
+/// Apply rosetta's post-Init normalized assembly (full-atom pose) so the
+/// host's canonical assembly matches the plugin's internal pose before
+/// any user action runs.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_rosetta_post_init(
+    store: &mut EntityStore,
+    engine: Option<&mut VisoEngine>,
+    post_init_bytes: &[u8],
+) {
     if post_init_bytes.is_empty() {
         log::warn!(
             "[App] rosetta post-Init returned no normalized assembly; \
@@ -2590,7 +2606,7 @@ fn bootstrap_plugins(
         return;
     }
     let normalized = match molex::ops::wire::deserialize_assembly(
-        &post_init_bytes,
+        post_init_bytes,
     ) {
         Ok(a) => a,
         Err(e) => {
@@ -2644,7 +2660,7 @@ fn bootstrap_plugins(
         "[App] rosetta post-Init assembly applied ({} bytes)",
         post_init_bytes.len()
     );
-    if let Some(eng) = engine.as_deref_mut() {
+    if let Some(eng) = engine {
         store.publish_to(eng);
     }
 }
