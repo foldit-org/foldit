@@ -22,6 +22,23 @@ fn rosetta_lib_name() -> &'static str {
     }
 }
 
+/// Platform-canonical file name for the python-host cdylib. The worker
+/// dlopens this by filename next to its own executable.
+fn python_host_lib_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "foldit_python_host.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libfoldit_python_host.dylib"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "libfoldit_python_host.so"
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "xtask")]
 struct Cli {
@@ -31,18 +48,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install Python environments in crates/foldit-runner
-    SetupMl,
+    /// Install the plugin Python environments in crates/foldit-runner
+    SetupEnvs,
     /// Build Rosetta from ~/rosetta-interactive
     BuildRosettaInteractive,
     /// Create distribution bundle
-    Bundle {
-        #[arg(long)]
-        cpu_only: bool,
-    },
-    /// Download ML model weights
-    DownloadModels,
-    /// Rebuild molex Python wheel from local source
+    Bundle,
+    /// Rebuild the molex Python extension from local source
     BuildMolex,
     /// Build the GUI (pnpm build) and copy dist to assets/gui
     BuildGui,
@@ -71,10 +83,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::SetupMl => setup_ml(),
+        Commands::SetupEnvs => setup_envs(),
         Commands::BuildRosettaInteractive => build_rosetta_interactive(),
-        Commands::Bundle { cpu_only } => bundle(cpu_only),
-        Commands::DownloadModels => download_models(),
+        Commands::Bundle => bundle(),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
         Commands::BuildWeb { debug } => build_web(debug),
@@ -177,29 +188,29 @@ fn bundle_web() -> Result<()> {
     Ok(())
 }
 
-fn setup_ml() -> Result<()> {
-    println!("Setting up ML environments (foundry + simplefold)...");
+fn setup_envs() -> Result<()> {
+    println!("Installing plugin Python environments (pixi install --all)...");
     let status = Command::new("pixi")
-        .args(["run", "setup"])
+        .args(["install", "--all"])
         .current_dir("crates/foldit-runner")
         .status()?;
     if !status.success() {
-        anyhow::bail!("Failed to setup ML environments");
+        anyhow::bail!("Failed to install plugin environments");
     }
-    // Note: molex is installed from PyPI by pixi (see pixi.toml's
-    // `molex = ">=0.3.0"`). To rebuild from the local submodule, run
-    // `cargo xtask build-molex` separately. Don't force a local
-    // rebuild here — it's only needed when actively developing molex.
+    // molex is installed editable into every plugin env via pixi (the
+    // `molex-local` feature in pixi.toml). To recompile the molex
+    // extension after editing its Rust source, run
+    // `cargo xtask build-molex` separately.
 
     // libpython is brought into the process via foldit-python-host's
     // build.rs (resolves via $CONDA_PREFIX or .pixi/envs/<env>/lib);
     // no host-binary link path, no copy to assets/libs/.
 
-    // Build the worker binary so it's next to the main executable.
-    // Without this, MLClient::new() fails at runtime because
-    // find_worker_binary() can't locate foldit-worker.
-    // Scope to -p foldit-runner so the build doesn't drag foldit's
-    // viso/wgpu dep graph into a backend-only binary.
+    // Build the worker binary + the python-host dylib so they sit next to
+    // the main executable. Without the worker, plugins can't spawn; without
+    // the dylib, Python plugins fail to load (the worker dlopens it by
+    // filename next to itself). Scope to -p so the build doesn't drag
+    // foldit's viso/wgpu dep graph into backend-only artifacts.
     println!("Building foldit-worker binary...");
     let status = Command::new("cargo")
         .args(["build", "-p", "foldit-runner", "--bin", "foldit-worker"])
@@ -208,23 +219,34 @@ fn setup_ml() -> Result<()> {
         anyhow::bail!("Failed to build foldit-worker");
     }
 
-    println!("ML environments setup complete.");
+    println!("Building foldit-python-host dylib...");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "foldit-python-host"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build foldit-python-host");
+    }
+
+    println!("Plugin environments setup complete.");
     Ok(())
 }
 
 fn build_molex() -> Result<()> {
-    println!("Rebuilding molex wheel from local source...");
-    for env in ["foundry", "simplefold"] {
-        println!("  Installing into {} environment...", env);
+    println!("Rebuilding the molex extension from local source...");
+    // molex is an editable maturin path dep composed into every plugin
+    // env (pixi.toml's `molex-local` feature). `pixi reinstall <pkg>`
+    // re-runs maturin to recompile the extension from the local crate.
+    for env in ["dummy", "foundry", "esmfold", "simplefold"] {
+        println!("  Reinstalling molex into the {} environment...", env);
         let status = Command::new("pixi")
-            .args(["run", "--environment", env, "build-molex"])
+            .args(["reinstall", "-e", env, "molex"])
             .current_dir("crates/foldit-runner")
             .status()?;
         if !status.success() {
-            anyhow::bail!("Failed to install molex wheel in {} environment", env);
+            anyhow::bail!("Failed to reinstall molex in the {} environment", env);
         }
     }
-    println!("molex wheel rebuilt and installed in all environments.");
+    println!("molex rebuilt and reinstalled in all plugin environments.");
     Ok(())
 }
 
@@ -322,73 +344,83 @@ fn build_rosetta_interactive() -> Result<()> {
     Ok(())
 }
 
-fn bundle(cpu_only: bool) -> Result<()> {
-    // 1. Build release binaries
-    println!("Building release binaries...");
-    let status = Command::new("cargo")
-        .args(["build", "--release"])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Failed to build release binaries");
+fn bundle() -> Result<()> {
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+
+    // 1. Build the host artifacts into target/release/. A plain
+    //    `cargo build --release` won't produce the worker (foldit-runner is
+    //    a workspace-excluded submodule) or the python-host dylib (it is
+    //    dlopened, not linked), so build each explicitly.
+    println!("Building release host artifacts (app, worker, python-host)...");
+    let builds: [(&str, &[&str]); 3] = [
+        (
+            "foldit app",
+            &["build", "--release", "-p", "foldit-desktop"],
+        ),
+        (
+            "foldit-worker",
+            &[
+                "build",
+                "--release",
+                "-p",
+                "foldit-runner",
+                "--bin",
+                "foldit-worker",
+            ],
+        ),
+        (
+            "foldit-python-host",
+            &["build", "--release", "-p", "foldit-python-host"],
+        ),
+    ];
+    for (desc, args) in builds {
+        println!("  cargo {}", args.join(" "));
+        let status = Command::new("cargo").args(args).status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to build {desc}");
+        }
     }
 
-    // 2. Create ML bundle
-    println!("Creating ML bundle...");
-    let bundle_task = if cpu_only { "bundle" } else { "bundle-gpu" };
+    // 2. Fresh bundle/ with host infra flat at the root: the app, the
+    //    worker, and the python-host dylib (the worker dlopens it next to
+    //    its own exe). No pixi, no .pixi — the bundle is self-contained.
+    let _ = std::fs::remove_dir_all("bundle");
+    std::fs::create_dir_all("bundle")?;
+
+    let host_files = [
+        format!("foldit{exe_ext}"),
+        format!("foldit-worker{exe_ext}"),
+        python_host_lib_name().to_string(),
+    ];
+    for name in &host_files {
+        let src = format!("target/release/{name}");
+        if Path::new(&src).exists() {
+            std::fs::copy(&src, format!("bundle/{name}"))?;
+            println!("Copied {name} to bundle.");
+        } else {
+            anyhow::bail!("expected host artifact missing: {src}");
+        }
+    }
+
+    // 3. Native plugins: copy the Rosetta plugin into bundle/plugins/rosetta.
+    copy_rosetta_plugin()?;
+
+    // 4. Python plugins: delegate to the pixi-side bundler, which copies each
+    //    plugin's conda env + materializes its editable installs into
+    //    bundle/plugins/<id>/. It runs in the default env (needs only a
+    //    Python interpreter; it reads each .pixi/envs/<env> from disk).
+    println!("Assembling Python plugins (foundry, esmfold, simplefold)...");
+    let bundle_abs = std::fs::canonicalize("bundle")?;
     let status = Command::new("pixi")
-        .args(["run", "--environment", "foundry", bundle_task])
+        .args(["run", "bundle", "--output"])
+        .arg(&bundle_abs)
         .current_dir("crates/foldit-runner")
         .status()?;
     if !status.success() {
-        anyhow::bail!("Failed to create ML bundle");
+        anyhow::bail!("Failed to assemble Python plugins");
     }
 
-    // 3. Copy ML bundle to root bundle directory
-    println!("Assembling final bundle...");
-    let _ = std::fs::remove_dir_all("bundle");
-    copy_dir("crates/foldit-runner/bundle", "bundle")?;
-
-    // 4. Copy Rust binaries
-    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
-
-    let worker_name = format!("foldit-worker{}", exe_ext);
-    let worker_src = format!("target/release/{}", worker_name);
-    if std::path::Path::new(&worker_src).exists() {
-        std::fs::copy(&worker_src, format!("bundle/{}", worker_name))?;
-        println!("Copied {} to bundle.", worker_name);
-    }
-
-    let app_name = format!("foldit{}", exe_ext);
-    let app_src = format!("target/release/{}", app_name);
-    if std::path::Path::new(&app_src).exists() {
-        std::fs::copy(&app_src, format!("bundle/{}", app_name))?;
-        println!("Copied {} to bundle.", app_name);
-    }
-
-    // 5. Copy Rosetta resources. Source of truth is the plugin
-    // directory, written by `build-rosetta-interactive`.
-    let lib_src = format!(
-        "crates/foldit-runner/plugins/rosetta/{}",
-        rosetta_lib_name()
-    );
-
-    if Path::new(&lib_src).exists() {
-        println!("Copying Rosetta library...");
-        std::fs::copy(&lib_src, format!("bundle/{}", rosetta_lib_name()))?;
-    } else {
-        println!("Warning: Rosetta library not found at {}", lib_src);
-        println!("  Run 'cargo xtask build-rosetta-interactive' first");
-    }
-
-    if Path::new("assets/database").exists() {
-        println!("Copying Rosetta database...");
-        copy_dir("assets/database", "bundle/rosetta_database")?;
-    } else {
-        println!("Warning: Rosetta database not found at assets/database");
-        println!("  Run 'cargo xtask build-rosetta-interactive' first");
-    }
-
-    // 6. Copy frontend assets to bundle
+    // 5. Frontend assets.
     if Path::new("assets/gui").exists() {
         println!("Copying frontend assets...");
         copy_dir("assets/gui", "bundle/gui")?;
@@ -398,6 +430,49 @@ fn bundle(cpu_only: bool) -> Result<()> {
     }
 
     println!("Bundle ready at ./bundle/");
+    Ok(())
+}
+
+/// Copy the Rosetta native plugin into `bundle/plugins/rosetta`, mirroring
+/// the dev-tree layout the orchestrator's `discover_plugins` scans
+/// (`plugins/<id>/{plugin.toml, <dylib>, assets/}`). The plugin dir is the
+/// source of truth, written by `build-rosetta-interactive`. We deliberately
+/// do NOT copy `deps/` (the rosetta-interactive C++ source submodule + cmake
+/// build tree). Missing artifacts warn rather than fail, so a dev without
+/// Rosetta built can still bundle the Python plugins.
+fn copy_rosetta_plugin() -> Result<()> {
+    let rosetta_plugin_src = "crates/foldit-runner/plugins/rosetta";
+    let rosetta_lib = rosetta_lib_name();
+    let lib_src = format!("{}/{}", rosetta_plugin_src, rosetta_lib);
+
+    if !Path::new(&lib_src).exists() {
+        println!("Warning: Rosetta plugin dylib not found at {}", lib_src);
+        println!("  Run 'cargo xtask build-rosetta-interactive' first");
+        return Ok(());
+    }
+
+    println!("Copying Rosetta plugin -> bundle/plugins/rosetta ...");
+    let rosetta_plugin_dst = "bundle/plugins/rosetta";
+    std::fs::create_dir_all(rosetta_plugin_dst)?;
+
+    std::fs::copy(
+        format!("{}/plugin.toml", rosetta_plugin_src),
+        format!("{}/plugin.toml", rosetta_plugin_dst),
+    )?;
+    std::fs::copy(&lib_src, format!("{}/{}", rosetta_plugin_dst, rosetta_lib))?;
+
+    // assets/ holds both the compact rosetta database (runtime) and the
+    // button icons referenced by plugin.toml.
+    let assets_src = format!("{}/assets", rosetta_plugin_src);
+    if Path::new(&assets_src).exists() {
+        copy_dir(&assets_src, &format!("{}/assets", rosetta_plugin_dst))?;
+    } else {
+        println!(
+            "Warning: Rosetta assets not found at {} (icons + database)",
+            assets_src
+        );
+        println!("  Run 'cargo xtask build-rosetta-interactive' first");
+    }
     Ok(())
 }
 
@@ -451,17 +526,6 @@ fn build_gui() -> Result<()> {
 
     copy_dir(&dist_dir, gui_dir)?;
     println!("GUI built and copied to {}", gui_dir);
-    Ok(())
-}
-
-fn download_models() -> Result<()> {
-    let status = Command::new("pixi")
-        .args(["run", "--environment", "foundry", "download-foundry"])
-        .current_dir("crates/foldit-runner")
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Failed to download models");
-    }
     Ok(())
 }
 
