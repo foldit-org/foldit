@@ -8,7 +8,9 @@ use foldit_gui::DirtyFlags;
 use crate::entity_store::{EntityRole, EntityStore};
 use viso::{InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{
-    EntityId as RunnerEntityId, OpType, ParamValue, SessionContext,
+    EntityId as RunnerEntityId, OpType, ParamConstraint as RunnerParamConstraint,
+    ParamSpec as RunnerParamSpec, ParamType as RunnerParamType, ParamValue,
+    SessionContext,
 };
 use foldit_runner::Orchestrator;
 use glam::Vec3;
@@ -335,8 +337,69 @@ pub fn build_actions_list(
             active: false,
             hotkey: entry.hotkey,
             tooltip: entry.tooltip,
+            params: entry
+                .params
+                .into_iter()
+                .map(param_spec_to_wire)
+                .collect(),
         })
         .collect()
+}
+
+fn param_spec_to_wire(
+    spec: RunnerParamSpec,
+) -> foldit_gui::state::ParamSpec {
+    foldit_gui::state::ParamSpec {
+        name: spec.name,
+        display_name: spec.display_name,
+        description: spec.description,
+        param_type: param_type_to_wire(spec.param_type),
+        default: spec.default.map(param_value_to_wire),
+        constraints: spec.constraints.map(param_constraint_to_wire),
+    }
+}
+
+fn param_type_to_wire(t: RunnerParamType) -> foldit_gui::state::ParamType {
+    use foldit_gui::state::ParamType as WireParamType;
+    match t {
+        RunnerParamType::Int => WireParamType::Int,
+        RunnerParamType::Float => WireParamType::Float,
+        RunnerParamType::Bool => WireParamType::Bool,
+        RunnerParamType::String => WireParamType::String,
+        RunnerParamType::Enum => WireParamType::Enum,
+        RunnerParamType::Vec3 => WireParamType::Vec3,
+    }
+}
+
+fn param_value_to_wire(v: ParamValue) -> foldit_gui::state::ParamValue {
+    use foldit_gui::state::ParamValue as WireParamValue;
+    match v {
+        ParamValue::Int(i) => WireParamValue::Int(i),
+        ParamValue::Float(f) => WireParamValue::Float(f),
+        ParamValue::Bool(b) => WireParamValue::Bool(b),
+        ParamValue::String(s) => WireParamValue::String(s),
+        ParamValue::Vec3(v3) => WireParamValue::Vec3(v3),
+    }
+}
+
+fn param_constraint_to_wire(
+    c: RunnerParamConstraint,
+) -> foldit_gui::state::ParamConstraint {
+    use foldit_gui::state::ParamConstraint as WireParamConstraint;
+    match c {
+        RunnerParamConstraint::IntRange { min, max } => {
+            WireParamConstraint::IntRange { min, max }
+        }
+        RunnerParamConstraint::FloatRange { min, max } => {
+            WireParamConstraint::FloatRange { min, max }
+        }
+        RunnerParamConstraint::EnumValues(values) => {
+            WireParamConstraint::EnumValues(values)
+        }
+        RunnerParamConstraint::StringPattern(p) => {
+            WireParamConstraint::StringPattern(p)
+        }
+    }
 }
 
 /// Get the trajectory path from command-line arguments.
