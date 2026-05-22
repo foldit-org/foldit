@@ -49,13 +49,7 @@ pixi install -e foundry-cpu
 pixi run generate-proto
 ```
 
-### 3. Download Model Weights
-
-```bash
-pixi run download-foundry
-```
-
-### 4. Run the Application
+### 3. Run the Application
 
 ```bash
 cd ../..  # Back to workspace root
