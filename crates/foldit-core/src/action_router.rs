@@ -382,6 +382,22 @@ fn param_value_to_wire(v: ParamValue) -> foldit_gui::state::ParamValue {
     }
 }
 
+/// Convert a wire-side `ParamValue` (deserialized from an `OpDispatch`
+/// envelope) into the orchestrator-native form the dispatch calls
+/// expect. Inverse of [`param_value_to_wire`].
+pub(crate) fn param_value_from_wire(
+    v: foldit_gui::state::ParamValue,
+) -> ParamValue {
+    use foldit_gui::state::ParamValue as WireParamValue;
+    match v {
+        WireParamValue::Int(i) => ParamValue::Int(i),
+        WireParamValue::Float(f) => ParamValue::Float(f),
+        WireParamValue::Bool(b) => ParamValue::Bool(b),
+        WireParamValue::String(s) => ParamValue::String(s),
+        WireParamValue::Vec3(v3) => ParamValue::Vec3(v3),
+    }
+}
+
 fn param_constraint_to_wire(
     c: RunnerParamConstraint,
 ) -> foldit_gui::state::ParamConstraint {
@@ -430,5 +446,28 @@ pub fn build_session_context(
             .map(|id| RunnerEntityId(u64::from(id)))
             .or_else(|| Some(RunnerEntityId(u64::from(target_id.raw())))),
         selection: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `param_value_from_wire` must be the exact inverse of
+    /// `param_value_to_wire` across every variant, so values the GUI
+    /// posts back through `OpDispatch.params` reach plugins unchanged.
+    #[test]
+    fn param_value_wire_roundtrip() {
+        let cases = [
+            ParamValue::Int(7),
+            ParamValue::Float(0.25),
+            ParamValue::Bool(true),
+            ParamValue::String("alpha".to_string()),
+            ParamValue::Vec3([1.0, -2.0, 3.5]),
+        ];
+        for native in cases {
+            let back = param_value_from_wire(param_value_to_wire(native.clone()));
+            assert_eq!(back, native);
+        }
     }
 }

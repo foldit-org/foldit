@@ -772,6 +772,7 @@ impl App {
             op_id,
             focused_entity_id: None,
             selection: Vec::new(),
+            params: std::collections::HashMap::new(),
         });
         true
     }
@@ -1049,6 +1050,7 @@ impl App {
                 op_id,
                 focused_entity_id: None,
                 selection: Vec::new(),
+                params: std::collections::HashMap::new(),
             });
         }
 
@@ -1324,7 +1326,14 @@ impl App {
                     })
                     .collect(),
             };
-            let params = std::collections::HashMap::new();
+            let params: std::collections::HashMap<
+                String,
+                foldit_runner::orchestrator::ParamValue,
+            > = op
+                .params
+                .into_iter()
+                .map(|(k, v)| (k, action_router::param_value_from_wire(v)))
+                .collect();
 
             let dispatch_outcome: Result<
                 OpOutcome,
