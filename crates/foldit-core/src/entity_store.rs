@@ -185,71 +185,6 @@ pub enum EntityStoreError {
     ActionRequiresEntity,
 }
 
-// ── Backend hand-off result ────────────────────────────────────────────
-
-/// Combined assembly handed off to the Rosetta backend.
-///
-/// `entity_ids` and `residue_ranges` are *parallel* arrays — one entry
-/// per entity in the produced assembly. The parallelism is the
-/// load-bearing invariant for downstream callers (focus locking, score
-/// projection); zero-residue entities are dropped from both arrays
-/// together so the indexing stays consistent.
-pub struct CombinedAssemblyResult {
-    /// Assembly with one entity per protein, in the same order as
-    /// `entity_ids`. Backend-side IDs are minted fresh; match by
-    /// position, not by id.
-    pub assembly: Assembly,
-    /// Local foldit entity ids parallel to `assembly.entities()`.
-    pub entity_ids: Vec<EntityId>,
-    /// Per-entity Rosetta residue ranges `(start, end)`, 1-indexed and
-    /// inclusive, parallel to `entity_ids`.
-    pub residue_ranges: Vec<(usize, usize)>,
-}
-
-/// Pure builder factored out of [`EntityStore::combined_assembly_for_backend`]
-/// so the zero-residue alignment fix is unit-testable without a live
-/// `EntityStore`.
-fn build_combined_assembly(
-    proteins: &[(EntityId, MoleculeEntity)],
-) -> Option<CombinedAssemblyResult> {
-    if proteins.is_empty() {
-        return None;
-    }
-    let mut entity_ids = Vec::with_capacity(proteins.len());
-    let mut residue_ranges = Vec::with_capacity(proteins.len());
-    let mut entities = Vec::with_capacity(proteins.len());
-    let mut cursor = 1usize;
-    for (id, entity) in proteins {
-        let res_count = match entity {
-            MoleculeEntity::Protein(p) => p.residues.len(),
-            _ => 0,
-        };
-        // Drop empty proteins from *all three* parallel arrays
-        // together — the prior bug had `entity_ids` collected up front
-        // (over the unfiltered list) so it ended up longer than
-        // `residue_ranges` whenever any protein had zero residues.
-        if res_count == 0 {
-            continue;
-        }
-        let start = cursor;
-        let end = cursor + res_count - 1;
-        entity_ids.push(*id);
-        residue_ranges.push((start, end));
-        entities.push(entity.clone());
-        cursor = end + 1;
-    }
-    if entities.is_empty() {
-        return None;
-    }
-    debug_assert_eq!(entity_ids.len(), residue_ranges.len());
-    debug_assert_eq!(entity_ids.len(), entities.len());
-    Some(CombinedAssemblyResult {
-        assembly: Assembly::new(entities),
-        entity_ids,
-        residue_ranges,
-    })
-}
-
 // ── EntityStore ────────────────────────────────────────────────────────
 
 /// Authoritative entity store.
@@ -1095,17 +1030,6 @@ impl EntityStore {
             })
     }
 
-    /// Build the combined `Assembly` for the Rosetta backend. Returns
-    /// `None` if there are no usable proteins (empty session, or every
-    /// protein is zero-residue).
-    pub fn combined_assembly_for_backend(&self) -> Option<CombinedAssemblyResult> {
-        let proteins: Vec<(EntityId, MoleculeEntity)> = self
-            .proteins()
-            .map(|(id, _, e)| (id, e.clone()))
-            .collect();
-        build_combined_assembly(&proteins)
-    }
-
     /// Count protein residues per non-preview, non-empty entity.
     pub fn visible_residue_counts(&self) -> Vec<(EntityId, usize)> {
         self.proteins()
@@ -1271,47 +1195,6 @@ mod tests {
             });
         }
         MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, b'A', None))
-    }
-
-    // ── combined_assembly_for_backend zero-residue alignment fix ──────
-
-    #[test]
-    fn combined_assembly_drops_zero_residue_entities_from_all_arrays() {
-        // A fixture with one zero-residue entity must produce parallel
-        // arrays of equal length.
-        let mut alloc = EntityIdAllocator::new();
-        let id_a = alloc.allocate();
-        let id_b = alloc.allocate();
-        let id_c = alloc.allocate();
-        let proteins = vec![
-            (id_a, mk_protein(id_a, 5)),
-            (id_b, mk_protein(id_b, 0)), // zero-residue protein
-            (id_c, mk_protein(id_c, 3)),
-        ];
-
-        let result = build_combined_assembly(&proteins).expect("non-empty result");
-
-        assert_eq!(
-            result.entity_ids.len(),
-            result.residue_ranges.len(),
-            "entity_ids and residue_ranges must be parallel"
-        );
-        assert_eq!(result.entity_ids.len(), 2, "zero-residue entity dropped");
-        assert_eq!(result.entity_ids, vec![id_a, id_c]);
-        assert_eq!(result.residue_ranges, vec![(1, 5), (6, 8)]);
-    }
-
-    #[test]
-    fn combined_assembly_returns_none_when_only_zero_residue_proteins() {
-        let mut alloc = EntityIdAllocator::new();
-        let id = alloc.allocate();
-        let proteins = vec![(id, mk_protein(id, 0))];
-        assert!(build_combined_assembly(&proteins).is_none());
-    }
-
-    #[test]
-    fn combined_assembly_returns_none_on_empty_input() {
-        assert!(build_combined_assembly(&[]).is_none());
     }
 
     // ── Preview lifecycle: insert → promote moves into history ────────

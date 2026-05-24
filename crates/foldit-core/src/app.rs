@@ -1702,24 +1702,6 @@ impl App {
             }
         }
 
-        // Push the new pose to Rosetta and trigger a cycle-0 re-score.
-        // Without this, the head move installs the right coordinates in
-        // viso but the Rosetta session keeps the *previous* head's pose
-        // — `head_score` (which now reads off the head checkpoint)
-        // returns the snapshot's stamped score, frozen in time, and
-        // `set_per_residue_scores` above stays cleared (gray
-        // structure). `recreate_session` rebuilds Rosetta's pose from
-        // the current `head_assembly()`; the cycle-0 init score lands
-        // back through the backend update path, which
-        // `apply_ongoing_update`'s idle branch then stamps via
-        // `set_head_scores`. Per-residue colors restore via
-        // `cache_per_residue_scores`. Same mechanism as load-time
-        // scoring — just retriggered on every head move.
-        // Rosetta session refresh after head move flows through the
-        // bridge plugin's `update_assembly` (eager pattern — items 64
-        // + 68). Not wired until bridge/ implementing update_assembly.
-        let _ = self.store.combined_assembly_for_backend();
-
         self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
     }
 
