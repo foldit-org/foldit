@@ -5,6 +5,10 @@
 //! processing, rendering, or frontend state sync.
 
 use foldit_gui::DirtyFlags;
+use foldit_gui::state::{
+    ParamConstraint as WireParamConstraint, ParamType as WireParamType,
+    ParamValue as WireParamValue,
+};
 use crate::entity_store::{EntityRole, EntityStore};
 use viso::{InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{
@@ -346,6 +350,62 @@ pub fn build_actions_list(
         .collect()
 }
 
+/// Generate a structural conversion `fn` between two enums that mirror
+/// each other variant-for-variant. The orchestrator-native `Param*`
+/// types (`foldit_runner`) and the gui-wire ones (`foldit_gui`) are kept
+/// as separate definitions because `foldit-gui` deliberately does not
+/// depend on `foldit-runner`, and the orphan rule forbids a `From` impl
+/// here (both types are foreign to this crate) — so the conversions must
+/// be free functions.
+///
+/// Each variant is named once with its field shape; the same `(bindings)`
+/// / `{ bindings }` token tree both destructures the source and
+/// reconstructs the destination. Adding a `Param*` variant becomes a
+/// one-line edit per direction instead of an easy-to-desync match arm.
+/// Mirrors the spirit of viso's `shader_registry!`.
+macro_rules! mirror_enum {
+    // Entry: function signature + braced variant list. Hands off to the
+    // `@build` muncher with an empty match-arm accumulator.
+    (
+        $(#[$meta:meta])*
+        $vis:vis fn $name:ident($arg:ident: $From:ident) -> $To:ident
+        { $($variants:tt)+ }
+    ) => {
+        $(#[$meta])*
+        $vis fn $name($arg: $From) -> $To {
+            mirror_enum!(@build $From, $To, $arg, { } $($variants)+)
+        }
+    };
+
+    // No variants left: emit the accumulated match. (A bare `:tt`-optional
+    // shape would be ambiguous with the `,` separator, so we munch instead,
+    // dispatching on the delimiter that follows each variant ident.)
+    (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }) => {
+        match $arg { $($arms)* }
+    };
+    // `Variant { fields.. }` — struct-shaped.
+    (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
+        $variant:ident { $($field:ident),+ $(,)? } $(, $($rest:tt)+)?) => {
+        mirror_enum!(@build $From, $To, $arg,
+            { $($arms)* $From::$variant { $($field),+ } => $To::$variant { $($field),+ }, }
+            $($($rest)+)?)
+    };
+    // `Variant(bindings..)` — tuple-shaped.
+    (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
+        $variant:ident ( $($bind:ident),+ $(,)? ) $(, $($rest:tt)+)?) => {
+        mirror_enum!(@build $From, $To, $arg,
+            { $($arms)* $From::$variant ( $($bind),+ ) => $To::$variant ( $($bind),+ ), }
+            $($($rest)+)?)
+    };
+    // `Variant` — unit.
+    (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
+        $variant:ident $(, $($rest:tt)+)?) => {
+        mirror_enum!(@build $From, $To, $arg,
+            { $($arms)* $From::$variant => $To::$variant, }
+            $($($rest)+)?)
+    };
+}
+
 fn param_spec_to_wire(
     spec: RunnerParamSpec,
 ) -> foldit_gui::state::ParamSpec {
@@ -359,62 +419,31 @@ fn param_spec_to_wire(
     }
 }
 
-fn param_type_to_wire(t: RunnerParamType) -> foldit_gui::state::ParamType {
-    use foldit_gui::state::ParamType as WireParamType;
-    match t {
-        RunnerParamType::Int => WireParamType::Int,
-        RunnerParamType::Float => WireParamType::Float,
-        RunnerParamType::Bool => WireParamType::Bool,
-        RunnerParamType::String => WireParamType::String,
-        RunnerParamType::Enum => WireParamType::Enum,
-        RunnerParamType::Vec3 => WireParamType::Vec3,
+mirror_enum! {
+    fn param_type_to_wire(t: RunnerParamType) -> WireParamType {
+        Int, Float, Bool, String, Enum, Vec3
     }
 }
 
-fn param_value_to_wire(v: ParamValue) -> foldit_gui::state::ParamValue {
-    use foldit_gui::state::ParamValue as WireParamValue;
-    match v {
-        ParamValue::Int(i) => WireParamValue::Int(i),
-        ParamValue::Float(f) => WireParamValue::Float(f),
-        ParamValue::Bool(b) => WireParamValue::Bool(b),
-        ParamValue::String(s) => WireParamValue::String(s),
-        ParamValue::Vec3(v3) => WireParamValue::Vec3(v3),
+mirror_enum! {
+    fn param_value_to_wire(v: ParamValue) -> WireParamValue {
+        Int(x), Float(x), Bool(x), String(x), Vec3(x)
     }
 }
 
-/// Convert a wire-side `ParamValue` (deserialized from an `OpDispatch`
-/// envelope) into the orchestrator-native form the dispatch calls
-/// expect. Inverse of [`param_value_to_wire`].
-pub(crate) fn param_value_from_wire(
-    v: foldit_gui::state::ParamValue,
-) -> ParamValue {
-    use foldit_gui::state::ParamValue as WireParamValue;
-    match v {
-        WireParamValue::Int(i) => ParamValue::Int(i),
-        WireParamValue::Float(f) => ParamValue::Float(f),
-        WireParamValue::Bool(b) => ParamValue::Bool(b),
-        WireParamValue::String(s) => ParamValue::String(s),
-        WireParamValue::Vec3(v3) => ParamValue::Vec3(v3),
+mirror_enum! {
+    /// Convert a wire-side `ParamValue` (deserialized from an `OpDispatch`
+    /// envelope) into the orchestrator-native form the dispatch calls
+    /// expect. Inverse of [`param_value_to_wire`].
+    pub(crate) fn param_value_from_wire(v: WireParamValue) -> ParamValue {
+        Int(x), Float(x), Bool(x), String(x), Vec3(x)
     }
 }
 
-fn param_constraint_to_wire(
-    c: RunnerParamConstraint,
-) -> foldit_gui::state::ParamConstraint {
-    use foldit_gui::state::ParamConstraint as WireParamConstraint;
-    match c {
-        RunnerParamConstraint::IntRange { min, max } => {
-            WireParamConstraint::IntRange { min, max }
-        }
-        RunnerParamConstraint::FloatRange { min, max } => {
-            WireParamConstraint::FloatRange { min, max }
-        }
-        RunnerParamConstraint::EnumValues(values) => {
-            WireParamConstraint::EnumValues(values)
-        }
-        RunnerParamConstraint::StringPattern(p) => {
-            WireParamConstraint::StringPattern(p)
-        }
+mirror_enum! {
+    fn param_constraint_to_wire(c: RunnerParamConstraint) -> WireParamConstraint {
+        IntRange { min, max }, FloatRange { min, max },
+        EnumValues(x), StringPattern(x)
     }
 }
 
