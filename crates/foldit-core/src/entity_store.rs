@@ -178,47 +178,26 @@ impl LockSet {
 // ── Errors ─────────────────────────────────────────────────────────────
 
 /// Error returned by every fallible [`EntityStore`] operation.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EntityStoreError {
     /// `History`-layer refusal (state machine, action lock, missing id,
     /// etc.). See [`HistoryError`].
-    History(HistoryError),
+    #[error("{0}")]
+    History(#[from] HistoryError),
     /// A navigation target would change a client-locked entity (the
     /// outer lock layer; the inner action-lock half lives on
     /// [`HistoryError::EntityLocked`]).
+    #[error("entity {} is locked by another client", entity.raw())]
     LockedByClient { entity: EntityId },
     /// `id` is not currently a transient preview.
+    #[error("{} is not a transient preview", id.raw())]
     NotAPreview { id: EntityId },
     /// `begin_action` was called with a [`CheckpointKind`] that doesn't
     /// name an entity (e.g., `Loaded`, `BondsChanged`). Action lifecycle
     /// kinds always do.
+    #[error("action lifecycle requires an entity-targeted CheckpointKind")]
     ActionRequiresEntity,
 }
-
-impl From<HistoryError> for EntityStoreError {
-    fn from(e: HistoryError) -> Self {
-        EntityStoreError::History(e)
-    }
-}
-
-impl std::fmt::Display for EntityStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EntityStoreError::History(e) => write!(f, "{e}"),
-            EntityStoreError::LockedByClient { entity } => {
-                write!(f, "entity {} is locked by another client", entity.raw())
-            }
-            EntityStoreError::NotAPreview { id } => {
-                write!(f, "{} is not a transient preview", id.raw())
-            }
-            EntityStoreError::ActionRequiresEntity => {
-                f.write_str("action lifecycle requires an entity-targeted CheckpointKind")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EntityStoreError {}
 
 // ── Backend hand-off result ────────────────────────────────────────────
 

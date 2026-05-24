@@ -102,28 +102,12 @@ pub struct GameEvent {
 
 // -- Error --
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PuzzleError {
-    Io(PathBuf, std::io::Error),
-    Parse(PathBuf, toml::de::Error),
-}
-
-impl std::fmt::Display for PuzzleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PuzzleError::Io(path, err) => write!(f, "{}: {}", path.display(), err),
-            PuzzleError::Parse(path, err) => write!(f, "{}: {}", path.display(), err),
-        }
-    }
-}
-
-impl std::error::Error for PuzzleError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PuzzleError::Io(_, err) => Some(err),
-            PuzzleError::Parse(_, err) => Some(err),
-        }
-    }
+    #[error("{}: {}", .0.display(), .1)]
+    Io(PathBuf, #[source] std::io::Error),
+    #[error("{}: {}", .0.display(), .1)]
+    Parse(PathBuf, #[source] toml::de::Error),
 }
 
 // -- Load --

@@ -32,6 +32,9 @@ serde_json = "1"
 toml = "0.8"
 base64 = "0.22"
 
+# Error handling
+thiserror = "1.0"
+
 # Native-only HTTP client for downloading from RCSB. On wasm the equivalent
 # fetch() bridge belongs in foldit-web (mirrors viso's split: web entry uses
 # `web_sys::window().fetch_with_str`, native uses a sync HTTP client).
