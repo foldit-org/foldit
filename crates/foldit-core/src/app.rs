@@ -311,13 +311,21 @@ pub struct App {
     /// Wall-clock of the last live history push. Gates the 50ms (20Hz)
     /// debounce so per-cycle Rosetta updates don't saturate the IPC.
     last_history_live_push_at: Option<Instant>,
+    #[cfg(not(target_arch = "wasm32"))]
+    stream_host: StreamHost,
+}
+
+/// Owns the in-flight stream bookkeeping that only exists on native
+/// builds: the plugin stream handle table plus the live pull-drag
+/// state. Grouped so App's stream lifecycle touches one field.
+#[cfg(not(target_arch = "wasm32"))]
+struct StreamHost {
     /// In-flight stream handles keyed by request_id. Populated by
     /// `handle_dispatch_op` on `StartStream`; the matching
     /// `release_dispatch_locks` runs in `apply_backend_updates` when
     /// the stream's terminal `PluginUpdate` arrives. The stored
     /// `plugin_id` is the dispatch target for `dispatch_cancel_stream`
     /// when the user hits ESC.
-    #[cfg(not(target_arch = "wasm32"))]
     active_streams: std::collections::HashMap<
         u64,
         ActiveStreamEntry,
@@ -328,7 +336,6 @@ pub struct App {
     /// handling flows through the unified stream-cleanup path; this
     /// field carries the extra viso-side bookkeeping needed for
     /// pointer-move (PullInfo + op id).
-    #[cfg(not(target_arch = "wasm32"))]
     pull_drag: Option<crate::pull_drag::PullDrag>,
 }
 
@@ -387,9 +394,10 @@ impl App {
             last_history_live: None,
             last_history_live_push_at: None,
             #[cfg(not(target_arch = "wasm32"))]
-            active_streams: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            pull_drag: None,
+            stream_host: StreamHost {
+                active_streams: std::collections::HashMap::new(),
+                pull_drag: None,
+            },
         }
     }
 
@@ -486,7 +494,7 @@ impl App {
                         ) {
                             visual_dirty = true;
                             if let (Some(entry), Some(entity)) = (
-                                self.active_streams.get(&request_id),
+                                self.stream_host.active_streams.get(&request_id),
                                 self.store
                                     .history()
                                     .ongoing()
@@ -524,6 +532,7 @@ impl App {
                         // Cancel-as-commit: same shape as Final below.
                         had_terminal = true;
                         let stream_transition = self
+                            .stream_host
                             .active_streams
                             .get(&request_id)
                             .map(|e| e.transition);
@@ -551,7 +560,7 @@ impl App {
                             }
                         }
                         if let Some(entry) =
-                            self.active_streams.remove(&request_id)
+                            self.stream_host.active_streams.remove(&request_id)
                         {
                             if let Some(orch) =
                                 self.router.orchestrator.as_mut()
@@ -559,8 +568,8 @@ impl App {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.pull_drag = None;
+                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.stream_host.pull_drag = None;
                         }
                         log::info!(
                             "plugin update Cancelled rid={request_id} \
@@ -575,6 +584,7 @@ impl App {
                     } => {
                         had_terminal = true;
                         let stream_transition = self
+                            .stream_host
                             .active_streams
                             .get(&request_id)
                             .map(|e| e.transition);
@@ -610,7 +620,7 @@ impl App {
                             }
                         }
                         if let Some(entry) =
-                            self.active_streams.remove(&request_id)
+                            self.stream_host.active_streams.remove(&request_id)
                         {
                             if let Some(orch) =
                                 self.router.orchestrator.as_mut()
@@ -618,8 +628,8 @@ impl App {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.pull_drag = None;
+                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.stream_host.pull_drag = None;
                         }
                         log::info!(
                             "plugin update Final rid={request_id} \
@@ -636,7 +646,7 @@ impl App {
                         // is gated to this stream's entity so a stale
                         // Error can't drop another op's tentative.
                         had_terminal = true;
-                        let entry = self.active_streams.remove(&request_id);
+                        let entry = self.stream_host.active_streams.remove(&request_id);
                         let owns_tentative = entry
                             .as_ref()
                             .and_then(|e| {
@@ -671,8 +681,8 @@ impl App {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.pull_drag = None;
+                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.stream_host.pull_drag = None;
                         }
                         log::warn!(
                             "plugin update Error rid={request_id} \
@@ -797,7 +807,7 @@ impl App {
             VisoCommand::ClearSelection => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(orch) = self.router.orchestrator.as_mut() {
-                    for (rid, entry) in &self.active_streams {
+                    for (rid, entry) in &self.stream_host.active_streams {
                         if let Err(e) = orch
                             .dispatch_cancel_stream(&entry.plugin_id, *rid)
                         {
@@ -845,7 +855,7 @@ impl App {
             match &input {
                 ViewportInput::PointerMove { x, y, .. }
                     if self.input.mouse_pressed()
-                        && self.pull_drag.is_none() =>
+                        && self.stream_host.pull_drag.is_none() =>
                 {
                     if self.try_begin_pull_drag(*x, *y) {
                         // viso recorded the press; drop its mouse
@@ -858,14 +868,14 @@ impl App {
                     }
                 }
                 ViewportInput::PointerMove { x, y, .. }
-                    if self.pull_drag.is_some() =>
+                    if self.stream_host.pull_drag.is_some() =>
                 {
                     self.update_pull_drag(*x, *y);
                     self.finalize_viewport_input();
                     return;
                 }
                 ViewportInput::PointerUp { .. }
-                    if self.pull_drag.is_some() =>
+                    if self.stream_host.pull_drag.is_some() =>
                 {
                     self.end_pull_drag();
                     self.finalize_viewport_input();
@@ -958,7 +968,7 @@ impl App {
                                 if let Some(orch) =
                                     self.router.orchestrator.as_mut()
                                 {
-                                    for (rid, entry) in &self.active_streams {
+                                    for (rid, entry) in &self.stream_host.active_streams {
                                         if let Err(e) = orch
                                             .dispatch_cancel_stream(
                                                 &entry.plugin_id,
@@ -1024,7 +1034,7 @@ impl App {
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, &self.router, pull);
@@ -1051,11 +1061,11 @@ impl App {
     /// trailing cleanup the regular `handle_viewport_input` flow does
     /// (visualizations + broadcast pump) without double-running the
     /// match-arm body. Pre-snapshots the pull info so the engine
-    /// borrow doesn't overlap with `&self.pull_drag`.
+    /// borrow doesn't overlap with `&self.stream_host.pull_drag`.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
         self.router.ui_dirty |= DirtyFlags::UI;
-        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, &self.router, pull);
         }
@@ -1068,7 +1078,7 @@ impl App {
     /// suppresses the regular viso input flow), false otherwise.
     ///
     /// Rejected picks (non-protein entity, hydrogen atom, no atom under
-    /// the cursor, dispatch failure) leave `self.pull_drag = None`
+    /// the cursor, dispatch failure) leave `self.stream_host.pull_drag = None`
     /// and return false, letting the click fall through to camera /
     /// selection handling.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1162,7 +1172,7 @@ impl App {
             }
         }
 
-        let _ = self.active_streams.insert(
+        let _ = self.stream_host.active_streams.insert(
             rid,
             ActiveStreamEntry {
                 handle,
@@ -1170,7 +1180,7 @@ impl App {
                 transition: TransitionKind::default(),
             },
         );
-        self.pull_drag = Some(crate::pull_drag::PullDrag {
+        self.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
             request_id: rid,
             plugin_id,
             pull_info,
@@ -1187,7 +1197,7 @@ impl App {
     fn update_pull_drag(&mut self, x: f32, y: f32) {
         use foldit_runner::orchestrator::ParamValue;
 
-        let Some(drag) = self.pull_drag.as_mut() else { return };
+        let Some(drag) = self.stream_host.pull_drag.as_mut() else { return };
         drag.pull_info.screen_target = (x, y);
 
         let (residue, atom_name, plugin_id, request_id) = (
@@ -1226,7 +1236,7 @@ impl App {
     /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
-        let Some(drag) = self.pull_drag.take() else { return };
+        let Some(drag) = self.stream_host.pull_drag.take() else { return };
         let Some(orch) = self.router.orchestrator.as_ref() else { return };
         if let Err(e) =
             orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id)
@@ -1379,7 +1389,7 @@ impl App {
 
             match dispatch_outcome {
                 Ok(OpOutcome::Stream { rid, handle }) => {
-                    let _ = self.active_streams.insert(
+                    let _ = self.stream_host.active_streams.insert(
                         rid,
                         ActiveStreamEntry {
                             handle,
@@ -1821,7 +1831,7 @@ impl App {
         // Pre-snapshot pull info under an immutable borrow so the
         // subsequent `&mut engine` doesn't conflict.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else { return };
