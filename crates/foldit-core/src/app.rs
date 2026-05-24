@@ -26,7 +26,7 @@ use viso::{
 };
 
 use crate::action_router::{self, ActionRouter};
-use crate::entity_store::{EntityOrigin, EntityRole, EntityStore, EntityStoreError};
+use crate::entity_store::{EntityOrigin, EntityStore, EntityStoreError};
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 
 fn score_for_mode(
@@ -200,16 +200,7 @@ fn load_entity_into_history(
         MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent
     );
     let zero_residue = entity.residue_count() == 0;
-    let id = store.insert_preview(
-        entity,
-        name.clone(),
-        EntityOrigin::Loaded,
-        EntityRole {
-            foldable: !is_ambient && !zero_residue,
-            designable: !is_ambient && !zero_residue,
-            ambient: is_ambient,
-        },
-    );
+    let id = store.insert_preview(entity, name.clone(), EntityOrigin::Loaded);
     if is_ambient || zero_residue {
         // Leave it transient: visible in viso, absent from history.
         return Some(id);
@@ -220,7 +211,6 @@ fn load_entity_into_history(
             entity: id,
             kind: mol_type,
         },
-        None,
         None,
         None,
         std::borrow::Cow::Owned(format!("Loaded {name}")),
@@ -1637,33 +1627,6 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 { let _ = name; let _ = engine; }
             }
-            ParameterizedAction::RunSequenceDesign { temperature, num_sequences } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                Self::run_sequence_design(
-                    &mut self.router, &mut self.store, engine,
-                    temperature, num_sequences,
-                );
-                #[cfg(target_arch = "wasm32")]
-                { let _ = (temperature, num_sequences, engine); }
-            }
-            ParameterizedAction::RunStructureDesign { length, num_steps, contig } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                Self::run_structure_design(
-                    &mut self.router, &mut self.store, engine,
-                    &length, num_steps, contig,
-                );
-                #[cfg(target_arch = "wasm32")]
-                { let _ = (length, num_steps, contig, engine); }
-            }
-            ParameterizedAction::RunPrediction { entity_ids } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                Self::run_prediction_for_entities(
-                    &mut self.router, &mut self.store, engine,
-                    &entity_ids,
-                );
-                #[cfg(target_arch = "wasm32")]
-                { let _ = (entity_ids, engine); }
-            }
             ParameterizedAction::History { .. }
             | ParameterizedAction::AdvanceBubble { .. } => {
                 // Handled in the early-return block above. The match is
@@ -1809,270 +1772,6 @@ impl App {
             Ok(HistoryOutcome::Noop) => {}
             Err(e) => log::warn!("history command refused: {e}"),
         }
-    }
-
-    // ── ML operations (parameterized) ──
-
-    /// Build entity context data from a pre-collected slice of entities.
-    ///
-    /// `focused_entity_id` switches the runner into focus-aware mode, used
-    /// by MPNN: only the focused protein is designable; every other
-    /// non-ambient entity is fixed.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn build_entity_context(
-        entities: Vec<molex::MoleculeEntity>,
-        store: &EntityStore,
-        entity_id: EntityId,
-        focused_entity_id: Option<u32>,
-    ) -> foldit_runner::orchestrator::SessionContext {
-        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, SessionContext};
-        let _ = (entities, store);
-        SessionContext {
-            focused_entity_id: focused_entity_id
-                .map(|id| RunnerEntityId(u64::from(id)))
-                .or_else(|| Some(RunnerEntityId(u64::from(entity_id.raw())))),
-            selection: Vec::new(),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_sequence_design(
-        router: &mut ActionRouter,
-        store: &mut EntityStore,
-        engine: &mut VisoEngine,
-        temperature: f32,
-        num_sequences: u32,
-    ) {
-        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
-        use crate::action_router::BackendOpRequest;
-
-        let focus = engine.focus();
-        log::info!("MPNN: focus = {:?}", focus);
-
-        let loaded = store.loaded_entity();
-        let Some((target_id, entities)) =
-            store.collect_ml_entities(&focus, loaded)
-        else {
-            log::warn!("No structure available for sequence design");
-            return;
-        };
-
-        let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
-        let entity_name = store.metadata(target_id).map(|m| m.name.clone());
-        log::info!(
-            "MPNN: target_id={}, entity='{}', {} entities, {} total atoms",
-            target_id.raw(),
-            entity_name.as_deref().unwrap_or("?"),
-            entities.len(),
-            total_atoms,
-        );
-
-        // Role validation: target must be designable
-        if let Some((_, role)) = store.entity_meta(target_id) {
-            if role.ambient {
-                log::warn!("Cannot run sequence design on ambient entity group (water/ion)");
-                return;
-            }
-            if !role.designable {
-                log::warn!("Target entity group is not designable");
-                return;
-            }
-        }
-
-        let focused_entity_id: Option<u32> = match focus {
-            Focus::Entity(eid) => Some(eid.raw()),
-            _ => None,
-        };
-
-        let entity_context = Self::build_entity_context(
-            entities, store, target_id, focused_entity_id,
-        );
-
-        let target_name = store.metadata(target_id)
-            .map(|m| m.name.clone())
-            .unwrap_or_default();
-        log::info!(
-            "Starting sequence design on '{}' (T={}, n={})...",
-            target_name, temperature, num_sequences,
-        );
-
-        router.start_op(
-            BackendOpRequest {
-                target: RunnerEntityId(u64::from(target_id.raw())),
-                op_type: OpType::MLSequenceDesign,
-                entity_context,
-                create_preview_mirror: false,
-                pending_reference_ca: None,
-                kickoff: Box::new(move |orch, ctx| {
-                    use foldit_runner::orchestrator::ParamValue;
-                    let mut params = std::collections::HashMap::new();
-                    params.insert(
-                        "temperature".to_string(),
-                        ParamValue::Float(temperature),
-                    );
-                    params.insert(
-                        "num_sequences".to_string(),
-                        ParamValue::Int(num_sequences as i32),
-                    );
-                    // sequence_design is a Query in the plugin protocol
-                    // (read-only, returns candidate sequences). Designed/
-                    // fixed chain encoding flows via SessionContext + the
-                    // plugin's MPNN convention (focused entity → designed,
-                    // selection → fixed). Capture-time population of the
-                    // selection list is not yet wired.
-                    orch.dispatch_query("sequence_design", ctx, params)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }),
-            },
-            engine,
-            store,
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_structure_design(
-        router: &mut ActionRouter,
-        store: &mut EntityStore,
-        engine: &mut VisoEngine,
-        length: &str,
-        num_steps: u32,
-        contig: Option<String>,
-    ) {
-        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
-        use crate::action_router::BackendOpRequest;
-
-        let Some(target_id) = store.loaded_entity() else {
-            log::warn!("No structure available for structure design");
-            return;
-        };
-        let Some(entity) = store.entity(target_id).cloned() else {
-            log::warn!("No structure available for structure design");
-            return;
-        };
-
-        // Role validation: target must be foldable
-        if let Some((_, role)) = store.entity_meta(target_id) {
-            if role.ambient {
-                log::warn!("Cannot run structure design on ambient entity (water/ion)");
-                return;
-            }
-            if !role.foldable {
-                log::warn!("Target entity is not foldable");
-                return;
-            }
-        }
-
-        use molex::MoleculeType;
-        let entities: Vec<molex::MoleculeEntity> = vec![entity].into_iter().filter(|e| {
-            !matches!(e.molecule_type(), MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent)
-        }).collect();
-
-        let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
-        log::info!(
-            "RFD3 structure design: source={}, {} entities, {} total atoms",
-            target_id.raw(), entities.len(), total_atoms,
-        );
-
-        let entity_context = Self::build_entity_context(entities, store, target_id, None);
-        let contig_str = contig.unwrap_or_default();
-
-        log::info!(
-            "Starting structure design (length={}, steps={}, contig='{}')...",
-            length, num_steps, contig_str,
-        );
-        let length_owned = length.to_string();
-        router.start_op(
-            BackendOpRequest {
-                target: RunnerEntityId(u64::from(target_id.raw())),
-                op_type: OpType::MLStructureDesign,
-                entity_context,
-                create_preview_mirror: false,
-                pending_reference_ca: None,
-                kickoff: Box::new(move |orch, ctx| {
-                    use foldit_runner::orchestrator::ParamValue;
-                    let mut params = std::collections::HashMap::new();
-                    params.insert("length".to_string(), ParamValue::String(length_owned));
-                    params.insert("contig".to_string(), ParamValue::String(contig_str));
-                    params.insert("num_steps".to_string(), ParamValue::Int(num_steps as i32));
-                    orch.dispatch_invoke("design", ctx, params, |_| None)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }),
-            },
-            engine,
-            store,
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_prediction_for_entities(
-        router: &mut ActionRouter,
-        store: &mut EntityStore,
-        engine: &mut VisoEngine,
-        entity_ids: &[u32],
-    ) {
-        use foldit_runner::orchestrator::{EntityId as RunnerEntityId, OpType};
-        use crate::action_router::BackendOpRequest;
-
-        // Resolve raw u32 ids (from the GUI's entity-picker payload) to
-        // typed EntityIds via the store's allocator. `mint_id` advances
-        // the allocator past `raw` so future allocations don't collide;
-        // for ids the store already knows, that's a no-op.
-        let mut resolved: Vec<EntityId> = Vec::new();
-        let mut collected: Vec<molex::MoleculeEntity> = Vec::new();
-        for raw in entity_ids {
-            let id = store.mint_id(*raw);
-            if let Some(entity) = store.entity(id) {
-                collected.push(entity.clone());
-                resolved.push(id);
-            }
-        }
-        let target_id = match resolved.first().copied() {
-            Some(id) => id,
-            None => {
-                log::warn!("No matching entities found for prediction");
-                return;
-            }
-        };
-
-        if collected.is_empty() {
-            log::warn!("No entities selected for prediction");
-            return;
-        }
-
-        let total_atoms: usize = collected.iter().map(|e| e.atom_count()).sum();
-        log::info!(
-            "RF3 prediction (entity picker): {} entities, {} total atoms",
-            collected.len(), total_atoms,
-        );
-
-        let pending_ca = molex::ops::codec::ca_positions(&collected);
-        let entity_context = Self::build_entity_context(collected, store, target_id, None);
-        let num_recycles: i32 = 3;
-
-        router.start_op(
-            BackendOpRequest {
-                target: RunnerEntityId(u64::from(target_id.raw())),
-                op_type: OpType::MLPredict,
-                entity_context,
-                create_preview_mirror: true,
-                pending_reference_ca: Some(pending_ca),
-                kickoff: Box::new(move |orch, ctx| {
-                    use foldit_runner::orchestrator::ParamValue;
-                    let mut params = std::collections::HashMap::new();
-                    params.insert(
-                        "num_recycles".to_string(),
-                        ParamValue::Int(num_recycles),
-                    );
-                    orch.dispatch_invoke("predict", ctx, params, |_| None)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }),
-            },
-            engine,
-            store,
-        );
     }
 
     // ── Native input (when webview is not ready) ──

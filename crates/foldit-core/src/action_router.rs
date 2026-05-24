@@ -9,7 +9,7 @@ use foldit_gui::state::{
     ParamConstraint as WireParamConstraint, ParamType as WireParamType,
     ParamValue as WireParamValue,
 };
-use crate::entity_store::{EntityRole, EntityStore};
+use crate::entity_store::EntityStore;
 use viso::{InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{
     EntityId as RunnerEntityId, OpType, ParamConstraint as RunnerParamConstraint,
@@ -193,7 +193,6 @@ impl ActionRouter {
                         mirror,
                         "Predicting...".to_string(),
                         origin,
-                        EntityRole { foldable: false, designable: false, ambient: false },
                     );
                     engine.set_entity_visible(loaded_id.raw(), false);
                     self.pending_preview_id = Some(preview_id);
@@ -463,8 +462,7 @@ pub fn trajectory_path_from_args() -> Option<String> {
 /// RFD3) require. Pure helper — no router/app state.
 ///
 /// Builds a `SessionContext` carrying the orchestrator-facing focus +
-/// selection. Entity-role hints (designable / foldable / ambient) are
-/// not plumbed through — plugins read their own state. Selection
+/// selection. Plugins read their own per-entity state. Selection
 /// capture is not yet wired; the field is left empty for now.
 pub fn build_session_context(
     target_id: molex::entity::molecule::id::EntityId,

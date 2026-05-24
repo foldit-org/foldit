@@ -8,7 +8,7 @@
 //!   preview signal; the old [`EntityMetadata::is_preview`] flag is
 //!   gone (G6).
 //! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` — per-entity
-//!   metadata (name, origin, role, reference CA, designed sequences).
+//!   metadata (name, origin, reference CA, designed sequences).
 //!   `Arc`-shared so unchanged entries stay aliased across history
 //!   operations (no metadata serialization on every mutation).
 //! - [`LockSet`] — placeholder for the future Orchestrator-owned
@@ -40,7 +40,7 @@
 //! the fact, but the invariant is what prevents it in the first
 //! place. Metadata-only setters
 //! ([`Self::set_entity_name`], [`Self::set_reference_ca`],
-//! [`Self::add_designed_sequences`], [`Self::set_entity_role`],
+//! [`Self::add_designed_sequences`],
 //! [`Self::set_entity_origin`]) are exempt — they don't appear in
 //! `head_assembly` output.
 
@@ -70,17 +70,6 @@ pub enum EntityOrigin {
     StructureDesign { source: EntityId, confidence: f32 },
 }
 
-/// What operations are permitted on this entity.
-#[derive(Debug, Clone)]
-pub struct EntityRole {
-    /// Structure (backbone) can be modified — wiggle, shake, RFD3.
-    pub foldable: bool,
-    /// Sequence can be redesigned — MPNN.
-    pub designable: bool,
-    /// Non-interactive background entity (waters, ions, lipids).
-    pub ambient: bool,
-}
-
 /// A designed sequence paired with the backbone it was designed for.
 #[derive(Debug, Clone)]
 pub struct DesignedSequence {
@@ -103,8 +92,6 @@ pub struct EntityMetadata {
     pub name: String,
     /// How the entity entered the scene.
     pub origin: EntityOrigin,
-    /// What operations are permitted.
-    pub role: EntityRole,
     /// Optional reference CA set for alignment.
     pub reference_ca: Option<Vec<Vec3>>,
     /// Designed sequences, appended by MPNN runs.
@@ -114,11 +101,10 @@ pub struct EntityMetadata {
 impl EntityMetadata {
     /// Build a minimal metadata record.
     #[must_use]
-    pub fn new(name: String, origin: EntityOrigin, role: EntityRole) -> Self {
+    pub fn new(name: String, origin: EntityOrigin) -> Self {
         Self {
             name,
             origin,
-            role,
             reference_ca: None,
             designed_sequences: Vec::new(),
         }
@@ -901,13 +887,6 @@ impl EntityStore {
         }
     }
 
-    /// Replace an entity's role. No history push.
-    pub fn set_entity_role(&mut self, id: EntityId, role: EntityRole) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            Arc::make_mut(meta_arc).role = role;
-        }
-    }
-
     /// Replace an entity's origin. No history push.
     pub fn set_entity_origin(&mut self, id: EntityId, origin: EntityOrigin) {
         if let Some(meta_arc) = self.metadata.get_mut(&id) {
@@ -925,14 +904,13 @@ impl EntityStore {
         mut entity: MoleculeEntity,
         name: String,
         origin: EntityOrigin,
-        role: EntityRole,
     ) -> EntityId {
         let id = self.allocator.allocate();
         entity.set_id(id);
         let _ = self.transient.insert(id, Arc::new(entity));
         let _ = self
             .metadata
-            .insert(id, Arc::new(EntityMetadata::new(name, origin, role)));
+            .insert(id, Arc::new(EntityMetadata::new(name, origin)));
         // Topology edit (entity added) — DELTA01 rejects AddEntity, so
         // this stays Full.
         let _ = self.queue_full_broadcast();
@@ -948,13 +926,12 @@ impl EntityStore {
         mut entity: MoleculeEntity,
         name: String,
         origin: EntityOrigin,
-        role: EntityRole,
     ) {
         entity.set_id(id);
         let _ = self.transient.insert(id, Arc::new(entity));
         let _ = self
             .metadata
-            .insert(id, Arc::new(EntityMetadata::new(name, origin, role)));
+            .insert(id, Arc::new(EntityMetadata::new(name, origin)));
         // Topology edit (entity added) — DELTA01 rejects AddEntity, so
         // this stays Full.
         let _ = self.queue_full_broadcast();
@@ -988,14 +965,13 @@ impl EntityStore {
     /// Promote a preview into history. Removes it from `transient` and
     /// pushes one checkpoint via [`History::add_entity`] with `kind`
     /// (typically [`CheckpointKind::PromotedPreview`] or one of the
-    /// ML kinds). Optionally stamps final origin / role / name.
+    /// ML kinds). Optionally stamps final origin / name.
     /// Refused if the preview is unknown or an action is in flight.
     pub fn promote_preview(
         &mut self,
         id: EntityId,
         kind: CheckpointKind,
         origin: Option<EntityOrigin>,
-        role: Option<EntityRole>,
         name: Option<String>,
         label: impl Into<Cow<'static, str>>,
     ) -> Result<CheckpointId, EntityStoreError> {
@@ -1008,9 +984,6 @@ impl EntityStore {
             let meta = Arc::make_mut(meta_arc);
             if let Some(o) = origin {
                 meta.origin = o;
-            }
-            if let Some(r) = role {
-                meta.role = r;
             }
             if let Some(n) = name {
                 meta.name = n;
@@ -1213,23 +1186,12 @@ impl EntityStore {
             .and_then(|m| m.reference_ca.as_deref())
     }
 
-    /// Entity metadata (origin + role).
-    #[must_use]
-    pub fn entity_meta(&self, id: EntityId) -> Option<(&EntityOrigin, &EntityRole)> {
-        self.metadata.get(&id).map(|m| (&m.origin, &m.role))
-    }
-
-    /// Register a loaded entity with reference CA + role detection.
+    /// Register a loaded entity with reference CA.
     /// Pure metadata edit — no history push.
     pub fn register_loaded(&mut self, id: EntityId, reference_ca: Vec<Vec3>) {
         if let Some(meta_arc) = self.metadata.get_mut(&id) {
             let meta = Arc::make_mut(meta_arc);
             meta.origin = EntityOrigin::Loaded;
-            meta.role = EntityRole {
-                foldable: true,
-                designable: true,
-                ambient: false,
-            };
             meta.reference_ca = Some(reference_ca);
         }
     }
@@ -1368,11 +1330,6 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "preview".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: false,
-                designable: false,
-                ambient: true,
-            },
         );
         assert!(store.is_preview(id));
         // Preview is visible in head_assembly.
@@ -1387,7 +1344,6 @@ mod tests {
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "promoted",
@@ -1411,7 +1367,6 @@ mod tests {
                 CheckpointKind::PromotedPreview { entity: stranger },
                 None,
                 None,
-                None,
                 "no",
             )
             .unwrap_err();
@@ -1427,17 +1382,11 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "x".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let _root_ckpt = store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "p",
@@ -1475,17 +1424,11 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "x".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let _ = store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "p",
@@ -1517,11 +1460,6 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "x".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         store.locks_mut().acquire(id);
         assert_eq!(store.count(), 1);
@@ -1550,17 +1488,11 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "old".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: false,
-                designable: false,
-                ambient: true,
-            },
         );
         let _ = store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "p",
@@ -1584,17 +1516,11 @@ mod tests {
             mk_bulk(mk_dummy_id()),
             "x".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: true,
-                ambient: false,
-            },
         );
         let _ = store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "p",
@@ -1633,11 +1559,6 @@ mod tests {
             mk_protein(mk_dummy_id(), 2),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let payloads = store.take_pending_broadcasts();
         assert_eq!(payloads.len(), 1);
@@ -1658,11 +1579,6 @@ mod tests {
             mk_protein(mk_dummy_id(), 1),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         // Drain the insert broadcast.
         let _ = store.take_pending_broadcasts();
@@ -1678,17 +1594,11 @@ mod tests {
             mk_protein(mk_dummy_id(), 1),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "promote",
@@ -1727,17 +1637,11 @@ mod tests {
             mk_protein(mk_dummy_id(), n_residues),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "promote",
@@ -2049,17 +1953,11 @@ mod tests {
             mk_protein(mk_dummy_id(), 3),
             "b".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         store
             .promote_preview(
                 id_b,
                 CheckpointKind::PromotedPreview { entity: id_b },
-                None,
                 None,
                 None,
                 "promote b",
@@ -2088,11 +1986,6 @@ mod tests {
             mk_protein(mk_dummy_id(), 2),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let _ = store.take_pending_broadcasts();
         let prior_asm = store.head_assembly();
@@ -2140,11 +2033,6 @@ mod tests {
             mk_protein(mk_dummy_id(), 1),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let _ = store.take_pending_broadcasts();
         assert!(store.remove_preview(id));
@@ -2163,18 +2051,12 @@ mod tests {
             mk_protein(mk_dummy_id(), 1),
             "p".to_string(),
             EntityOrigin::Loaded,
-            EntityRole {
-                foldable: true,
-                designable: false,
-                ambient: false,
-            },
         );
         let _ = store.take_pending_broadcasts();
         store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 None,
                 "promote",
