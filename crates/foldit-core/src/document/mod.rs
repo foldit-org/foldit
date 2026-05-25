@@ -49,6 +49,11 @@ use crate::history::{
 };
 
 mod broadcast;
+mod change;
+// Re-export is unused until the apply funnel + projectors consume it in
+// RX6; remove the allow then (mirrors change::SceneChange's dead_code allow).
+#[allow(unused_imports)]
+pub use change::SceneChange;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 
