@@ -697,28 +697,33 @@ impl App {
         }
     }
 
-    /// Drain `Document::take_pending_broadcasts` and forward each
-    /// payload to the orchestrator. Call at the end of every action /
-    /// keybind / head-move handler — the store queues a broadcast per
-    /// authoritative mutation, but doesn't reach into the orchestrator
-    /// itself; this is the bridge.
-    fn pump_pending_broadcasts(&mut self) {
-        let payloads = self.store.take_pending_broadcasts();
-        if payloads.is_empty() {
+    /// Drain `Document::take_scene_changes` and route the batch to the
+    /// projectors. Call at the end of every action / keybind / head-move
+    /// handler — the store emits a `SceneChange` per observable mutation
+    /// but holds no projection logic; this is the bridge.
+    ///
+    /// Today the only spine consumer is the `PluginBroadcaster` (Full/Delta
+    /// plugin fan-out); the render + GUI projectors are later sessions, so
+    /// the `refresh_scores` + `ui_dirty` tail (RX9/RX10's eventual home)
+    /// rides along here for now.
+    fn pump_scene_changes(&mut self) {
+        let changes = self.store.take_scene_changes();
+        if changes.is_empty() {
             return;
         }
         let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
             // Without an orchestrator we have no plugins to notify;
-            // drop the queued payloads.
+            // drop the drained changes.
             return;
         };
-        for payload in &payloads {
-            orch.broadcast_to_plugins(payload);
-        }
-        // Re-score after every broadcast so the head checkpoint
-        // reflects the post-edit state. Synchronous: the score query
-        // is cheap (~ms) compared to the user-visible cost of a stale
-        // score lingering across frames.
+        // `broadcaster` and `orchestrator` are disjoint fields of
+        // `self.plugin_driver`; `store` is a separate field of `self`.
+        self.plugin_driver
+            .broadcaster
+            .broadcast(&changes, &self.store, orch);
+        // Re-score after every drain so the head checkpoint reflects the
+        // post-edit state. Synchronous: the score query is cheap (~ms)
+        // compared to a stale score lingering across frames.
         refresh_scores(orch, &mut self.store, self.engine.as_mut());
         self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
     }
@@ -805,7 +810,7 @@ impl App {
             // All other commands: delegate entirely to viso
             other => { engine.execute(other); }
         }
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
         true
     }
 
@@ -1027,7 +1032,7 @@ impl App {
             });
         }
 
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     /// Called after the pull-drag interception path. Mirrors the
@@ -1042,7 +1047,7 @@ impl App {
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, &self.router, pull);
         }
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     /// Pointer-down on an atom: classify the pick, dispatch the matching
@@ -1229,7 +1234,7 @@ impl App {
             foldit_gui::ActionId::Undo => self.handle_undo(),
             foldit_gui::ActionId::Redo => self.handle_redo(),
         }
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     /// Dispatch a plugin op by op-id. Resolves the op against the
@@ -1383,7 +1388,7 @@ impl App {
             }
             self.router.ui_dirty |=
                 DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
-            self.pump_pending_broadcasts();
+            self.pump_scene_changes();
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1443,7 +1448,7 @@ impl App {
         action: foldit_gui::ParameterizedAction,
     ) {
         self.handle_parameterized_action_inner(action);
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     fn handle_parameterized_action_inner(
@@ -1626,12 +1631,12 @@ impl App {
 
     pub fn handle_undo(&mut self) {
         self.run_history_command(HistoryCommand::Undo);
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     pub fn handle_redo(&mut self) {
         self.run_history_command(HistoryCommand::Redo { branch: None });
-        self.pump_pending_broadcasts();
+        self.pump_scene_changes();
     }
 
     /// Common tail for undo / redo / jump_checkpoint: republish to viso

@@ -21,8 +21,15 @@ use crate::history::CheckpointId;
 
 /// A single observable change to the scene.
 ///
-/// Consumed by the `Document::apply` funnel + projectors starting in
-/// RX6; remove the `allow` then.
+/// Emitted by the [`Document::apply`] funnel and consumed by the
+/// projectors. As of RX6 the only consumer is the `PluginBroadcaster`,
+/// which reads the discriminant and `Edit::tentative` (it re-derives the
+/// assembly from the `Document` rather than from these payloads). The
+/// per-variant payload fields (`edit`, `from`/`to`, `entity`) are
+/// populated now but only *read* once the render projector (RX7) and GUI
+/// projector (RX9) land; the `dead_code` allow covers that gap — drop it
+/// when those projectors consume the fields. (Derived `Debug`/`Clone` are
+/// ignored by dead-code analysis, so they don't keep the fields live.)
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SceneChange {
