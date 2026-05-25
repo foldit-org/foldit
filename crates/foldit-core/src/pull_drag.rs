@@ -32,7 +32,7 @@ use molex::{Element, MoleculeEntity};
 #[cfg(not(target_arch = "wasm32"))]
 use viso::{AtomRef, PullInfo};
 
-use crate::entity_store::EntityStore;
+use crate::document::Document;
 
 /// Op id for the residue-anchored cart-pull (backbone pull).
 pub(crate) const OP_PULL_BACKBONE: &str = "ActionLocalMinimizePull";
@@ -88,7 +88,7 @@ pub(crate) struct PullDrag {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn route_atom_pick(
-    store: &EntityStore,
+    store: &Document,
     entity_id: u32,
     atom_idx: u32,
 ) -> Option<PullRoute> {
@@ -138,7 +138,7 @@ pub(crate) fn route_atom_pick(
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn route_residue_pick(
-    store: &EntityStore,
+    store: &Document,
     flat_residue: u32,
     atom_name: &str,
     entity_id: MolexEntityId,

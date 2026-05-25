@@ -12,7 +12,7 @@ use foldit_gui::state::{
     ParamConstraint as WireParamConstraint, ParamType as WireParamType,
     ParamValue as WireParamValue,
 };
-use crate::entity_store::EntityStore;
+use crate::document::Document;
 use viso::{InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
 use foldit_runner::orchestrator::{
     EntityId as RunnerEntityId, OpType, ParamConstraint as RunnerParamConstraint,
@@ -107,7 +107,7 @@ impl ActionRouter {
     pub fn handle_trigger_action(
         &mut self,
         _engine: &mut VisoEngine,
-        _store: &mut EntityStore,
+        _store: &mut Document,
         action: foldit_gui::ActionId,
     ) -> Option<foldit_gui::ParameterizedAction> {
         log::error!(
@@ -118,7 +118,7 @@ impl ActionRouter {
         None
     }
 
-    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
+    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut Document) {
         log::info!("Cancelling current operation");
         engine.execute(VisoCommand::ClearSelection);
         // Stream lock release + commit live in apply_backend_updates'
@@ -149,7 +149,7 @@ impl ActionRouter {
         orch: &mut Orchestrator,
         request: BackendOpRequest,
         engine: &mut VisoEngine,
-        store: &mut EntityStore,
+        store: &mut Document,
     ) {
         if orch.is_locked(request.target) {
             let op = orch.get_op_type(request.target);
@@ -206,7 +206,7 @@ impl ActionRouter {
         &mut self,
         engine: &mut VisoEngine,
         input: &mut InputProcessor,
-        _store: &mut EntityStore,
+        _store: &mut Document,
         button: MouseButton,
         pressed: bool,
     ) {
@@ -222,7 +222,7 @@ impl ActionRouter {
         &mut self,
         engine: &mut VisoEngine,
         _input: &InputProcessor,
-        _store: &mut EntityStore,
+        _store: &mut Document,
         x: f32,
         y: f32,
     ) {

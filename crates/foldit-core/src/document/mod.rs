@@ -1,6 +1,6 @@
-//! Authoritative entity store atop the two-layer [`History`].
+//! Authoritative document atop the two-layer [`History`].
 //!
-//! `EntityStore` owns:
+//! `Document` owns:
 //! - [`History`] — the full per-entity timelines + checkpoint graph.
 //! - `transient: IndexMap<EntityId, Arc<MoleculeEntity>>` — preview /
 //!   scene-resident entities that are visible in [`Self::head_assembly`]
@@ -56,9 +56,9 @@ mod render;
 
 // ── Errors ─────────────────────────────────────────────────────────────
 
-/// Error returned by every fallible [`EntityStore`] operation.
+/// Error returned by every fallible [`Document`] operation.
 #[derive(Debug, thiserror::Error)]
-pub enum EntityStoreError {
+pub enum DocumentError {
     /// `History`-layer refusal (state machine, action lock, missing id,
     /// etc.). See [`HistoryError`].
     #[error("{0}")]
@@ -73,10 +73,10 @@ pub enum EntityStoreError {
     ActionRequiresEntity,
 }
 
-// ── EntityStore ────────────────────────────────────────────────────────
+// ── Document ───────────────────────────────────────────────────────────
 
-/// Authoritative entity store.
-pub struct EntityStore {
+/// Authoritative document over the whole scene.
+pub struct Document {
     /// Per-entity metadata. `Arc`-shared so unchanged entries alias
     /// across history operations (no metadata serialization fan-out
     /// per mutation).
@@ -104,13 +104,13 @@ pub struct EntityStore {
     pending_broadcasts: Vec<foldit_runner::orchestrator::BroadcastPayload>,
 }
 
-impl Default for EntityStore {
+impl Default for Document {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl EntityStore {
+impl Document {
     /// Build an empty store. The internal [`History`] is seeded with no
     /// entities and an empty bonds set; call [`Self::reset`] when a
     /// puzzle loads.
@@ -251,19 +251,19 @@ impl EntityStore {
         &mut self,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<CheckpointId, EntityStoreError> {
-        let entity = kind.entity().ok_or(EntityStoreError::ActionRequiresEntity)?;
+    ) -> Result<CheckpointId, DocumentError> {
+        let entity = kind.entity().ok_or(DocumentError::ActionRequiresEntity)?;
         let snap_id = self
             .history
             .checkpoint(self.history.checkpoints().head())
             .and_then(|h| h.entity_heads.get(&entity).copied())
-            .ok_or(EntityStoreError::History(HistoryError::UnknownEntity {
+            .ok_or(DocumentError::History(HistoryError::UnknownEntity {
                 entity,
             }))?;
         let snap = self
             .history
             .snapshot(entity, snap_id)
-            .ok_or(EntityStoreError::History(HistoryError::UnknownSnapshot {
+            .ok_or(DocumentError::History(HistoryError::UnknownSnapshot {
                 entity,
                 id: snap_id,
             }))?;
@@ -281,7 +281,7 @@ impl EntityStore {
         game_score: Option<f64>,
         filter_status: Option<FilterStatus>,
         mutate: impl FnOnce(&mut MoleculeEntity),
-    ) -> Result<(), EntityStoreError> {
+    ) -> Result<(), DocumentError> {
         Ok(self
             .history
             .action_update(raw_score, game_score, filter_status, mutate)?)
@@ -290,7 +290,7 @@ impl EntityStore {
     /// Commit the in-flight action. Flips tentative flags; recomputes
     /// best cursors; transitions to `Idle`. Returns the now-committed
     /// checkpoint id.
-    pub fn commit_action(&mut self) -> Result<CheckpointId, EntityStoreError> {
+    pub fn commit_action(&mut self) -> Result<CheckpointId, DocumentError> {
         // Capture the active entity + prior lane-head payload before
         // delegating: after commit_action lands, `ongoing` flips to
         // `Idle` and the tentative's parent linkage stays intact, but
@@ -329,7 +329,7 @@ impl EntityStore {
 
     /// Abort the in-flight action. Removes the tentative snapshot and
     /// checkpoint; head pointers fall back to their parents.
-    pub fn abort_action(&mut self) -> Result<(), EntityStoreError> {
+    pub fn abort_action(&mut self) -> Result<(), DocumentError> {
         Ok(self.history.abort_action()?)
     }
 
@@ -344,7 +344,7 @@ impl EntityStore {
         label: impl Into<Cow<'static, str>>,
         raw_score: Option<f64>,
         game_score: Option<f64>,
-    ) -> Result<CheckpointId, EntityStoreError> {
+    ) -> Result<CheckpointId, DocumentError> {
         // Capture the prior lane-head payload before the history push
         // so the post-push diff has something to compare against. A
         // None here means the entity wasn't tracked yet (history will
@@ -378,7 +378,7 @@ impl EntityStore {
 
     /// Move checkpoint head to its parent. Returns the new head id, or
     /// `None` if already at root.
-    pub fn undo(&mut self) -> Result<Option<CheckpointId>, EntityStoreError> {
+    pub fn undo(&mut self) -> Result<Option<CheckpointId>, DocumentError> {
         if self
             .history
             .checkpoint(self.history.checkpoints().head())
@@ -400,7 +400,7 @@ impl EntityStore {
     pub fn redo(
         &mut self,
         branch: Option<CheckpointId>,
-    ) -> Result<Option<CheckpointId>, EntityStoreError> {
+    ) -> Result<Option<CheckpointId>, DocumentError> {
         let head = self.history.checkpoints().head();
         let kids: Vec<CheckpointId> = self
             .history
@@ -411,11 +411,11 @@ impl EntityStore {
             (_, []) => return Ok(None),
             (Some(b), kids) if kids.contains(&b) => {}
             (Some(_), _) => {
-                return Err(EntityStoreError::History(HistoryError::NoSuchBranch))
+                return Err(DocumentError::History(HistoryError::NoSuchBranch))
             }
             (None, [_]) => {}
             (None, _) => {
-                return Err(EntityStoreError::History(HistoryError::AmbiguousBranch))
+                return Err(DocumentError::History(HistoryError::AmbiguousBranch))
             }
         }
         let prior = self.head_assembly();
@@ -427,7 +427,7 @@ impl EntityStore {
     }
 
     /// Jump checkpoint head to `id`.
-    pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, EntityStoreError> {
+    pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, DocumentError> {
         let prior = self.head_assembly();
         let ckpt = self.history.jump_checkpoint(id)?;
         self.queue_assembly_update_broadcast(&prior);
@@ -440,7 +440,7 @@ impl EntityStore {
         &mut self,
         entity: EntityId,
         target: EntitySnapshotId,
-    ) -> Result<CheckpointId, EntityStoreError> {
+    ) -> Result<CheckpointId, DocumentError> {
         let prior = self.head_assembly();
         let ckpt = self.history.lane_undo(entity, target)?;
         self.queue_assembly_update_broadcast(&prior);
@@ -453,7 +453,7 @@ impl EntityStore {
         &mut self,
         entity: EntityId,
         branch: Option<EntitySnapshotId>,
-    ) -> Result<CheckpointId, EntityStoreError> {
+    ) -> Result<CheckpointId, DocumentError> {
         let prior = self.head_assembly();
         let ckpt = self.history.lane_redo(entity, branch)?;
         self.queue_assembly_update_broadcast(&prior);
@@ -463,12 +463,12 @@ impl EntityStore {
     // ── Curation ──────────────────────────────────────────────────────
 
     /// Pin a checkpoint as user-marked best.
-    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), EntityStoreError> {
+    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), DocumentError> {
         Ok(self.history.pin_checkpoint(id)?)
     }
 
     /// Unpin a checkpoint.
-    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), EntityStoreError> {
+    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), DocumentError> {
         Ok(self.history.unpin_checkpoint(id)?)
     }
 
@@ -477,7 +477,7 @@ impl EntityStore {
         &mut self,
         id: CheckpointId,
         exclude: bool,
-    ) -> Result<(), EntityStoreError> {
+    ) -> Result<(), DocumentError> {
         Ok(self.history.set_exclude_from_best(id, exclude)?)
     }
 
@@ -536,11 +536,11 @@ impl EntityStore {
         origin: Option<EntityOrigin>,
         name: Option<String>,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<CheckpointId, EntityStoreError> {
+    ) -> Result<CheckpointId, DocumentError> {
         let payload = self
             .transient
             .shift_remove(&id)
-            .ok_or(EntityStoreError::NotAPreview { id })?;
+            .ok_or(DocumentError::NotAPreview { id })?;
 
         if let Some(meta_arc) = self.metadata.get_mut(&id) {
             let meta = Arc::make_mut(meta_arc);
@@ -567,7 +567,7 @@ impl EntityStore {
                 // ActiveActionInProgress and EntityAlreadyExists, both
                 // of which are caller-fixable; rebuilding the payload
                 // from a re-snapshotted entity is a section-4 concern.
-                Err(EntityStoreError::History(e))
+                Err(DocumentError::History(e))
             }
         }
     }

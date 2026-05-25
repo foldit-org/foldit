@@ -1,6 +1,6 @@
 //! Foldit application state — host-agnostic.
 //!
-//! `App` owns the `Orchestrator` (in `ActionRouter`), `EntityStore`,
+//! `App` owns the `Orchestrator` (in `ActionRouter`), `Document`,
 //! `History`, and the cross-cutting bookkeeping (puzzle, scoring mode,
 //! viso engine handle, history-version trackers). Both the desktop
 //! (`foldit-desktop`) and web (`foldit-web`) builds wrap this in their
@@ -26,7 +26,7 @@ use viso::{
 };
 
 use crate::action_router::{self, ActionRouter};
-use crate::entity_store::{EntityOrigin, EntityStore, EntityStoreError};
+use crate::document::{Document, DocumentError, EntityOrigin};
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,7 +100,7 @@ fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
 
 /// Project the backend `History` into the wire payload consumed by
 /// the `HistoryPanel`.
-fn project_history(store: &EntityStore) -> HistorySection {
+fn project_history(store: &Document) -> HistorySection {
     let history = store.history();
     let cps = history.checkpoints();
     let head_id = cps.head();
@@ -174,7 +174,7 @@ enum HistoryOutcome {
 /// Read the score for the *current head checkpoint*, projected through
 /// the active scoring mode. Replaces the old `App::latest_score` field
 /// (G1: derive, don't store).
-fn head_score(store: &EntityStore, mode: ScoringMode) -> Option<f64> {
+fn head_score(store: &Document, mode: ScoringMode) -> Option<f64> {
     let head_id = store.history().checkpoints().head();
     let ckpt = store.history().checkpoint(head_id)?;
     score_for_mode(ckpt.raw_score, ckpt.game_score, mode)
@@ -192,7 +192,7 @@ fn head_score(store: &EntityStore, mode: ScoringMode) -> Option<f64> {
 /// stub clutters the history (`1bfe` produced 3 root-level dots: one
 /// `Loaded` + two `AddEntity` for chain A and a water).
 fn load_entity_into_history(
-    store: &mut EntityStore,
+    store: &mut Document,
     entity: molex::MoleculeEntity,
     name: String,
 ) -> Option<EntityId> {
@@ -230,7 +230,7 @@ fn load_entity_into_history(
 /// focus when an op-dispatch carries no `focused_entity_id`. Wave-1
 /// puzzles ship 1-chain proteins; a missing focus is the rule, not
 /// the exception. Returns `None` when no protein entity exists.
-fn first_protein_entity(store: &EntityStore) -> Option<EntityId> {
+fn first_protein_entity(store: &Document) -> Option<EntityId> {
     store.proteins().next().map(|(eid, _, _)| eid)
 }
 
@@ -265,7 +265,7 @@ fn resolve_transition(
 ///
 /// Returns `true` if a payload swap actually fired.
 fn apply_streaming_assembly(
-    store: &mut EntityStore,
+    store: &mut Document,
     incoming: &molex::Assembly,
     raw_score: Option<f64>,
 ) -> bool {
@@ -287,7 +287,7 @@ fn apply_streaming_assembly(
 pub struct App {
     engine: Option<VisoEngine>,
     input: InputProcessor,
-    store: EntityStore,
+    store: Document,
     router: ActionRouter,
     plugin_driver: PluginDriver,
     pdb_path: String,
@@ -349,7 +349,7 @@ impl App {
         Self {
             engine: None,
             input: InputProcessor::new(),
-            store: EntityStore::new(),
+            store: Document::new(),
             router: ActionRouter::new(),
             plugin_driver: PluginDriver::new(),
             pdb_path,
@@ -697,7 +697,7 @@ impl App {
         }
     }
 
-    /// Drain `EntityStore::take_pending_broadcasts` and forward each
+    /// Drain `Document::take_pending_broadcasts` and forward each
     /// payload to the orchestrator. Call at the end of every action /
     /// keybind / head-move handler — the store queues a broadcast per
     /// authoritative mutation, but doesn't reach into the orchestrator
@@ -1223,7 +1223,7 @@ impl App {
 
     pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
         // Undo / Redo are not plugin ops -- they operate on the
-        // EntityStore history directly, with `&mut self` to reach
+        // Document history directly, with `&mut self` to reach
         // both store + engine.
         match action {
             foldit_gui::ActionId::Undo => self.handle_undo(),
@@ -1657,7 +1657,7 @@ impl App {
     }
 
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
-    /// `EntityStore` method. Refusals are logged; the GUI surface
+    /// `Document` method. Refusals are logged; the GUI surface
     /// shows the result by virtue of the head not moving (no separate
     /// toast / error channel — `HistoryError::EntityLocked` only
     /// fires while the user's own action is still running, where the
@@ -1668,7 +1668,7 @@ impl App {
         if self.engine.is_none() {
             return;
         }
-        let result: Result<HistoryOutcome, EntityStoreError> = match cmd {
+        let result: Result<HistoryOutcome, DocumentError> = match cmd {
             HistoryCommand::JumpCheckpoint { id } => self
                 .store
                 .jump_checkpoint(id.into_inner())
@@ -1992,7 +1992,7 @@ impl App {
                 log::info!("Loaded structure: {}", name);
 
                 // Plugin streaming updates land via plugin_update_rx;
-                // canonical state is the EntityStore.
+                // canonical state is the Document.
                 let mut orch = Orchestrator::new();
                 bootstrap_plugins(
                     &mut orch,
@@ -2171,7 +2171,7 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
 #[cfg(not(target_arch = "wasm32"))]
 fn bootstrap_plugins(
     orch: &mut Orchestrator,
-    store: &mut EntityStore,
+    store: &mut Document,
     mut engine: Option<&mut VisoEngine>,
 ) {
     let Some(plugins_root) = locate_plugins_root() else {
@@ -2241,7 +2241,7 @@ fn bootstrap_plugins(
 /// any user action runs.
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_rosetta_post_init(
-    store: &mut EntityStore,
+    store: &mut Document,
     engine: Option<&mut VisoEngine>,
     post_init_bytes: &[u8],
 ) {
@@ -2328,7 +2328,7 @@ fn apply_rosetta_post_init(
 #[cfg(not(target_arch = "wasm32"))]
 fn refresh_scores(
     orch: &mut Orchestrator,
-    store: &mut EntityStore,
+    store: &mut Document,
     engine: Option<&mut VisoEngine>,
 ) {
     use foldit_runner::orchestrator::SessionContext;

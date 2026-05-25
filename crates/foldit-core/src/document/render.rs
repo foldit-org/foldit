@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use super::EntityStore;
+use super::Document;
 
-impl EntityStore {
+impl Document {
     /// Push the current `head_assembly()` snapshot to viso. Each push
     /// stamps a fresh `publish_seq` onto the Assembly so viso's
     /// generation-gate (`poll_assembly`) sees a different number on

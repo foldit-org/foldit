@@ -6,9 +6,9 @@
 use molex::ops::edit::AssemblyEdit;
 use molex::{Assembly, MoleculeEntity};
 
-use super::EntityStore;
+use super::Document;
 
-impl EntityStore {
+impl Document {
     /// Drain pending plugin broadcasts. Callers pump this after each
     /// action handler / keybinding / head-move and forward each entry
     /// to the orchestrator's `broadcast_to_plugins`. Always returns

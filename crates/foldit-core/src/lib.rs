@@ -1,6 +1,6 @@
 pub(crate) mod action_router;
 pub mod app;
-pub(crate) mod entity_store;
+pub(crate) mod document;
 pub(crate) mod history;
 pub(crate) mod plugin_driver;
 pub mod puzzle;

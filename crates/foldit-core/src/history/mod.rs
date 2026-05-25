@@ -24,10 +24,10 @@
 //!
 //! **Lock layering.** `History` enforces only the *action lock* — refusing
 //! navigation/mutation that would touch the entity held by an in-flight
-//! [`OngoingState::Active`]. Multi-client locks (Orchestrator-owned
-//! `LockSet`, including the case where the runner is server-side and clients
-//! are remote) are layered above by `EntityStore`; do not push them into
-//! this module.
+//! [`OngoingState::Active`]. Multi-client locking (the case where the runner
+//! is server-side and clients are remote) is owned by the runner's
+//! orchestrator (its `EntityLockTable`), not by foldit-core; do not push it
+//! into this module.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -457,7 +457,7 @@ impl History {
     /// `entity_id → root_snapshot`. Refused while `Active` (the running
     /// action freezes the assembly per § Lock semantics).
     ///
-    /// Used by [`crate::entity_store::EntityStore::promote_preview`] to
+    /// Used by [`crate::document::Document::promote_preview`] to
     /// move a previously-transient entity into history.
     pub fn add_entity(
         &mut self,

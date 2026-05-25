@@ -20,7 +20,7 @@ fn mk_atom() -> Atom {
 
 /// Some valid EntityId. `EntityId` has no public constructor so
 /// every call mints id 0 from a fresh allocator. Callers that pass
-/// this into [`EntityStore::insert_preview`] don't observe the
+/// this into [`Document::insert_preview`] don't observe the
 /// value because the store overwrites the entity's id immediately.
 fn mk_dummy_id() -> EntityId {
     EntityIdAllocator::new().allocate()
@@ -75,10 +75,10 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
 
 #[test]
 fn insert_preview_then_promote_lands_in_history() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let alloc_id = {
         // Burn a few ids so we can verify preview keys are minted
-        // by EntityStore::insert_preview.
+        // by Document::insert_preview.
         store.allocator.allocate()
     };
     let _ = alloc_id;
@@ -115,7 +115,7 @@ fn insert_preview_then_promote_lands_in_history() {
 
 #[test]
 fn promote_preview_unknown_id_returns_not_a_preview() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let mut alloc = EntityIdAllocator::new();
     let stranger = alloc.allocate();
     let err = store
@@ -127,14 +127,14 @@ fn promote_preview_unknown_id_returns_not_a_preview() {
             "no",
         )
         .unwrap_err();
-    assert!(matches!(err, EntityStoreError::NotAPreview { .. }));
+    assert!(matches!(err, DocumentError::NotAPreview { .. }));
 }
 
 // ── Live membership: derived from history + transient, not metadata ──
 
 #[test]
 fn live_membership_lists_committed_then_preview() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     // Insert + promote A: a committed entity.
     let a = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
@@ -172,7 +172,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     // checkpoint, so navigating back past an entity's checkpoint drops
     // it from ids/count/iter — even though its side-table metadata is
     // never GC'd. The old metadata-keyed implementation got this wrong.
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let x = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "x".to_string(),
@@ -205,7 +205,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
 
 #[test]
 fn reset_clears_history_metadata_and_transient() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "x".to_string(),
@@ -231,13 +231,13 @@ fn reset_clears_history_metadata_and_transient() {
 
 #[test]
 fn pending_broadcasts_empty_at_construction() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     assert!(store.take_pending_broadcasts().is_empty());
 }
 
 #[test]
 fn insert_preview_queues_one_full_broadcast() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let _id = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "p".to_string(),
@@ -257,7 +257,7 @@ fn insert_preview_queues_one_full_broadcast() {
 
 #[test]
 fn remove_preview_also_queues_a_broadcast() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
@@ -272,7 +272,7 @@ fn remove_preview_also_queues_a_broadcast() {
 
 #[test]
 fn record_entity_update_queues_one_broadcast() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
@@ -314,8 +314,8 @@ fn record_entity_update_queues_one_broadcast() {
 
 /// Helper: drive an entity through promote_preview → drain so the
 /// broadcast queue is at a known-empty starting point.
-fn store_with_protein(n_residues: usize) -> (EntityStore, EntityId) {
-    let mut store = EntityStore::new();
+fn store_with_protein(n_residues: usize) -> (Document, EntityId) {
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), n_residues),
         "p".to_string(),
@@ -664,7 +664,7 @@ fn jump_checkpoint_topology_change_falls_back_to_full() {
 
 #[test]
 fn remove_preview_emits_full() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
@@ -682,7 +682,7 @@ fn remove_preview_emits_full() {
 
 #[test]
 fn promote_preview_emits_full() {
-    let mut store = EntityStore::new();
+    let mut store = Document::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
