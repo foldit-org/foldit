@@ -11,10 +11,6 @@
 //!   metadata (name, origin, reference CA, designed sequences).
 //!   `Arc`-shared so unchanged entries stay aliased across history
 //!   operations (no metadata serialization on every mutation).
-//! - [`LockSet`] — placeholder for the future Orchestrator-owned
-//!   multi-client lock manager. `EntityStore`'s navigation methods
-//!   consult it; the running-action half of the lock rule is enforced
-//!   one layer down by [`History`].
 //!
 //! Mutation intent is in the type signature (G6): three explicit
 //! categories — history-bearing actions, metadata-only edits, and
@@ -45,7 +41,6 @@
 //! `head_assembly` output.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -111,56 +106,6 @@ impl EntityMetadata {
     }
 }
 
-// ── Lock set ───────────────────────────────────────────────────────────
-
-/// Placeholder for the future Orchestrator-owned multi-client lock
-/// manager.
-///
-/// `EntityStore` holds one for now; a future refactor (when the runner
-/// runs server-side and clients are remote) will move ownership to a
-/// dedicated Orchestrator and pass `&LockSet` into `EntityStore`'s
-/// navigation methods. The interface is the same either way: a set of
-/// entity ids plus `acquire` / `release` / `contains`.
-///
-/// The `History` layer enforces the *action lock* (the entity owned by
-/// the running [`crate::history::OngoingState::Active`]). `LockSet`
-/// here adds the *client lock* — entities reserved by another client.
-/// The two layers compose; a head-move that would touch either
-/// refuses.
-#[derive(Debug, Clone, Default)]
-pub struct LockSet {
-    locked: HashSet<EntityId>,
-}
-
-impl LockSet {
-    /// Empty lock set.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Whether `entity` is currently locked.
-    #[must_use]
-    pub fn contains(&self, entity: EntityId) -> bool {
-        self.locked.contains(&entity)
-    }
-
-    /// Reserve `entity`. Idempotent.
-    pub fn acquire(&mut self, entity: EntityId) {
-        let _ = self.locked.insert(entity);
-    }
-
-    /// Release `entity`. No-op if not held.
-    pub fn release(&mut self, entity: EntityId) {
-        let _ = self.locked.remove(&entity);
-    }
-
-    /// Iterate the currently-locked entities.
-    pub fn iter(&self) -> impl Iterator<Item = EntityId> + '_ {
-        self.locked.iter().copied()
-    }
-}
-
 // ── Errors ─────────────────────────────────────────────────────────────
 
 /// Error returned by every fallible [`EntityStore`] operation.
@@ -170,11 +115,6 @@ pub enum EntityStoreError {
     /// etc.). See [`HistoryError`].
     #[error("{0}")]
     History(#[from] HistoryError),
-    /// A navigation target would change a client-locked entity (the
-    /// outer lock layer; the inner action-lock half lives on
-    /// [`HistoryError::EntityLocked`]).
-    #[error("entity {} is locked by another client", entity.raw())]
-    LockedByClient { entity: EntityId },
     /// `id` is not currently a transient preview.
     #[error("{} is not a transient preview", id.raw())]
     NotAPreview { id: EntityId },
@@ -202,8 +142,6 @@ pub struct EntityStore {
     allocator: EntityIdAllocator,
     /// The full two-layer history.
     history: History,
-    /// Multi-client lock placeholder. See [`LockSet`].
-    locks: LockSet,
     /// Monotonic counter stamped onto every published `Assembly`.
     /// Without it, `Assembly::new` hands viso a fresh snapshot at
     /// generation 0 every time, and viso's `poll_assembly` skips
@@ -235,7 +173,6 @@ impl EntityStore {
             transient: IndexMap::new(),
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
-            locks: LockSet::new(),
             publish_seq: 0,
             pending_broadcasts: Vec::new(),
         }
@@ -437,17 +374,6 @@ impl EntityStore {
         &self.history
     }
 
-    /// Read access to the multi-client lock set.
-    #[must_use]
-    pub fn locks(&self) -> &LockSet {
-        &self.locks
-    }
-
-    /// Mutable access — the placeholder until an Orchestrator owns it.
-    pub fn locks_mut(&mut self) -> &mut LockSet {
-        &mut self.locks
-    }
-
     /// Look up an entity by id. Searches committed lane heads first,
     /// then transient previews.
     #[must_use]
@@ -508,17 +434,13 @@ impl EntityStore {
     /// Begin a streaming action. The kind determines the entity (via
     /// `kind.entity()`); the current lane head's payload is forked into
     /// the tentative snapshot. Refused if the action's entity isn't in
-    /// the committed set, isn't owned by this kind, or is locked
-    /// elsewhere.
+    /// the committed set or isn't owned by this kind.
     pub fn begin_action(
         &mut self,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
     ) -> Result<CheckpointId, EntityStoreError> {
         let entity = kind.entity().ok_or(EntityStoreError::ActionRequiresEntity)?;
-        if self.locks.contains(entity) {
-            return Err(EntityStoreError::LockedByClient { entity });
-        }
         let snap_id = self
             .history
             .checkpoint(self.history.checkpoints().head())
@@ -601,7 +523,7 @@ impl EntityStore {
 
     /// Atomic non-streaming entity replacement. Pushes one snapshot +
     /// one checkpoint with `tentative = false` immediately. Refused if
-    /// `entity` is locked or an action is in flight.
+    /// an action is in flight.
     pub fn record_entity_update(
         &mut self,
         kind: CheckpointKind,
@@ -611,9 +533,6 @@ impl EntityStore {
         raw_score: Option<f64>,
         game_score: Option<f64>,
     ) -> Result<CheckpointId, EntityStoreError> {
-        if self.locks.contains(entity) {
-            return Err(EntityStoreError::LockedByClient { entity });
-        }
         // Capture the prior lane-head payload before the history push
         // so the post-push diff has something to compare against. A
         // None here means the entity wasn't tracked yet (history will
@@ -642,21 +561,20 @@ impl EntityStore {
         Ok(ckpt)
     }
 
-    // ── Navigation (lock-checked via the LockSet client lock; the
-    //    action-lock half is enforced one layer down by `History`) ────
+    // ── Navigation (the action-lock half is enforced one layer down by
+    //    `History`) ──────────────────────────────────────────────────
 
     /// Move checkpoint head to its parent. Returns the new head id, or
     /// `None` if already at root.
     pub fn undo(&mut self) -> Result<Option<CheckpointId>, EntityStoreError> {
-        let parent = match self
+        if self
             .history
             .checkpoint(self.history.checkpoints().head())
             .and_then(|h| h.parent)
+            .is_none()
         {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-        self.check_target_locks(parent)?;
+            return Ok(None);
+        }
         let prior = self.head_assembly();
         let moved = self.history.undo()?;
         if moved.is_some() {
@@ -677,18 +595,17 @@ impl EntityStore {
             .checkpoint(head)
             .map(|h| h.children.iter().copied().collect())
             .unwrap_or_default();
-        let target = match (branch, kids.as_slice()) {
+        match (branch, kids.as_slice()) {
             (_, []) => return Ok(None),
-            (Some(b), kids) if kids.contains(&b) => b,
+            (Some(b), kids) if kids.contains(&b) => {}
             (Some(_), _) => {
                 return Err(EntityStoreError::History(HistoryError::NoSuchBranch))
             }
-            (None, [only]) => *only,
+            (None, [_]) => {}
             (None, _) => {
                 return Err(EntityStoreError::History(HistoryError::AmbiguousBranch))
             }
-        };
-        self.check_target_locks(target)?;
+        }
         let prior = self.head_assembly();
         let moved = self.history.redo(branch)?;
         if moved.is_some() {
@@ -699,7 +616,6 @@ impl EntityStore {
 
     /// Jump checkpoint head to `id`.
     pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, EntityStoreError> {
-        self.check_target_locks(id)?;
         let prior = self.head_assembly();
         let ckpt = self.history.jump_checkpoint(id)?;
         self.queue_assembly_update_broadcast(&prior);
@@ -713,9 +629,6 @@ impl EntityStore {
         entity: EntityId,
         target: EntitySnapshotId,
     ) -> Result<CheckpointId, EntityStoreError> {
-        if self.locks.contains(entity) {
-            return Err(EntityStoreError::LockedByClient { entity });
-        }
         let prior = self.head_assembly();
         let ckpt = self.history.lane_undo(entity, target)?;
         self.queue_assembly_update_broadcast(&prior);
@@ -729,34 +642,10 @@ impl EntityStore {
         entity: EntityId,
         branch: Option<EntitySnapshotId>,
     ) -> Result<CheckpointId, EntityStoreError> {
-        if self.locks.contains(entity) {
-            return Err(EntityStoreError::LockedByClient { entity });
-        }
         let prior = self.head_assembly();
         let ckpt = self.history.lane_redo(entity, branch)?;
         self.queue_assembly_update_broadcast(&prior);
         Ok(ckpt)
-    }
-
-    /// Refuse if any client-locked entity's payload would change going to
-    /// `target`.
-    fn check_target_locks(&self, target: CheckpointId) -> Result<(), EntityStoreError> {
-        let target_ckpt = self
-            .history
-            .checkpoint(target)
-            .ok_or(EntityStoreError::History(HistoryError::UnknownCheckpoint {
-                id: target,
-            }))?;
-        for (entity, target_snap) in &target_ckpt.entity_heads {
-            if !self.locks.contains(*entity) {
-                continue;
-            }
-            let current = self.history.lane(*entity).map(|l| l.head());
-            if current != Some(*target_snap) {
-                return Err(EntityStoreError::LockedByClient { entity: *entity });
-            }
-        }
-        Ok(())
     }
 
     // ── Curation ──────────────────────────────────────────────────────
@@ -957,7 +846,6 @@ impl EntityStore {
         self.metadata.clear();
         self.transient.clear();
         self.allocator = EntityIdAllocator::new();
-        self.locks = LockSet::new();
         self.history = History::new(std::iter::empty(), PathBuf::new());
         // Drop any queued payloads from the prior session — they
         // describe state that no longer exists. Broadcast gen is
@@ -1256,84 +1144,6 @@ mod tests {
         assert!(matches!(err, EntityStoreError::NotAPreview { .. }));
     }
 
-    // ── Lock-checked navigation ───────────────────────────────────────
-
-    #[test]
-    fn undo_refuses_when_target_changes_a_locked_entity() {
-        let mut store = EntityStore::new();
-        let id = store.insert_preview(
-            mk_bulk(mk_dummy_id()),
-            "x".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let _root_ckpt = store
-            .promote_preview(
-                id,
-                CheckpointKind::PromotedPreview { entity: id },
-                None,
-                None,
-                "p",
-            )
-            .unwrap();
-
-        // Push a record_entity_update so undo has somewhere to go.
-        let _ = store
-            .record_entity_update(
-                CheckpointKind::Shake { entity: id, duration_ms: 1 },
-                id,
-                mk_bulk(id),
-                "shake",
-                None,
-                None,
-            )
-            .unwrap();
-
-        // Undo target's entity_heads[id] != current → if `id` is
-        // locked, refuse.
-        store.locks_mut().acquire(id);
-        let err = store.undo().expect_err("undo should refuse");
-        assert!(matches!(err, EntityStoreError::LockedByClient { entity } if entity == id));
-
-        // Releasing the lock unblocks undo.
-        store.locks_mut().release(id);
-        let to = store.undo().unwrap();
-        assert!(to.is_some());
-    }
-
-    #[test]
-    fn lane_undo_refuses_locked_entity() {
-        let mut store = EntityStore::new();
-        let id = store.insert_preview(
-            mk_bulk(mk_dummy_id()),
-            "x".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let _ = store
-            .promote_preview(
-                id,
-                CheckpointKind::PromotedPreview { entity: id },
-                None,
-                None,
-                "p",
-            )
-            .unwrap();
-        let lane_root = store.history().lane(id).unwrap().root();
-        let _ = store
-            .record_entity_update(
-                CheckpointKind::Shake { entity: id, duration_ms: 1 },
-                id,
-                mk_bulk(id),
-                "shake",
-                None,
-                None,
-            )
-            .unwrap();
-
-        store.locks_mut().acquire(id);
-        let err = store.lane_undo(id, lane_root).expect_err("should refuse");
-        assert!(matches!(err, EntityStoreError::LockedByClient { entity } if entity == id));
-    }
-
     // ── Reset clears everything ───────────────────────────────────────
 
     #[test]
@@ -1344,7 +1154,6 @@ mod tests {
             "x".to_string(),
             EntityOrigin::Loaded,
         );
-        store.locks_mut().acquire(id);
         assert_eq!(store.count(), 1);
         assert!(store.is_preview(id));
 
@@ -1352,7 +1161,6 @@ mod tests {
 
         assert_eq!(store.count(), 0);
         assert!(!store.is_preview(id));
-        assert!(!store.locks().contains(id));
         assert_eq!(store.history().checkpoints().len(), 1); // root only
         assert!(store
             .history()

@@ -1708,8 +1708,7 @@ impl App {
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
     /// `EntityStore` method. Refusals are logged; the GUI surface
     /// shows the result by virtue of the head not moving (no separate
-    /// toast / error channel — single-client mode never produces a
-    /// `LockedByClient` refusal, and `HistoryError::EntityLocked` only
+    /// toast / error channel — `HistoryError::EntityLocked` only
     /// fires while the user's own action is still running, where the
     /// running indicator is the natural feedback). The match is
     /// exhaustive (G10): adding a variant without a handler is a
