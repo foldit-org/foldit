@@ -253,13 +253,6 @@ impl ActionRouter {
 // Free functions (used by App)
 // ---------------------------------------------------------------------------
 
-/// Extract CA positions from entities (for Kabsch alignment).
-pub fn entities_backbone_ca(
-    entities: &[molex::MoleculeEntity],
-) -> Vec<Vec3> {
-    molex::ops::codec::ca_positions(entities)
-}
-
 /// Build the GUI's actions list by joining each plugin's manifest
 /// `[[buttons]]` array with its bridge-side op registration. The
 /// orchestrator's `ops_catalog()` already does the join; this wrapper

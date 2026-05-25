@@ -8,7 +8,7 @@
 //!   preview signal; the old [`EntityMetadata::is_preview`] flag is
 //!   gone (G6).
 //! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` — per-entity
-//!   metadata (name, origin, reference CA, designed sequences).
+//!   metadata (name, origin).
 //!   `Arc`-shared so unchanged entries stay aliased across history
 //!   operations (no metadata serialization on every mutation).
 //!
@@ -40,7 +40,6 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use glam::Vec3;
 use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::{Assembly, MoleculeEntity, MoleculeType};
@@ -51,7 +50,7 @@ use crate::history::{
 
 mod broadcast;
 mod metadata;
-pub use metadata::{DesignedSequence, EntityMetadata, EntityOrigin};
+pub use metadata::{EntityMetadata, EntityOrigin};
 
 mod render;
 
@@ -609,16 +608,6 @@ impl EntityStore {
                 !self.transient.contains_key(*id) && matches!(m.origin, EntityOrigin::Loaded)
             })
             .map(|(id, _)| *id)
-    }
-
-    /// Register a loaded entity with reference CA.
-    /// Pure metadata edit — no history push.
-    pub fn register_loaded(&mut self, id: EntityId, reference_ca: Vec<Vec3>) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            let meta = Arc::make_mut(meta_arc);
-            meta.origin = EntityOrigin::Loaded;
-            meta.reference_ca = Some(reference_ca);
-        }
     }
 }
 

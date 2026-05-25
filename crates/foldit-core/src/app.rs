@@ -1511,18 +1511,11 @@ impl App {
                 match crate::puzzle::load_file_as_entities(&path) {
                     Ok((entities, name)) => {
                         log::info!("Loaded structure via IPC: {}", name);
-                        let backbone_ca = action_router::entities_backbone_ca(&entities);
-                        let mut ids = Vec::new();
                         for entity in entities {
-                            if let Some(id) = load_entity_into_history(&mut self.store, entity, name.clone()) {
-                                ids.push(id);
-                            }
+                            let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                         }
                         self.store.publish_to(engine);
                         engine.fit_camera_to_focus();
-                        if let Some(&first_id) = ids.first() {
-                            self.store.register_loaded(first_id, backbone_ca);
-                        }
                         // Free-form file load → scientist mode.
                         self.puzzle.scoring_mode = ScoringMode::Scientist;
                         self.puzzle.id = 0;
@@ -1561,7 +1554,6 @@ impl App {
                             engine.load_preset(preset_name, presets_dir);
                         }
 
-                        let backbone_ca = action_router::entities_backbone_ca(&puzzle_data.entities);
                         let ss_override = puzzle_data.ss_override;
                         let cam = &puzzle_data.camera;
                         let cam_eye = glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
@@ -1590,10 +1582,6 @@ impl App {
                             if let Some(&first_id) = ids.first() {
                                 engine.set_ss_override(first_id.raw(), ss);
                             }
-                        }
-
-                        if let Some(&first_id) = ids.first() {
-                            self.store.register_loaded(first_id, backbone_ca);
                         }
 
                         // Rosetta session init via bridge plugin's
@@ -2027,13 +2015,8 @@ impl App {
         // Parse entities from file
         match crate::puzzle::load_file_as_entities(&self.pdb_path) {
             Ok((entities, name)) => {
-                let backbone_ca = action_router::entities_backbone_ca(&entities);
-
-                let mut ids: Vec<EntityId> = Vec::new();
                 for entity in entities {
-                    if let Some(id) = load_entity_into_history(&mut self.store, entity, name.clone()) {
-                        ids.push(id);
-                    }
+                    let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                 }
 
                 // Push to viso (viso inherits our IDs). update(0.0)
@@ -2043,18 +2026,10 @@ impl App {
                 engine.update(0.0);
                 engine.fit_camera_to_focus();
 
-                if let Some(&first_id) = ids.first() {
-                    log::info!("Loaded structure: {}", name);
-                    log::info!(
-                        "Stored {} original CA positions for alignment",
-                        backbone_ca.len()
-                    );
-                    self.store.register_loaded(first_id, backbone_ca);
-                }
+                log::info!("Loaded structure: {}", name);
 
                 // Plugin streaming updates land via plugin_update_rx;
                 // canonical state is the EntityStore.
-                let _ = &ids;
                 let mut orch = Orchestrator::new();
                 bootstrap_plugins(
                     &mut orch,
