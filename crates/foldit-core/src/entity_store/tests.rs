@@ -130,6 +130,77 @@ fn promote_preview_unknown_id_returns_not_a_preview() {
     assert!(matches!(err, EntityStoreError::NotAPreview { .. }));
 }
 
+// ── Live membership: derived from history + transient, not metadata ──
+
+#[test]
+fn live_membership_lists_committed_then_preview() {
+    let mut store = EntityStore::new();
+    // Insert + promote A: a committed entity.
+    let a = store.insert_preview(
+        mk_protein(mk_dummy_id(), 2),
+        "a".to_string(),
+        EntityOrigin::Loaded,
+    );
+    store
+        .promote_preview(
+            a,
+            CheckpointKind::PromotedPreview { entity: a },
+            None,
+            None,
+            "a",
+        )
+        .expect("promote a");
+    // Insert B and leave it as a preview.
+    let b = store.insert_preview(
+        mk_bulk(mk_dummy_id()),
+        "b".to_string(),
+        EntityOrigin::Loaded,
+    );
+
+    assert_eq!(store.count(), 2);
+    // Committed first, then preview.
+    assert_eq!(store.ids().collect::<Vec<_>>(), vec![a, b]);
+    assert!(!store.is_preview(a));
+    assert!(store.is_preview(b));
+    // loaded_entity is the first committed entity.
+    assert_eq!(store.loaded_entity(), Some(a));
+}
+
+#[test]
+fn undone_entity_drops_from_membership_though_metadata_lingers() {
+    // The point of P2: membership is derived from the live head
+    // checkpoint, so navigating back past an entity's checkpoint drops
+    // it from ids/count/iter — even though its side-table metadata is
+    // never GC'd. The old metadata-keyed implementation got this wrong.
+    let mut store = EntityStore::new();
+    let x = store.insert_preview(
+        mk_protein(mk_dummy_id(), 2),
+        "x".to_string(),
+        EntityOrigin::Loaded,
+    );
+    store
+        .promote_preview(
+            x,
+            CheckpointKind::PromotedPreview { entity: x },
+            None,
+            None,
+            "x",
+        )
+        .expect("promote x");
+    assert_eq!(store.count(), 1);
+    assert!(store.ids().any(|id| id == x));
+
+    // Navigate back past X's checkpoint to the empty root.
+    store.undo().expect("undo");
+
+    // Metadata lingers: the side table still holds X.
+    assert!(store.metadata(x).is_some());
+    // Derived membership must NOT surface the undone entity.
+    assert_eq!(store.count(), 0);
+    assert!(store.ids().next().is_none());
+    assert!(store.iter().next().is_none());
+}
+
 // ── Reset clears everything ───────────────────────────────────────
 
 #[test]

@@ -187,21 +187,41 @@ impl EntityStore {
         self.metadata.get(&id).map(Arc::as_ref)
     }
 
-    /// Iterate every tracked entity's metadata, in insertion order.
+    /// Live entity membership: the head checkpoint's committed entities
+    /// (canonical `entity_heads` order), followed by the transient
+    /// previews (insertion order). The two sets are disjoint
+    /// (`promote_preview` moves an entity from `transient` into
+    /// history), so concatenating committed-then-preview needs no dedup.
+    /// This is the membership source for `ids` / `count` / `iter`; the
+    /// `metadata` map is now a pure side table, not a membership oracle
+    /// (it is never GC'd, so it over-reports).
+    fn live_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        let head_id = self.history.checkpoints().head();
+        let entity_heads = self.history.checkpoint(head_id).map(|h| &h.entity_heads);
+        entity_heads
+            .into_iter()
+            .flat_map(|heads| heads.keys().copied())
+            .chain(self.transient.keys().copied())
+    }
+
+    /// Iterate every live (committed ∪ preview) entity's metadata, in
+    /// canonical order (committed first, then preview). Live ids with no
+    /// side-table entry are skipped.
     pub fn iter(&self) -> impl Iterator<Item = (EntityId, &EntityMetadata)> {
-        self.metadata.iter().map(|(id, m)| (*id, m.as_ref()))
+        self.live_ids()
+            .filter_map(move |id| self.metadata.get(&id).map(|m| (id, m.as_ref())))
     }
 
-    /// All currently-tracked entity ids, in insertion order. Includes
-    /// committed entities and previews.
+    /// All live (committed ∪ preview) entity ids, in canonical order
+    /// (committed first, then preview).
     pub fn ids(&self) -> impl Iterator<Item = EntityId> + '_ {
-        self.metadata.keys().copied()
+        self.live_ids()
     }
 
-    /// Number of tracked entities (committed + preview).
+    /// Number of live (committed ∪ preview) entities.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.metadata.len()
+        self.live_ids().count()
     }
 
     /// Whether `id` is a transient preview.
@@ -599,15 +619,15 @@ impl EntityStore {
             })
     }
 
-    /// First committed (non-preview) loaded entity.
+    /// First committed entity: the loaded protein. Reads the head
+    /// checkpoint's first `entity_heads` key, so (unlike the old
+    /// `metadata` scan) it can never surface a stale/undone entity.
     #[must_use]
     pub fn loaded_entity(&self) -> Option<EntityId> {
-        self.metadata
-            .iter()
-            .find(|(id, m)| {
-                !self.transient.contains_key(*id) && matches!(m.origin, EntityOrigin::Loaded)
-            })
-            .map(|(id, _)| *id)
+        let head_id = self.history.checkpoints().head();
+        self.history
+            .checkpoint(head_id)
+            .and_then(|h| h.entity_heads.keys().next().copied())
     }
 }
 
