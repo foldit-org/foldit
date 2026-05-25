@@ -148,6 +148,8 @@ impl ActionRouter {
     ///
     /// Order: lock check → (optional) stop rosetta + clear session →
     /// try_lock → kickoff → (optional) preview mirror → ui_dirty.
+    // reserved for plugin migration (REMAINING_WORK T8: SessionContext)
+    #[allow(dead_code)]
     pub fn start_op(
         &mut self,
         request: BackendOpRequest,
@@ -206,51 +208,6 @@ impl ActionRouter {
         }
 
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
-    fn run_prediction(&mut self, engine: &mut VisoEngine, store: &mut EntityStore) {
-        let focus = engine.focus();
-        let fallback = store.loaded_entity();
-        let Some((target_id, entities)) =
-            store.collect_ml_entities(&focus, fallback)
-        else {
-            log::warn!("No structure available for prediction");
-            return;
-        };
-
-        let total_atoms: usize = entities.iter().map(|e| e.atom_count()).sum();
-        log::info!(
-            "RF3 prediction: focus={:?}, {} entities, {} total atoms",
-            focus, entities.len(), total_atoms,
-        );
-
-        let pending_ca = molex::ops::codec::ca_positions(&entities);
-        let entity_context = build_session_context(target_id, None);
-        let num_recycles: i32 = 3;
-
-        self.start_op(
-            BackendOpRequest {
-                target: RunnerEntityId(u64::from(target_id.raw())),
-                op_type: OpType::MLPredict,
-                entity_context,
-                create_preview_mirror: true,
-                pending_reference_ca: Some(pending_ca),
-                kickoff: Box::new(move |orch, ctx| {
-                    let mut params = std::collections::HashMap::new();
-                    params.insert(
-                        "num_recycles".to_string(),
-                        ParamValue::Int(num_recycles),
-                    );
-                    orch.dispatch_invoke("predict", ctx, params, |_| None)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }),
-            },
-            engine,
-            store,
-        );
     }
 
     // ── Mouse / input handlers ──
@@ -464,6 +421,8 @@ pub fn trajectory_path_from_args() -> Option<String> {
 /// Builds a `SessionContext` carrying the orchestrator-facing focus +
 /// selection. Plugins read their own per-entity state. Selection
 /// capture is not yet wired; the field is left empty for now.
+// reserved for plugin migration (REMAINING_WORK T8: SessionContext)
+#[allow(dead_code)]
 pub fn build_session_context(
     target_id: molex::entity::molecule::id::EntityId,
     focused_entity_id: Option<u32>,

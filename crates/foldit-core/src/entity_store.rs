@@ -34,11 +34,7 @@
 //! queue leaves plugins one generation behind the host; the
 //! orchestrator's `STALE_GEN` recovery catches divergence after
 //! the fact, but the invariant is what prevents it in the first
-//! place. Metadata-only setters
-//! ([`Self::set_entity_name`], [`Self::set_reference_ca`],
-//! [`Self::add_designed_sequences`],
-//! [`Self::set_entity_origin`]) are exempt — they don't appear in
-//! `head_assembly` output.
+//! place.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -332,13 +328,6 @@ impl EntityStore {
     /// Allocate a fresh entity id.
     pub fn allocate_id(&mut self) -> EntityId {
         self.allocator.allocate()
-    }
-
-    /// Reconstruct an [`EntityId`] from a raw `u32` (deserialization).
-    /// Advances the allocator past `raw` so future allocations don't
-    /// collide.
-    pub fn mint_id(&mut self, raw: u32) -> EntityId {
-        self.allocator.from_raw(raw)
     }
 
     // ── Read accessors ────────────────────────────────────────────────
@@ -676,48 +665,6 @@ impl EntityStore {
         self.history.set_head_scores(raw_score, game_score);
     }
 
-    /// Overwrite the entity payload on the current head's lane snapshot.
-    /// See [`History::set_head_entity`]: bumps `live_version` only, no
-    /// new checkpoint. Returns `true` if the entity is part of the
-    /// current head and the payload was applied.
-    pub fn set_head_entity(
-        &mut self,
-        entity: EntityId,
-        payload: MoleculeEntity,
-    ) -> bool {
-        self.history.set_head_entity(entity, payload)
-    }
-
-    // ── Pure metadata edits — NOT history (G1: no shadow score; G6) ──
-
-    /// Set an entity's display name. No history push.
-    pub fn set_entity_name(&mut self, id: EntityId, name: String) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            Arc::make_mut(meta_arc).name = name;
-        }
-    }
-
-    /// Stash a reference CA set for alignment. No history push.
-    pub fn set_reference_ca(&mut self, id: EntityId, ca: Vec<Vec3>) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            Arc::make_mut(meta_arc).reference_ca = Some(ca);
-        }
-    }
-
-    /// Append designed sequences to `id`'s metadata. No history push.
-    pub fn add_designed_sequences(&mut self, id: EntityId, seqs: Vec<DesignedSequence>) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            Arc::make_mut(meta_arc).designed_sequences.extend(seqs);
-        }
-    }
-
-    /// Replace an entity's origin. No history push.
-    pub fn set_entity_origin(&mut self, id: EntityId, origin: EntityOrigin) {
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            Arc::make_mut(meta_arc).origin = origin;
-        }
-    }
-
     // ── Preview API — transient, never in history ─────────────────────
 
     /// Insert a new preview entity. Allocates a fresh id, sets the
@@ -739,38 +686,6 @@ impl EntityStore {
         // this stays Full.
         let _ = self.queue_full_broadcast();
         id
-    }
-
-    /// Insert a preview with a caller-supplied id. Used when restoring
-    /// state from a wire payload (e.g., session reload). Bypasses
-    /// history.
-    pub fn insert_preview_with_id(
-        &mut self,
-        id: EntityId,
-        mut entity: MoleculeEntity,
-        name: String,
-        origin: EntityOrigin,
-    ) {
-        entity.set_id(id);
-        let _ = self.transient.insert(id, Arc::new(entity));
-        let _ = self
-            .metadata
-            .insert(id, Arc::new(EntityMetadata::new(name, origin)));
-        // Topology edit (entity added) — DELTA01 rejects AddEntity, so
-        // this stays Full.
-        let _ = self.queue_full_broadcast();
-    }
-
-    /// Replace the entity body of an existing preview. No-op if `id`
-    /// is not currently a preview.
-    pub fn update_preview(&mut self, id: EntityId, mut entity: MoleculeEntity) {
-        let Some(prior_arc) = self.transient.get(&id).map(Arc::clone) else {
-            return;
-        };
-        entity.set_id(id);
-        let new_arc = Arc::new(entity);
-        let _ = self.transient.insert(id, Arc::clone(&new_arc));
-        self.queue_single_entity_update_broadcast(&prior_arc, &new_arc);
     }
 
     /// Remove a preview (cancel / error path). Drops the metadata too.
@@ -834,7 +749,7 @@ impl EntityStore {
         }
     }
 
-    // ── Reset & one-shot transient mutation ───────────────────────────
+    // ── Reset ─────────────────────────────────────────────────────────
 
     /// Drop the entire history graph, clear metadata and transient.
     /// After `reset`, the store is back to the empty initial state;
@@ -855,16 +770,6 @@ impl EntityStore {
         self.pending_broadcasts.clear();
         // Hard topology reset — every entity disappears, Full broadcast.
         let _ = self.queue_full_broadcast();
-    }
-
-    /// One-shot animation lerp / visualization-only operation: builds a
-    /// transient `Assembly` from `head_assembly()`, applies `f`, and
-    /// returns its result. **Does not modify** `self.transient`
-    /// (different concept; one-shot vs persistent) and does not touch
-    /// history.
-    pub fn mutate_transient<R>(&mut self, f: impl FnOnce(&mut Assembly) -> R) -> R {
-        let mut assembly = self.head_assembly();
-        f(&mut assembly)
     }
 
     // ── Viso publishing — thin wrappers over `head_assembly()` ────────
@@ -918,18 +823,6 @@ impl EntityStore {
             })
     }
 
-    /// Count protein residues per non-preview, non-empty entity.
-    pub fn visible_residue_counts(&self) -> Vec<(EntityId, usize)> {
-        self.proteins()
-            .filter_map(|(id, _, entity)| match entity {
-                MoleculeEntity::Protein(p) if !p.residues.is_empty() => {
-                    Some((id, p.residues.len()))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     /// Build a focus description from focus + entity names.
     pub fn focus_description(&self, focus: &viso::Focus) -> String {
         match focus {
@@ -945,40 +838,6 @@ impl EntityStore {
         }
     }
 
-    /// Get the bytes-encoded assembly for one entity (all molecule
-    /// types).
-    pub fn get_entity_assembly_bytes(&self, id: EntityId) -> Option<Vec<u8>> {
-        let entity = self.entity(id)?;
-        molex::ops::wire::assembly_bytes(std::slice::from_ref(entity)).ok()
-    }
-
-    /// Collect entities for an ML kickoff based on the current focus.
-    /// Refuses preview targets — kicking off RF3/RFD3/MPNN against a
-    /// streaming preview would be nonsense.
-    pub fn collect_ml_entities(
-        &self,
-        focus: &viso::Focus,
-        fallback_entity: Option<EntityId>,
-    ) -> Option<(EntityId, Vec<MoleculeEntity>)> {
-        match focus {
-            viso::Focus::Entity(eid) => {
-                if self.is_preview(*eid) {
-                    return None;
-                }
-                let entity = self.entity(*eid)?.clone();
-                Some((*eid, vec![entity]))
-            }
-            viso::Focus::Session => {
-                let id = fallback_entity?;
-                if self.is_preview(id) {
-                    return None;
-                }
-                let entity = self.entity(id)?.clone();
-                Some((id, vec![entity]))
-            }
-        }
-    }
-
     /// First committed (non-preview) loaded entity.
     #[must_use]
     pub fn loaded_entity(&self) -> Option<EntityId> {
@@ -988,14 +847,6 @@ impl EntityStore {
                 !self.transient.contains_key(*id) && matches!(m.origin, EntityOrigin::Loaded)
             })
             .map(|(id, _)| *id)
-    }
-
-    /// Reference CA positions for alignment.
-    #[must_use]
-    pub fn reference_ca(&self, id: EntityId) -> Option<&[Vec3]> {
-        self.metadata
-            .get(&id)
-            .and_then(|m| m.reference_ca.as_deref())
     }
 
     /// Register a loaded entity with reference CA.
@@ -1168,71 +1019,6 @@ mod tests {
             .unwrap()
             .entity_heads
             .is_empty());
-    }
-
-    // ── Pure metadata edits don't touch history ──────────────────────
-
-    #[test]
-    fn set_entity_name_does_not_push_history() {
-        let mut store = EntityStore::new();
-        let id = store.insert_preview(
-            mk_bulk(mk_dummy_id()),
-            "old".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let _ = store
-            .promote_preview(
-                id,
-                CheckpointKind::PromotedPreview { entity: id },
-                None,
-                None,
-                "p",
-            )
-            .unwrap();
-        let n_ckpts = store.history().checkpoints().len();
-
-        store.set_entity_name(id, "new".to_string());
-        assert_eq!(store.metadata(id).unwrap().name, "new");
-        assert_eq!(
-            store.history().checkpoints().len(),
-            n_ckpts,
-            "metadata edit must not push a checkpoint"
-        );
-    }
-
-    #[test]
-    fn add_designed_sequences_does_not_push_history() {
-        let mut store = EntityStore::new();
-        let id = store.insert_preview(
-            mk_bulk(mk_dummy_id()),
-            "x".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let _ = store
-            .promote_preview(
-                id,
-                CheckpointKind::PromotedPreview { entity: id },
-                None,
-                None,
-                "p",
-            )
-            .unwrap();
-        let n_ckpts = store.history().checkpoints().len();
-
-        store.add_designed_sequences(
-            id,
-            vec![DesignedSequence {
-                sequence: "AAA".to_string(),
-                score: 1.0,
-                designed_for: id,
-            }],
-        );
-        assert_eq!(store.metadata(id).unwrap().designed_sequences.len(), 1);
-        assert_eq!(
-            store.history().checkpoints().len(),
-            n_ckpts,
-            "metadata edit must not push a checkpoint"
-        );
     }
 
     // ── plugin-broadcast queue ────────────────────────────────────────
@@ -1669,53 +1455,6 @@ mod tests {
     }
 
     // ── Preview lifecycle Delta + Full emission ──────────────────────
-
-    #[test]
-    fn update_preview_coord_only_emits_delta() {
-        let mut store = EntityStore::new();
-        let id = store.insert_preview(
-            mk_protein(mk_dummy_id(), 2),
-            "p".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let _ = store.take_pending_broadcasts();
-        let prior_asm = store.head_assembly();
-
-        let mut updated = mk_protein(id, 2);
-        for atom in updated.atom_set_mut() {
-            atom.position = glam::Vec3::new(11.0, 22.0, 33.0);
-        }
-        store.update_preview(id, updated);
-
-        let payloads = store.take_pending_broadcasts();
-        assert_eq!(payloads.len(), 1);
-        let bytes = match &payloads[0] {
-            foldit_runner::orchestrator::BroadcastPayload::Delta(b) => b.clone(),
-            other => panic!("expected Delta, got {other:?}"),
-        };
-        let edits = molex::ops::wire::delta::deserialize_edits(&bytes)
-            .expect("delta decodes");
-        assert_eq!(edits.len(), 1);
-        assert!(matches!(edits[0], AssemblyEdit::SetEntityCoords { .. }));
-
-        let mut replay = prior_asm;
-        replay.apply_edits(&edits).expect("apply_edits");
-        let host_head = store.head_assembly();
-        assert_eq!(
-            replay
-                .entities()
-                .iter()
-                .find(|e| e.id() == id)
-                .expect("entity")
-                .positions(),
-            host_head
-                .entities()
-                .iter()
-                .find(|e| e.id() == id)
-                .expect("entity")
-                .positions(),
-        );
-    }
 
     #[test]
     fn remove_preview_emits_full() {
