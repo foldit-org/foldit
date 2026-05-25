@@ -28,6 +28,9 @@ use viso::{
 use crate::action_router::{self, ActionRouter};
 use crate::entity_store::{EntityOrigin, EntityStore, EntityStoreError};
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
+use crate::plugin_driver::PluginDriver;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plugin_driver::ActiveStreamEntry;
 
 fn score_for_mode(
     raw: Option<f64>,
@@ -286,11 +289,10 @@ pub struct App {
     input: InputProcessor,
     store: EntityStore,
     router: ActionRouter,
+    plugin_driver: PluginDriver,
     pdb_path: String,
     puzzle: PuzzleSession,
     history_sync: HistorySyncCursor,
-    #[cfg(not(target_arch = "wasm32"))]
-    stream_host: StreamHost,
 }
 
 /// Metadata for the active puzzle. Zero/empty in Scientist mode;
@@ -321,43 +323,6 @@ struct HistorySyncCursor {
     last_live_push_at: Option<Instant>,
 }
 
-/// Owns the in-flight stream bookkeeping that only exists on native
-/// builds: the plugin stream handle table plus the live pull-drag
-/// state. Grouped so App's stream lifecycle touches one field.
-#[cfg(not(target_arch = "wasm32"))]
-struct StreamHost {
-    /// In-flight stream handles keyed by request_id. Populated by
-    /// `handle_dispatch_op` on `StartStream`; the matching
-    /// `release_dispatch_locks` runs in `apply_backend_updates` when
-    /// the stream's terminal `PluginUpdate` arrives. The stored
-    /// `plugin_id` is the dispatch target for `dispatch_cancel_stream`
-    /// when the user hits ESC.
-    active_streams: std::collections::HashMap<
-        u64,
-        ActiveStreamEntry,
-    >,
-    /// Live pull-drag state. `Some(...)` between pointer-down on an
-    /// atom and pointer-up / stream-terminal / ESC cancel. The drag's
-    /// stream id also lives in `active_streams` so Final/Error
-    /// handling flows through the unified stream-cleanup path; this
-    /// field carries the extra viso-side bookkeeping needed for
-    /// pointer-move (PullInfo + op id).
-    pull_drag: Option<crate::pull_drag::PullDrag>,
-}
-
-/// Bundle stored per running stream so `apply_backend_updates` /
-/// `cancel_operations` can release locks and dispatch cancel against
-/// the right plugin worker without re-querying the orchestrator.
-/// `transition` is the viso animation preset to queue on each Pending
-/// snapshot — resolved from the manifest catalog once at dispatch
-/// time so per-poll handling stays orchestrator-free.
-#[cfg(not(target_arch = "wasm32"))]
-struct ActiveStreamEntry {
-    handle: foldit_runner::orchestrator::DispatchHandle,
-    plugin_id: String,
-    transition: foldit_runner::orchestrator::TransitionKind,
-}
-
 /// Discriminated result of a dispatch — wraps the two return shapes
 /// `dispatch_invoke` and `dispatch_start_stream` produce so
 /// `handle_dispatch_op` can post-process either uniformly.
@@ -386,6 +351,7 @@ impl App {
             input: InputProcessor::new(),
             store: EntityStore::new(),
             router: ActionRouter::new(),
+            plugin_driver: PluginDriver::new(),
             pdb_path,
             // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
             // when an intro/campaign puzzle is loaded.
@@ -402,11 +368,6 @@ impl App {
                 last_topology: None,
                 last_live: None,
                 last_live_push_at: None,
-            },
-            #[cfg(not(target_arch = "wasm32"))]
-            stream_host: StreamHost {
-                active_streams: std::collections::HashMap::new(),
-                pull_drag: None,
             },
         }
     }
@@ -455,7 +416,7 @@ impl App {
                 EntityId as RunnerEntityId, PluginUpdate,
             };
 
-            let updates = match self.router.orchestrator.as_mut() {
+            let updates = match self.plugin_driver.orchestrator.as_mut() {
                 Some(orch) => orch.drain_plugin_updates(),
                 None => return,
             };
@@ -504,7 +465,7 @@ impl App {
                         ) {
                             visual_dirty = true;
                             if let (Some(entry), Some(entity)) = (
-                                self.stream_host.active_streams.get(&request_id),
+                                self.plugin_driver.stream_host.active_streams.get(&request_id),
                                 self.store
                                     .history()
                                     .ongoing()
@@ -524,7 +485,7 @@ impl App {
                             // is gated by `POLL_INTERVAL` (50ms), so
                             // worst case is ~20 score queries/sec.
                             if let Some(orch) =
-                                self.router.orchestrator.as_mut()
+                                self.plugin_driver.orchestrator.as_mut()
                             {
                                 refresh_scores(
                                     orch,
@@ -542,6 +503,7 @@ impl App {
                         // Cancel-as-commit: same shape as Final below.
                         had_terminal = true;
                         let stream_transition = self
+                            .plugin_driver
                             .stream_host
                             .active_streams
                             .get(&request_id)
@@ -570,16 +532,16 @@ impl App {
                             }
                         }
                         if let Some(entry) =
-                            self.stream_host.active_streams.remove(&request_id)
+                            self.plugin_driver.stream_host.active_streams.remove(&request_id)
                         {
                             if let Some(orch) =
-                                self.router.orchestrator.as_mut()
+                                self.plugin_driver.orchestrator.as_mut()
                             {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.stream_host.pull_drag = None;
+                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.plugin_driver.stream_host.pull_drag = None;
                         }
                         log::info!(
                             "plugin update Cancelled rid={request_id} \
@@ -594,6 +556,7 @@ impl App {
                     } => {
                         had_terminal = true;
                         let stream_transition = self
+                            .plugin_driver
                             .stream_host
                             .active_streams
                             .get(&request_id)
@@ -630,16 +593,16 @@ impl App {
                             }
                         }
                         if let Some(entry) =
-                            self.stream_host.active_streams.remove(&request_id)
+                            self.plugin_driver.stream_host.active_streams.remove(&request_id)
                         {
                             if let Some(orch) =
-                                self.router.orchestrator.as_mut()
+                                self.plugin_driver.orchestrator.as_mut()
                             {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.stream_host.pull_drag = None;
+                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.plugin_driver.stream_host.pull_drag = None;
                         }
                         log::info!(
                             "plugin update Final rid={request_id} \
@@ -656,7 +619,7 @@ impl App {
                         // is gated to this stream's entity so a stale
                         // Error can't drop another op's tentative.
                         had_terminal = true;
-                        let entry = self.stream_host.active_streams.remove(&request_id);
+                        let entry = self.plugin_driver.stream_host.active_streams.remove(&request_id);
                         let owns_tentative = entry
                             .as_ref()
                             .and_then(|e| {
@@ -686,13 +649,13 @@ impl App {
                         }
                         if let Some(entry) = entry {
                             if let Some(orch) =
-                                self.router.orchestrator.as_mut()
+                                self.plugin_driver.orchestrator.as_mut()
                             {
                                 orch.release_dispatch_locks(entry.handle);
                             }
                         }
-                        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.stream_host.pull_drag = None;
+                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
+                            self.plugin_driver.stream_host.pull_drag = None;
                         }
                         log::warn!(
                             "plugin update Error rid={request_id} \
@@ -744,7 +707,7 @@ impl App {
         if payloads.is_empty() {
             return;
         }
-        let Some(orch) = self.router.orchestrator.as_mut() else {
+        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
             // Without an orchestrator we have no plugins to notify;
             // drop the queued payloads.
             return;
@@ -770,7 +733,7 @@ impl App {
     /// no GUI selection). Returns true if an op was dispatched.
     #[cfg(not(target_arch = "wasm32"))]
     fn try_hotkey_dispatch(&mut self, key_str: &str) -> bool {
-        let op_id = self.router.orchestrator.as_ref().and_then(|orch| {
+        let op_id = self.plugin_driver.orchestrator.as_ref().and_then(|orch| {
             orch.ops_catalog()
                 .into_iter()
                 .find(|e| e.hotkey.as_deref() == Some(key_str))
@@ -816,8 +779,8 @@ impl App {
             }
             VisoCommand::ClearSelection => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(orch) = self.router.orchestrator.as_mut() {
-                    for (rid, entry) in &self.stream_host.active_streams {
+                if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
+                    for (rid, entry) in &self.plugin_driver.stream_host.active_streams {
                         if let Err(e) = orch
                             .dispatch_cancel_stream(&entry.plugin_id, *rid)
                         {
@@ -865,7 +828,7 @@ impl App {
             match &input {
                 ViewportInput::PointerMove { x, y, .. }
                     if self.input.mouse_pressed()
-                        && self.stream_host.pull_drag.is_none() =>
+                        && self.plugin_driver.stream_host.pull_drag.is_none() =>
                 {
                     if self.try_begin_pull_drag(*x, *y) {
                         // viso recorded the press; drop its mouse
@@ -878,14 +841,14 @@ impl App {
                     }
                 }
                 ViewportInput::PointerMove { x, y, .. }
-                    if self.stream_host.pull_drag.is_some() =>
+                    if self.plugin_driver.stream_host.pull_drag.is_some() =>
                 {
                     self.update_pull_drag(*x, *y);
                     self.finalize_viewport_input();
                     return;
                 }
                 ViewportInput::PointerUp { .. }
-                    if self.stream_host.pull_drag.is_some() =>
+                    if self.plugin_driver.stream_host.pull_drag.is_some() =>
                 {
                     self.end_pull_drag();
                     self.finalize_viewport_input();
@@ -976,9 +939,9 @@ impl App {
                             VisoCommand::ClearSelection => {
                                 #[cfg(not(target_arch = "wasm32"))]
                                 if let Some(orch) =
-                                    self.router.orchestrator.as_mut()
+                                    self.plugin_driver.orchestrator.as_mut()
                                 {
-                                    for (rid, entry) in &self.stream_host.active_streams {
+                                    for (rid, entry) in &self.plugin_driver.stream_host.active_streams {
                                         if let Err(e) = orch
                                             .dispatch_cancel_stream(
                                                 &entry.plugin_id,
@@ -1012,7 +975,7 @@ impl App {
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             pending_hotkey_op = self
-                                .router
+                                .plugin_driver
                                 .orchestrator
                                 .as_ref()
                                 .and_then(|orch| {
@@ -1044,7 +1007,7 @@ impl App {
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, &self.router, pull);
@@ -1071,11 +1034,11 @@ impl App {
     /// trailing cleanup the regular `handle_viewport_input` flow does
     /// (visualizations + broadcast pump) without double-running the
     /// match-arm body. Pre-snapshots the pull info so the engine
-    /// borrow doesn't overlap with `&self.stream_host.pull_drag`.
+    /// borrow doesn't overlap with `&self.plugin_driver.stream_host.pull_drag`.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
         self.router.ui_dirty |= DirtyFlags::UI;
-        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, &self.router, pull);
         }
@@ -1088,7 +1051,7 @@ impl App {
     /// suppresses the regular viso input flow), false otherwise.
     ///
     /// Rejected picks (non-protein entity, hydrogen atom, no atom under
-    /// the cursor, dispatch failure) leave `self.stream_host.pull_drag = None`
+    /// the cursor, dispatch failure) leave `self.plugin_driver.stream_host.pull_drag = None`
     /// and return false, letting the click fall through to camera /
     /// selection handling.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1134,7 +1097,7 @@ impl App {
             }],
         };
 
-        let Some(orch) = self.router.orchestrator.as_mut() else { return false };
+        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else { return false };
         let Some(cached) = orch.plugin_registry().get_op(route.op_id).cloned() else {
             log::warn!(
                 "try_begin_pull_drag: op id {:?} missing from registry",
@@ -1182,7 +1145,7 @@ impl App {
             }
         }
 
-        let _ = self.stream_host.active_streams.insert(
+        let _ = self.plugin_driver.stream_host.active_streams.insert(
             rid,
             ActiveStreamEntry {
                 handle,
@@ -1190,7 +1153,7 @@ impl App {
                 transition: TransitionKind::default(),
             },
         );
-        self.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
+        self.plugin_driver.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
             request_id: rid,
             plugin_id,
             pull_info,
@@ -1207,7 +1170,7 @@ impl App {
     fn update_pull_drag(&mut self, x: f32, y: f32) {
         use foldit_runner::orchestrator::ParamValue;
 
-        let Some(drag) = self.stream_host.pull_drag.as_mut() else { return };
+        let Some(drag) = self.plugin_driver.stream_host.pull_drag.as_mut() else { return };
         drag.pull_info.screen_target = (x, y);
 
         let (residue, atom_name, plugin_id, request_id) = (
@@ -1225,7 +1188,7 @@ impl App {
         let target =
             engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
 
-        let Some(orch) = self.router.orchestrator.as_ref() else { return };
+        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else { return };
         let mut params = std::collections::HashMap::new();
         let _ = params.insert(
             String::from("endpoint"),
@@ -1246,8 +1209,8 @@ impl App {
     /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
-        let Some(drag) = self.stream_host.pull_drag.take() else { return };
-        let Some(orch) = self.router.orchestrator.as_ref() else { return };
+        let Some(drag) = self.plugin_driver.stream_host.pull_drag.take() else { return };
+        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else { return };
         if let Err(e) =
             orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id)
         {
@@ -1287,7 +1250,7 @@ impl App {
                 SessionContext as RunnerSessionContext,
             };
 
-            let Some(orch) = self.router.orchestrator.as_mut() else {
+            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                 log::warn!(
                     "handle_dispatch_op({:?}): orchestrator not initialized",
                     op.op_id
@@ -1399,7 +1362,7 @@ impl App {
 
             match dispatch_outcome {
                 Ok(OpOutcome::Stream { rid, handle }) => {
-                    let _ = self.stream_host.active_streams.insert(
+                    let _ = self.plugin_driver.stream_host.active_streams.insert(
                         rid,
                         ActiveStreamEntry {
                             handle,
@@ -1535,7 +1498,7 @@ impl App {
             }
             ParameterizedAction::LoadPuzzle { puzzle_id } => {
                 self.store.reset();
-                self.router.reset_for_new_structure();
+                self.plugin_driver.reset_for_new_structure();
 
                 match crate::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
@@ -1810,7 +1773,7 @@ impl App {
         // Pre-snapshot pull info under an immutable borrow so the
         // subsequent `&mut engine` doesn't conflict.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else { return };
@@ -1882,7 +1845,7 @@ impl App {
             }
         }
         if app_dirty.contains(DirtyFlags::ACTIONS) {
-            frontend.set_actions(action_router::build_actions_list(&self.router.orchestrator));
+            frontend.set_actions(action_router::build_actions_list(&self.plugin_driver.orchestrator));
         }
         if app_dirty.contains(DirtyFlags::LOADING) {
             frontend.set_loading_progress(None);
@@ -2041,11 +2004,11 @@ impl App {
                     &mut self.store,
                     Some(&mut engine),
                 );
-                self.router.orchestrator = Some(orch);
+                self.plugin_driver.orchestrator = Some(orch);
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", self.pdb_path, e);
-                self.router.orchestrator = Some(Orchestrator::new());
+                self.plugin_driver.orchestrator = Some(Orchestrator::new());
             }
         }
 
@@ -2065,7 +2028,7 @@ impl App {
 
     /// Shut down backends and scene processor.
     pub fn shutdown(&mut self) {
-        self.router.shutdown();
+        self.plugin_driver.shutdown();
         if let Some(engine) = &mut self.engine {
             engine.shutdown();
         }

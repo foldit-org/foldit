@@ -1,8 +1,11 @@
 //! Action Router: translates user input into orchestrator/backend commands.
 //!
-//! Owns routing state (orchestrator handle) and dispatches user actions
-//! to the appropriate backend operations. Does NOT handle backend output
-//! processing, rendering, or frontend state sync.
+//! Holds the per-input routing state (dirty flags, last cursor pos, the
+//! pending ML-op bookkeeping) and dispatches user actions to the
+//! appropriate backend operations. The orchestrator handle itself now
+//! lives on `PluginDriver`; routing methods that need it take it as a
+//! parameter. Does NOT handle backend output processing, rendering, or
+//! frontend state sync.
 
 use foldit_gui::DirtyFlags;
 use foldit_gui::state::{
@@ -47,14 +50,15 @@ pub struct BackendOpRequest {
     >,
 }
 
-/// Central mediator for action dispatch, owning all routing state.
+/// Central mediator for action dispatch. Holds the per-input routing
+/// state (dirty flags, cursor pos, pending ML-op bookkeeping); the
+/// orchestrator handle lives on `PluginDriver`.
 ///
 /// Rosetta-specific UI scaffolding (pull-drag, band-drag, active_bands
 /// mirror) was gutted alongside the in-process executor — it'll come
 /// back wired through the unified plugin protocol once bridge/ implements
 /// the pull / band_add handlers (items 54–61).
 pub struct ActionRouter {
-    pub orchestrator: Option<Orchestrator>,
     pub ui_dirty: DirtyFlags,
     pub last_mouse_pos: (f32, f32),
     /// CA positions of the protein chains submitted to the most recent
@@ -78,7 +82,6 @@ pub struct ActionRouter {
 impl ActionRouter {
     pub fn new() -> Self {
         Self {
-            orchestrator: None,
             ui_dirty: DirtyFlags::empty(),
             last_mouse_pos: (0.0, 0.0),
             pending_prediction_reference: None,
@@ -92,15 +95,6 @@ impl ActionRouter {
         let flags = self.ui_dirty;
         self.ui_dirty = DirtyFlags::empty();
         flags
-    }
-
-    /// Release any lock state when puzzle topology changes.
-    pub fn reset_for_new_structure(&mut self) {
-        if let Some(ref mut orch) = self.orchestrator {
-            for eid in orch.locked_entities() {
-                orch.unlock(eid);
-            }
-        }
     }
 
     // ── Action dispatch ──
@@ -152,15 +146,11 @@ impl ActionRouter {
     #[allow(dead_code)]
     pub fn start_op(
         &mut self,
+        orch: &mut Orchestrator,
         request: BackendOpRequest,
         engine: &mut VisoEngine,
         store: &mut EntityStore,
     ) {
-        let Some(ref mut orch) = self.orchestrator else {
-            log::warn!("Orchestrator not initialized");
-            return;
-        };
-
         if orch.is_locked(request.target) {
             let op = orch.get_op_type(request.target);
             log::warn!(
@@ -238,14 +228,6 @@ impl ActionRouter {
     ) {
         engine.set_cursor_pos(x, y);
         self.last_mouse_pos = (x, y);
-    }
-
-    // ── Shutdown ──
-
-    pub fn shutdown(&self) {
-        if let Some(ref orch) = self.orchestrator {
-            orch.shutdown();
-        }
     }
 }
 
