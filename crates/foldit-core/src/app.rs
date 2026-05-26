@@ -31,7 +31,7 @@ use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::plugin_driver::ActiveStreamEntry;
+use crate::plugin_driver::{ActiveStreamEntry, OpOutcome};
 use crate::render_projector::{self, RenderProjector};
 
 fn score_for_mode(
@@ -310,18 +310,6 @@ struct PuzzleSession {
     target_score: f64,
 }
 
-/// Discriminated result of a dispatch — wraps the two return shapes
-/// `dispatch_invoke` and `dispatch_start_stream` produce so
-/// `handle_dispatch_op` can post-process either uniformly.
-#[cfg(not(target_arch = "wasm32"))]
-enum OpOutcome {
-    Invoke(Vec<u8>),
-    Stream {
-        rid: u64,
-        handle: foldit_runner::orchestrator::DispatchHandle,
-    },
-}
-
 impl App {
     /// Get a display title derived from the PDB path (e.g. "1BFE" from ".../1bfe.cif")
     pub fn structure_title(&self) -> String {
@@ -397,10 +385,7 @@ impl App {
                 EntityId as RunnerEntityId, PluginUpdate,
             };
 
-            let updates = match self.plugin_driver.orchestrator.as_mut() {
-                Some(orch) => orch.drain_plugin_updates(),
-                None => return,
-            };
+            let updates = self.plugin_driver.drain_updates();
             if updates.is_empty() {
                 return;
             }
@@ -446,7 +431,7 @@ impl App {
                         ) {
                             visual_dirty = true;
                             if let (Some(entry), Some(entity)) = (
-                                self.plugin_driver.stream_host.active_streams.get(&request_id),
+                                self.plugin_driver.stream_entry(request_id),
                                 self.store
                                     .history()
                                     .ongoing()
@@ -485,9 +470,7 @@ impl App {
                         had_terminal = true;
                         let stream_transition = self
                             .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
+                            .stream_entry(request_id)
                             .map(|e| e.transition);
                         if apply_streaming_assembly(
                             &mut self.store,
@@ -512,18 +495,9 @@ impl App {
                                 pending_transition = Some((entity, t));
                             }
                         }
-                        if let Some(entry) =
-                            self.plugin_driver.stream_host.active_streams.remove(&request_id)
-                        {
-                            if let Some(orch) =
-                                self.plugin_driver.orchestrator.as_mut()
-                            {
-                                orch.release_dispatch_locks(entry.handle);
-                            }
-                        }
-                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.plugin_driver.stream_host.pull_drag = None;
-                        }
+                        let _ = self
+                            .plugin_driver
+                            .release_terminal_stream(request_id);
                         log::info!(
                             "plugin update Cancelled rid={request_id} \
                              entities={}",
@@ -538,9 +512,7 @@ impl App {
                         had_terminal = true;
                         let stream_transition = self
                             .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
+                            .stream_entry(request_id)
                             .map(|e| e.transition);
                         if apply_streaming_assembly(
                             &mut self.store,
@@ -573,18 +545,9 @@ impl App {
                                 pending_transition = Some((entity, t));
                             }
                         }
-                        if let Some(entry) =
-                            self.plugin_driver.stream_host.active_streams.remove(&request_id)
-                        {
-                            if let Some(orch) =
-                                self.plugin_driver.orchestrator.as_mut()
-                            {
-                                orch.release_dispatch_locks(entry.handle);
-                            }
-                        }
-                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.plugin_driver.stream_host.pull_drag = None;
-                        }
+                        let _ = self
+                            .plugin_driver
+                            .release_terminal_stream(request_id);
                         log::info!(
                             "plugin update Final rid={request_id} \
                              entities={}",
@@ -598,18 +561,21 @@ impl App {
                         // Spontaneous failure only (timeout, exception,
                         // transport, STALE_GEN). Never commits; abort
                         // is gated to this stream's entity so a stale
-                        // Error can't drop another op's tentative.
+                        // Error can't drop another op's tentative. Peek
+                        // at the entry through `stream_entry` to read
+                        // `handle.entities` before
+                        // `release_terminal_stream` consumes the handle.
                         had_terminal = true;
-                        let entry = self.plugin_driver.stream_host.active_streams.remove(&request_id);
-                        let owns_tentative = entry
-                            .as_ref()
-                            .and_then(|e| {
+                        let owns_tentative = self
+                            .plugin_driver
+                            .stream_entry(request_id)
+                            .and_then(|entry| {
                                 self.store
                                     .history()
                                     .ongoing()
                                     .locked_entity()
                                     .map(|locked| {
-                                        e.handle.entities.iter().any(
+                                        entry.handle.entities.iter().any(
                                             |runner_eid: &RunnerEntityId| {
                                                 runner_eid.0
                                                     == u64::from(locked.raw())
@@ -628,16 +594,9 @@ impl App {
                                 visual_dirty = true;
                             }
                         }
-                        if let Some(entry) = entry {
-                            if let Some(orch) =
-                                self.plugin_driver.orchestrator.as_mut()
-                            {
-                                orch.release_dispatch_locks(entry.handle);
-                            }
-                        }
-                        if matches!(&self.plugin_driver.stream_host.pull_drag, Some(d) if d.request_id == request_id) {
-                            self.plugin_driver.stream_host.pull_drag = None;
-                        }
+                        let _ = self
+                            .plugin_driver
+                            .release_terminal_stream(request_id);
                         log::warn!(
                             "plugin update Error rid={request_id} \
                              message={message}"
@@ -781,19 +740,7 @@ impl App {
             }
             VisoCommand::ClearSelection => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
-                    for (rid, entry) in &self.plugin_driver.stream_host.active_streams {
-                        if let Err(e) = orch
-                            .dispatch_cancel_stream(&entry.plugin_id, *rid)
-                        {
-                            log::warn!(
-                                "dispatch_cancel_stream plugin={} rid={rid} \
-                                 failed: {e}",
-                                entry.plugin_id
-                            );
-                        }
-                    }
-                }
+                self.plugin_driver.cancel_all_active_streams();
                 self.cancel_operations();
             }
             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
@@ -978,25 +925,8 @@ impl App {
                             }
                             VisoCommand::ClearSelection => {
                                 #[cfg(not(target_arch = "wasm32"))]
-                                if let Some(orch) =
-                                    self.plugin_driver.orchestrator.as_mut()
-                                {
-                                    for (rid, entry) in &self.plugin_driver.stream_host.active_streams {
-                                        if let Err(e) = orch
-                                            .dispatch_cancel_stream(
-                                                &entry.plugin_id,
-                                                *rid,
-                                            )
-                                        {
-                                            log::warn!(
-                                                "dispatch_cancel_stream \
-                                                 plugin={} rid={rid} \
-                                                 failed: {e}",
-                                                entry.plugin_id
-                                            );
-                                        }
-                                    }
-                                }
+                                self.plugin_driver
+                                    .cancel_all_active_streams();
                                 pending_cancel = true;
                             }
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
@@ -1297,7 +1227,7 @@ impl App {
             self.apply_backend_updates();
 
             use foldit_runner::orchestrator::{
-                EntityId as RunnerEntityId, OpKind, ResidueRef,
+                EntityId as RunnerEntityId, ResidueRef,
                 SessionContext as RunnerSessionContext,
             };
 
@@ -1359,20 +1289,18 @@ impl App {
                 .map(|(k, v)| (k, action_router::param_value_from_wire(v)))
                 .collect();
 
-            let dispatch_outcome: Result<
-                OpOutcome,
-                String,
-            > = match cached.kind {
-                OpKind::Invoke => orch
-                    .dispatch_invoke(&op.op_id, ctx, params, |_| None)
-                    .map(OpOutcome::Invoke)
-                    .map_err(|e| e.to_string()),
-                OpKind::Stream => orch
-                    .dispatch_start_stream(&op.op_id, ctx, params, |_| None)
-                    .map(|(rid, handle)| OpOutcome::Stream { rid, handle })
-                    .map_err(|e| e.to_string()),
-            };
+            // Drop the orchestrator borrow before reaching back into
+            // `self.plugin_driver` for the consolidated dispatch.
             let _ = orch;
+            let dispatch_outcome = self.plugin_driver.dispatch_op(
+                &op.op_id,
+                cached.kind,
+                ctx,
+                params,
+                plugin_id.clone(),
+                transition,
+                |_| None,
+            );
 
             // Resolve which entity this op targets. The focused entity
             // wins; otherwise pick the lone protein in the head
@@ -1412,15 +1340,11 @@ impl App {
             }
 
             match dispatch_outcome {
-                Ok(OpOutcome::Stream { rid, handle }) => {
-                    let _ = self.plugin_driver.stream_host.active_streams.insert(
-                        rid,
-                        ActiveStreamEntry {
-                            handle,
-                            plugin_id,
-                            transition,
-                        },
-                    );
+                Ok(OpOutcome::Stream) => {
+                    // Stream dispatch: `PluginDriver::dispatch_op`
+                    // already inserted the `ActiveStreamEntry`. The
+                    // matching terminal arm in `apply_backend_updates`
+                    // does the cleanup; nothing else to do here.
                 }
                 Ok(OpOutcome::Invoke(bytes)) => {
                     self.apply_invoke_result(&bytes, transition);

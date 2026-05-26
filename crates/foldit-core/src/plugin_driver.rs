@@ -62,6 +62,140 @@ impl PluginDriver {
     }
 }
 
+// ── Native-only dispatch mechanism ──────────────────────────────────────
+//
+// These methods own the plugin-side bookkeeping of dispatch (orchestrator
+// I/O + `StreamHost` table maintenance) and never touch `Document` or
+// `VisoEngine` — the coordination boundary keeps those on `App`.
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PluginDriver {
+    /// Drain whatever the orchestrator has queued for the host. Returns an
+    /// empty `Vec` when no orchestrator is wired up.
+    pub(crate) fn drain_updates(
+        &mut self,
+    ) -> Vec<foldit_runner::orchestrator::PluginUpdate> {
+        self.orchestrator
+            .as_mut()
+            .map(|orch| orch.drain_plugin_updates())
+            .unwrap_or_default()
+    }
+
+    /// Read accessor for an in-flight stream entry. Used by the Pending
+    /// arm of `apply_backend_updates` to look up the resolved
+    /// `TransitionKind`, and by the Error arm to inspect
+    /// `handle.entities` before the terminal cleanup releases the handle.
+    pub(crate) fn stream_entry(&self, rid: u64) -> Option<&ActiveStreamEntry> {
+        self.stream_host.active_streams.get(&rid)
+    }
+
+    /// Terminal stream cleanup (Cancelled / Final / Error): remove the
+    /// entry from the active-streams table, release its dispatch locks
+    /// on the orchestrator, and clear `pull_drag` if it pointed at this
+    /// stream. Returns the entry's `(plugin_id, transition)` so callers
+    /// can log or replay the manifest transition without re-querying.
+    pub(crate) fn release_terminal_stream(
+        &mut self,
+        rid: u64,
+    ) -> Option<(String, foldit_runner::orchestrator::TransitionKind)> {
+        let entry = self.stream_host.active_streams.remove(&rid)?;
+        let ActiveStreamEntry {
+            handle,
+            plugin_id,
+            transition,
+        } = entry;
+        if let Some(orch) = self.orchestrator.as_mut() {
+            orch.release_dispatch_locks(handle);
+        }
+        if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == rid) {
+            self.stream_host.pull_drag = None;
+        }
+        Some((plugin_id, transition))
+    }
+
+    /// Send a cancel to every in-flight stream's plugin. Used by the
+    /// ESC / `VisoCommand::ClearSelection` paths. Doesn't touch
+    /// `active_streams`: the terminal cleanup runs when the plugin's
+    /// `Cancelled` reply lands in the next drain.
+    pub(crate) fn cancel_all_active_streams(&mut self) {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return;
+        };
+        for (rid, entry) in &self.stream_host.active_streams {
+            if let Err(e) = orch.dispatch_cancel_stream(&entry.plugin_id, *rid) {
+                log::warn!(
+                    "dispatch_cancel_stream plugin={} rid={rid} failed: {e}",
+                    entry.plugin_id,
+                );
+            }
+        }
+    }
+
+    /// One-call dispatch: hand the orchestrator a pre-built session
+    /// context + params, branch on `kind`, and for streams, insert the
+    /// `ActiveStreamEntry` so the matching terminal arm can find it.
+    /// `App` still owns the catalog lookup that produces `plugin_id` /
+    /// `transition` and the post-processing (`begin_action`,
+    /// `apply_invoke_result`, broadcaster pump, score poll).
+    pub(crate) fn dispatch_op(
+        &mut self,
+        op_id: &str,
+        kind: foldit_runner::orchestrator::OpKind,
+        ctx: foldit_runner::orchestrator::SessionContext,
+        params: std::collections::HashMap<
+            String,
+            foldit_runner::orchestrator::ParamValue,
+        >,
+        plugin_id: String,
+        transition: foldit_runner::orchestrator::TransitionKind,
+        entity_type_of: impl Fn(
+            foldit_runner::orchestrator::EntityId,
+        ) -> Option<foldit_runner::orchestrator::EntityType>,
+    ) -> Result<OpOutcome, String> {
+        use foldit_runner::orchestrator::OpKind;
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Err(String::from("orchestrator not initialized"));
+        };
+        match kind {
+            OpKind::Invoke => orch
+                .dispatch_invoke(op_id, ctx, params, entity_type_of)
+                .map(OpOutcome::Invoke)
+                .map_err(|e| e.to_string()),
+            OpKind::Stream => {
+                let (rid, handle) = orch
+                    .dispatch_start_stream(op_id, ctx, params, entity_type_of)
+                    .map_err(|e| e.to_string())?;
+                let _ = self.stream_host.active_streams.insert(
+                    rid,
+                    ActiveStreamEntry {
+                        handle,
+                        plugin_id,
+                        transition,
+                    },
+                );
+                Ok(OpOutcome::Stream)
+            }
+        }
+    }
+}
+
+/// Discriminated result of a dispatch — wraps the two return shapes
+/// `dispatch_invoke` and `dispatch_start_stream` produce so
+/// `App::handle_dispatch_op` can post-process either uniformly. Lives
+/// here (rather than in `app.rs`) because [`PluginDriver::dispatch_op`]
+/// is the producer and `App` is just one of two consumers.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum OpOutcome {
+    /// Synchronous invoke completed; payload is the plugin's reply
+    /// bytes, to feed into `apply_invoke_result`.
+    Invoke(Vec<u8>),
+    /// Stream dispatch succeeded; the `DispatchHandle` is already
+    /// stored in `StreamHost::active_streams`, so the caller has
+    /// nothing left to do for the dispatch itself. The matching
+    /// terminal arm in `apply_backend_updates` performs the cleanup.
+    Stream,
+}
+
 // ── Plugin broadcaster ──────────────────────────────────────────────────
 
 /// Plugin projection of the [`SceneChange`] spine.
