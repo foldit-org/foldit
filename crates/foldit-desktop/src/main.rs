@@ -42,7 +42,7 @@ fn main() {
 
     log::info!("Foldit starting...");
 
-    let pdb_path = match foldit_core::puzzle::resolve_structure_path(&input) {
+    let structure_path = match foldit_core::puzzle::resolve_structure_path(&input) {
         Ok(path) => path,
         Err(e) => {
             log::error!("{}", e);
@@ -50,8 +50,8 @@ fn main() {
         }
     };
 
-    log::info!("Loading structure from: {}", pdb_path);
+    log::info!("Loading structure from: {}", structure_path);
 
-    let app = App::new(pdb_path);
-    window::run(app, foldit_gui::FrontendState::new(), log_buffer);
+    let app = App::new();
+    window::run(app, structure_path, foldit_gui::FrontendState::new(), log_buffer);
 }

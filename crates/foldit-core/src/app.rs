@@ -188,9 +188,9 @@ fn head_score(store: &Document, mode: ScoringMode) -> Option<f64> {
 /// committed [`EntityId`].
 ///
 /// Ambient (water / ion / solvent) and zero-residue entities — the
-/// hetatm stubs that the parser emits for cofactors / waters in many
-/// PDB files — are kept as previews (transient) so viso still renders
-/// them, but they DO NOT push a history checkpoint. They aren't
+/// het-residue stubs the parser emits for cofactors / waters in
+/// structure files — are kept as previews (transient) so viso still
+/// renders them, but they DO NOT push a history checkpoint. They aren't
 /// undoable from the user's perspective; pushing one `AddEntity` per
 /// stub clutters the history (`1bfe` produced 3 root-level dots: one
 /// `Loaded` + two `AddEntity` for chain A and a water).
@@ -235,6 +235,29 @@ fn load_entity_into_history(
 /// the exception. Returns `None` when no protein entity exists.
 fn first_protein_entity(store: &Document) -> Option<EntityId> {
     store.proteins().next().map(|(eid, _, _)| eid)
+}
+
+/// Bridge a runner [`EntityId`](foldit_runner::orchestrator::EntityId)
+/// to the orchestrator's [`EntityType`](foldit_runner::orchestrator::EntityType)
+/// by looking the entity up in the [`Document`] and mapping the
+/// `MoleculeEntity` variant 1:1. Used by `dispatch_op` callers so the
+/// orchestrator can pick per-entity locks instead of falling back to
+/// `LockTargets::SessionWide`. Returns `None` when the runner id has no
+/// matching molex id in the current head (no committed lane or preview).
+#[cfg(not(target_arch = "wasm32"))]
+fn entity_type_of(
+    store: &Document,
+    id: foldit_runner::orchestrator::EntityId,
+) -> Option<foldit_runner::orchestrator::EntityType> {
+    use foldit_runner::orchestrator::EntityType;
+    use molex::MoleculeEntity;
+    let molex_id = store.ids().find(|m| u64::from(m.raw()) == id.0)?;
+    store.entity(molex_id).map(|me| match me {
+        MoleculeEntity::Protein(_) => EntityType::Protein,
+        MoleculeEntity::NucleicAcid(_) => EntityType::NucleicAcid,
+        MoleculeEntity::SmallMolecule(_) => EntityType::SmallMolecule,
+        MoleculeEntity::Bulk(_) => EntityType::Bulk,
+    })
 }
 
 /// Translate the runner-side manifest enum to a concrete viso
@@ -296,16 +319,22 @@ pub struct App {
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
     gui_projector: GuiProjector,
-    pdb_path: String,
-    puzzle: PuzzleSession,
+    /// Display name for the currently loaded structure (file stem on
+    /// free-form loads, puzzle name on `LoadPuzzle`). `None` before any
+    /// load; `structure_title()` falls back to `"Unknown"` in that case.
+    structure_title: Option<String>,
+    /// Objective metadata for the currently loaded puzzle. `None` in
+    /// Scientist mode (free-form structure load) and at startup before
+    /// any load; `Some` only after `LoadPuzzle` populates it from the
+    /// puzzle TOML.
+    loaded_puzzle: Option<LoadedPuzzle>,
 }
 
-/// Objective metadata for the active puzzle. Zero/empty in Scientist
-/// mode; populated from the puzzle TOML on a Game load. RX9 moved the
-/// GUI-projection fields (scoring mode, tutorial bubbles, bubble
-/// cursor) onto [`GuiProjector`]; RX14 will pull these objective
-/// fields out as a separate type.
-struct PuzzleSession {
+/// Objective metadata for an active puzzle. Populated from the puzzle
+/// TOML on a `LoadPuzzle` event. Free-form structure loads (Scientist
+/// mode) have no objective and so leave [`App::loaded_puzzle`] as `None`.
+#[derive(Debug, Clone)]
+struct LoadedPuzzle {
     id: u32,
     title: String,
     starting_score: f64,
@@ -313,16 +342,16 @@ struct PuzzleSession {
 }
 
 impl App {
-    /// Get a display title derived from the PDB path (e.g. "1BFE" from ".../1bfe.cif")
+    /// Display title for the currently loaded structure, or `"Unknown"`
+    /// before any load. Refreshed at every load site (`LoadStructure`,
+    /// `LoadPuzzle`, `load_initial_structure`).
     pub fn structure_title(&self) -> String {
-        std::path::Path::new(&self.pdb_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unknown")
-            .to_uppercase()
+        self.structure_title
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string())
     }
 
-    pub fn new(pdb_path: String) -> Self {
+    pub fn new() -> Self {
         Self {
             engine: None,
             input: InputProcessor::new(),
@@ -331,15 +360,10 @@ impl App {
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
             gui_projector: GuiProjector::new(),
-            pdb_path,
-            // CLI bootstrap zeroes the objective; `LoadPuzzle` fills it
-            // in from the puzzle TOML.
-            puzzle: PuzzleSession {
-                id: 0,
-                title: String::new(),
-                starting_score: 0.0,
-                target_score: 0.0,
-            },
+            structure_title: None,
+            // No puzzle objective until `LoadPuzzle` fires; free-form
+            // `LoadStructure` keeps this as `None` too.
+            loaded_puzzle: None,
         }
     }
 
@@ -1209,7 +1233,7 @@ impl App {
             route.op_id,
             ctx,
             params,
-            |_| None,
+            |id| entity_type_of(store, id),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1410,6 +1434,10 @@ impl App {
             // Drop the orchestrator borrow before reaching back into
             // `self.plugin_driver` for the consolidated dispatch.
             let _ = orch;
+            // Hoist a shared borrow of the store so the lookup closure
+            // can capture it alongside the upcoming `&mut self.plugin_driver`
+            // call (disjoint field paths).
+            let store = &self.store;
             let dispatch_outcome = self.plugin_driver.dispatch_op(
                 &op.op_id,
                 cached.kind,
@@ -1417,7 +1445,7 @@ impl App {
                 params,
                 plugin_id.clone(),
                 transition,
-                |_| None,
+                |id| entity_type_of(store, id),
             );
 
             // Resolve which entity this op targets. The focused entity
@@ -1574,12 +1602,13 @@ impl App {
                         }
                         self.render_projector.publish(&self.store, engine);
                         engine.fit_camera_to_focus();
-                        // Free-form file load → scientist mode.
+                        // Free-form file load → scientist mode; no
+                        // puzzle objective. Refresh the display title
+                        // so `structure_title()` reflects the just-
+                        // loaded file rather than the bootstrap one.
                         self.gui_projector.scoring_mode = ScoringMode::Scientist;
-                        self.puzzle.id = 0;
-                        self.puzzle.title = name;
-                        self.puzzle.starting_score = 0.0;
-                        self.puzzle.target_score = 0.0;
+                        self.structure_title = Some(name.clone());
+                        self.loaded_puzzle = None;
                         self.gui_projector.bubbles.clear();
                         self.gui_projector.current_bubble = 0;
                         self.ui_dirty |=
@@ -1599,10 +1628,16 @@ impl App {
                     Ok(puzzle_data) => {
                         // Capture mode + puzzle metadata for the GUI.
                         self.gui_projector.scoring_mode = ScoringMode::Game;
-                        self.puzzle.id = puzzle_id;
-                        self.puzzle.title = puzzle_data.name.clone();
-                        self.puzzle.starting_score = puzzle_data.start_energy;
-                        self.puzzle.target_score = puzzle_data.completion_score;
+                        self.loaded_puzzle = Some(LoadedPuzzle {
+                            id: puzzle_id,
+                            title: puzzle_data.name.clone(),
+                            starting_score: puzzle_data.start_energy,
+                            target_score: puzzle_data.completion_score,
+                        });
+                        // Keep `structure_title` aligned for a future
+                        // Game→Scientist flip; Game mode itself reads
+                        // `loaded_puzzle.title` directly.
+                        self.structure_title = Some(puzzle_data.name.clone());
                         self.gui_projector.bubbles = puzzle_data.bubbles;
                         self.gui_projector.current_bubble = 0;
 
@@ -1910,19 +1945,31 @@ impl App {
         // without being overwritten.
         if app_dirty.contains(DirtyFlags::PUZZLE) {
             match self.gui_projector.scoring_mode {
-                ScoringMode::Game => frontend.set_puzzle_game(
-                    self.puzzle.id,
-                    self.puzzle.title.clone(),
-                    self.puzzle.starting_score,
-                    self.puzzle.target_score,
-                ),
-                ScoringMode::Scientist => frontend.set_puzzle_scientist(
-                    if self.puzzle.title.is_empty() {
-                        self.structure_title()
+                ScoringMode::Game => {
+                    // Game mode implies LoadPuzzle ran, which populates
+                    // `loaded_puzzle`. The two are set together at every
+                    // mode-changing site, so a Game-mode tick with no
+                    // `loaded_puzzle` is a programming error, not a
+                    // user-visible state.
+                    if let Some(p) = &self.loaded_puzzle {
+                        frontend.set_puzzle_game(
+                            p.id,
+                            p.title.clone(),
+                            p.starting_score,
+                            p.target_score,
+                        );
                     } else {
-                        self.puzzle.title.clone()
-                    },
-                ),
+                        log::warn!(
+                            "populate_frontend: Game mode with no loaded_puzzle; skipping set_puzzle_game",
+                        );
+                    }
+                }
+                // Scientist mode has no puzzle objective by construction
+                // (LoadStructure clears `loaded_puzzle`), so the title
+                // is the file-derived structure name.
+                ScoringMode::Scientist => {
+                    frontend.set_puzzle_scientist(self.structure_title())
+                }
             }
             // Bubble push on puzzle swap: render the cursor's current
             // bubble (always index 0 right after LoadPuzzle, since the
@@ -1950,11 +1997,12 @@ impl App {
                 // first time current_score crosses the toml target. Higher
                 // game score = better fold (game-score formula negates),
                 // so the comparison is `>=`.
-                if self.gui_projector.scoring_mode == ScoringMode::Game
-                    && self.puzzle.target_score > 0.0
-                    && score >= self.puzzle.target_score
-                {
-                    frontend.mark_puzzle_complete();
+                if self.gui_projector.scoring_mode == ScoringMode::Game {
+                    if let Some(p) = &self.loaded_puzzle {
+                        if p.target_score > 0.0 && score >= p.target_score {
+                            frontend.mark_puzzle_complete();
+                        }
+                    }
                 }
             }
         }
@@ -2070,18 +2118,19 @@ impl App {
     /// initial Rosetta session. Runs AFTER the webview's loading screen
     /// is visible so the user has feedback during the (potentially
     /// slow) load. Requires `create_render_context` to have run first.
-    pub fn load_initial_structure(&mut self) {
+    pub fn load_initial_structure(&mut self, path: String) {
         if self.engine.is_none() {
             log::error!("load_initial_structure called before create_render_context");
             return;
         }
 
         // Parse entities from file
-        match crate::puzzle::load_file_as_entities(&self.pdb_path) {
+        match crate::puzzle::load_file_as_entities(&path) {
             Ok((entities, name)) => {
                 for entity in entities {
                     let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                 }
+                self.structure_title = Some(name.clone());
 
                 // Push to viso (viso inherits our IDs). update(0.0)
                 // drains the pending Assembly so scene.current is
@@ -2122,7 +2171,7 @@ impl App {
                 self.refresh_scores();
             }
             Err(e) => {
-                log::error!("Failed to load structure '{}': {}", self.pdb_path, e);
+                log::error!("Failed to load structure '{}': {}", path, e);
                 self.plugin_driver.orchestrator = Some(Orchestrator::new());
             }
         }

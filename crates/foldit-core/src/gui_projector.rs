@@ -2,10 +2,10 @@
 //!
 //! Holds the three GUI-facing fields that `populate_frontend` reads each
 //! frame: the history-version debounce cursor, the scoring-mode display
-//! policy, and the tutorial-bubble flow (bubble vector + cursor). Was
-//! split across `App::history_sync` and `PuzzleSession`'s GUI half
-//! before RX9 — the *puzzle objective* (id/title/scores) stays on
-//! [`crate::app::PuzzleSession`] for now; RX14 finishes that split.
+//! policy, and the tutorial-bubble flow (bubble vector + cursor). The
+//! *puzzle objective* (id/title/scores) lives separately on
+//! [`crate::app::App::loaded_puzzle`] (`LoadedPuzzle`), kept in lock-step
+//! with `scoring_mode` at every load site.
 //!
 //! Unlike [`crate::render_projector::RenderProjector`] and the
 //! plugin broadcaster, this projector is **not** spine-driven: it picks

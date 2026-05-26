@@ -25,6 +25,11 @@ pub(crate) struct AppRunner {
     last_frame: Instant,
     /// Last applied render size, to avoid redundant resizes
     last_render_size: (u32, u32),
+    /// Path to load on the first (deferred) `load_initial_structure`
+    /// call. `take()`n at that point so the field reads `None` once the
+    /// bootstrap structure load has fired; we never re-load by path.
+    /// Accepts any format the molex loader handles (PDB, CIF, bCIF).
+    structure_path: Option<String>,
     /// Structure load is deferred until the webview loading screen is visible
     init_pending: bool,
     /// Timeout for webview readiness — load anyway if webview takes too long
@@ -43,7 +48,12 @@ pub(crate) struct AppRunner {
 }
 
 impl AppRunner {
-    fn new(app: App, frontend: foldit_gui::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> Self {
+    fn new(
+        app: App,
+        structure_path: String,
+        frontend: foldit_gui::FrontendState,
+        log_buffer: crate::tee_logger::LogBuffer,
+    ) -> Self {
         Self {
             app,
             window: None,
@@ -53,6 +63,7 @@ impl AppRunner {
             webview_ready: false,
             last_frame: Instant::now(),
             last_render_size: (0, 0),
+            structure_path: Some(structure_path),
             init_pending: false,
             init_deadline: None,
             awaiting_initial_score: false,
@@ -670,7 +681,11 @@ impl AppRunner {
                 log::info!("Deferred structure load starting (webview_ready={})", self.webview_ready);
                 self.init_pending = false;
                 self.init_deadline = None;
-                self.app.load_initial_structure();
+                let path = self
+                    .structure_path
+                    .take()
+                    .expect("structure_path consumed exactly once on the deferred-load path");
+                self.app.load_initial_structure(path);
                 // Structure parsed and engine populated, but the Rosetta
                 // worker hasn't delivered its first score yet. Set puzzle
                 // metadata so it's ready when the GUI flips to InPuzzle, but
@@ -898,8 +913,13 @@ impl Drop for AppRunner {
 }
 
 /// Run the application event loop. This function never returns.
-pub(crate) fn run(app: App, frontend: foldit_gui::FrontendState, log_buffer: crate::tee_logger::LogBuffer) -> ! {
-    let mut runner = AppRunner::new(app, frontend, log_buffer);
+pub(crate) fn run(
+    app: App,
+    structure_path: String,
+    frontend: foldit_gui::FrontendState,
+    log_buffer: crate::tee_logger::LogBuffer,
+) -> ! {
+    let mut runner = AppRunner::new(app, structure_path, frontend, log_buffer);
 
     // In debug, spawn dev server and wait for it before opening the window.
     #[cfg(debug_assertions)]

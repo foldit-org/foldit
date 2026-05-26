@@ -82,9 +82,9 @@ pub struct FolditApp {
 impl FolditApp {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // Empty pdb_path — web doesn't load by filesystem path; the host
-        // fetches structure bytes and feeds them in via the orchestrator.
-        let app = App::new(String::new());
+        // Web doesn't load by filesystem path; the host fetches
+        // structure bytes and feeds them in via the orchestrator.
+        let app = App::new();
         Self {
             app: Rc::new(RefCell::new(app)),
             frontend: Rc::new(RefCell::new(FrontendState::new())),
