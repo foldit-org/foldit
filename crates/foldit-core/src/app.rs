@@ -319,6 +319,9 @@ pub struct App {
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
     gui_projector: GuiProjector,
+    /// Host-provided filesystem / resource access. The only path through
+    /// which foldit-core touches the filesystem outside puzzle loading.
+    host: Box<dyn crate::HostResources>,
     /// Display name for the currently loaded structure (file stem on
     /// free-form loads, puzzle name on `LoadPuzzle`). `None` before any
     /// load; `structure_title()` falls back to `"Unknown"` in that case.
@@ -351,7 +354,7 @@ impl App {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
-    pub fn new() -> Self {
+    pub fn new(host: Box<dyn crate::HostResources>) -> Self {
         Self {
             engine: None,
             input: InputProcessor::new(),
@@ -360,6 +363,7 @@ impl App {
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
             gui_projector: GuiProjector::new(),
+            host,
             structure_title: None,
             // No puzzle objective until `LoadPuzzle` fires; free-form
             // `LoadStructure` keeps this as `None` too.
@@ -1643,8 +1647,9 @@ impl App {
 
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(preset_name) = &puzzle_data.view_preset {
-                            let presets_dir = std::path::Path::new("assets/view_presets");
-                            engine.load_preset(preset_name, presets_dir);
+                            if let Some(dir) = self.host.view_presets_dir() {
+                                engine.load_preset(preset_name, dir);
+                            }
                         }
 
                         let ss_override = puzzle_data.ss_override;
@@ -1710,23 +1715,21 @@ impl App {
             }
             ParameterizedAction::LoadViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let presets_dir = std::path::Path::new("assets/view_presets");
-                    engine.load_preset(&name, presets_dir);
+                if let Some(dir) = self.host.view_presets_dir() {
+                    engine.load_preset(&name, dir);
                     self.ui_dirty |= DirtyFlags::VIEW;
                 }
                 #[cfg(target_arch = "wasm32")]
-                { let _ = name; let _ = engine; }
+                let _ = name;
             }
             ParameterizedAction::SaveViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let presets_dir = std::path::Path::new("assets/view_presets");
-                    engine.save_preset(&name, presets_dir);
+                if let Some(dir) = self.host.view_presets_dir() {
+                    engine.save_preset(&name, dir);
                     self.ui_dirty |= DirtyFlags::VIEW;
                 }
                 #[cfg(target_arch = "wasm32")]
-                { let _ = name; let _ = engine; }
+                let _ = name;
             }
             ParameterizedAction::History { .. }
             | ParameterizedAction::AdvanceBubble { .. } => {
@@ -2024,9 +2027,11 @@ impl App {
 
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let presets_dir = std::path::Path::new("assets/view_presets");
-                frontend.view.available_presets =
-                    viso::options::VisoOptions::list_presets(presets_dir);
+                frontend.view.available_presets = self
+                    .host
+                    .view_presets_dir()
+                    .map(viso::options::VisoOptions::list_presets)
+                    .unwrap_or_default();
             }
             frontend.view.active_preset = engine.active_preset().map(String::from);
         }
@@ -2118,11 +2123,19 @@ impl App {
     /// initial Rosetta session. Runs AFTER the webview's loading screen
     /// is visible so the user has feedback during the (potentially
     /// slow) load. Requires `create_render_context` to have run first.
-    pub fn load_initial_structure(&mut self, path: String) {
+    ///
+    /// Bootstrap path comes from the host (`HostResources::initial_structure_path`);
+    /// `None` is a no-op (e.g. the web shell loads structures via a
+    /// separate flow rather than a startup path).
+    pub fn load_initial_structure(&mut self) {
         if self.engine.is_none() {
             log::error!("load_initial_structure called before create_render_context");
             return;
         }
+
+        let Some(path) = self.host.initial_structure_path() else {
+            return;
+        };
 
         // Parse entities from file
         match crate::puzzle::load_file_as_entities(&path) {
@@ -2394,7 +2407,7 @@ impl foldit_gui::Dispatcher for App {
                     .get("filepath")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| "missing 'filepath'".to_string())?;
-                let bytes = std::fs::read(filepath)
+                let bytes = self.host.read_file(filepath)
                     .map_err(|e| format!("read {}: {}", filepath, e))?;
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

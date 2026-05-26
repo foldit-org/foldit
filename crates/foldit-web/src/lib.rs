@@ -27,6 +27,8 @@
 
 #![cfg(target_arch = "wasm32")]
 
+mod host;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -84,7 +86,7 @@ impl FolditApp {
     pub fn new() -> Self {
         // Web doesn't load by filesystem path; the host fetches
         // structure bytes and feeds them in via the orchestrator.
-        let app = App::new();
+        let app = App::new(Box::new(host::WebHost));
         Self {
             app: Rc::new(RefCell::new(app)),
             frontend: Rc::new(RefCell::new(FrontendState::new())),

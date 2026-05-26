@@ -20,6 +20,7 @@
 //!   Right-drag residue to residue - Create band
 //!   Mouse - Rotate/zoom camera
 
+mod host;
 #[cfg(any(not(debug_assertions), test))]
 mod plugin_assets;
 mod tee_logger;
@@ -52,6 +53,7 @@ fn main() {
 
     log::info!("Loading structure from: {}", structure_path);
 
-    let app = App::new();
-    window::run(app, structure_path, foldit_gui::FrontendState::new(), log_buffer);
+    let host = Box::new(host::DesktopHost::new(Some(structure_path)));
+    let app = App::new(host);
+    window::run(app, foldit_gui::FrontendState::new(), log_buffer);
 }
