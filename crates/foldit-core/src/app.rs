@@ -27,6 +27,7 @@ use viso::{
 
 use crate::action_router::{self, ActionRouter};
 use crate::document::{Document, DocumentError, EntityOrigin};
+use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
@@ -292,37 +293,21 @@ pub struct App {
     router: ActionRouter,
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
+    gui_projector: GuiProjector,
     pdb_path: String,
     puzzle: PuzzleSession,
-    history_sync: HistorySyncCursor,
 }
 
-/// Metadata for the active puzzle. Zero/empty in Scientist mode;
-/// populated from the puzzle TOML on a Game load.
+/// Objective metadata for the active puzzle. Zero/empty in Scientist
+/// mode; populated from the puzzle TOML on a Game load. RX9 moved the
+/// GUI-projection fields (scoring mode, tutorial bubbles, bubble
+/// cursor) onto [`GuiProjector`]; RX14 will pull these objective
+/// fields out as a separate type.
 struct PuzzleSession {
-    /// `Game` for tutorial/campaign/server puzzles, `Scientist` for
-    /// CLI / drag-drop loads. Drives which score representation reaches the GUI.
-    scoring_mode: ScoringMode,
     id: u32,
     title: String,
     starting_score: f64,
     target_score: f64,
-    /// Tutorial bubbles parsed from the puzzle TOML's `[[sequence]]`. Empty for scientist-mode loads.
-    bubbles: Vec<crate::puzzle::Bubble>,
-    /// Index into `bubbles` for the currently-displayed bubble. Reset to 0 on load.
-    /// When `>= bubbles.len()` the sequence is exhausted and no bubble is shown.
-    current_bubble: usize,
-}
-
-/// Tracks the last history versions pushed to the frontend so
-/// populate_frontend can debounce/skip redundant reprojections.
-struct HistorySyncCursor {
-    /// Last `History::topology_version()` pushed. `None` forces an initial push (G5: no u64::MAX sentinel).
-    last_topology: Option<u64>,
-    /// Last `History::live_version()` pushed; mid-action score updates only.
-    last_live: Option<u64>,
-    /// Wall-clock of the last live push. Gates the 50ms (20Hz) debounce.
-    last_live_push_at: Option<Instant>,
 }
 
 /// Discriminated result of a dispatch — wraps the two return shapes
@@ -355,22 +340,15 @@ impl App {
             router: ActionRouter::new(),
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
+            gui_projector: GuiProjector::new(),
             pdb_path,
-            // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
-            // when an intro/campaign puzzle is loaded.
+            // CLI bootstrap zeroes the objective; `LoadPuzzle` fills it
+            // in from the puzzle TOML.
             puzzle: PuzzleSession {
-                scoring_mode: ScoringMode::Scientist,
                 id: 0,
                 title: String::new(),
                 starting_score: 0.0,
                 target_score: 0.0,
-                bubbles: Vec::new(),
-                current_bubble: 0,
-            },
-            history_sync: HistorySyncCursor {
-                last_topology: None,
-                last_live: None,
-                last_live_push_at: None,
             },
         }
     }
@@ -379,7 +357,7 @@ impl App {
     /// for the current session. Replaces the old `latest_score`
     /// shadow-field check; the truth source is now the head checkpoint.
     pub fn has_initial_score(&self) -> bool {
-        head_score(&self.store, self.puzzle.scoring_mode).is_some()
+        head_score(&self.store, self.gui_projector.scoring_mode).is_some()
     }
 
     // ── Engine-only delegation (no router interaction) ──
@@ -1533,13 +1511,13 @@ impl App {
                         self.render_projector.publish(&self.store, engine);
                         engine.fit_camera_to_focus();
                         // Free-form file load → scientist mode.
-                        self.puzzle.scoring_mode = ScoringMode::Scientist;
+                        self.gui_projector.scoring_mode = ScoringMode::Scientist;
                         self.puzzle.id = 0;
                         self.puzzle.title = name;
                         self.puzzle.starting_score = 0.0;
                         self.puzzle.target_score = 0.0;
-                        self.puzzle.bubbles.clear();
-                        self.puzzle.current_bubble = 0;
+                        self.gui_projector.bubbles.clear();
+                        self.gui_projector.current_bubble = 0;
                         self.router.ui_dirty |=
                             DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::PUZZLE;
                     }
@@ -1556,13 +1534,13 @@ impl App {
                 match crate::puzzle::load_puzzle_structure(puzzle_id) {
                     Ok(puzzle_data) => {
                         // Capture mode + puzzle metadata for the GUI.
-                        self.puzzle.scoring_mode = ScoringMode::Game;
+                        self.gui_projector.scoring_mode = ScoringMode::Game;
                         self.puzzle.id = puzzle_id;
                         self.puzzle.title = puzzle_data.name.clone();
                         self.puzzle.starting_score = puzzle_data.start_energy;
                         self.puzzle.target_score = puzzle_data.completion_score;
-                        self.puzzle.bubbles = puzzle_data.bubbles;
-                        self.puzzle.current_bubble = 0;
+                        self.gui_projector.bubbles = puzzle_data.bubbles;
+                        self.gui_projector.current_bubble = 0;
 
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(preset_name) = &puzzle_data.view_preset {
@@ -1668,9 +1646,10 @@ impl App {
     /// and clears); back saturates at 0.
     fn advance_bubble(&mut self, back: bool) {
         if back {
-            self.puzzle.current_bubble = self.puzzle.current_bubble.saturating_sub(1);
-        } else if self.puzzle.current_bubble < self.puzzle.bubbles.len() {
-            self.puzzle.current_bubble += 1;
+            self.gui_projector.current_bubble =
+                self.gui_projector.current_bubble.saturating_sub(1);
+        } else if self.gui_projector.current_bubble < self.gui_projector.bubbles.len() {
+            self.gui_projector.current_bubble += 1;
         }
         self.router.ui_dirty |= DirtyFlags::TEXT_BUBBLE;
     }
@@ -1854,7 +1833,7 @@ impl App {
         // and then the score check below can latch victory in the same frame
         // without being overwritten.
         if app_dirty.contains(DirtyFlags::PUZZLE) {
-            match self.puzzle.scoring_mode {
+            match self.gui_projector.scoring_mode {
                 ScoringMode::Game => frontend.set_puzzle_game(
                     self.puzzle.id,
                     self.puzzle.title.clone(),
@@ -1874,22 +1853,28 @@ impl App {
             // cursor is reset there). Subsequent AdvanceBubble actions
             // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
             frontend.set_text_bubble(
-                self.puzzle.bubbles.get(self.puzzle.current_bubble).map(bubble_to_payload),
+                self.gui_projector
+                    .bubbles
+                    .get(self.gui_projector.current_bubble)
+                    .map(bubble_to_payload),
             );
         }
         if app_dirty.contains(DirtyFlags::TEXT_BUBBLE) {
             frontend.set_text_bubble(
-                self.puzzle.bubbles.get(self.puzzle.current_bubble).map(bubble_to_payload),
+                self.gui_projector
+                    .bubbles
+                    .get(self.gui_projector.current_bubble)
+                    .map(bubble_to_payload),
             );
         }
         if app_dirty.contains(DirtyFlags::SCORE) {
-            if let Some(score) = head_score(&self.store, self.puzzle.scoring_mode) {
+            if let Some(score) = head_score(&self.store, self.gui_projector.scoring_mode) {
                 frontend.set_score(score, false);
                 // Victory check: in Game mode, latch puzzle as complete the
                 // first time current_score crosses the toml target. Higher
                 // game score = better fold (game-score formula negates),
                 // so the comparison is `>=`.
-                if self.puzzle.scoring_mode == ScoringMode::Game
+                if self.gui_projector.scoring_mode == ScoringMode::Game
                     && self.puzzle.target_score > 0.0
                     && score >= self.puzzle.target_score
                 {
@@ -1969,25 +1954,25 @@ impl App {
         //     because committing also bumps `topology_version`.
         let topology = self.store.history().topology_version();
         let live = self.store.history().live_version();
-        let topology_changed = self.history_sync.last_topology != Some(topology);
-        let live_changed = self.history_sync.last_live != Some(live);
+        let cursor = &mut self.gui_projector.history_sync;
+        let topology_changed = cursor.last_topology != Some(topology);
+        let live_changed = cursor.last_live != Some(live);
 
         if topology_changed {
             frontend.set_history(project_history(&self.store));
-            self.history_sync.last_topology = Some(topology);
-            self.history_sync.last_live = Some(live);
-            self.history_sync.last_live_push_at = Some(Instant::now());
+            cursor.last_topology = Some(topology);
+            cursor.last_live = Some(live);
+            cursor.last_live_push_at = Some(Instant::now());
         } else if live_changed {
             let now = Instant::now();
-            let debounced = self
-                .history_sync
+            let debounced = cursor
                 .last_live_push_at
                 .map_or(false, |t| now.duration_since(t).as_millis() < 50);
             if !debounced {
                 if let Some(update) = project_history_live(self.store.history()) {
                     frontend.set_history_live(update);
-                    self.history_sync.last_live = Some(live);
-                    self.history_sync.last_live_push_at = Some(now);
+                    cursor.last_live = Some(live);
+                    cursor.last_live_push_at = Some(now);
                 }
             }
         }
