@@ -679,14 +679,15 @@ impl App {
     }
 
     /// Drain `Document::take_scene_changes` and route the batch to the
-    /// projectors. Call at the end of every action / keybind / head-move
-    /// handler — the store emits a `SceneChange` per observable mutation
-    /// but holds no projection logic; this is the bridge.
+    /// `PluginBroadcaster` (Full/Delta plugin fan-out). Call at the end
+    /// of every action / keybind / head-move handler; the store emits a
+    /// `SceneChange` per observable mutation but holds no projection
+    /// logic, and this is the bridge.
     ///
-    /// Today the only spine consumer is the `PluginBroadcaster` (Full/Delta
-    /// plugin fan-out); the render + GUI projectors are later sessions, so
-    /// the `refresh_scores` + `ui_dirty` tail (RX9/RX10's eventual home)
-    /// rides along here for now.
+    /// Score refresh is intentionally NOT part of this method (RX10
+    /// decision B). Callers run [`Self::poll_plugin_scores`] separately
+    /// after the pump to preserve the post-broadcast refresh cadence
+    /// the old combined helper provided.
     fn pump_scene_changes(&mut self) {
         let changes = self.store.take_scene_changes();
         if changes.is_empty() {
@@ -702,9 +703,24 @@ impl App {
         self.plugin_driver
             .broadcaster
             .broadcast(&changes, &self.store, orch);
-        // Re-score after every drain so the head checkpoint reflects the
-        // post-edit state. Synchronous: the score query is cheap (~ms)
-        // compared to a stale score lingering across frames.
+    }
+
+    /// Query every plugin's `score` op, merge totals into the head
+    /// checkpoint (bumping `live_version` for the GuiProjector to pick
+    /// up), and push per-residue scores directly to viso for
+    /// color-by-score display modes. Off the `SceneChange` spine
+    /// entirely: scores have two consumers (the GuiProjector via
+    /// `HistorySyncCursor` and viso via a direct overlay push) and
+    /// neither needs to ride the spine (RX10 decision B).
+    ///
+    /// Called after every `pump_scene_changes` at action / keybind /
+    /// head-move boundaries to preserve the cadence the old combined
+    /// helper provided. Cadence unweld (refresh on per-tick instead of
+    /// per-broadcast) is RX13.
+    fn poll_plugin_scores(&mut self) {
+        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+            return;
+        };
         refresh_scores(orch, &mut self.store, self.engine.as_mut());
         self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
     }
@@ -795,6 +811,7 @@ impl App {
             other => { engine.execute(other); }
         }
         self.pump_scene_changes();
+        self.poll_plugin_scores();
         true
     }
 
@@ -1059,6 +1076,7 @@ impl App {
         }
 
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     /// Called after the pull-drag interception path. Mirrors the
@@ -1074,6 +1092,7 @@ impl App {
             update_all_visualizations(engine, &self.router, pull);
         }
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     /// Pointer-down on an atom: classify the pick, dispatch the matching
@@ -1261,6 +1280,7 @@ impl App {
             foldit_gui::ActionId::Redo => self.handle_redo(),
         }
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     /// Dispatch a plugin op by op-id. Resolves the op against the
@@ -1415,6 +1435,7 @@ impl App {
             self.router.ui_dirty |=
                 DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
             self.pump_scene_changes();
+            self.poll_plugin_scores();
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1475,6 +1496,7 @@ impl App {
     ) {
         self.handle_parameterized_action_inner(action);
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     fn handle_parameterized_action_inner(
@@ -1659,11 +1681,13 @@ impl App {
     pub fn handle_undo(&mut self) {
         self.run_history_command(HistoryCommand::Undo);
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     pub fn handle_redo(&mut self) {
         self.run_history_command(HistoryCommand::Redo { branch: None });
         self.pump_scene_changes();
+        self.poll_plugin_scores();
     }
 
     /// Common tail for undo / redo / jump_checkpoint: republish to viso

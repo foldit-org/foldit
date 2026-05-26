@@ -74,8 +74,10 @@ impl PluginDriver {
 ///
 /// Per drain it coalesces the batch into one snapshot-diff broadcast
 /// (vs the old one-broadcast-per-mutation queue), so the orchestrator's
-/// generation advances once per drain. It ignores tentative `Edit`s and
-/// `ScoresUpdated`: plugins never see live frames or host scores.
+/// generation advances once per drain. It ignores tentative `Edit`s:
+/// plugins never see live frames. (Score updates are off-spine
+/// entirely; canonical writes happen via `Document::set_head_scores`
+/// and never reach the broadcaster.)
 pub(crate) struct PluginBroadcaster {
     /// The `Assembly` last serialized and broadcast. `None` before the
     /// first broadcast (and after construction), which forces a Full.
@@ -105,8 +107,8 @@ impl PluginBroadcaster {
         orch: &mut foldit_runner::Orchestrator,
     ) {
         if !changes.iter().any(Self::is_observable) {
-            // Tentative-only / scores-only / empty batch — nothing the
-            // plugins should see.
+            // Tentative-only / empty batch: nothing the plugins should
+            // see.
             return;
         }
         let new = doc.head_assembly();
@@ -121,9 +123,10 @@ impl PluginBroadcaster {
         self.last_published = Some(new);
     }
 
-    /// Whether a change is a non-tentative observable mutation. Tentative
-    /// edits (live per-cycle frames) and score updates are filtered out:
-    /// plugins compute their own scores and never see live frames.
+    /// Whether a change is a non-tentative observable mutation.
+    /// Tentative edits (live per-cycle frames) are filtered out: plugins
+    /// never see live frames. (Score updates aren't on the spine at all,
+    /// so the match has no arm for them.)
     fn is_observable(change: &SceneChange) -> bool {
         matches!(
             change,
@@ -354,10 +357,10 @@ mod tests {
         );
     }
 
-    // ── is_observable: tentative edits + scores are filtered ──
+    // ── is_observable: tentative edits are filtered ──
 
     #[test]
-    fn is_observable_filters_tentative_and_scores() {
+    fn is_observable_filters_tentative() {
         let (a, _) = two_ids();
         let coord_edit = AssemblyEdit::SetEntityCoords {
             entity: a,
@@ -373,22 +376,9 @@ mod tests {
             edit: coord_edit,
             tentative: true,
         }));
-        assert!(!PluginBroadcaster::is_observable(&SceneChange::ScoresUpdated));
     }
 
     // ── broadcast: gating + snapshot bookkeeping end-to-end ──
-
-    #[test]
-    fn broadcast_ignores_scores_only_batch() {
-        let mut doc = Document::new();
-        doc.set_head_scores(Some(1.0), None);
-        let changes = doc.take_scene_changes();
-        let mut orch = foldit_runner::Orchestrator::new();
-        let mut bc = PluginBroadcaster::new();
-        bc.broadcast(&changes, &doc, &mut orch);
-        assert_eq!(orch.broadcast_gen(), 0, "scores-only batch broadcasts nothing");
-        assert!(bc.last_published.is_none());
-    }
 
     #[test]
     fn broadcast_ignores_tentative_only_batch() {

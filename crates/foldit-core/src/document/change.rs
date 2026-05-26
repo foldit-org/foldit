@@ -45,7 +45,4 @@ pub enum SceneChange {
     PreviewAdded { entity: EntityId },
     /// A preview (transient) entity was discarded from the overlay.
     PreviewDiscarded { entity: EntityId },
-    /// The head checkpoint's scores changed. Routed to the GUI projector
-    /// only (plugins compute their own scores).
-    ScoresUpdated,
 }

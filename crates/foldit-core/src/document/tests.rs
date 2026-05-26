@@ -487,19 +487,35 @@ fn jump_checkpoint_emits_head_moved() {
 }
 
 #[test]
-fn set_head_scores_emits_scores_updated() {
+fn set_head_scores_emits_no_scene_change() {
+    // Scores are off-spine (decision B): `set_head_scores` writes the
+    // canonical raw/game numbers to the head checkpoint and bumps the
+    // history's `live_version`, but does not emit a `SceneChange`. The
+    // GUI projector consumes the new score via `HistorySyncCursor`;
+    // plugins never see host scores.
     let (mut store, _id) = store_with_protein(2);
+    let before = store.history().live_version();
     store.set_head_scores(Some(1.0), Some(2.0));
     let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::ScoresUpdated]), "got {changes:?}");
+    assert!(changes.is_empty(), "set_head_scores emits no SceneChange, got {changes:?}");
+    assert_ne!(
+        before,
+        store.history().live_version(),
+        "set_head_scores bumps live_version so the GuiProjector picks it up",
+    );
 }
 
 #[test]
 fn reset_clears_pending_then_emits_one_head_moved() {
     let (mut store, _id) = store_with_protein(2);
-    // Leave an undrained change in the queue — reset must drop it before
+    // Leave an undrained change in the queue. Use insert_preview (it
+    // emits `PreviewAdded`); reset must drop that pending change before
     // emitting its own HeadMoved.
-    store.set_head_scores(Some(1.0), None);
+    let _ = store.insert_preview(
+        mk_protein(mk_dummy_id(), 1),
+        "leftover".to_string(),
+        EntityOrigin::Loaded,
+    );
 
     store.reset();
 

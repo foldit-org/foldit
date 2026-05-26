@@ -445,14 +445,14 @@ impl Document {
         Ok(self.history.set_exclude_from_best(id, exclude)?)
     }
 
-    /// Stamp scores on the current head checkpoint in place. See
-    /// [`History::set_head_scores`]: bumps `live_version` only, no
-    /// topology change.
+    /// Stamp scores on the current head checkpoint in place. Canonical
+    /// score write: updates the head checkpoint and bumps the History's
+    /// `live_version`; emits no `SceneChange`. Scores are off-spine:
+    /// plugins compute their own, and the GUI projector picks up the
+    /// new score by polling `live_version` through its
+    /// `HistorySyncCursor`.
     pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
         self.history.set_head_scores(raw_score, game_score);
-        // Plugins compute their own scores, so the broadcaster ignores
-        // this; the GUI projector consumes it.
-        self.apply(SceneChange::ScoresUpdated);
     }
 
     // ── Preview API — transient, never in history ─────────────────────
