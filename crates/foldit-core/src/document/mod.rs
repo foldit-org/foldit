@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
-use molex::ops::AssemblyEdit;
 use molex::{Assembly, MoleculeEntity, MoleculeType};
 
 use crate::history::{
@@ -268,22 +267,10 @@ impl Document {
     ) -> Result<(), DocumentError> {
         self.history
             .action_update(raw_score, game_score, filter_status, mutate)?;
-        // Read the post-mutation tentative lane head (begin_action made it
-        // the lane head; action_update mutated it in place) and emit it as
-        // the live edit.
-        if let Some(entity) = self.history.ongoing().locked_entity() {
-            if let Some(coords) = self
-                .history
-                .lane(entity)
-                .and_then(|l| l.snapshot(l.head()))
-                .map(|s| s.payload.positions())
-            {
-                self.apply(SceneChange::Edit {
-                    edit: AssemblyEdit::SetEntityCoords { entity, coords },
-                    tentative: true,
-                });
-            }
-        }
+        // A tentative live frame: render projector picks it up via the
+        // spine and rebuilds from `head_assembly`. Payload-less because
+        // the projectors re-derive from `Document` anyway.
+        self.apply(SceneChange::Edit { tentative: true });
         Ok(())
     }
 
@@ -291,19 +278,16 @@ impl Document {
     /// best cursors; transitions to `Idle`. Returns the now-committed
     /// checkpoint id.
     pub fn commit_action(&mut self) -> Result<CheckpointId, DocumentError> {
-        let from = self.history.checkpoints().head();
         let ckpt = self.history.commit_action()?;
-        self.apply(SceneChange::HeadMoved { from, to: ckpt });
+        self.apply(SceneChange::HeadMoved);
         Ok(ckpt)
     }
 
     /// Abort the in-flight action. Removes the tentative snapshot and
     /// checkpoint; head pointers fall back to their parents.
     pub fn abort_action(&mut self) -> Result<(), DocumentError> {
-        let from = self.history.checkpoints().head();
         self.history.abort_action()?;
-        let to = self.history.checkpoints().head();
-        self.apply(SceneChange::HeadMoved { from, to });
+        self.apply(SceneChange::HeadMoved);
         Ok(())
     }
 
@@ -313,10 +297,9 @@ impl Document {
     /// Move checkpoint head to its parent. Returns the new head id, or
     /// `None` if already at root (in which case nothing is emitted).
     pub fn undo(&mut self) -> Result<Option<CheckpointId>, DocumentError> {
-        let from = self.history.checkpoints().head();
         let moved = self.history.undo()?;
-        if let Some(to) = moved {
-            self.apply(SceneChange::HeadMoved { from, to });
+        if moved.is_some() {
+            self.apply(SceneChange::HeadMoved);
         }
         Ok(moved)
     }
@@ -328,10 +311,10 @@ impl Document {
         &mut self,
         branch: Option<CheckpointId>,
     ) -> Result<Option<CheckpointId>, DocumentError> {
-        let from = self.history.checkpoints().head();
+        let head = self.history.checkpoints().head();
         let kids: Vec<CheckpointId> = self
             .history
-            .checkpoint(from)
+            .checkpoint(head)
             .map(|h| h.children.iter().copied().collect())
             .unwrap_or_default();
         match (branch, kids.as_slice()) {
@@ -346,17 +329,16 @@ impl Document {
             }
         }
         let moved = self.history.redo(branch)?;
-        if let Some(to) = moved {
-            self.apply(SceneChange::HeadMoved { from, to });
+        if moved.is_some() {
+            self.apply(SceneChange::HeadMoved);
         }
         Ok(moved)
     }
 
     /// Jump checkpoint head to `id`.
     pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, DocumentError> {
-        let from = self.history.checkpoints().head();
         let ckpt = self.history.jump_checkpoint(id)?;
-        self.apply(SceneChange::HeadMoved { from, to: ckpt });
+        self.apply(SceneChange::HeadMoved);
         Ok(ckpt)
     }
 
@@ -367,9 +349,8 @@ impl Document {
         entity: EntityId,
         target: EntitySnapshotId,
     ) -> Result<CheckpointId, DocumentError> {
-        let from = self.history.checkpoints().head();
         let ckpt = self.history.lane_undo(entity, target)?;
-        self.apply(SceneChange::HeadMoved { from, to: ckpt });
+        self.apply(SceneChange::HeadMoved);
         Ok(ckpt)
     }
 
@@ -380,9 +361,8 @@ impl Document {
         entity: EntityId,
         branch: Option<EntitySnapshotId>,
     ) -> Result<CheckpointId, DocumentError> {
-        let from = self.history.checkpoints().head();
         let ckpt = self.history.lane_redo(entity, branch)?;
-        self.apply(SceneChange::HeadMoved { from, to: ckpt });
+        self.apply(SceneChange::HeadMoved);
         Ok(ckpt)
     }
 
@@ -434,7 +414,7 @@ impl Document {
         let _ = self
             .metadata
             .insert(id, Arc::new(EntityMetadata::new(name, origin)));
-        self.apply(SceneChange::PreviewAdded { entity: id });
+        self.apply(SceneChange::PreviewAdded);
         id
     }
 
@@ -445,7 +425,7 @@ impl Document {
             return false;
         }
         let _ = self.metadata.shift_remove(&id);
-        self.apply(SceneChange::PreviewDiscarded { entity: id });
+        self.apply(SceneChange::PreviewDiscarded);
         true
     }
 
@@ -477,10 +457,9 @@ impl Document {
             }
         }
 
-        let from = self.history.checkpoints().head();
         match self.history.add_entity(id, payload, kind, label.into()) {
             Ok(ckpt) => {
-                self.apply(SceneChange::HeadMoved { from, to: ckpt });
+                self.apply(SceneChange::HeadMoved);
                 Ok(ckpt)
             }
             Err(e) => {
@@ -505,7 +484,6 @@ impl Document {
     /// preview-then-promote flow that runs through the same recorded
     /// path as RF3 / RFD3 / MPNN promotions, by design).
     pub fn reset(&mut self) {
-        let from = self.history.checkpoints().head();
         self.metadata.clear();
         self.transient.clear();
         self.allocator = EntityIdAllocator::new();
@@ -517,8 +495,7 @@ impl Document {
         // post-reset empty-assembly diff still advances the host's gen
         // counter, so plugins never see `from_gen` go backwards.
         self.pending_changes.clear();
-        let to = self.history.checkpoints().head();
-        self.apply(SceneChange::HeadMoved { from, to });
+        self.apply(SceneChange::HeadMoved);
     }
 
     // ── Backend helpers ───────────────────────────────────────────────

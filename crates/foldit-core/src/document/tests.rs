@@ -1,6 +1,5 @@
 use super::*;
 use crate::history::WiggleMask;
-use molex::ops::edit::AssemblyEdit;
 use molex::entity::molecule::atom::Atom;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::protein::ProteinEntity;
@@ -265,14 +264,14 @@ fn pending_changes_empty_at_construction() {
 #[test]
 fn insert_preview_emits_preview_added() {
     let mut store = Document::new();
-    let id = store.insert_preview(
+    let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "p".to_string(),
         EntityOrigin::Loaded,
     );
     let changes = store.take_scene_changes();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::PreviewAdded { entity }] if *entity == id),
+        matches!(changes.as_slice(), [SceneChange::PreviewAdded]),
         "got {changes:?}",
     );
     // Drain is destructive — second take returns empty.
@@ -291,7 +290,7 @@ fn remove_preview_emits_preview_discarded() {
     assert!(store.remove_preview(id));
     let changes = store.take_scene_changes();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::PreviewDiscarded { entity }] if *entity == id),
+        matches!(changes.as_slice(), [SceneChange::PreviewDiscarded]),
         "got {changes:?}",
     );
 }
@@ -322,7 +321,7 @@ fn promote_preview_emits_head_moved() {
         )
         .expect("promote_preview");
     let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved { .. }]), "got {changes:?}");
+    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
@@ -333,7 +332,12 @@ fn begin_action_emits_nothing() {
 }
 
 #[test]
-fn action_update_emits_tentative_edit_with_post_mutation_coords() {
+fn action_update_emits_tentative_edit() {
+    // SceneChange is signal-only (RX13): payload coords are gone — the
+    // RenderProjector rebuilds from `Document::head_assembly`. The test
+    // asserts the funnel shape (one tentative Edit) and that the
+    // post-mutation coords are reachable through the document; the
+    // payload itself is no longer on the spine.
     let (mut store, id) = store_with_protein(2);
     store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     let _ = store.take_scene_changes();
@@ -347,16 +351,18 @@ fn action_update_emits_tentative_edit_with_post_mutation_coords() {
         .expect("action_update");
 
     let changes = store.take_scene_changes();
-    let [SceneChange::Edit {
-        edit: AssemblyEdit::SetEntityCoords { entity, coords },
-        tentative,
-    }] = changes.as_slice()
-    else {
-        panic!("expected one tentative SetEntityCoords edit, got {changes:?}");
-    };
-    assert!(*tentative, "action_update edits must be tentative");
-    assert_eq!(*entity, id);
-    assert!(coords.iter().all(|c| *c == glam::Vec3::new(9.0, 9.0, 9.0)));
+    assert!(
+        matches!(changes.as_slice(), [SceneChange::Edit { tentative: true }]),
+        "expected one tentative Edit, got {changes:?}",
+    );
+    let head = store.head_assembly();
+    let entity = head
+        .entity(id)
+        .expect("action's locked entity is in the head assembly");
+    assert!(entity
+        .positions()
+        .iter()
+        .all(|c| *c == glam::Vec3::new(9.0, 9.0, 9.0)));
 }
 
 #[test]
@@ -376,7 +382,7 @@ fn commit_action_emits_head_moved() {
 
     store.commit_action().expect("commit_action");
     let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved { .. }]), "got {changes:?}");
+    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
@@ -386,7 +392,7 @@ fn abort_action_emits_head_moved() {
     let _ = store.take_scene_changes();
     store.abort_action().expect("abort_action");
     let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved { .. }]), "got {changes:?}");
+    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
@@ -401,12 +407,12 @@ fn undo_then_redo_each_emit_head_moved() {
 
     store.undo().expect("undo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved { .. }]),
+        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
         "undo emits HeadMoved",
     );
     store.redo(None).expect("redo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved { .. }]),
+        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
         "redo emits HeadMoved",
     );
 }
@@ -438,7 +444,7 @@ fn lane_undo_emits_head_moved() {
 
     store.lane_undo(id, original).expect("lane_undo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved { .. }]),
+        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
         "lane_undo emits HeadMoved",
     );
 }
@@ -466,7 +472,7 @@ fn jump_checkpoint_emits_head_moved() {
 
     store.jump_checkpoint(first).expect("jump_checkpoint");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved { .. }]),
+        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
         "jump_checkpoint emits HeadMoved",
     );
 }
@@ -506,7 +512,7 @@ fn reset_clears_pending_then_emits_one_head_moved() {
 
     let changes = store.take_scene_changes();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::HeadMoved { .. }]),
+        matches!(changes.as_slice(), [SceneChange::HeadMoved]),
         "reset drops pending changes and emits exactly one HeadMoved, got {changes:?}",
     );
 }

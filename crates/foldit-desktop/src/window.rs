@@ -15,11 +15,13 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
+/// `App` owns the [`foldit_gui::FrontendState`] mirror and the
+/// Loading → InPuzzle state-machine now (RX13); the runner is purely
+/// the wry/winit + dev-server shell.
 pub(crate) struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
     webview: Option<wry::WebView>,
-    frontend: foldit_gui::FrontendState,
     ipc_rx: Option<std::sync::mpsc::Receiver<IpcMessage>>,
     webview_ready: bool,
     last_frame: Instant,
@@ -29,11 +31,6 @@ pub(crate) struct AppRunner {
     init_pending: bool,
     /// Timeout for webview readiness — load anyway if webview takes too long
     init_deadline: Option<Instant>,
-    /// Set after `load_initial_structure` returns; cleared once the Rosetta
-    /// backend delivers its first score update. Gates the Loading → InPuzzle
-    /// transition so the GUI never reveals the in-game UI before the engine
-    /// has a real score and the camera has rendered the loaded structure.
-    awaiting_initial_score: bool,
     /// Shared log buffer from tee_logger (drained each frame into frontend state)
     log_buffer: crate::tee_logger::LogBuffer,
     #[cfg(debug_assertions)]
@@ -43,23 +40,17 @@ pub(crate) struct AppRunner {
 }
 
 impl AppRunner {
-    fn new(
-        app: App,
-        frontend: foldit_gui::FrontendState,
-        log_buffer: crate::tee_logger::LogBuffer,
-    ) -> Self {
+    fn new(app: App, log_buffer: crate::tee_logger::LogBuffer) -> Self {
         Self {
             app,
             window: None,
             webview: None,
-            frontend,
             ipc_rx: None,
             webview_ready: false,
             last_frame: Instant::now(),
             last_render_size: (0, 0),
             init_pending: false,
             init_deadline: None,
-            awaiting_initial_score: false,
             log_buffer,
             #[cfg(debug_assertions)]
             dev_server: None,
@@ -81,12 +72,9 @@ impl AppRunner {
                 IpcMessage::Ready => {
                     log::info!("Webview ready");
                     self.webview_ready = true;
-                    // Mark all dirty so the next `push_dirty_state_to_webview`
-                    // emits a full snapshot via the single `__onStateUpdate`
-                    // channel (which includes `app_state: Loading`). All state
-                    // flows through one path → no `__onInitialState` Promise
-                    // race to worry about.
-                    self.frontend.mark_all_dirty();
+                    // App owns the FrontendState mirror (RX13) — its
+                    // `on_ready` impl marks every section dirty so the
+                    // next push emits a full snapshot.
                     self.app.on_ready();
                 }
                 IpcMessage::ViewportInput(input) => self.app.on_viewport_input(input),
@@ -123,23 +111,26 @@ impl AppRunner {
         let _ = webview.evaluate_script(&script);
     }
 
-    /// Push dirty FrontendState sections to the webview.
+    /// Ship any dirty sections of the App-owned FrontendState to the
+    /// webview. `App::tick` already populated the frontend on this
+    /// frame; the host only does the log-mirror handoff and the IPC
+    /// transport.
     fn push_dirty_state_to_webview(&mut self) {
-        // Drain log buffer into frontend state
+        // Drain log buffer into App-owned frontend state.
         if let Ok(buf) = self.log_buffer.lock() {
             if !buf.is_empty() {
                 let log_text: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
-                self.frontend.set_log(log_text);
+                self.app.set_frontend_log(log_text);
             }
         }
-
-        // Transfer App domain state into FrontendState
-        self.app.populate_frontend(&mut self.frontend);
 
         if !self.webview_ready {
             return;
         }
-        let Some(payload) = bridge::push::serialize_dirty(&mut self.frontend) else {
+        let Some(bytes) = self.app.serialize_frontend_dirty() else {
+            return;
+        };
+        let Ok(payload) = std::str::from_utf8(&bytes) else {
             return;
         };
         if let Some(ref webview) = self.webview {
@@ -651,7 +642,11 @@ impl AppRunner {
         (webview, ipc_rx)
     }
 
-    /// Per-frame update: process events, update state, render, push to webview.
+    /// Per-frame update: process IPC, drive `App::tick`, render, push
+    /// dirty frontend bytes to the webview. `App` owns the drive loop
+    /// (spine drain, score poll, engine update, visualization update,
+    /// state-machine, populate_frontend) — the host just sequences the
+    /// IPC / surface / render side around it.
     fn tick_frame(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame);
@@ -675,17 +670,7 @@ impl AppRunner {
                 self.init_pending = false;
                 self.init_deadline = None;
                 self.app.load_initial_structure();
-                // Structure parsed and engine populated, but the Rosetta
-                // worker hasn't delivered its first score yet. Set puzzle
-                // metadata so it's ready when the GUI flips to InPuzzle, but
-                // keep `app_state` on Loading until `awaiting_initial_score`
-                // clears (see post-`apply_backend_updates` block below).
-                self.frontend.set_puzzle_loaded(true);
-                self.frontend.set_score_title(self.app.structure_title());
-                self.frontend.set_puzzle_scientist(self.app.structure_title());
-                self.frontend.mark_all_dirty();
-                self.awaiting_initial_score = true;
-                log::info!("Structure loaded, awaiting Rosetta initial score");
+                log::info!("Structure loaded, awaiting initial score");
                 // Fall through to render the first frame
             } else {
                 // Webview still loading — keep pumping frames so it can paint
@@ -711,32 +696,15 @@ impl AppRunner {
             }
         }
 
-        // Process all backend updates (Rosetta + ML) via triple buffers
-        self.app.apply_backend_updates();
+        // App-owned drive loop (RX13): backend updates → spine drain →
+        // broadcaster + render projector → score poll → engine update +
+        // visualization → state-machine → populate_frontend.
+        self.app.tick(dt.as_secs_f32());
 
-        // Loading → InPuzzle transition gate. We waited for the Rosetta
-        // worker to deliver its first score for the loaded session before
-        // flipping the top-level state — otherwise the GUI reveals the
-        // in-game UI while the backend is still spinning up and the camera
-        // hasn't yet rendered the loaded structure with a real score.
-        if self.awaiting_initial_score && self.app.has_initial_score() {
-            self.frontend.set_app_state(foldit_gui::AppState::InPuzzle);
-            self.awaiting_initial_score = false;
-            log::info!("Initial Rosetta score received — app_state=InPuzzle");
-        }
-
-        // Update engine: drains pending Assembly, submits mesh rebuild
-        // for new generations, applies completed background mesh data,
-        // ticks camera animation.
-        self.app.update_engine(dt.as_secs_f32());
-
-        // Update frame visuals (bands + pull tracking)
-        self.app.update_frame_visuals();
-
-        // Render
+        // Render the engine surface.
         self.app.render();
 
-        // Push dirty state to webview
+        // Ship any dirty frontend bytes to the webview.
         self.push_dirty_state_to_webview();
 
         // Request next frame
@@ -904,10 +872,9 @@ impl Drop for AppRunner {
 /// Run the application event loop. This function never returns.
 pub(crate) fn run(
     app: App,
-    frontend: foldit_gui::FrontendState,
     log_buffer: crate::tee_logger::LogBuffer,
 ) -> ! {
-    let mut runner = AppRunner::new(app, frontend, log_buffer);
+    let mut runner = AppRunner::new(app, log_buffer);
 
     // In debug, spawn dev server and wait for it before opening the window.
     #[cfg(debug_assertions)]

@@ -55,5 +55,5 @@ fn main() {
 
     let host = Box::new(host::DesktopHost::new(Some(structure_path)));
     let app = App::new(host);
-    window::run(app, foldit_gui::FrontendState::new(), log_buffer);
+    window::run(app, log_buffer);
 }

@@ -1,56 +1,74 @@
 //! App-owned viso projection.
 //!
-//! Owns the publish generation counter, hands the current head assembly
-//! to viso (set / replace), and describes focus targets by entity name.
-//! Relocated here from `Document` so `Document` stays molex-only: it no
-//! longer names `viso` types or tracks the publish sequence.
-//!
-//! RX7 keeps render driven at the current explicit call sites; making
-//! this projector consume the `SceneChange` spine is RX13's tick.
+//! Consumes the [`SceneChange`] spine and rebuilds the head `Assembly`
+//! once per drain to publish to viso. Owns the publish-generation
+//! counter and the last-published id list, the latter only to pick
+//! between `set_assembly` (steady-state coord update) and
+//! `replace_assembly` (topology swap: tears down per-entity scene-local
+//! state). Both stamp a fresh `publish_seq` so viso's `poll_assembly`
+//! gate sees a different number on every publish.
 
-use crate::document::Document;
+use crate::document::{Document, SceneChange};
 
 /// App-owned viso projector. Holds the monotonic publish counter that
-/// every published `Assembly` is stamped with: without a fresh
-/// generation per publish, viso's `poll_assembly` gate skips the
-/// second-and-subsequent publishes, because a freshly built `Assembly`
-/// always starts at generation 0.
+/// every published `Assembly` is stamped with, plus the entity-id list
+/// of the last published assembly so we can detect topology change and
+/// route to `replace_assembly` accordingly. The seq counter is
+/// **deliberately** not reset on `Document::reset`: a fresh post-reset
+/// publish still advances it, and viso never sees the generation go
+/// backwards.
 pub(crate) struct RenderProjector {
     /// Monotonic counter stamped onto every published `Assembly`.
-    /// Incremented on every `publish` / `replace`. Lives here rather
-    /// than on `Document`, so `Document::reset` no longer touches it: a
-    /// fresh post-reset publish still advances the counter, and viso
-    /// never sees the generation go backwards.
+    /// Incremented on every `project` that actually publishes. Without
+    /// a fresh generation per publish, viso's `poll_assembly` gate
+    /// would skip the second-and-subsequent publishes (a freshly built
+    /// `Assembly` always starts at generation 0).
     publish_seq: u64,
+    /// Entity ids of the last published assembly, in canonical order.
+    /// Compared against the next drain's id list to choose between
+    /// `set_assembly` (same topology, only coords differ) and
+    /// `replace_assembly` (any add/remove/reorder). Mirrors the
+    /// broadcaster's snapshot-diff for Full vs Delta.
+    last_published_ids: Vec<molex::entity::molecule::id::EntityId>,
 }
 
 impl RenderProjector {
     pub fn new() -> Self {
-        Self { publish_seq: 0 }
+        Self {
+            publish_seq: 0,
+            last_published_ids: Vec::new(),
+        }
     }
 
-    /// Push the current `head_assembly()` snapshot to viso. Each push
-    /// stamps a fresh `publish_seq` onto the `Assembly` so viso's
-    /// generation gate (`poll_assembly`) sees a different number on
-    /// every call; without that, the second-and-subsequent publishes
-    /// would silently skip. Was `Document::publish_to`.
-    pub fn publish(&mut self, doc: &Document, engine: &mut viso::VisoEngine) {
+    /// Consume a drained `SceneChange` batch and publish the current
+    /// head assembly to viso. No-ops when the batch is empty (no
+    /// publishes mean no wasted assembly builds or generation bumps).
+    /// Picks `replace_assembly` when the entity id set / order has
+    /// shifted since the last publish; `set_assembly` otherwise.
+    pub fn project(
+        &mut self,
+        changes: &[SceneChange],
+        doc: &Document,
+        engine: &mut viso::VisoEngine,
+    ) {
+        if changes.is_empty() {
+            return;
+        }
         let mut asm = doc.head_assembly();
-        self.publish_seq = self.publish_seq.saturating_add(1);
-        asm.set_generation(self.publish_seq);
-        engine.set_assembly(std::sync::Arc::new(asm));
-    }
+        let new_ids: Vec<molex::entity::molecule::id::EntityId> =
+            asm.entities().iter().map(|e| e.id()).collect();
+        let topology_changed = new_ids != self.last_published_ids;
 
-    /// Atomic topology swap: hand the current `head_assembly()` to viso
-    /// and have it tear down scene-local state plus force-sync in one
-    /// shot. Use for puzzle / file reloads where leftover per-entity
-    /// state from the previous topology would otherwise linger until the
-    /// next render tick. Was `Document::replace_in`.
-    pub fn replace(&mut self, doc: &Document, engine: &mut viso::VisoEngine) {
-        let mut asm = doc.head_assembly();
         self.publish_seq = self.publish_seq.saturating_add(1);
         asm.set_generation(self.publish_seq);
-        engine.replace_assembly(std::sync::Arc::new(asm));
+        let asm = std::sync::Arc::new(asm);
+
+        if topology_changed {
+            engine.replace_assembly(asm);
+        } else {
+            engine.set_assembly(asm);
+        }
+        self.last_published_ids = new_ids;
     }
 }
 

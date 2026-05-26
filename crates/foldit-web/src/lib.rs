@@ -40,9 +40,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 
 use foldit_core::App;
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
-use foldit_gui::{
-    ActionId, Dispatcher, FrontendState, OpDispatch, ParameterizedAction, ViewportInput,
-};
+use foldit_gui::{ActionId, Dispatcher, OpDispatch, ParameterizedAction, ViewportInput};
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
 
@@ -62,7 +60,6 @@ pub fn init() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type AppHandle = Rc<RefCell<App>>;
-type FrontendHandle = Rc<RefCell<FrontendState>>;
 type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,7 +72,6 @@ type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
 #[wasm_bindgen]
 pub struct FolditApp {
     app: AppHandle,
-    frontend: FrontendHandle,
     state_cb: JsCallback,
     response_cb: JsCallback,
 }
@@ -89,7 +85,6 @@ impl FolditApp {
         let app = App::new(Box::new(host::WebHost));
         Self {
             app: Rc::new(RefCell::new(app)),
-            frontend: Rc::new(RefCell::new(FrontendState::new())),
             state_cb: Rc::new(RefCell::new(None)),
             response_cb: Rc::new(RefCell::new(None)),
         }
@@ -139,9 +134,9 @@ impl FolditApp {
 
         self.app.borrow_mut().attach_engine(engine);
 
-        // rAF loop. Self-rescheduling closure that ticks the engine once
-        // per frame. Pattern lifted from viso/src/app/web/mod.rs.
-        spawn_render_loop(self.app.clone());
+        // rAF loop. Self-rescheduling closure that drives App::tick
+        // once per frame and pushes any serialized dirty state to JS.
+        spawn_render_loop(self.app.clone(), self.state_cb.clone());
 
         Ok(())
     }
@@ -214,11 +209,11 @@ impl Default for FolditApp {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Outbound transport: state-push + async-request response delivery.
+// Outbound transport: async-request response delivery.
 //
-// Implemented against the JS callbacks. Currently only used internally;
-// when foldit_core::App grows a `populate_frontend(&mut FrontendState)`
-// call site here, this transport's `send_state` will fire.
+// State push is driven inline by the rAF loop calling
+// `App::serialize_frontend_dirty`; only the response channel needs a
+// long-lived JS-callback bridge here.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -254,10 +249,12 @@ impl bridge::Transport for WebTransport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// rAF loop: self-rescheduling closure that ticks the engine each frame.
+// rAF loop: self-rescheduling closure that drives App::tick(dt) and
+// then drains the App-owned FrontendState dirty diff into the JS
+// state callback.
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn spawn_render_loop(app: AppHandle) {
+fn spawn_render_loop(app: AppHandle, state_cb: JsCallback) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => {
@@ -274,13 +271,22 @@ fn spawn_render_loop(app: AppHandle) {
 
     *g.borrow_mut() = Some(Closure::new(move || {
         let now = perf.as_ref().map_or(0.0, |p| p.now());
-        let _dt = ((now - *last_ts.borrow()) / 1000.0).max(0.0) as f32;
+        let dt = ((now - *last_ts.borrow()) / 1000.0).max(0.0) as f32;
         *last_ts.borrow_mut() = now;
 
-        // Tick the App; it owns the engine and drives update + render.
-        // (Once App grows an explicit per-frame entry-point we'll call
-        // it here. For now the engine is reachable via App; iterate.)
-        let _ = app.borrow_mut();
+        {
+            let mut app = app.borrow_mut();
+            app.tick(dt);
+            app.render();
+            if let Some(bytes) = app.serialize_frontend_dirty() {
+                if let Some(cb) = state_cb.borrow().clone() {
+                    // bytes is already JSON-encoded UTF-8.
+                    if let Ok(json) = std::str::from_utf8(&bytes) {
+                        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(json));
+                    }
+                }
+            }
+        }
 
         // Re-arm.
         if let Some(window) = web_sys::window() {

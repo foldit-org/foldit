@@ -264,13 +264,10 @@ impl PluginBroadcaster {
     fn is_observable(change: &SceneChange) -> bool {
         matches!(
             change,
-            SceneChange::HeadMoved { .. }
-                | SceneChange::PreviewAdded { .. }
-                | SceneChange::PreviewDiscarded { .. }
-                | SceneChange::Edit {
-                    tentative: false,
-                    ..
-                }
+            SceneChange::HeadMoved
+                | SceneChange::PreviewAdded
+                | SceneChange::PreviewDiscarded
+                | SceneChange::Edit { tentative: false }
         )
     }
 }
@@ -495,19 +492,12 @@ mod tests {
 
     #[test]
     fn is_observable_filters_tentative() {
-        let (a, _) = two_ids();
-        let coord_edit = AssemblyEdit::SetEntityCoords {
-            entity: a,
-            coords: Vec::new(),
-        };
-        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewAdded { entity: a }));
-        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewDiscarded { entity: a }));
+        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewAdded));
+        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewDiscarded));
         assert!(PluginBroadcaster::is_observable(&SceneChange::Edit {
-            edit: coord_edit.clone(),
             tentative: false,
         }));
         assert!(!PluginBroadcaster::is_observable(&SceneChange::Edit {
-            edit: coord_edit,
             tentative: true,
         }));
     }
@@ -516,14 +506,7 @@ mod tests {
 
     #[test]
     fn broadcast_ignores_tentative_only_batch() {
-        let (a, _) = two_ids();
-        let changes = vec![SceneChange::Edit {
-            edit: AssemblyEdit::SetEntityCoords {
-                entity: a,
-                coords: Vec::new(),
-            },
-            tentative: true,
-        }];
+        let changes = vec![SceneChange::Edit { tentative: true }];
         let doc = Document::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
