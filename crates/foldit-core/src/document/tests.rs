@@ -98,7 +98,6 @@ fn insert_preview_then_promote_lands_in_history() {
         "preview".to_string(),
         EntityOrigin::Loaded,
     );
-    assert!(store.is_preview(id));
     // Preview is visible in head_assembly.
     let asm = store.head_assembly();
     assert_eq!(asm.entities().len(), 1);
@@ -116,8 +115,6 @@ fn insert_preview_then_promote_lands_in_history() {
             "promoted",
         )
         .unwrap();
-    // No longer a preview.
-    assert!(!store.is_preview(id));
     // Now in history; new checkpoint references the entity.
     let new_head = store.history().checkpoint(ckpt).unwrap();
     assert!(new_head.entity_heads.contains_key(&id));
@@ -170,10 +167,6 @@ fn live_membership_lists_committed_then_preview() {
     assert_eq!(store.count(), 2);
     // Committed first, then preview.
     assert_eq!(store.ids().collect::<Vec<_>>(), vec![a, b]);
-    assert!(!store.is_preview(a));
-    assert!(store.is_preview(b));
-    // loaded_entity is the first committed entity.
-    assert_eq!(store.loaded_entity(), Some(a));
 }
 
 #[test]
@@ -216,18 +209,16 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
 #[test]
 fn reset_clears_history_metadata_and_transient() {
     let mut store = Document::new();
-    let id = store.insert_preview(
+    let _id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "x".to_string(),
         EntityOrigin::Loaded,
     );
     assert_eq!(store.count(), 1);
-    assert!(store.is_preview(id));
 
     store.reset();
 
     assert_eq!(store.count(), 0);
-    assert!(!store.is_preview(id));
     assert_eq!(store.history().checkpoints().len(), 1); // root only
     assert!(store
         .history()
@@ -335,16 +326,6 @@ fn promote_preview_emits_head_moved() {
 }
 
 #[test]
-fn record_entity_update_emits_head_moved() {
-    let (mut store, id) = store_with_protein(1);
-    store
-        .record_entity_update(wiggle(id), id, mk_protein(id, 1), "wiggle", None, None)
-        .expect("record_entity_update");
-    let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved { .. }]), "got {changes:?}");
-}
-
-#[test]
 fn begin_action_emits_nothing() {
     let (mut store, id) = store_with_protein(2);
     store.begin_action(wiggle(id), "wiggle").expect("begin_action");
@@ -411,9 +392,11 @@ fn abort_action_emits_head_moved() {
 #[test]
 fn undo_then_redo_each_emit_head_moved() {
     let (mut store, id) = store_with_protein(2);
+    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     store
-        .record_entity_update(wiggle(id), id, mk_protein(id, 2), "wiggle", None, None)
-        .expect("record_entity_update");
+        .action_update(None, None, None, |_| {})
+        .expect("action_update");
+    store.commit_action().expect("commit_action");
     let _ = store.take_scene_changes();
 
     store.undo().expect("undo");
@@ -446,9 +429,11 @@ fn redo_at_leaf_emits_nothing() {
 fn lane_undo_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let original = store.history().lane(id).expect("lane").head();
+    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     store
-        .record_entity_update(wiggle(id), id, mk_protein(id, 2), "wiggle", None, None)
-        .expect("record_entity_update");
+        .action_update(None, None, None, |_| {})
+        .expect("action_update");
+    store.commit_action().expect("commit_action");
     let _ = store.take_scene_changes();
 
     store.lane_undo(id, original).expect("lane_undo");

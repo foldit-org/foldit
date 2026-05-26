@@ -100,14 +100,6 @@ pub enum CheckpointKind {
 }
 
 impl CheckpointKind {
-    /// Whether this kind pushes a new snapshot on its entity's lane.
-    /// `LaneUndo` only moves a head pointer; the snapshot it points at
-    /// already exists.
-    #[must_use]
-    pub fn pushes_snapshot(&self) -> bool {
-        !matches!(self, CheckpointKind::LaneUndo { .. })
-    }
-
     /// The entity this checkpoint primarily targets, if any. `Loaded`
     /// is the only non-entity-targeted variant.
     #[must_use]
@@ -130,7 +122,8 @@ impl CheckpointKind {
     }
 
     /// Translate into the matching [`EntityActionKind`] for the
-    /// snapshot pushed on the lane (when [`pushes_snapshot`] is true).
+    /// snapshot pushed on the lane (every kind except `LaneUndo`, which
+    /// only moves a head pointer at a snapshot that already exists).
     #[must_use]
     pub fn entity_action_kind(&self) -> Option<EntityActionKind> {
         match self {

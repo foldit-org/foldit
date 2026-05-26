@@ -556,56 +556,6 @@ impl History {
         }
     }
 
-    /// Overwrite the entity payload on the snapshot referenced by the
-    /// current head checkpoint's `entity_heads[entity]`, in place.
-    /// Bumps `live_version` only — no new checkpoint, no new snapshot.
-    ///
-    /// Used by the apply_ongoing_update Idle branch to absorb cycle-0
-    /// idealization shifts. Rosetta's `ri_session_create` does a small
-    /// idealization pass (hydrogen placement, sub-Å moves, sidechain
-    /// repack); without this method the head snapshot keeps the
-    /// pre-idealized coords, the next wiggle's `update_session_in_place`
-    /// overwrites Rosetta's idealized pose with those coords, and
-    /// fa_rep blows up on the clash-heavy starting state — the "huge
-    /// energy jump" symptom. Updating the snapshot payload in place
-    /// keeps both layers in sync without polluting history.
-    ///
-    /// Returns `true` if the head checkpoint references that entity
-    /// and the payload was applied; `false` if the entity isn't on
-    /// the current head (no-op for non-active entities).
-    pub fn set_head_entity(
-        &mut self,
-        entity: EntityId,
-        payload: MoleculeEntity,
-    ) -> bool {
-        let head_id = self.checkpoints.head;
-        let snap_id = match self
-            .checkpoints
-            .checkpoints
-            .get(head_id)
-            .and_then(|h| h.entity_heads.get(&entity).copied())
-        {
-            Some(id) => id,
-            None => return false,
-        };
-        let lane = match self.lanes.get_mut(&entity) {
-            Some(l) => l,
-            None => return false,
-        };
-        let snap = match lane.snapshots.get_mut(snap_id) {
-            Some(s) => s,
-            None => return false,
-        };
-        let snap_payload = Arc::make_mut(&mut snap.payload);
-        *snap_payload = payload;
-        self.live_version = self.live_version.saturating_add(1);
-
-        if cfg!(debug_assertions) {
-            self.assert_invariant();
-        }
-        true
-    }
-
     // ── Private root: every DAG-bearing event funnels here (G3) ──────
 
     /// The single root through which every checkpoint- or lane-DAG-

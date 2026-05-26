@@ -1,10 +1,11 @@
 //! Foldit application state — host-agnostic.
 //!
-//! `App` owns the `Orchestrator` (in `ActionRouter`), `Document`,
-//! `History`, and the cross-cutting bookkeeping (puzzle, scoring mode,
-//! viso engine handle, history-version trackers). Both the desktop
-//! (`foldit-desktop`) and web (`foldit-web`) builds wrap this in their
-//! host-specific lifecycle:
+//! `App` owns the `Document`, `PluginDriver` (which carries the
+//! orchestrator + scene-broadcaster), the two projectors
+//! (`RenderProjector`, `GuiProjector`), and the cross-cutting
+//! bookkeeping (puzzle metadata, viso engine handle, dirty-flags,
+//! history-version trackers). Both the desktop (`foldit-desktop`) and
+//! web (`foldit-web`) builds wrap this in their host-specific lifecycle:
 //!
 //! - desktop: `window::AppRunner` holds the wry webview + winit window
 //!   alongside `App`; winit events are converted to host-agnostic
@@ -25,7 +26,6 @@ use viso::{
     Focus, InputEvent, InputProcessor, VisoCommand, VisoEngine,
 };
 
-use crate::action_router::{self, ActionRouter};
 use crate::document::{Document, DocumentError, EntityOrigin};
 use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
@@ -33,6 +33,7 @@ use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::{ActiveStreamEntry, OpOutcome};
 use crate::render_projector::{self, RenderProjector};
+use crate::wire_params;
 
 fn score_for_mode(
     raw: Option<f64>,
@@ -285,12 +286,13 @@ fn apply_streaming_assembly(
     applied
 }
 
-/// Main application state — thin glue connecting the render engine and action router.
+/// Main application state — thin glue connecting the render engine,
+/// plugin driver, document, and the two projectors.
 pub struct App {
     engine: Option<VisoEngine>,
     input: InputProcessor,
     store: Document,
-    router: ActionRouter,
+    ui_dirty: DirtyFlags,
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
     gui_projector: GuiProjector,
@@ -325,7 +327,7 @@ impl App {
             engine: None,
             input: InputProcessor::new(),
             store: Document::new(),
-            router: ActionRouter::new(),
+            ui_dirty: DirtyFlags::empty(),
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
             gui_projector: GuiProjector::new(),
@@ -348,7 +350,7 @@ impl App {
         head_score(&self.store, self.gui_projector.scoring_mode).is_some()
     }
 
-    // ── Engine-only delegation (no router interaction) ──
+    // ── Engine-only delegation ──
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if let Some(engine) = &mut self.engine {
@@ -450,16 +452,8 @@ impl App {
                             // cheap (~ms for rosetta); Pending cadence
                             // is gated by `POLL_INTERVAL` (50ms), so
                             // worst case is ~20 score queries/sec.
-                            if let Some(orch) =
-                                self.plugin_driver.orchestrator.as_mut()
-                            {
-                                refresh_scores(
-                                    orch,
-                                    &mut self.store,
-                                    self.engine.as_mut(),
-                                );
-                                self.router.ui_dirty |= DirtyFlags::SCORE;
-                            }
+                            self.refresh_scores();
+                            self.ui_dirty |= DirtyFlags::SCORE;
                         }
                     }
                     PluginUpdate::Cancelled {
@@ -625,14 +619,14 @@ impl App {
                 }
             }
             if had_terminal {
-                self.router.ui_dirty |= DirtyFlags::SCORE
+                self.ui_dirty |= DirtyFlags::SCORE
                     | DirtyFlags::ACTIONS
                     | DirtyFlags::SCENE
                     | DirtyFlags::HISTORY;
             } else if visual_dirty {
                 // Mid-stream visual updates without a terminal event:
                 // the scene needs a re-publish but not a full UI sync.
-                self.router.ui_dirty |= DirtyFlags::SCENE;
+                self.ui_dirty |= DirtyFlags::SCENE;
             }
         }
     }
@@ -677,14 +671,129 @@ impl App {
     /// helper provided. Cadence unweld (refresh on per-tick instead of
     /// per-broadcast) is RX13.
     fn poll_plugin_scores(&mut self) {
+        if self.plugin_driver.orchestrator.is_none() {
+            return;
+        }
+        self.refresh_scores();
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
+    }
+
+    /// Fan out the well-known `score` query across every plugin that
+    /// registered it, merge totals into the head checkpoint, and push
+    /// per-residue scores to the render engine for color-by-score modes.
+    ///
+    /// Called once at bootstrap (flips `has_initial_score()`, opening the
+    /// loading gate) and again after every host-originated broadcast (so
+    /// post-edit rescores update both the score widget and the residue
+    /// colors).
+    ///
+    /// Today only Rosetta returns a non-trivial report. When more scorers
+    /// come online the merge becomes app-wide -- the host stays generic
+    /// either way.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_scores(&mut self) {
+        use foldit_runner::orchestrator::SessionContext;
+        use std::collections::HashMap;
+
         let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
             return;
         };
-        refresh_scores(orch, &mut self.store, self.engine.as_mut());
-        self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
+        let reports = orch.collect_scores(&SessionContext::default());
+        if reports.is_empty() {
+            return;
+        }
+
+        let mut total: Option<f64> = None;
+        // entity_id -> Vec<(residue_index, score)>; merged across all
+        // reporting plugins (later writers stack on top of earlier ones
+        // for now -- when multiple plugins score per-residue we'll need a
+        // merge strategy choice).
+        let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
+        for (plugin_id, report) in &reports {
+            if total.is_none() {
+                total = Some(f64::from(report.total));
+            }
+            log::info!(
+                "[App] score from {plugin_id}: total={} terms={} per_residue={}",
+                report.total,
+                report.terms.len(),
+                report.per_residue.len()
+            );
+            for rs in &report.per_residue {
+                let Some(rref) = rs.residue.as_ref() else { continue };
+                #[allow(clippy::cast_possible_truncation)]
+                let entity_id = rref.entity_id as u32;
+                per_entity.entry(entity_id).or_default().push((
+                    rref.residue_index,
+                    f64::from(rs.score),
+                ));
+            }
+        }
+        if let Some(t) = total {
+            // Convert the rosetta raw score (REU) to foldit's game-mode
+            // display. Verbatim port of the
+            // `rosetta_score_to_game_score_either(use_minimum=true,
+            // internal=false)` branch at
+            // `plugins/rosetta/deps/rosetta-interactive/source/src/interactive/
+            // rosetta_util/rosetta_util.cc:2702`, using the constants
+            // declared on lines 2662-2663 + 2664 of the same file.
+            // Bridge-side the converter slot
+            // (`rosetta_score_to_game_score`) is null because nothing in
+            // the new plugin-host architecture calls
+            // `register_score_functions`; doing the linear map here is
+            // the right home anyway -- the formula is universal foldit
+            // policy, not rosetta-specific, and lives next to the
+            // `ScoringMode` selector that decides which view reaches the
+            // GUI.
+            const SCORE_OFFSET: f64 = 800.0;
+            const SCORE_SCALE: f64 = 10.0;
+            const SCORE_MINIMUM: f64 = 0.0;
+            let raw = t;
+            let game = ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM);
+            self.store.set_head_scores(Some(raw), Some(game));
+        }
+
+        // Push per-residue scores into the engine so Score / ScoreRelative
+        // color schemes have data. Each entity's score Vec is sized to
+        // its full residue count; missing residues default to 0.0 (the
+        // mid-palette stop in absolute mode, the lower quantile in
+        // relative mode -- close enough for a first-pass render).
+        let Some(engine) = self.engine.as_mut() else { return };
+        // Build (raw_entity_id -> residue_count) once via head_assembly so
+        // we don't need a mut borrow on store to mint molex EntityIds.
+        let head = self.store.head_assembly();
+        let residue_counts: HashMap<u32, usize> = head
+            .entities()
+            .iter()
+            .map(|e| (e.id().raw(), e.residue_count()))
+            .collect();
+        for (entity_id, mut entries) in per_entity {
+            let Some(&residue_count) = residue_counts.get(&entity_id) else {
+                log::warn!(
+                    "[App] per-residue scores arrived for unknown entity \
+                     {entity_id} (host has entities {:?})",
+                    residue_counts.keys().collect::<Vec<_>>()
+                );
+                continue;
+            };
+            let mut scores = vec![0.0_f64; residue_count];
+            entries.sort_unstable_by_key(|(idx, _)| *idx);
+            let entry_count = entries.len();
+            for (idx, val) in entries {
+                let i = idx as usize;
+                if i < scores.len() {
+                    scores[i] = val;
+                }
+            }
+            log::info!(
+                "[App] applied {entry_count} per-residue scores to viso entity \
+                 {entity_id} (residue_count={residue_count})"
+            );
+            engine.set_per_residue_scores(entity_id, Some(scores));
+        }
     }
 
-    // ── Keybinding dispatch (engine + router) ──
+    // ── Keybinding dispatch ──
 
     /// Catalog hotkey fallback. Runs only after a viso built-in
     /// `handle_key_press` *miss*, so built-ins always win. On a match
@@ -732,7 +841,7 @@ impl App {
             VisoCommand::ToggleTrajectory => {
                 if engine.has_trajectory() {
                     engine.execute(VisoCommand::ToggleTrajectory);
-                } else if let Some(path) = action_router::trajectory_path_from_args() {
+                } else if let Some(path) = trajectory_path_from_args() {
                     engine.load_trajectory(std::path::Path::new(&path));
                 } else {
                     log::info!("No trajectory loaded. Pass --trajectory <path.dcd> to load one.");
@@ -752,7 +861,7 @@ impl App {
                 // Focus-driven lock update lands when the bridge
                 // plugin's `update_assembly` + selection-derived locks
                 // are wired.
-                self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
             }
             // All other commands: delegate entirely to viso
             other => { engine.execute(other); }
@@ -766,10 +875,10 @@ impl App {
     /// in-progress preview entities, republish, and flag the GUI dirty.
     /// Stream lock release + commit live in `apply_backend_updates`'
     /// terminal arms; doing them here races a follow-up dispatch that's
-    /// quick enough to slip in before the terminal drains. Was
-    /// `ActionRouter::cancel_operations`; hoisted to App so the
-    /// `RenderProjector` stays a field touched only inside App methods
-    /// (the coordination boundary), never threaded as a parameter.
+    /// quick enough to slip in before the terminal drains. Lives on
+    /// `App` so the `RenderProjector` stays a field touched only inside
+    /// App methods (the coordination boundary), never threaded as a
+    /// parameter.
     fn cancel_operations(&mut self) {
         let Some(engine) = self.engine.as_mut() else {
             return;
@@ -787,7 +896,7 @@ impl App {
                 preview_ids.len()
             );
         }
-        self.router.ui_dirty |=
+        self.ui_dirty |=
             DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
     }
 
@@ -841,7 +950,7 @@ impl App {
         }
 
         // Hotkey resolved in the `Key` arm below via a disjoint field
-        // borrow (`self.router`, not `self.engine`); the actual
+        // borrow (`self.plugin_driver`, not `self.engine`); the actual
         // dispatch is deferred to after the match so the `engine`
         // borrow is released before `handle_dispatch_op` takes
         // `&mut self`.
@@ -872,8 +981,13 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, viso_button, true);
+                let hovered = engine.hovered_target();
+                if let Some(cmd) = self.input.handle_event(
+                    InputEvent::MouseButton { button: viso_button, pressed: true },
+                    hovered,
+                ) {
+                    engine.execute(cmd);
+                }
             }
             ViewportInput::PointerUp {
                 x, y, button, shift, ..
@@ -891,8 +1005,13 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-                self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, viso_button, false);
+                let hovered = engine.hovered_target();
+                if let Some(cmd) = self.input.handle_event(
+                    InputEvent::MouseButton { button: viso_button, pressed: false },
+                    hovered,
+                ) {
+                    engine.execute(cmd);
+                }
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
                 if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
@@ -902,7 +1021,6 @@ impl App {
                 if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
                     engine.execute(cmd);
                 }
-                self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
             }
             ViewportInput::Scroll { delta } => {
                 if let Some(cmd) = self.input.handle_event(InputEvent::Scroll { delta }, engine.hovered_target()) {
@@ -919,7 +1037,7 @@ impl App {
                             VisoCommand::ToggleTrajectory => {
                                 if engine.has_trajectory() {
                                     engine.execute(VisoCommand::ToggleTrajectory);
-                                } else if let Some(path) = action_router::trajectory_path_from_args() {
+                                } else if let Some(path) = trajectory_path_from_args() {
                                     engine.load_trajectory(std::path::Path::new(&path));
                                 }
                             }
@@ -932,16 +1050,16 @@ impl App {
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                                 engine.execute(cmd);
                                 // (lock update deferred — see comment above)
-                                self.router.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
                             }
                             other => { engine.execute(other); }
                         }
                     } else {
                         // No viso built-in claims this key — resolve it
                         // against the plugin hotkey catalog. Disjoint
-                        // field borrow (`self.router`) so it coexists
-                        // with the live `engine` borrow; dispatch is
-                        // deferred to after the match.
+                        // field borrow (`self.plugin_driver`) so it
+                        // coexists with the live `engine` borrow;
+                        // dispatch is deferred to after the match.
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             pending_hotkey_op = self
@@ -973,14 +1091,14 @@ impl App {
             }
         }
 
-        self.router.ui_dirty |= DirtyFlags::UI;
+        self.ui_dirty |= DirtyFlags::UI;
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
         let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
-        update_all_visualizations(engine, &self.router, pull);
+        update_all_visualizations(engine, pull);
 
         // `engine`'s last use was above — `&mut self` is free again, so
         // the deferred actions below can run. Ordering of the cancel vs.
@@ -1016,10 +1134,10 @@ impl App {
     /// borrow doesn't overlap with `&self.plugin_driver.stream_host.pull_drag`.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
-        self.router.ui_dirty |= DirtyFlags::UI;
+        self.ui_dirty |= DirtyFlags::UI;
         let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
         if let Some(engine) = self.engine.as_mut() {
-            update_all_visualizations(engine, &self.router, pull);
+            update_all_visualizations(engine, pull);
         }
         self.pump_scene_changes();
         self.poll_plugin_scores();
@@ -1286,7 +1404,7 @@ impl App {
             > = op
                 .params
                 .into_iter()
-                .map(|(k, v)| (k, action_router::param_value_from_wire(v)))
+                .map(|(k, v)| (k, wire_params::param_value_from_wire(v)))
                 .collect();
 
             // Drop the orchestrator borrow before reaching back into
@@ -1356,7 +1474,7 @@ impl App {
                     );
                 }
             }
-            self.router.ui_dirty |=
+            self.ui_dirty |=
                 DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
             self.pump_scene_changes();
             self.poll_plugin_scores();
@@ -1405,7 +1523,7 @@ impl App {
                 }
                 self.render_projector.publish(&self.store, engine);
             }
-            self.router.ui_dirty |=
+            self.ui_dirty |=
                 DirtyFlags::SCENE | DirtyFlags::HISTORY;
         } else if self.store.has_ongoing_action() {
             // Nothing matched (e.g. plugin returned an empty / unrelated
@@ -1464,14 +1582,14 @@ impl App {
                         self.puzzle.target_score = 0.0;
                         self.gui_projector.bubbles.clear();
                         self.gui_projector.current_bubble = 0;
-                        self.router.ui_dirty |=
+                        self.ui_dirty |=
                             DirtyFlags::LOADING | DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::PUZZLE;
                     }
                     Err(e) => {
                         log::error!("Failed to load structure '{}': {}", path, e);
                     }
                 }
-                self.router.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
+                self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
             }
             ParameterizedAction::LoadPuzzle { puzzle_id } => {
                 self.store.reset();
@@ -1534,7 +1652,7 @@ impl App {
                     }
                     Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
                 }
-                self.router.ui_dirty |= DirtyFlags::LOADING
+                self.ui_dirty |= DirtyFlags::LOADING
                     | DirtyFlags::SCORE
                     | DirtyFlags::SELECTION
                     | DirtyFlags::ACTIONS
@@ -1550,7 +1668,7 @@ impl App {
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
                     Ok(opts) => {
                         engine.set_options(opts);
-                        self.router.ui_dirty |= DirtyFlags::VIEW;
+                        self.ui_dirty |= DirtyFlags::VIEW;
                     }
                     Err(e) => log::error!("Failed to deserialize view options: {}", e),
                 }
@@ -1560,7 +1678,7 @@ impl App {
                 {
                     let presets_dir = std::path::Path::new("assets/view_presets");
                     engine.load_preset(&name, presets_dir);
-                    self.router.ui_dirty |= DirtyFlags::VIEW;
+                    self.ui_dirty |= DirtyFlags::VIEW;
                 }
                 #[cfg(target_arch = "wasm32")]
                 { let _ = name; let _ = engine; }
@@ -1570,7 +1688,7 @@ impl App {
                 {
                     let presets_dir = std::path::Path::new("assets/view_presets");
                     engine.save_preset(&name, presets_dir);
-                    self.router.ui_dirty |= DirtyFlags::VIEW;
+                    self.ui_dirty |= DirtyFlags::VIEW;
                 }
                 #[cfg(target_arch = "wasm32")]
                 { let _ = name; let _ = engine; }
@@ -1597,7 +1715,7 @@ impl App {
         } else if self.gui_projector.current_bubble < self.gui_projector.bubbles.len() {
             self.gui_projector.current_bubble += 1;
         }
-        self.router.ui_dirty |= DirtyFlags::TEXT_BUBBLE;
+        self.ui_dirty |= DirtyFlags::TEXT_BUBBLE;
     }
 
     // ── History navigation (Undo / Redo / Jump / Pin) ──
@@ -1633,7 +1751,7 @@ impl App {
             }
         }
 
-        self.router.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
     }
 
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
@@ -1699,7 +1817,7 @@ impl App {
         match result {
             Ok(HistoryOutcome::HeadMoved) => self.after_head_move(),
             Ok(HistoryOutcome::Curated) => {
-                self.router.ui_dirty |= DirtyFlags::ACTIONS;
+                self.ui_dirty |= DirtyFlags::ACTIONS;
             }
             Ok(HistoryOutcome::Noop) => {}
             Err(e) => log::warn!("history command refused: {e}"),
@@ -1714,15 +1832,21 @@ impl App {
         pressed: bool,
     ) {
         if let Some(engine) = &mut self.engine {
-            self.router.handle_native_mouse_input(engine, &mut self.input, &mut self.store, button, pressed);
-            update_all_visualizations(engine, &self.router, None);
+            let hovered = engine.hovered_target();
+            if let Some(cmd) = self
+                .input
+                .handle_event(InputEvent::MouseButton { button, pressed }, hovered)
+            {
+                engine.execute(cmd);
+            }
+            update_all_visualizations(engine, None);
         }
     }
 
     pub fn handle_native_cursor_moved(&mut self, x: f32, y: f32) {
         if let Some(engine) = &mut self.engine {
-            self.router.handle_native_cursor_moved(engine, &self.input, &mut self.store, x, y);
-            update_all_visualizations(engine, &self.router, None);
+            engine.set_cursor_pos(x, y);
+            update_all_visualizations(engine, None);
         }
     }
 
@@ -1757,7 +1881,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else { return };
-        update_all_visualizations(engine, &self.router, pull);
+        update_all_visualizations(engine, pull);
     }
 
     // ── Frontend state sync ──
@@ -1772,7 +1896,11 @@ impl App {
         frontend.set_fps(engine.fps());
         frontend.ui.selected_count = engine.selected_residues().len();
 
-        let app_dirty = self.router.take_ui_dirty();
+        // Direct field access (rather than `self.take_ui_dirty()`) so the
+        // compiler split-borrows: `engine` keeps `&self.engine`, the
+        // write below touches the disjoint `self.ui_dirty`.
+        let app_dirty = self.ui_dirty;
+        self.ui_dirty = DirtyFlags::empty();
         if app_dirty.is_empty() {
             return;
         }
@@ -1831,7 +1959,7 @@ impl App {
             }
         }
         if app_dirty.contains(DirtyFlags::ACTIONS) {
-            frontend.set_actions(action_router::build_actions_list(&self.plugin_driver.orchestrator));
+            frontend.set_actions(wire_params::build_actions_list(&self.plugin_driver.orchestrator));
         }
         if app_dirty.contains(DirtyFlags::LOADING) {
             frontend.set_loading_progress(None);
@@ -1927,7 +2055,7 @@ impl App {
 
     }
 
-    // ── Complex methods (touch both engine and router) ──
+    // ── Complex lifecycle (engine attach + initial load) ──
 
     /// Attach a host-built `VisoEngine` to this App. Hosts are
     /// responsible for constructing the wgpu `RenderContext` against
@@ -1938,28 +2066,15 @@ impl App {
         self.engine = Some(engine);
     }
 
-    /// Take the engine back out for a brief moment (used during
-    /// load_initial_structure-style flows that need disjoint borrows).
-    pub fn engine_take(&mut self) -> Option<VisoEngine> {
-        self.engine.take()
-    }
-
-    /// Replace the engine after a `engine_take`/inspection.
-    pub fn engine_replace(&mut self, engine: VisoEngine) {
-        self.engine = Some(engine);
-    }
-
     /// Load the initial structure, register entities, and create the
     /// initial Rosetta session. Runs AFTER the webview's loading screen
     /// is visible so the user has feedback during the (potentially
     /// slow) load. Requires `create_render_context` to have run first.
     pub fn load_initial_structure(&mut self) {
-        // Take engine out so we can hold a `&mut engine` alongside `&mut self.store`
-        // etc. without borrow-checker grief; restored at end.
-        let Some(mut engine) = self.engine.take() else {
+        if self.engine.is_none() {
             log::error!("load_initial_structure called before create_render_context");
             return;
-        };
+        }
 
         // Parse entities from file
         match crate::puzzle::load_file_as_entities(&self.pdb_path) {
@@ -1970,29 +2085,41 @@ impl App {
 
                 // Push to viso (viso inherits our IDs). update(0.0)
                 // drains the pending Assembly so scene.current is
-                // populated before fit_camera reads it.
-                self.render_projector.publish(&self.store, &mut engine);
-                engine.update(0.0);
-                engine.fit_camera_to_focus();
+                // populated before fit_camera reads it. Scoped block
+                // releases the engine borrow before `&mut self` calls
+                // below.
+                {
+                    let engine = self
+                        .engine
+                        .as_mut()
+                        .expect("engine present (checked above)");
+                    self.render_projector.publish(&self.store, engine);
+                    engine.update(0.0);
+                    engine.fit_camera_to_focus();
+                }
 
                 log::info!("Loaded structure: {}", name);
 
-                // Plugin streaming updates land via plugin_update_rx;
-                // canonical state is the Document.
-                let mut orch = Orchestrator::new();
-                bootstrap_plugins(&mut orch, &mut self.store);
+                // Construct + assign the orchestrator BEFORE
+                // `bootstrap_plugins` so the method can reach it
+                // through `self.plugin_driver.orchestrator.as_mut()`
+                // instead of threading a locally-owned `&mut Orchestrator`.
+                self.plugin_driver.orchestrator = Some(Orchestrator::new());
+                self.bootstrap_plugins();
+
                 // Republish: bootstrap may have committed rosetta's
                 // post-Init normalized assembly (full-atom pose) into the
                 // store. Push it here — after bootstrap, before
                 // refresh_scores — the same point the publish formerly ran
                 // inside apply_rosetta_post_init.
-                self.render_projector.publish(&self.store, &mut engine);
-                refresh_scores(
-                    &mut orch,
-                    &mut self.store,
-                    Some(&mut engine),
-                );
-                self.plugin_driver.orchestrator = Some(orch);
+                {
+                    let engine = self
+                        .engine
+                        .as_mut()
+                        .expect("engine present (still here)");
+                    self.render_projector.publish(&self.store, engine);
+                }
+                self.refresh_scores();
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", self.pdb_path, e);
@@ -2000,18 +2127,180 @@ impl App {
             }
         }
 
-        self.engine = Some(engine);
-
         // Push the now-populated state to the GUI on the next frame:
         // VIEW for the engine options, ACTIONS so the catalog (wiggle
         // etc.) renders, SCORE so the initial number from
         // refresh_scores reaches the score widget, SCENE for the
         // entity list, LOADING to flip out of the loading screen.
-        self.router.ui_dirty |= DirtyFlags::VIEW
+        self.ui_dirty |= DirtyFlags::VIEW
             | DirtyFlags::ACTIONS
             | DirtyFlags::SCORE
             | DirtyFlags::SCENE
             | DirtyFlags::LOADING;
+    }
+
+    /// Discover plugins under the runtime plugin root and bring up the
+    /// always-on Rosetta session with the just-loaded structure as the
+    /// initial assembly. Errors are logged and dropped: a missing plugin
+    /// dir / dylib should degrade the app to viewer-only, not crash the
+    /// load.
+    ///
+    /// Caller must have assigned `self.plugin_driver.orchestrator` to
+    /// `Some(Orchestrator::new())` before calling — this method reaches
+    /// the orchestrator through that field rather than taking one as a
+    /// parameter.
+    ///
+    /// If Rosetta's Init returns a non-empty normalized assembly (full-atom
+    /// pose with hydrogens / terminal O / etc. added), it is committed as
+    /// a follow-up `PluginOp` checkpoint and republished so that
+    /// `scene.positions` is seeded at the normalized atom count before any
+    /// user action runs. Without this, the first user op would cross an
+    /// atom-set boundary mid-action and snap.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn bootstrap_plugins(&mut self) {
+        let Some(plugins_root) = locate_plugins_root() else {
+            log::warn!(
+                "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
+                 from a workspace checkout); plugins disabled"
+            );
+            return;
+        };
+        log::info!(
+            "[App] discovering plugins under {}",
+            plugins_root.display()
+        );
+
+        // Snapshot the initial assembly under an immutable store borrow
+        // so we can hand it to `ensure_plugin_registered` for each plugin
+        // without re-borrowing across iterations.
+        let initial_assembly = {
+            let head_before = self.store.head_assembly();
+            match molex::ops::wire::serialize_assembly(&head_before) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!(
+                        "[App] failed to serialize initial assembly for plugin \
+                         registration: {e:?}; plugins disabled"
+                    );
+                    return;
+                }
+            }
+        };
+
+        // Discover under a mut orch borrow scoped to this block so we
+        // can later interleave orch and store calls.
+        let discovered = {
+            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+                return;
+            };
+            match orch.discover_plugins(&plugins_root) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    log::warn!(
+                        "[App] discover_plugins({}) failed: {e}; plugins disabled",
+                        plugins_root.display()
+                    );
+                    return;
+                }
+            }
+        };
+        log::info!("[App] discovered plugins: {discovered:?}");
+
+        for plugin_id in &discovered {
+            let post_init_bytes = {
+                let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+                    return;
+                };
+                match orch
+                    .ensure_plugin_registered(plugin_id, initial_assembly.clone())
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        log::warn!(
+                            "[App] ensure_plugin_registered('{plugin_id}') failed: \
+                             {e}; {plugin_id} plugin disabled"
+                        );
+                        continue;
+                    }
+                }
+            };
+            log::info!("[App] {plugin_id} plugin ready");
+
+            if plugin_id == "rosetta" {
+                self.apply_rosetta_post_init(&post_init_bytes);
+            }
+        }
+    }
+
+    /// Apply rosetta's post-Init normalized assembly (full-atom pose) so
+    /// the host's canonical assembly matches the plugin's internal pose
+    /// before any user action runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_rosetta_post_init(&mut self, post_init_bytes: &[u8]) {
+        if post_init_bytes.is_empty() {
+            log::warn!(
+                "[App] rosetta post-Init returned no normalized assembly; \
+                 first user action will likely snap because scene.positions \
+                 stays at the pre-Init atom count."
+            );
+            return;
+        }
+        let normalized = match molex::ops::wire::deserialize_assembly(
+            post_init_bytes,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!(
+                    "[App] rosetta post-Init assembly decode failed: {e:?}; \
+                     skipping normalization apply"
+                );
+                return;
+            }
+        };
+        let Some(target_entity) = first_protein_entity(&self.store) else {
+            log::warn!(
+                "[App] rosetta post-Init: no protein entity in store; \
+                 skipping normalization apply"
+            );
+            return;
+        };
+        let kind = CheckpointKind::PluginOp {
+            entity: target_entity,
+            plugin_id: String::from("rosetta"),
+            op_id: String::from("_init_normalize"),
+            display: String::from("Init"),
+        };
+        if let Err(e) = self.store.begin_action(kind, String::from("Init")) {
+            log::warn!(
+                "[App] rosetta post-Init begin_action failed: {e}; \
+                 skipping normalization apply"
+            );
+            return;
+        }
+        let applied =
+            apply_streaming_assembly(&mut self.store, &normalized, None);
+        if !applied {
+            log::warn!(
+                "[App] rosetta post-Init apply_streaming_assembly did not \
+                 update any entity; rolling back tentative. This usually means \
+                 the rosetta-returned entity ID does not match any store \
+                 entity ID."
+            );
+            let _ = self.store.commit_action();
+            return;
+        }
+        if let Err(e) = self.store.commit_action() {
+            log::warn!(
+                "[App] rosetta post-Init commit_action failed: {e}"
+            );
+            return;
+        }
+        log::info!(
+            "[App] rosetta post-Init assembly applied ({} bytes)",
+            post_init_bytes.len()
+        );
+        // Republish is hoisted to `load_initial_structure` (which owns
+        // `render_projector`); the projector is never threaded down here.
     }
 
     /// Shut down backends and scene processor.
@@ -2090,17 +2379,29 @@ impl foldit_gui::Dispatcher for App {
 // ---------------------------------------------------------------------------
 
 /// Update drag/pull/band visualizations. Bands are still inert (the
-/// band-router state machine is the next item to come back online).
-/// The pull capsule + cone arrow renders whenever the caller hands a
+/// band state machine is the next item to come back online). The pull
+/// capsule + cone arrow renders whenever the caller hands a
 /// `Some(PullInfo)` from a live drag; clears otherwise so a finished
 /// or cancelled drag leaves no overlay.
 fn update_all_visualizations(
     engine: &mut VisoEngine,
-    _router: &ActionRouter,
     pull: Option<viso::PullInfo>,
 ) {
     engine.update_bands(vec![]);
     engine.update_pull(pull);
+}
+
+/// Get the trajectory path from command-line arguments. CLI/host
+/// utility — read once on a hotkey + reused by `LoadTrajectory`.
+fn trajectory_path_from_args() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2).find_map(|w| {
+        if w[0] == "--trajectory" {
+            Some(w[1].clone())
+        } else {
+            None
+        }
+    })
 }
 
 /// Locate the runtime plugins directory.
@@ -2144,273 +2445,6 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Discover plugins under the runtime plugin root and bring up the
-/// always-on Rosetta session with the just-loaded structure as the
-/// initial assembly. Errors are logged and dropped: a missing plugin
-/// dir / dylib should degrade the app to viewer-only, not crash the
-/// load.
-///
-/// If Rosetta's Init returns a non-empty normalized assembly (full-atom
-/// pose with hydrogens / terminal O / etc. added), it is committed as
-/// a follow-up `PluginOp` checkpoint and republished so that
-/// `scene.positions` is seeded at the normalized atom count before any
-/// user action runs. Without this, the first user op would cross an
-/// atom-set boundary mid-action and snap.
-#[cfg(not(target_arch = "wasm32"))]
-fn bootstrap_plugins(
-    orch: &mut Orchestrator,
-    store: &mut Document,
-) {
-    let Some(plugins_root) = locate_plugins_root() else {
-        log::warn!(
-            "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
-             from a workspace checkout); plugins disabled"
-        );
-        return;
-    };
-    log::info!(
-        "[App] discovering plugins under {}",
-        plugins_root.display()
-    );
-    let discovered = match orch.discover_plugins(&plugins_root) {
-        Ok(ids) => ids,
-        Err(e) => {
-            log::warn!(
-                "[App] discover_plugins({}) failed: {e}; plugins disabled",
-                plugins_root.display()
-            );
-            return;
-        }
-    };
-    log::info!("[App] discovered plugins: {discovered:?}");
-
-    let head_before = store.head_assembly();
-    let initial_assembly = match molex::ops::wire::serialize_assembly(
-        &head_before,
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!(
-                "[App] failed to serialize initial assembly for plugin \
-                 registration: {e:?}; plugins disabled"
-            );
-            return;
-        }
-    };
-
-    for plugin_id in &discovered {
-        let post_init_bytes = match orch
-            .ensure_plugin_registered(plugin_id, initial_assembly.clone())
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::warn!(
-                    "[App] ensure_plugin_registered('{plugin_id}') failed: \
-                     {e}; {plugin_id} plugin disabled"
-                );
-                continue;
-            }
-        };
-        log::info!("[App] {plugin_id} plugin ready");
-
-        if plugin_id == "rosetta" {
-            apply_rosetta_post_init(store, &post_init_bytes);
-        }
-    }
-}
-
-/// Apply rosetta's post-Init normalized assembly (full-atom pose) so the
-/// host's canonical assembly matches the plugin's internal pose before
-/// any user action runs.
-#[cfg(not(target_arch = "wasm32"))]
-fn apply_rosetta_post_init(
-    store: &mut Document,
-    post_init_bytes: &[u8],
-) {
-    if post_init_bytes.is_empty() {
-        log::warn!(
-            "[App] rosetta post-Init returned no normalized assembly; \
-             first user action will likely snap because scene.positions \
-             stays at the pre-Init atom count."
-        );
-        return;
-    }
-    let normalized = match molex::ops::wire::deserialize_assembly(
-        post_init_bytes,
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            log::warn!(
-                "[App] rosetta post-Init assembly decode failed: {e:?}; \
-                 skipping normalization apply"
-            );
-            return;
-        }
-    };
-    let Some(target_entity) = first_protein_entity(store) else {
-        log::warn!(
-            "[App] rosetta post-Init: no protein entity in store; \
-             skipping normalization apply"
-        );
-        return;
-    };
-    let kind = CheckpointKind::PluginOp {
-        entity: target_entity,
-        plugin_id: String::from("rosetta"),
-        op_id: String::from("_init_normalize"),
-        display: String::from("Init"),
-    };
-    if let Err(e) =
-        store.begin_action(kind, String::from("Init"))
-    {
-        log::warn!(
-            "[App] rosetta post-Init begin_action failed: {e}; \
-             skipping normalization apply"
-        );
-        return;
-    }
-    let applied = apply_streaming_assembly(store, &normalized, None);
-    if !applied {
-        log::warn!(
-            "[App] rosetta post-Init apply_streaming_assembly did not \
-             update any entity; rolling back tentative. This usually means \
-             the rosetta-returned entity ID does not match any store \
-             entity ID."
-        );
-        let _ = store.commit_action();
-        return;
-    }
-    if let Err(e) = store.commit_action() {
-        log::warn!(
-            "[App] rosetta post-Init commit_action failed: {e}"
-        );
-        return;
-    }
-    log::info!(
-        "[App] rosetta post-Init assembly applied ({} bytes)",
-        post_init_bytes.len()
-    );
-    // Republish is hoisted to `load_initial_structure` (the App method
-    // that owns `render_projector`); the projector is never threaded down
-    // here.
-}
-
-/// Fan out the well-known `score` query across every plugin that
-/// registered it, merge totals into the head checkpoint, and push
-/// per-residue scores to the render engine for color-by-score modes.
-///
-/// Called once at bootstrap (flips `has_initial_score()`, opening the
-/// loading gate) and again after every host-originated broadcast (so
-/// post-edit rescores update both the score widget and the residue
-/// colors).
-///
-/// Today only Rosetta returns a non-trivial report. When more scorers
-/// come online the merge becomes app-wide -- the host stays generic
-/// either way.
-#[cfg(not(target_arch = "wasm32"))]
-fn refresh_scores(
-    orch: &mut Orchestrator,
-    store: &mut Document,
-    engine: Option<&mut VisoEngine>,
-) {
-    use foldit_runner::orchestrator::SessionContext;
-
-    let reports = orch.collect_scores(&SessionContext::default());
-    if reports.is_empty() {
-        return;
-    }
-
-    use std::collections::HashMap;
-
-    let mut total: Option<f64> = None;
-    // entity_id -> Vec<(residue_index, score)>; merged across all
-    // reporting plugins (later writers stack on top of earlier ones
-    // for now -- when multiple plugins score per-residue we'll need a
-    // merge strategy choice).
-    let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
-    for (plugin_id, report) in &reports {
-        if total.is_none() {
-            total = Some(f64::from(report.total));
-        }
-        log::info!(
-            "[App] score from {plugin_id}: total={} terms={} per_residue={}",
-            report.total,
-            report.terms.len(),
-            report.per_residue.len()
-        );
-        for rs in &report.per_residue {
-            let Some(rref) = rs.residue.as_ref() else { continue };
-            #[allow(clippy::cast_possible_truncation)]
-            let entity_id = rref.entity_id as u32;
-            per_entity.entry(entity_id).or_default().push((
-                rref.residue_index,
-                f64::from(rs.score),
-            ));
-        }
-    }
-    if let Some(t) = total {
-        // Convert the rosetta raw score (REU) to foldit's game-mode
-        // display. Verbatim port of the
-        // `rosetta_score_to_game_score_either(use_minimum=true,
-        // internal=false)` branch at
-        // `plugins/rosetta/deps/rosetta-interactive/source/src/interactive/
-        // rosetta_util/rosetta_util.cc:2702`, using the constants
-        // declared on lines 2662-2663 + 2664 of the same file.
-        // Bridge-side the converter slot
-        // (`rosetta_score_to_game_score`) is null because nothing in
-        // the new plugin-host architecture calls
-        // `register_score_functions`; doing the linear map here is
-        // the right home anyway -- the formula is universal foldit
-        // policy, not rosetta-specific, and lives next to the
-        // `ScoringMode` selector that decides which view reaches the
-        // GUI.
-        const SCORE_OFFSET: f64 = 800.0;
-        const SCORE_SCALE: f64 = 10.0;
-        const SCORE_MINIMUM: f64 = 0.0;
-        let raw = t;
-        let game = ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM);
-        store.set_head_scores(Some(raw), Some(game));
-    }
-
-    // Push per-residue scores into the engine so Score / ScoreRelative
-    // color schemes have data. Each entity's score Vec is sized to
-    // its full residue count; missing residues default to 0.0 (the
-    // mid-palette stop in absolute mode, the lower quantile in
-    // relative mode -- close enough for a first-pass render).
-    let Some(engine) = engine else { return };
-    // Build (raw_entity_id -> residue_count) once via head_assembly so
-    // we don't need a mut borrow on store to mint molex EntityIds.
-    let head = store.head_assembly();
-    let residue_counts: HashMap<u32, usize> = head
-        .entities()
-        .iter()
-        .map(|e| (e.id().raw(), e.residue_count()))
-        .collect();
-    for (entity_id, mut entries) in per_entity {
-        let Some(&residue_count) = residue_counts.get(&entity_id) else {
-            log::warn!(
-                "[App] per-residue scores arrived for unknown entity \
-                 {entity_id} (host has entities {:?})",
-                residue_counts.keys().collect::<Vec<_>>()
-            );
-            continue;
-        };
-        let mut scores = vec![0.0_f64; residue_count];
-        entries.sort_unstable_by_key(|(idx, _)| *idx);
-        let entry_count = entries.len();
-        for (idx, val) in entries {
-            let i = idx as usize;
-            if i < scores.len() {
-                scores[i] = val;
-            }
-        }
-        log::info!(
-            "[App] applied {entry_count} per-residue scores to viso entity \
-             {entity_id} (residue_count={residue_count})"
-        );
-        engine.set_per_residue_scores(entity_id, Some(scores));
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Entry point

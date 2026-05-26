@@ -115,13 +115,6 @@ impl Document {
         }
     }
 
-    // ── ID allocation ─────────────────────────────────────────────────
-
-    /// Allocate a fresh entity id.
-    pub fn allocate_id(&mut self) -> EntityId {
-        self.allocator.allocate()
-    }
-
     // ── Read accessors ────────────────────────────────────────────────
 
     /// Build the current view of the assembly: the lane heads of every
@@ -214,12 +207,6 @@ impl Document {
     #[must_use]
     pub fn count(&self) -> usize {
         self.live_ids().count()
-    }
-
-    /// Whether `id` is a transient preview.
-    #[must_use]
-    pub fn is_preview(&self, id: EntityId) -> bool {
-        self.transient.contains_key(&id)
     }
 
     /// All current preview ids, in insertion order.
@@ -318,31 +305,6 @@ impl Document {
         let to = self.history.checkpoints().head();
         self.apply(SceneChange::HeadMoved { from, to });
         Ok(())
-    }
-
-    /// Atomic non-streaming entity replacement. Pushes one snapshot +
-    /// one checkpoint with `tentative = false` immediately. Refused if
-    /// an action is in flight.
-    pub fn record_entity_update(
-        &mut self,
-        kind: CheckpointKind,
-        entity: EntityId,
-        payload: MoleculeEntity,
-        label: impl Into<Cow<'static, str>>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
-    ) -> Result<CheckpointId, DocumentError> {
-        let from = self.history.checkpoints().head();
-        let ckpt = self.history.record_entity_update(
-            entity,
-            kind,
-            Arc::new(payload),
-            label.into(),
-            raw_score,
-            game_score,
-        )?;
-        self.apply(SceneChange::HeadMoved { from, to: ckpt });
-        Ok(ckpt)
     }
 
     // ── Navigation (the action-lock half is enforced one layer down by
@@ -583,16 +545,6 @@ impl Document {
             })
     }
 
-    /// First committed entity: the loaded protein. Reads the head
-    /// checkpoint's first `entity_heads` key, so (unlike the old
-    /// `metadata` scan) it can never surface a stale/undone entity.
-    #[must_use]
-    pub fn loaded_entity(&self) -> Option<EntityId> {
-        let head_id = self.history.checkpoints().head();
-        self.history
-            .checkpoint(head_id)
-            .and_then(|h| h.entity_heads.keys().next().copied())
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
