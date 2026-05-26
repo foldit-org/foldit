@@ -6,6 +6,7 @@ pub(crate) mod plugin_driver;
 pub mod puzzle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pull_drag;
+pub(crate) mod render_projector;
 
 pub use app::App;
 #[cfg(not(target_arch = "wasm32"))]

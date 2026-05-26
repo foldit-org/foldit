@@ -31,6 +31,7 @@ use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, Histor
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::ActiveStreamEntry;
+use crate::render_projector::{self, RenderProjector};
 
 fn score_for_mode(
     raw: Option<f64>,
@@ -290,6 +291,7 @@ pub struct App {
     store: Document,
     router: ActionRouter,
     plugin_driver: PluginDriver,
+    render_projector: RenderProjector,
     pdb_path: String,
     puzzle: PuzzleSession,
     history_sync: HistorySyncCursor,
@@ -352,6 +354,7 @@ impl App {
             store: Document::new(),
             router: ActionRouter::new(),
             plugin_driver: PluginDriver::new(),
+            render_projector: RenderProjector::new(),
             pdb_path,
             // CLI bootstrap defaults to scientist; LoadPuzzle flips to Game
             // when an intro/campaign puzzle is loaded.
@@ -427,9 +430,9 @@ impl App {
             let mut visual_dirty = false;
             let mut had_terminal = false;
             // Resolved animation preset for whichever stream produced
-            // the latest visual update in this drain — queued on the
-            // engine right before `publish_to` so the new assembly
-            // animates in instead of snapping. Single-action invariant
+            // the latest visual update in this drain, queued on the
+            // engine right before `render_projector.publish` so the new
+            // assembly animates in instead of snapping. Single-action invariant
             // means at most one stream is mutating at a time, so
             // last-write-wins is correct. The entity is captured
             // alongside the transition (not re-resolved via
@@ -681,7 +684,7 @@ impl App {
                             resolve_transition(kind),
                         );
                     }
-                    self.store.publish_to(engine);
+                    self.render_projector.publish(&self.store, engine);
                 }
             }
             if had_terminal {
@@ -797,11 +800,14 @@ impl App {
                         }
                     }
                 }
-                self.router.cancel_operations(engine, &mut self.store);
+                self.cancel_operations();
             }
             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                 engine.execute(cmd);
-                log::info!("Focus: {}", self.store.focus_description(&engine.focus()));
+                log::info!(
+                    "Focus: {}",
+                    render_projector::focus_description(&self.store, &engine.focus())
+                );
                 // Focus-driven lock update lands when the bridge
                 // plugin's `update_assembly` + selection-derived locks
                 // are wired.
@@ -812,6 +818,35 @@ impl App {
         }
         self.pump_scene_changes();
         true
+    }
+
+    /// Cancel the in-flight operation: clear the viso selection, drop any
+    /// in-progress preview entities, republish, and flag the GUI dirty.
+    /// Stream lock release + commit live in `apply_backend_updates`'
+    /// terminal arms; doing them here races a follow-up dispatch that's
+    /// quick enough to slip in before the terminal drains. Was
+    /// `ActionRouter::cancel_operations`; hoisted to App so the
+    /// `RenderProjector` stays a field touched only inside App methods
+    /// (the coordination boundary), never threaded as a parameter.
+    fn cancel_operations(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        log::info!("Cancelling current operation");
+        engine.execute(VisoCommand::ClearSelection);
+        let preview_ids: Vec<EntityId> = self.store.preview_ids().collect();
+        if !preview_ids.is_empty() {
+            for id in &preview_ids {
+                self.store.remove_preview(*id);
+            }
+            self.render_projector.publish(&self.store, engine);
+            log::info!(
+                "Removed {} in-progress preview entities",
+                preview_ids.len()
+            );
+        }
+        self.router.ui_dirty |=
+            DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
     }
 
     // ── Viewport input (from webview) ──
@@ -870,6 +905,11 @@ impl App {
         // `&mut self`.
         #[cfg(not(target_arch = "wasm32"))]
         let mut pending_hotkey_op: Option<String> = None;
+        // ClearSelection/ESC cancel needs `&mut self`, but `engine` is
+        // borrowed for the rest of the match and used again by
+        // `update_all_visualizations` after it. Defer the cancel past that
+        // last engine use, mirroring the `pending_hotkey_op` deferral.
+        let mut pending_cancel = false;
 
         let Some(engine) = &mut self.engine else { return };
 
@@ -962,7 +1002,7 @@ impl App {
                                         }
                                     }
                                 }
-                                self.router.cancel_operations(engine, &mut self.store);
+                                pending_cancel = true;
                             }
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                                 engine.execute(cmd);
@@ -1017,8 +1057,16 @@ impl App {
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, &self.router, pull);
 
-        // `engine`'s last use was above — `&mut self` is free again. A
-        // hotkey resolved in the `Key` arm dispatches through the same
+        // `engine`'s last use was above — `&mut self` is free again, so
+        // the deferred actions below can run. Ordering of the cancel vs.
+        // `update_all_visualizations` is immaterial: the latter only sets
+        // band/pull overlays, disjoint from cancel's selection-clear +
+        // preview-removal + republish.
+        if pending_cancel {
+            self.cancel_operations();
+        }
+
+        // A hotkey resolved in the `Key` arm dispatches through the same
         // sink a button click uses (item 78); built-ins already won by
         // `handle_key_press` being checked first.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1400,8 +1448,8 @@ impl App {
     /// to the ongoing tentative and commit it. Mirrors the Stream-side
     /// `Final` path; called from `handle_dispatch_op` for `OpKind::Invoke`.
     /// `transition` is the manifest-declared animation preset, queued on
-    /// the locked entity right before `publish_to` so the result eases
-    /// in rather than snapping.
+    /// the locked entity right before `render_projector.publish` so the
+    /// result eases in rather than snapping.
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_invoke_result(
         &mut self,
@@ -1432,7 +1480,7 @@ impl App {
                         resolve_transition(transition),
                     );
                 }
-                self.store.publish_to(engine);
+                self.render_projector.publish(&self.store, engine);
             }
             self.router.ui_dirty |=
                 DirtyFlags::SCENE | DirtyFlags::HISTORY;
@@ -1482,7 +1530,7 @@ impl App {
                         for entity in entities {
                             let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                         }
-                        self.store.publish_to(engine);
+                        self.render_projector.publish(&self.store, engine);
                         engine.fit_camera_to_focus();
                         // Free-form file load → scientist mode.
                         self.puzzle.scoring_mode = ScoringMode::Scientist;
@@ -1536,7 +1584,7 @@ impl App {
 
                         // Atomic topology swap: tears down stale scene-local state and
                         // force-syncs so subsequent calls see the new entities.
-                        self.store.replace_in(engine);
+                        self.render_projector.replace(&self.store, engine);
 
                         // Snap so bounding_radius reflects molecule extent (fog driver),
                         // then override the pose with the puzzle's saved eye/up but
@@ -1640,9 +1688,9 @@ impl App {
     }
 
     /// Common tail for undo / redo / jump_checkpoint: republish to viso
-    /// via `replace_in` (unconditional rederive — the snapshot swap
-    /// installs an Assembly with stale generation that `set_assembly`
-    /// would otherwise skip), clear cached per-residue scores (the
+    /// via `render_projector.replace` (unconditional rederive; the
+    /// snapshot swap installs an Assembly that the `set_assembly`
+    /// generation gate would otherwise skip), clear cached per-residue scores (the
     /// values were computed against the *previous* head and become
     /// meaningless on a head move; v1 just blanks them so the structure
     /// renders neutral instead of "gray", v2 will async-reeval), and
@@ -1651,7 +1699,7 @@ impl App {
     /// `populate_frontend` (G1).
     fn after_head_move(&mut self) {
         if let Some(engine) = self.engine.as_mut() {
-            self.store.replace_in(engine);
+            self.render_projector.replace(&self.store, engine);
             let ids: Vec<EntityId> = self.store.ids().collect();
             for eid in ids {
                 engine.set_per_residue_scores(eid.raw(), None);
@@ -1990,7 +2038,7 @@ impl App {
                 // Push to viso (viso inherits our IDs). update(0.0)
                 // drains the pending Assembly so scene.current is
                 // populated before fit_camera reads it.
-                self.store.publish_to(&mut engine);
+                self.render_projector.publish(&self.store, &mut engine);
                 engine.update(0.0);
                 engine.fit_camera_to_focus();
 
@@ -1999,11 +2047,13 @@ impl App {
                 // Plugin streaming updates land via plugin_update_rx;
                 // canonical state is the Document.
                 let mut orch = Orchestrator::new();
-                bootstrap_plugins(
-                    &mut orch,
-                    &mut self.store,
-                    Some(&mut engine),
-                );
+                bootstrap_plugins(&mut orch, &mut self.store);
+                // Republish: bootstrap may have committed rosetta's
+                // post-Init normalized assembly (full-atom pose) into the
+                // store. Push it here — after bootstrap, before
+                // refresh_scores — the same point the publish formerly ran
+                // inside apply_rosetta_post_init.
+                self.render_projector.publish(&self.store, &mut engine);
                 refresh_scores(
                     &mut orch,
                     &mut self.store,
@@ -2177,7 +2227,6 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
 fn bootstrap_plugins(
     orch: &mut Orchestrator,
     store: &mut Document,
-    mut engine: Option<&mut VisoEngine>,
 ) {
     let Some(plugins_root) = locate_plugins_root() else {
         log::warn!(
@@ -2232,11 +2281,7 @@ fn bootstrap_plugins(
         log::info!("[App] {plugin_id} plugin ready");
 
         if plugin_id == "rosetta" {
-            apply_rosetta_post_init(
-                store,
-                engine.as_deref_mut(),
-                &post_init_bytes,
-            );
+            apply_rosetta_post_init(store, &post_init_bytes);
         }
     }
 }
@@ -2247,7 +2292,6 @@ fn bootstrap_plugins(
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_rosetta_post_init(
     store: &mut Document,
-    engine: Option<&mut VisoEngine>,
     post_init_bytes: &[u8],
 ) {
     if post_init_bytes.is_empty() {
@@ -2313,9 +2357,9 @@ fn apply_rosetta_post_init(
         "[App] rosetta post-Init assembly applied ({} bytes)",
         post_init_bytes.len()
     );
-    if let Some(eng) = engine {
-        store.publish_to(eng);
-    }
+    // Republish is hoisted to `load_initial_structure` (the App method
+    // that owns `render_projector`); the projector is never threaded down
+    // here.
 }
 
 /// Fan out the well-known `score` query across every plugin that

@@ -13,7 +13,7 @@ use foldit_gui::state::{
     ParamValue as WireParamValue,
 };
 use crate::document::Document;
-use viso::{InputEvent, InputProcessor, MouseButton, VisoCommand, VisoEngine};
+use viso::{InputEvent, InputProcessor, MouseButton, VisoEngine};
 use foldit_runner::orchestrator::{
     EntityId as RunnerEntityId, OpType, ParamConstraint as RunnerParamConstraint,
     ParamSpec as RunnerParamSpec, ParamType as RunnerParamType, ParamValue,
@@ -118,24 +118,6 @@ impl ActionRouter {
         None
     }
 
-    pub fn cancel_operations(&mut self, engine: &mut VisoEngine, store: &mut Document) {
-        log::info!("Cancelling current operation");
-        engine.execute(VisoCommand::ClearSelection);
-        // Stream lock release + commit live in apply_backend_updates'
-        // terminal arms; doing them here races a follow-up dispatch
-        // that's quick enough to slip in before the terminal drains.
-        let preview_ids: Vec<molex::entity::molecule::id::EntityId> =
-            store.preview_ids().collect();
-        if !preview_ids.is_empty() {
-            for id in &preview_ids {
-                store.remove_preview(*id);
-            }
-            store.publish_to(engine);
-            log::info!("Removed {} in-progress preview entities", preview_ids.len());
-        }
-        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
-    }
-
     // ── ML operations ──
 
     /// Run the shared kickoff protocol for an ML backend op.
@@ -188,7 +170,7 @@ impl ActionRouter {
                     );
                     engine.set_entity_visible(loaded_id.raw(), false);
                     self.pending_preview_id = Some(preview_id);
-                    store.publish_to(engine);
+                    // T8: republish via App after dispatch
                     log::info!(
                         "Created RF3 preview {} mirroring loaded entity {}",
                         preview_id.raw(), loaded_id.raw(),

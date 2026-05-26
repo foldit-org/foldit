@@ -51,8 +51,6 @@ pub use change::SceneChange;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 
-mod render;
-
 // ── Errors ─────────────────────────────────────────────────────────────
 
 /// Error returned by every fallible [`Document`] operation.
@@ -89,12 +87,6 @@ pub struct Document {
     allocator: EntityIdAllocator,
     /// The full two-layer history.
     history: History,
-    /// Monotonic counter stamped onto every published `Assembly`.
-    /// Without it, `Assembly::new` hands viso a fresh snapshot at
-    /// generation 0 every time, and viso's `poll_assembly` skips
-    /// every publish after the first. Increment on every
-    /// `publish_to` / `replace_in`.
-    publish_seq: u64,
     /// Drain queue of [`SceneChange`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_scene_changes`] and routes the batch to the
@@ -119,7 +111,6 @@ impl Document {
             transient: IndexMap::new(),
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
-            publish_seq: 0,
             pending_changes: Vec::new(),
         }
     }
@@ -136,26 +127,29 @@ impl Document {
     /// Build the current view of the assembly: the lane heads of every
     /// entity in the checkpoint head's `entity_heads` (in canonical
     /// order), followed by every transient preview (also in insertion
-    /// order). Cheap as a per-frame call relative to today's path:
-    /// each entity is `MoleculeEntity::clone()` (O(atoms)). A future
-    /// optimization can expose an `Assembly::from_arcs(Vec<Arc<…>>)`
-    /// constructor on molex to skip the deep clone — out of scope for
-    /// section 3.
+    /// order). Collects the entity `Arc`s and hands them to
+    /// [`Assembly::from_arcs`], so a per-frame call is O(entities) of
+    /// refcount bumps rather than the old O(atoms) deep clone per
+    /// entity. The returned `Assembly` shares its `Arc<MoleculeEntity>`s
+    /// with the history snapshots (and the transient map); that aliasing
+    /// is safe because consumers only read the assembly, and history
+    /// forks its own copy via `Arc::make_mut` before any in-place edit,
+    /// so a published snapshot never observes a later mutation.
     #[must_use]
     pub fn head_assembly(&self) -> Assembly {
         let head_id = self.history.checkpoints().head();
-        let mut entities: Vec<MoleculeEntity> = Vec::new();
+        let mut entities: Vec<Arc<MoleculeEntity>> = Vec::new();
         if let Some(head) = self.history.checkpoint(head_id) {
             for (eid, snap_id) in &head.entity_heads {
                 if let Some(snap) = self.history.snapshot(*eid, *snap_id) {
-                    entities.push((*snap.payload).clone());
+                    entities.push(Arc::clone(&snap.payload));
                 }
             }
         }
         for arc in self.transient.values() {
-            entities.push((**arc).clone());
+            entities.push(Arc::clone(arc));
         }
-        Assembly::new(entities)
+        Assembly::from_arcs(entities)
     }
 
     /// Read access to the history graph.
