@@ -13,6 +13,8 @@
 //! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
 //!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
@@ -345,6 +347,11 @@ pub struct App {
     /// once the first plugin score lands. Mirrors the desktop runner's
     /// old field.
     awaiting_initial_score: bool,
+    /// Empty inner sets are never stored: removing the last residue
+    /// on an entity removes the entity entry, so iterating
+    /// `selected_entities` yields only entities that currently have
+    /// at least one selected residue.
+    selection: BTreeMap<EntityId, BTreeSet<u32>>,
 }
 
 /// Objective metadata for an active puzzle. Populated from the puzzle
@@ -385,6 +392,7 @@ impl App {
             frontend: FrontendState::new(),
             app_state: AppState::Loading,
             awaiting_initial_score: false,
+            selection: BTreeMap::new(),
         }
     }
 
@@ -1672,6 +1680,10 @@ impl App {
         let title = self.structure_title();
         self.store.reset();
         self.plugin_driver.reset_for_new_structure();
+        // Topology swap: selection keys are entity ids from the
+        // outgoing assembly; the new puzzle's entity ids may collide
+        // numerically without referring to the same entities, so clear.
+        self.selection.clear();
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
@@ -2445,6 +2457,102 @@ impl App {
             engine.shutdown();
         }
     }
+
+    // ── Selection authority ──
+    //
+    // Apply / clear / toggle / query helpers over [`App::selection`].
+    // Invariant maintained across every mutator: per-entity sets are
+    // never left empty in the outer map. Removing the last residue on
+    // an entity removes the entity entry.
+
+    /// Mark a single residue on `entity` as selected. Idempotent:
+    /// re-selecting an already-selected residue is a no-op.
+    pub(crate) fn select_residue(&mut self, entity: EntityId, residue_index: u32) {
+        self.selection
+            .entry(entity)
+            .or_default()
+            .insert(residue_index);
+    }
+
+    /// Mark a single residue on `entity` as deselected. Idempotent on
+    /// already-empty state. If this empties the per-entity set, the
+    /// entity entry is removed from the outer map (sets are never
+    /// left empty).
+    pub(crate) fn deselect_residue(&mut self, entity: EntityId, residue_index: u32) {
+        if let Some(set) = self.selection.get_mut(&entity) {
+            set.remove(&residue_index);
+            if set.is_empty() {
+                self.selection.remove(&entity);
+            }
+        }
+    }
+
+    /// Bulk-replace the selection on a single entity. The provided
+    /// residues become the entity's full set (not merged into the
+    /// existing one). An empty input removes the entity entry.
+    pub(crate) fn set_residues_on(
+        &mut self,
+        entity: EntityId,
+        residues: impl IntoIterator<Item = u32>,
+    ) {
+        let set: BTreeSet<u32> = residues.into_iter().collect();
+        if set.is_empty() {
+            self.selection.remove(&entity);
+        } else {
+            self.selection.insert(entity, set);
+        }
+    }
+
+    /// Drop the entire selection across all entities.
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Flip the selected state of `(entity, residue_index)` and return
+    /// the new state (`true` if now selected, `false` if now
+    /// deselected). Maintains the empty-set-removal invariant.
+    pub(crate) fn toggle_residue(&mut self, entity: EntityId, residue_index: u32) -> bool {
+        let set = self.selection.entry(entity).or_default();
+        let now_selected = set.insert(residue_index);
+        if !now_selected {
+            set.remove(&residue_index);
+            if set.is_empty() {
+                self.selection.remove(&entity);
+            }
+        }
+        now_selected
+    }
+
+    /// Selected residues on a specific entity, or `None` if the entity
+    /// has no selection. Sets are never empty by invariant, so
+    /// `Some(_)` always carries at least one residue.
+    pub(crate) fn selected_residues_on(&self, entity: EntityId) -> Option<&BTreeSet<u32>> {
+        self.selection.get(&entity)
+    }
+
+    /// Point-query: is `(entity, residue_index)` selected?
+    pub(crate) fn is_residue_selected(&self, entity: EntityId, residue_index: u32) -> bool {
+        self.selection
+            .get(&entity)
+            .is_some_and(|set| set.contains(&residue_index))
+    }
+
+    /// Iterator over the entities that currently have at least one
+    /// residue selected. Order is `BTreeMap`'s natural key order.
+    pub(crate) fn selected_entities(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.selection.keys().copied()
+    }
+
+    /// True when no residue is selected on any entity.
+    pub(crate) fn selection_is_empty(&self) -> bool {
+        self.selection.is_empty()
+    }
+
+    /// Total number of selected residues across all entities (sum of
+    /// per-entity set sizes).
+    pub(crate) fn selection_total_count(&self) -> usize {
+        self.selection.values().map(|set| set.len()).sum()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2592,3 +2700,201 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use molex::entity::molecule::id::EntityIdAllocator;
+    use std::io;
+    use std::path::Path;
+
+    /// Minimal [`HostResources`] stub. `App` construction needs one;
+    /// these tests never touch the filesystem.
+    struct TestHost;
+
+    impl crate::HostResources for TestHost {
+        fn read_file(&self, _path: &str) -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "test stub"))
+        }
+        fn view_presets_dir(&self) -> Option<&Path> {
+            None
+        }
+        fn initial_structure_path(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn fresh_app() -> App {
+        App::new(Box::new(TestHost))
+    }
+
+    /// Mint a sequence of distinct entity ids in a test-local order.
+    /// `EntityId` is opaque, so we allocate via `EntityIdAllocator` and
+    /// hand back the n-th id from a freshly-seeded allocator. The map
+    /// keys we care about are just "different ids on the same App",
+    /// not specific raw values.
+    fn mint_ids(n: usize) -> Vec<EntityId> {
+        let mut alloc = EntityIdAllocator::new();
+        (0..n).map(|_| alloc.allocate()).collect()
+    }
+
+    #[test]
+    fn new_app_has_empty_selection() {
+        let app = fresh_app();
+        let ids = mint_ids(1);
+        assert!(app.selection_is_empty());
+        assert_eq!(app.selection_total_count(), 0);
+        assert!(app.selected_residues_on(ids[0]).is_none());
+    }
+
+    #[test]
+    fn select_residue_is_idempotent() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        app.select_residue(e, 7);
+        app.select_residue(e, 7);
+        app.select_residue(e, 7);
+        assert_eq!(app.selection_total_count(), 1);
+        assert!(app.is_residue_selected(e, 7));
+        let set = app.selected_residues_on(e).expect("present");
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn clear_selection_empties_the_map() {
+        let mut app = fresh_app();
+        let ids = mint_ids(2);
+        app.select_residue(ids[0], 0);
+        app.select_residue(ids[1], 5);
+        assert_eq!(app.selection_total_count(), 2);
+        app.clear_selection();
+        assert!(app.selection_is_empty());
+        assert!(app.selected_residues_on(ids[0]).is_none());
+        assert!(app.selected_residues_on(ids[1]).is_none());
+        assert!(!app.is_residue_selected(ids[0], 0));
+    }
+
+    #[test]
+    fn set_residues_on_replaces_not_merges() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        app.select_residue(e, 1);
+        app.select_residue(e, 2);
+        app.select_residue(e, 3);
+        app.set_residues_on(e, [10, 11]);
+        let set = app.selected_residues_on(e).expect("present");
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&10));
+        assert!(set.contains(&11));
+        assert!(!set.contains(&1));
+        assert!(!set.contains(&2));
+        assert!(!set.contains(&3));
+    }
+
+    #[test]
+    fn set_residues_on_empty_removes_entity_entry() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        app.select_residue(e, 9);
+        app.set_residues_on(e, std::iter::empty());
+        assert!(app.selected_residues_on(e).is_none());
+        assert!(app.selection_is_empty());
+    }
+
+    #[test]
+    fn multi_entity_isolation() {
+        let mut app = fresh_app();
+        let ids = mint_ids(2);
+        let a = ids[0];
+        let b = ids[1];
+        app.select_residue(a, 1);
+        app.select_residue(a, 2);
+        app.select_residue(b, 100);
+
+        assert!(app.is_residue_selected(a, 1));
+        assert!(app.is_residue_selected(a, 2));
+        assert!(!app.is_residue_selected(a, 100));
+        assert!(app.is_residue_selected(b, 100));
+        assert!(!app.is_residue_selected(b, 1));
+
+        app.clear_selection();
+        app.select_residue(a, 1);
+        app.set_residues_on(b, [42, 43]);
+        // Mutating B must not have touched A.
+        assert_eq!(
+            app.selected_residues_on(a).expect("present").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn deselect_last_residue_removes_entity_entry() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        app.select_residue(e, 0);
+        app.select_residue(e, 1);
+        app.deselect_residue(e, 0);
+        // Set is still non-empty: entry must remain.
+        assert!(app.selected_residues_on(e).is_some());
+        app.deselect_residue(e, 1);
+        // Last residue gone: entity entry must be removed.
+        assert!(app.selected_residues_on(e).is_none());
+        assert!(app.selection_is_empty());
+    }
+
+    #[test]
+    fn deselect_idempotent_on_missing() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        // Deselect a residue that was never selected: no panic, no
+        // phantom entity entry left behind.
+        app.deselect_residue(e, 99);
+        assert!(app.selection_is_empty());
+        app.select_residue(e, 1);
+        app.deselect_residue(e, 99);
+        assert!(app.is_residue_selected(e, 1));
+        assert_eq!(app.selection_total_count(), 1);
+    }
+
+    #[test]
+    fn toggle_residue_round_trips() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        let e = ids[0];
+        // First toggle selects.
+        assert!(app.toggle_residue(e, 3));
+        assert!(app.is_residue_selected(e, 3));
+        // Second toggle deselects and removes the empty entity entry.
+        assert!(!app.toggle_residue(e, 3));
+        assert!(!app.is_residue_selected(e, 3));
+        assert!(app.selected_residues_on(e).is_none());
+        // Toggle on a sibling residue while none are selected: same
+        // entity, but the entry was removed in step 2, so this is a
+        // fresh insert.
+        assert!(app.toggle_residue(e, 4));
+        assert!(app.is_residue_selected(e, 4));
+        assert!(!app.is_residue_selected(e, 3));
+    }
+
+    #[test]
+    fn selected_entities_enumerates_only_nonempty() {
+        let mut app = fresh_app();
+        let ids = mint_ids(3);
+        app.select_residue(ids[0], 0);
+        app.select_residue(ids[1], 0);
+        app.select_residue(ids[2], 0);
+        app.deselect_residue(ids[1], 0);
+        let ents: Vec<_> = app.selected_entities().collect();
+        // BTreeMap key order is by `EntityId`'s `Ord`, which for the
+        // molex newtype is the underlying u32 order. The allocator
+        // hands out ids in sequence so ids[0] < ids[1] < ids[2]; after
+        // removing ids[1], `selected_entities` enumerates ids[0],
+        // ids[2] in that order.
+        assert_eq!(ents, vec![ids[0], ids[2]]);
+    }
+}
