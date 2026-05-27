@@ -2510,6 +2510,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
+        self.flush_selection_to_viso();
     }
 
     /// Bulk-replace the selection on a single entity. The provided
@@ -2526,6 +2527,7 @@ impl App {
         } else {
             self.selection.insert(entity, set);
         }
+        self.flush_selection_to_viso();
     }
 
     /// Drop the entire selection across all entities.
