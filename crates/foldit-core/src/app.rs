@@ -886,7 +886,7 @@ impl App {
                 // Focus-driven lock update lands when the bridge
                 // plugin's `update_assembly` + selection-derived locks
                 // are wired.
-                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
             }
             // All other commands: delegate entirely to viso
             other => { engine.execute(other); }
@@ -903,6 +903,7 @@ impl App {
     /// App methods (the coordination boundary), never threaded as a
     /// parameter.
     fn cancel_operations(&mut self) {
+        self.clear_selection();
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
@@ -1074,7 +1075,7 @@ impl App {
                             VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
                                 engine.execute(cmd);
                                 // (lock update deferred — see comment above)
-                                self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::UI;
+                                self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
                             }
                             other => { engine.execute(other); }
                         }
@@ -1671,7 +1672,7 @@ impl App {
                 log::error!("Failed to load structure '{}': {}", path, e);
             }
         }
-        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE;
     }
 
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
@@ -1683,7 +1684,8 @@ impl App {
         // Topology swap: selection keys are entity ids from the
         // outgoing assembly; the new puzzle's entity ids may collide
         // numerically without referring to the same entities, so clear.
-        self.selection.clear();
+        // Going through the mutator self-sets SELECTION dirty.
+        self.clear_selection();
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
@@ -1751,7 +1753,6 @@ impl App {
         }
         self.ui_dirty |= DirtyFlags::LOADING
             | DirtyFlags::SCORE
-            | DirtyFlags::SELECTION
             | DirtyFlags::ACTIONS
             | DirtyFlags::PUZZLE;
     }
@@ -1953,6 +1954,7 @@ impl App {
     }
 
     fn populate_frontend(&mut self) {
+        let selected_count = self.selection_total_count();
         let engine = match &self.engine {
             Some(e) => e,
             None => return,
@@ -1960,7 +1962,7 @@ impl App {
 
         // FPS and selected count change every frame — always push them
         self.frontend.set_fps(engine.fps());
-        self.frontend.ui.selected_count = engine.selected_residues().len();
+        self.frontend.ui.selected_count = selected_count;
 
         let app_dirty = self.ui_dirty;
         self.ui_dirty = DirtyFlags::empty();
@@ -2061,12 +2063,20 @@ impl App {
             self.frontend.view.active_preset = engine.active_preset().map(String::from);
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {
-            self.frontend.mark_dirty(DirtyFlags::SELECTION);
+            let entries: Vec<foldit_gui::EntitySelection> = self
+                .selection
+                .iter()
+                .map(|(eid, residues)| foldit_gui::EntitySelection {
+                    entity_id: eid.raw(),
+                    residues: residues.iter().copied().collect(),
+                })
+                .collect();
+            self.frontend.set_selection(entries);
         }
         if app_dirty.contains(DirtyFlags::UI) {
             self.frontend.mark_dirty(DirtyFlags::UI);
         }
-        if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SELECTION) {
+        if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SCENE) {
             use molex::MoleculeType;
             let mut scene_entities = Vec::new();
             for (eid, _meta) in self.store.iter() {
@@ -2496,6 +2506,7 @@ impl App {
             .entry(entity)
             .or_default()
             .insert(residue_index);
+        self.ui_dirty |= DirtyFlags::SELECTION;
         self.flush_selection_to_viso();
     }
 
@@ -2510,6 +2521,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
+        self.ui_dirty |= DirtyFlags::SELECTION;
         self.flush_selection_to_viso();
     }
 
@@ -2527,12 +2539,14 @@ impl App {
         } else {
             self.selection.insert(entity, set);
         }
+        self.ui_dirty |= DirtyFlags::SELECTION;
         self.flush_selection_to_viso();
     }
 
     /// Drop the entire selection across all entities.
     pub(crate) fn clear_selection(&mut self) {
         self.selection.clear();
+        self.ui_dirty |= DirtyFlags::SELECTION;
         self.flush_selection_to_viso();
     }
 
@@ -2548,6 +2562,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
+        self.ui_dirty |= DirtyFlags::SELECTION;
         self.flush_selection_to_viso();
         now_selected
     }
