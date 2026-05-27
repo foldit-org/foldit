@@ -14,7 +14,7 @@
 use molex::ops::edit::AssemblyEdit;
 use molex::{Assembly, MoleculeEntity};
 
-use crate::document::{Document, SceneChange};
+use crate::session::{Session, SessionUpdate};
 
 /// Owns the orchestrator handle, the plugin broadcaster, and the
 /// native-only stream bookkeeping. `App` holds one of these and reaches
@@ -23,8 +23,8 @@ use crate::document::{Document, SceneChange};
 /// `App` rely on this).
 pub struct PluginDriver {
     pub orchestrator: Option<foldit_runner::Orchestrator>,
-    /// Plugin projection of the `SceneChange` spine: diffs its own
-    /// last-published `Assembly` against the `Document` to fan Full/Delta
+    /// Plugin projection of the `SessionUpdate` spine: diffs its own
+    /// last-published `Assembly` against the `Session` to fan Full/Delta
     /// broadcasts out. Disjoint from `orchestrator` so `App` can borrow
     /// both in `pump_scene_changes`.
     pub(crate) broadcaster: PluginBroadcaster,
@@ -65,7 +65,7 @@ impl PluginDriver {
 // ── Native-only dispatch mechanism ──────────────────────────────────────
 //
 // These methods own the plugin-side bookkeeping of dispatch (orchestrator
-// I/O + `StreamHost` table maintenance) and never touch `Document` or
+// I/O + `StreamHost` table maintenance) and never touch `Session` or
 // `VisoEngine` — the coordination boundary keeps those on `App`.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -141,7 +141,7 @@ impl PluginDriver {
         &mut self,
         op_id: &str,
         kind: foldit_runner::orchestrator::OpKind,
-        ctx: foldit_runner::orchestrator::SessionContext,
+        ctx: foldit_runner::orchestrator::DispatchContext,
         params: std::collections::HashMap<
             String,
             foldit_runner::orchestrator::ParamValue,
@@ -198,10 +198,10 @@ pub(crate) enum OpOutcome {
 
 // ── Plugin broadcaster ──────────────────────────────────────────────────
 
-/// Plugin projection of the [`SceneChange`] spine.
+/// Plugin projection of the [`SessionUpdate`] spine.
 ///
 /// Holds its own last-published `Assembly` snapshot and diffs it against
-/// the authoritative [`Document`] to fan a Full/Delta `UpdateAssembly`
+/// the authoritative [`Session`] to fan a Full/Delta `UpdateAssembly`
 /// broadcast out to peer plugins (whose Assembly mirrors must stay in
 /// sync with the host). Cross-platform: the broadcast decision is the
 /// same on native and wasm.
@@ -210,12 +210,12 @@ pub(crate) enum OpOutcome {
 /// (vs the old one-broadcast-per-mutation queue), so the orchestrator's
 /// generation advances once per drain. It ignores tentative `Edit`s:
 /// plugins never see live frames. (Score updates are off-spine
-/// entirely; canonical writes happen via `Document::set_head_scores`
+/// entirely; canonical writes happen via `Session::set_head_scores`
 /// and never reach the broadcaster.)
 pub(crate) struct PluginBroadcaster {
     /// The `Assembly` last serialized and broadcast. `None` before the
     /// first broadcast (and after construction), which forces a Full.
-    /// Deliberately **not** cleared on `Document::reset`: the post-reset
+    /// Deliberately **not** cleared on `Session::reset`: the post-reset
     /// empty-assembly diff still produces a Full that advances the
     /// orchestrator's gen counter, so plugins never see `from_gen` go
     /// backwards.
@@ -236,8 +236,8 @@ impl PluginBroadcaster {
     /// fans it out through `orch`, and adopts the new snapshot.
     pub(crate) fn broadcast(
         &mut self,
-        changes: &[SceneChange],
-        doc: &Document,
+        changes: &[SessionUpdate],
+        doc: &Session,
         orch: &mut foldit_runner::Orchestrator,
     ) {
         if !changes.iter().any(Self::is_observable) {
@@ -261,13 +261,13 @@ impl PluginBroadcaster {
     /// Tentative edits (live per-cycle frames) are filtered out: plugins
     /// never see live frames. (Score updates aren't on the spine at all,
     /// so the match has no arm for them.)
-    fn is_observable(change: &SceneChange) -> bool {
+    fn is_observable(change: &SessionUpdate) -> bool {
         matches!(
             change,
-            SceneChange::HeadMoved
-                | SceneChange::PreviewAdded
-                | SceneChange::PreviewDiscarded
-                | SceneChange::Edit { tentative: false }
+            SessionUpdate::HeadMoved
+                | SessionUpdate::PreviewAdded
+                | SessionUpdate::PreviewDiscarded
+                | SessionUpdate::Edit { tentative: false }
         )
     }
 }
@@ -277,7 +277,7 @@ impl PluginBroadcaster {
 /// the Full serialize fails (currently impossible for in-memory
 /// assemblies), at which point the caller skips the broadcast.
 ///
-/// Mirrors the old `Document::queue_assembly_update_broadcast` fallback
+/// Mirrors the old `Session::queue_assembly_update_broadcast` fallback
 /// chain: a delta-serialize failure (a topology edit slipping past the
 /// coord-only check) also falls through to a Full.
 fn encode_payload(
@@ -404,7 +404,7 @@ pub(crate) struct ActiveStreamEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Document, EntityOrigin};
+    use crate::session::{Session, EntityOrigin};
     use foldit_runner::orchestrator::BroadcastPayload;
     use molex::entity::molecule::atom::Atom;
     use molex::entity::molecule::bulk::BulkEntity;
@@ -492,12 +492,12 @@ mod tests {
 
     #[test]
     fn is_observable_filters_tentative() {
-        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewAdded));
-        assert!(PluginBroadcaster::is_observable(&SceneChange::PreviewDiscarded));
-        assert!(PluginBroadcaster::is_observable(&SceneChange::Edit {
+        assert!(PluginBroadcaster::is_observable(&SessionUpdate::PreviewAdded));
+        assert!(PluginBroadcaster::is_observable(&SessionUpdate::PreviewDiscarded));
+        assert!(PluginBroadcaster::is_observable(&SessionUpdate::Edit {
             tentative: false,
         }));
-        assert!(!PluginBroadcaster::is_observable(&SceneChange::Edit {
+        assert!(!PluginBroadcaster::is_observable(&SessionUpdate::Edit {
             tentative: true,
         }));
     }
@@ -506,8 +506,8 @@ mod tests {
 
     #[test]
     fn broadcast_ignores_tentative_only_batch() {
-        let changes = vec![SceneChange::Edit { tentative: true }];
-        let doc = Document::new();
+        let changes = vec![SessionUpdate::Edit { tentative: true }];
+        let doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
         bc.broadcast(&changes, &doc, &mut orch);
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn broadcast_ignores_empty_batch() {
-        let doc = Document::new();
+        let doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
         bc.broadcast(&[], &doc, &mut orch);
@@ -526,13 +526,13 @@ mod tests {
 
     #[test]
     fn broadcast_observable_batch_advances_gen_and_adopts_snapshot() {
-        let mut doc = Document::new();
+        let mut doc = Session::new();
         let _ = doc.insert_preview(
             mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO),
             "p".to_string(),
             EntityOrigin::Loaded,
         );
-        let changes = doc.take_scene_changes(); // [PreviewAdded]
+        let changes = doc.take_updates(); // [PreviewAdded]
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
         bc.broadcast(&changes, &doc, &mut orch);

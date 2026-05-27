@@ -10,8 +10,8 @@
 //! Unlike [`crate::render_projector::RenderProjector`] and the
 //! plugin broadcaster, this projector is **not** spine-driven: it picks
 //! up score changes through the cursor's `live_version` bump rather
-//! than via `take_scene_changes`, because scores deliberately are not
-//! a `SceneChange` event (see `docs/foldit_core_state.md` on score
+//! than via `take_updates`, because scores deliberately are not
+//! a `SessionUpdate` event (see `docs/foldit_core_state.md` on score
 //! propagation). The host already calls `populate_frontend` per frame.
 
 use web_time::Instant;

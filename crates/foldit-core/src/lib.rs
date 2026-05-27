@@ -1,5 +1,5 @@
 pub mod app;
-pub(crate) mod document;
+pub(crate) mod session;
 pub(crate) mod gui_projector;
 pub(crate) mod history;
 mod host_resources;

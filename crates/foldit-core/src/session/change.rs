@@ -1,9 +1,9 @@
 //! The typed change-event spine.
 //!
-//! [`SceneChange`] is the single event type emitted by the `Document`
+//! [`SessionUpdate`] is the single event type emitted by the `Document`
 //! mutation funnel (RX6) and consumed by the three projectors: render
 //! (RX13), plugin broadcast (RX6), and GUI (live cursor in RX10). Every
-//! observable mutation produces exactly one `SceneChange`; the
+//! observable mutation produces exactly one `SessionUpdate`; the
 //! projectors decide independently how (or whether) to react to each
 //! variant.
 //!
@@ -16,7 +16,7 @@
 
 /// A single observable change to the scene.
 #[derive(Debug, Clone)]
-pub enum SceneChange {
+pub enum SessionUpdate {
     /// A structural/coordinate edit. `tentative` marks per-cycle
     /// live/streaming edits (e.g. a pull-drag or mid-action plugin
     /// frame); the plugin broadcaster and persistent projectors skip

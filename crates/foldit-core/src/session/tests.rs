@@ -19,7 +19,7 @@ fn mk_atom() -> Atom {
 
 /// Some valid EntityId. `EntityId` has no public constructor so
 /// every call mints id 0 from a fresh allocator. Callers that pass
-/// this into [`Document::insert_preview`] don't observe the
+/// this into [`Session::insert_preview`] don't observe the
 /// value because the store overwrites the entity's id immediately.
 fn mk_dummy_id() -> EntityId {
     EntityIdAllocator::new().allocate()
@@ -84,10 +84,10 @@ fn wiggle(entity: EntityId) -> CheckpointKind {
 
 #[test]
 fn insert_preview_then_promote_lands_in_history() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let alloc_id = {
         // Burn a few ids so we can verify preview keys are minted
-        // by Document::insert_preview.
+        // by Session::insert_preview.
         store.allocator.allocate()
     };
     let _ = alloc_id;
@@ -121,7 +121,7 @@ fn insert_preview_then_promote_lands_in_history() {
 
 #[test]
 fn promote_preview_unknown_id_returns_not_a_preview() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let mut alloc = EntityIdAllocator::new();
     let stranger = alloc.allocate();
     let err = store
@@ -133,14 +133,14 @@ fn promote_preview_unknown_id_returns_not_a_preview() {
             "no",
         )
         .unwrap_err();
-    assert!(matches!(err, DocumentError::NotAPreview { .. }));
+    assert!(matches!(err, SessionError::NotAPreview { .. }));
 }
 
 // ── Live membership: derived from history + transient, not metadata ──
 
 #[test]
 fn live_membership_lists_committed_then_preview() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     // Insert + promote A: a committed entity.
     let a = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
@@ -174,7 +174,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     // checkpoint, so navigating back past an entity's checkpoint drops
     // it from ids/count/iter — even though its side-table metadata is
     // never GC'd. The old metadata-keyed implementation got this wrong.
-    let mut store = Document::new();
+    let mut store = Session::new();
     let x = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "x".to_string(),
@@ -207,7 +207,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
 
 #[test]
 fn reset_clears_history_metadata_and_transient() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let _id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "x".to_string(),
@@ -227,16 +227,16 @@ fn reset_clears_history_metadata_and_transient() {
         .is_empty());
 }
 
-// ── SceneChange spine emission ────────────────────────────────────
+// ── SessionUpdate spine emission ────────────────────────────────────
 //
 // These assert the *funnel*: each mutator emits exactly the expected
-// `SceneChange` (or none). The Full/Delta projection of those changes is
+// `SessionUpdate` (or none). The Full/Delta projection of those changes is
 // the `PluginBroadcaster`'s job and is tested in `plugin_driver`.
 
 /// Drive an entity through promote_preview → drain so the change queue
 /// is at a known-empty starting point.
-fn store_with_protein(n_residues: usize) -> (Document, EntityId) {
-    let mut store = Document::new();
+fn store_with_protein(n_residues: usize) -> (Session, EntityId) {
+    let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), n_residues),
         "p".to_string(),
@@ -251,66 +251,66 @@ fn store_with_protein(n_residues: usize) -> (Document, EntityId) {
             "promote",
         )
         .expect("promote_preview");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
     (store, id)
 }
 
 #[test]
-fn pending_changes_empty_at_construction() {
-    let mut store = Document::new();
-    assert!(store.take_scene_changes().is_empty());
+fn pending_updates_empty_at_construction() {
+    let mut store = Session::new();
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
 fn insert_preview_emits_preview_added() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "p".to_string(),
         EntityOrigin::Loaded,
     );
-    let changes = store.take_scene_changes();
+    let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::PreviewAdded]),
+        matches!(changes.as_slice(), [SessionUpdate::PreviewAdded]),
         "got {changes:?}",
     );
     // Drain is destructive — second take returns empty.
-    assert!(store.take_scene_changes().is_empty());
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
 fn remove_preview_emits_preview_discarded() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
         EntityOrigin::Loaded,
     );
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
     assert!(store.remove_preview(id));
-    let changes = store.take_scene_changes();
+    let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::PreviewDiscarded]),
+        matches!(changes.as_slice(), [SessionUpdate::PreviewDiscarded]),
         "got {changes:?}",
     );
 }
 
 #[test]
 fn remove_preview_unknown_emits_nothing() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     assert!(!store.remove_preview(mk_dummy_id()));
-    assert!(store.take_scene_changes().is_empty());
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
 fn promote_preview_emits_head_moved() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_string(),
         EntityOrigin::Loaded,
     );
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
     store
         .promote_preview(
             id,
@@ -320,27 +320,27 @@ fn promote_preview_emits_head_moved() {
             "promote",
         )
         .expect("promote_preview");
-    let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
+    let changes = store.take_updates();
+    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
 fn begin_action_emits_nothing() {
     let (mut store, id) = store_with_protein(2);
     store.begin_action(wiggle(id), "wiggle").expect("begin_action");
-    assert!(store.take_scene_changes().is_empty());
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
 fn action_update_emits_tentative_edit() {
-    // SceneChange is signal-only (RX13): payload coords are gone — the
-    // RenderProjector rebuilds from `Document::head_assembly`. The test
+    // SessionUpdate is signal-only (RX13): payload coords are gone — the
+    // RenderProjector rebuilds from `Session::head_assembly`. The test
     // asserts the funnel shape (one tentative Edit) and that the
     // post-mutation coords are reachable through the document; the
     // payload itself is no longer on the spine.
     let (mut store, id) = store_with_protein(2);
     store.begin_action(wiggle(id), "wiggle").expect("begin_action");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
 
     store
         .action_update(None, None, None, |e| {
@@ -350,9 +350,9 @@ fn action_update_emits_tentative_edit() {
         })
         .expect("action_update");
 
-    let changes = store.take_scene_changes();
+    let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::Edit { tentative: true }]),
+        matches!(changes.as_slice(), [SessionUpdate::Edit { tentative: true }]),
         "expected one tentative Edit, got {changes:?}",
     );
     let head = store.head_assembly();
@@ -378,21 +378,21 @@ fn commit_action_emits_head_moved() {
         .expect("action_update");
     // Drain begin (none) + action_update (tentative Edit) so the next
     // take only sees the commit.
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
 
     store.commit_action().expect("commit_action");
-    let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
+    let changes = store.take_updates();
+    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
 fn abort_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     store.begin_action(wiggle(id), "wiggle").expect("begin_action");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
     store.abort_action().expect("abort_action");
-    let changes = store.take_scene_changes();
-    assert!(matches!(changes.as_slice(), [SceneChange::HeadMoved]), "got {changes:?}");
+    let changes = store.take_updates();
+    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
 }
 
 #[test]
@@ -403,32 +403,32 @@ fn undo_then_redo_each_emit_head_moved() {
         .action_update(None, None, None, |_| {})
         .expect("action_update");
     store.commit_action().expect("commit_action");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
 
     store.undo().expect("undo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
+        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
         "undo emits HeadMoved",
     );
     store.redo(None).expect("redo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
+        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
         "redo emits HeadMoved",
     );
 }
 
 #[test]
 fn undo_at_root_emits_nothing() {
-    let mut store = Document::new();
+    let mut store = Session::new();
     assert_eq!(store.undo().expect("undo"), None);
-    assert!(store.take_scene_changes().is_empty());
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
 fn redo_at_leaf_emits_nothing() {
     let (mut store, _id) = store_with_protein(2);
     assert_eq!(store.redo(None).expect("redo"), None);
-    assert!(store.take_scene_changes().is_empty());
+    assert!(store.take_updates().is_empty());
 }
 
 #[test]
@@ -440,11 +440,11 @@ fn lane_undo_emits_head_moved() {
         .action_update(None, None, None, |_| {})
         .expect("action_update");
     store.commit_action().expect("commit_action");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
 
     store.lane_undo(id, original).expect("lane_undo");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
+        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
         "lane_undo emits HeadMoved",
     );
 }
@@ -468,11 +468,11 @@ fn jump_checkpoint_emits_head_moved() {
             "promote b",
         )
         .expect("promote b");
-    let _ = store.take_scene_changes();
+    let _ = store.take_updates();
 
     store.jump_checkpoint(first).expect("jump_checkpoint");
     assert!(
-        matches!(store.take_scene_changes().as_slice(), [SceneChange::HeadMoved]),
+        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
         "jump_checkpoint emits HeadMoved",
     );
 }
@@ -481,14 +481,14 @@ fn jump_checkpoint_emits_head_moved() {
 fn set_head_scores_emits_no_scene_change() {
     // Scores are off-spine (decision B): `set_head_scores` writes the
     // canonical raw/game numbers to the head checkpoint and bumps the
-    // history's `live_version`, but does not emit a `SceneChange`. The
+    // history's `live_version`, but does not emit a `SessionUpdate`. The
     // GUI projector consumes the new score via `HistorySyncCursor`;
     // plugins never see host scores.
     let (mut store, _id) = store_with_protein(2);
     let before = store.history().live_version();
     store.set_head_scores(Some(1.0), Some(2.0));
-    let changes = store.take_scene_changes();
-    assert!(changes.is_empty(), "set_head_scores emits no SceneChange, got {changes:?}");
+    let changes = store.take_updates();
+    assert!(changes.is_empty(), "set_head_scores emits no SessionUpdate, got {changes:?}");
     assert_ne!(
         before,
         store.history().live_version(),
@@ -510,9 +510,9 @@ fn reset_clears_pending_then_emits_one_head_moved() {
 
     store.reset();
 
-    let changes = store.take_scene_changes();
+    let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SceneChange::HeadMoved]),
+        matches!(changes.as_slice(), [SessionUpdate::HeadMoved]),
         "reset drops pending changes and emits exactly one HeadMoved, got {changes:?}",
     );
 }

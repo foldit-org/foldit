@@ -1,6 +1,6 @@
 //! Authoritative document atop the two-layer [`History`].
 //!
-//! `Document` owns:
+//! `Session` owns:
 //! - [`History`] — the full per-entity timelines + checkpoint graph.
 //! - `transient: IndexMap<EntityId, Arc<MoleculeEntity>>` — preview /
 //!   scene-resident entities that are visible in [`Self::head_assembly`]
@@ -22,13 +22,13 @@
 //! here; the single-root invariant from G3 is preserved end to end.
 //!
 //! **Emit invariant.** Every public mutator is a shim: it performs its
-//! state change, then emits exactly one [`SceneChange`] (or none, where
+//! state change, then emits exactly one [`SessionUpdate`] (or none, where
 //! the change is unobservable) through the [`Self::apply`] funnel. The
-//! `Document` holds no projection logic — it neither serializes
+//! `Session` holds no projection logic — it neither serializes
 //! assemblies nor knows about plugins or viso. `App` drains the emitted
-//! changes via [`Self::take_scene_changes`] and routes them to the
+//! changes via [`Self::take_updates`] and routes them to the
 //! projectors (the `PluginBroadcaster` owns the Full/Delta plugin
-//! fan-out; the render + GUI projectors follow). Because `pending_changes`
+//! fan-out; the render + GUI projectors follow). Because `pending_updates`
 //! is private and `apply` is its sole pusher, "one emit per mutator" is a
 //! structural invariant, not a runtime assertion.
 
@@ -46,15 +46,15 @@ use crate::history::{
 
 mod apply;
 mod change;
-pub use change::SceneChange;
+pub use change::SessionUpdate;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 
 // ── Errors ─────────────────────────────────────────────────────────────
 
-/// Error returned by every fallible [`Document`] operation.
+/// Error returned by every fallible [`Session`] operation.
 #[derive(Debug, thiserror::Error)]
-pub enum DocumentError {
+pub enum SessionError {
     /// `History`-layer refusal (state machine, action lock, missing id,
     /// etc.). See [`HistoryError`].
     #[error("{0}")]
@@ -69,10 +69,10 @@ pub enum DocumentError {
     ActionRequiresEntity,
 }
 
-// ── Document ───────────────────────────────────────────────────────────
+// ── Session ───────────────────────────────────────────────────────────
 
 /// Authoritative document over the whole scene.
-pub struct Document {
+pub struct Session {
     /// Per-entity metadata. `Arc`-shared so unchanged entries alias
     /// across history operations (no metadata serialization fan-out
     /// per mutation).
@@ -86,20 +86,20 @@ pub struct Document {
     allocator: EntityIdAllocator,
     /// The full two-layer history.
     history: History,
-    /// Drain queue of [`SceneChange`]s emitted by this store's mutators
+    /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
-    /// [`Self::take_scene_changes`] and routes the batch to the
+    /// [`Self::take_updates`] and routes the batch to the
     /// projectors. Always empty in steady state.
-    pending_changes: Vec<SceneChange>,
+    pending_updates: Vec<SessionUpdate>,
 }
 
-impl Default for Document {
+impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Document {
+impl Session {
     /// Build an empty store. The internal [`History`] is seeded with no
     /// entities and an empty bonds set; call [`Self::reset`] when a
     /// puzzle loads.
@@ -110,7 +110,7 @@ impl Document {
             transient: IndexMap::new(),
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
-            pending_changes: Vec::new(),
+            pending_updates: Vec::new(),
         }
     }
 
@@ -229,19 +229,19 @@ impl Document {
         &mut self,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<CheckpointId, DocumentError> {
-        let entity = kind.entity().ok_or(DocumentError::ActionRequiresEntity)?;
+    ) -> Result<CheckpointId, SessionError> {
+        let entity = kind.entity().ok_or(SessionError::ActionRequiresEntity)?;
         let snap_id = self
             .history
             .checkpoint(self.history.checkpoints().head())
             .and_then(|h| h.entity_heads.get(&entity).copied())
-            .ok_or(DocumentError::History(HistoryError::UnknownEntity {
+            .ok_or(SessionError::History(HistoryError::UnknownEntity {
                 entity,
             }))?;
         let snap = self
             .history
             .snapshot(entity, snap_id)
-            .ok_or(DocumentError::History(HistoryError::UnknownSnapshot {
+            .ok_or(SessionError::History(HistoryError::UnknownSnapshot {
                 entity,
                 id: snap_id,
             }))?;
@@ -254,7 +254,7 @@ impl Document {
     /// checkpoint's score / filter status. Bumps `live_version` only
     /// (no DAG topology change).
     ///
-    /// Emits one tentative [`SceneChange::Edit`] carrying the locked
+    /// Emits one tentative [`SessionUpdate::Edit`] carrying the locked
     /// entity's post-mutation coordinates. The plugin broadcaster skips
     /// tentative edits (plugins don't see live frames); it completes the
     /// spine for the render projector.
@@ -264,30 +264,30 @@ impl Document {
         game_score: Option<f64>,
         filter_status: Option<FilterStatus>,
         mutate: impl FnOnce(&mut MoleculeEntity),
-    ) -> Result<(), DocumentError> {
+    ) -> Result<(), SessionError> {
         self.history
             .action_update(raw_score, game_score, filter_status, mutate)?;
         // A tentative live frame: render projector picks it up via the
         // spine and rebuilds from `head_assembly`. Payload-less because
-        // the projectors re-derive from `Document` anyway.
-        self.apply(SceneChange::Edit { tentative: true });
+        // the projectors re-derive from `Session` anyway.
+        self.apply(SessionUpdate::Edit { tentative: true });
         Ok(())
     }
 
     /// Commit the in-flight action. Flips tentative flags; recomputes
     /// best cursors; transitions to `Idle`. Returns the now-committed
     /// checkpoint id.
-    pub fn commit_action(&mut self) -> Result<CheckpointId, DocumentError> {
+    pub fn commit_action(&mut self) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.commit_action()?;
-        self.apply(SceneChange::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved);
         Ok(ckpt)
     }
 
     /// Abort the in-flight action. Removes the tentative snapshot and
     /// checkpoint; head pointers fall back to their parents.
-    pub fn abort_action(&mut self) -> Result<(), DocumentError> {
+    pub fn abort_action(&mut self) -> Result<(), SessionError> {
         self.history.abort_action()?;
-        self.apply(SceneChange::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved);
         Ok(())
     }
 
@@ -296,10 +296,10 @@ impl Document {
 
     /// Move checkpoint head to its parent. Returns the new head id, or
     /// `None` if already at root (in which case nothing is emitted).
-    pub fn undo(&mut self) -> Result<Option<CheckpointId>, DocumentError> {
+    pub fn undo(&mut self) -> Result<Option<CheckpointId>, SessionError> {
         let moved = self.history.undo()?;
         if moved.is_some() {
-            self.apply(SceneChange::HeadMoved);
+            self.apply(SessionUpdate::HeadMoved);
         }
         Ok(moved)
     }
@@ -310,7 +310,7 @@ impl Document {
     pub fn redo(
         &mut self,
         branch: Option<CheckpointId>,
-    ) -> Result<Option<CheckpointId>, DocumentError> {
+    ) -> Result<Option<CheckpointId>, SessionError> {
         let head = self.history.checkpoints().head();
         let kids: Vec<CheckpointId> = self
             .history
@@ -321,24 +321,24 @@ impl Document {
             (_, []) => return Ok(None),
             (Some(b), kids) if kids.contains(&b) => {}
             (Some(_), _) => {
-                return Err(DocumentError::History(HistoryError::NoSuchBranch))
+                return Err(SessionError::History(HistoryError::NoSuchBranch))
             }
             (None, [_]) => {}
             (None, _) => {
-                return Err(DocumentError::History(HistoryError::AmbiguousBranch))
+                return Err(SessionError::History(HistoryError::AmbiguousBranch))
             }
         }
         let moved = self.history.redo(branch)?;
         if moved.is_some() {
-            self.apply(SceneChange::HeadMoved);
+            self.apply(SessionUpdate::HeadMoved);
         }
         Ok(moved)
     }
 
     /// Jump checkpoint head to `id`.
-    pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, DocumentError> {
+    pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.jump_checkpoint(id)?;
-        self.apply(SceneChange::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved);
         Ok(ckpt)
     }
 
@@ -348,9 +348,9 @@ impl Document {
         &mut self,
         entity: EntityId,
         target: EntitySnapshotId,
-    ) -> Result<CheckpointId, DocumentError> {
+    ) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.lane_undo(entity, target)?;
-        self.apply(SceneChange::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved);
         Ok(ckpt)
     }
 
@@ -360,21 +360,21 @@ impl Document {
         &mut self,
         entity: EntityId,
         branch: Option<EntitySnapshotId>,
-    ) -> Result<CheckpointId, DocumentError> {
+    ) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.lane_redo(entity, branch)?;
-        self.apply(SceneChange::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved);
         Ok(ckpt)
     }
 
     // ── Curation ──────────────────────────────────────────────────────
 
     /// Pin a checkpoint as user-marked best.
-    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), DocumentError> {
+    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
         Ok(self.history.pin_checkpoint(id)?)
     }
 
     /// Unpin a checkpoint.
-    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), DocumentError> {
+    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
         Ok(self.history.unpin_checkpoint(id)?)
     }
 
@@ -383,13 +383,13 @@ impl Document {
         &mut self,
         id: CheckpointId,
         exclude: bool,
-    ) -> Result<(), DocumentError> {
+    ) -> Result<(), SessionError> {
         Ok(self.history.set_exclude_from_best(id, exclude)?)
     }
 
     /// Stamp scores on the current head checkpoint in place. Canonical
     /// score write: updates the head checkpoint and bumps the History's
-    /// `live_version`; emits no `SceneChange`. Scores are off-spine:
+    /// `live_version`; emits no `SessionUpdate`. Scores are off-spine:
     /// plugins compute their own, and the GUI projector picks up the
     /// new score by polling `live_version` through its
     /// `HistorySyncCursor`.
@@ -414,7 +414,7 @@ impl Document {
         let _ = self
             .metadata
             .insert(id, Arc::new(EntityMetadata::new(name, origin)));
-        self.apply(SceneChange::PreviewAdded);
+        self.apply(SessionUpdate::PreviewAdded);
         id
     }
 
@@ -425,7 +425,7 @@ impl Document {
             return false;
         }
         let _ = self.metadata.shift_remove(&id);
-        self.apply(SceneChange::PreviewDiscarded);
+        self.apply(SessionUpdate::PreviewDiscarded);
         true
     }
 
@@ -441,11 +441,11 @@ impl Document {
         origin: Option<EntityOrigin>,
         name: Option<String>,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<CheckpointId, DocumentError> {
+    ) -> Result<CheckpointId, SessionError> {
         let payload = self
             .transient
             .shift_remove(&id)
-            .ok_or(DocumentError::NotAPreview { id })?;
+            .ok_or(SessionError::NotAPreview { id })?;
 
         if let Some(meta_arc) = self.metadata.get_mut(&id) {
             let meta = Arc::make_mut(meta_arc);
@@ -459,7 +459,7 @@ impl Document {
 
         match self.history.add_entity(id, payload, kind, label.into()) {
             Ok(ckpt) => {
-                self.apply(SceneChange::HeadMoved);
+                self.apply(SessionUpdate::HeadMoved);
                 Ok(ckpt)
             }
             Err(e) => {
@@ -470,7 +470,7 @@ impl Document {
                 // ActiveActionInProgress and EntityAlreadyExists, both
                 // of which are caller-fixable; rebuilding the payload
                 // from a re-snapshotted entity is a section-4 concern.
-                Err(DocumentError::History(e))
+                Err(SessionError::History(e))
             }
         }
     }
@@ -494,8 +494,8 @@ impl Document {
         // intentionally NOT cleared (it lives on `PluginDriver`): the
         // post-reset empty-assembly diff still advances the host's gen
         // counter, so plugins never see `from_gen` go backwards.
-        self.pending_changes.clear();
-        self.apply(SceneChange::HeadMoved);
+        self.pending_updates.clear();
+        self.apply(SessionUpdate::HeadMoved);
     }
 
     // ── Backend helpers ───────────────────────────────────────────────

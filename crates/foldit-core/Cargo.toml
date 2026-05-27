@@ -2,7 +2,7 @@
 name = "foldit-core"
 version = "0.1.0"
 edition = "2021"
-description = "Pure-logic core: document, history, plugin driver, projectors, puzzle loading"
+description = "Pure-logic core: session, history, plugin driver, projectors, puzzle loading"
 
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }

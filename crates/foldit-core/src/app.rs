@@ -1,6 +1,6 @@
 //! Foldit application state — host-agnostic.
 //!
-//! `App` owns the `Document`, `PluginDriver` (which carries the
+//! `App` owns the `Session`, `PluginDriver` (which carries the
 //! orchestrator + scene-broadcaster), the two projectors
 //! (`RenderProjector`, `GuiProjector`), and the cross-cutting
 //! bookkeeping (puzzle metadata, viso engine handle, dirty-flags,
@@ -26,7 +26,7 @@ use viso::{
     Focus, InputEvent, InputProcessor, VisoCommand, VisoEngine,
 };
 
-use crate::document::{Document, DocumentError, EntityOrigin};
+use crate::session::{Session, SessionError, EntityOrigin};
 use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
@@ -103,7 +103,7 @@ fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
 
 /// Project the backend `History` into the wire payload consumed by
 /// the `HistoryPanel`.
-fn project_history(store: &Document) -> HistorySection {
+fn project_history(store: &Session) -> HistorySection {
     let history = store.history();
     let cps = history.checkpoints();
     let head_id = cps.head();
@@ -177,7 +177,7 @@ enum HistoryOutcome {
 /// Read the score for the *current head checkpoint*, projected through
 /// the active scoring mode. Replaces the old `App::latest_score` field
 /// (G1: derive, don't store).
-fn head_score(store: &Document, mode: ScoringMode) -> Option<f64> {
+fn head_score(store: &Session, mode: ScoringMode) -> Option<f64> {
     let head_id = store.history().checkpoints().head();
     let ckpt = store.history().checkpoint(head_id)?;
     score_for_mode(ckpt.raw_score, ckpt.game_score, mode)
@@ -195,7 +195,7 @@ fn head_score(store: &Document, mode: ScoringMode) -> Option<f64> {
 /// stub clutters the history (`1bfe` produced 3 root-level dots: one
 /// `Loaded` + two `AddEntity` for chain A and a water).
 fn load_entity_into_history(
-    store: &mut Document,
+    store: &mut Session,
     entity: molex::MoleculeEntity,
     name: String,
 ) -> Option<EntityId> {
@@ -233,20 +233,20 @@ fn load_entity_into_history(
 /// focus when an op-dispatch carries no `focused_entity_id`. Wave-1
 /// puzzles ship 1-chain proteins; a missing focus is the rule, not
 /// the exception. Returns `None` when no protein entity exists.
-fn first_protein_entity(store: &Document) -> Option<EntityId> {
+fn first_protein_entity(store: &Session) -> Option<EntityId> {
     store.proteins().next().map(|(eid, _, _)| eid)
 }
 
 /// Bridge a runner [`EntityId`](foldit_runner::orchestrator::EntityId)
 /// to the orchestrator's [`EntityType`](foldit_runner::orchestrator::EntityType)
-/// by looking the entity up in the [`Document`] and mapping the
+/// by looking the entity up in the [`Session`] and mapping the
 /// `MoleculeEntity` variant 1:1. Used by `dispatch_op` callers so the
 /// orchestrator can pick per-entity locks instead of falling back to
 /// `LockTargets::SessionWide`. Returns `None` when the runner id has no
 /// matching molex id in the current head (no committed lane or preview).
 #[cfg(not(target_arch = "wasm32"))]
 fn entity_type_of(
-    store: &Document,
+    store: &Session,
     id: foldit_runner::orchestrator::EntityId,
 ) -> Option<foldit_runner::orchestrator::EntityType> {
     use foldit_runner::orchestrator::EntityType;
@@ -291,7 +291,7 @@ fn resolve_transition(
 ///
 /// Returns `true` if a payload swap actually fired.
 fn apply_streaming_assembly(
-    store: &mut Document,
+    store: &mut Session,
     incoming: &molex::Assembly,
     raw_score: Option<f64>,
 ) -> bool {
@@ -317,7 +317,7 @@ fn apply_streaming_assembly(
 pub struct App {
     engine: Option<VisoEngine>,
     input: InputProcessor,
-    store: Document,
+    store: Session,
     ui_dirty: DirtyFlags,
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
@@ -372,7 +372,7 @@ impl App {
         Self {
             engine: None,
             input: InputProcessor::new(),
-            store: Document::new(),
+            store: Session::new(),
             ui_dirty: DirtyFlags::empty(),
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
@@ -680,7 +680,7 @@ impl App {
     /// Query every plugin's `score` op, merge totals into the head
     /// checkpoint (bumping `live_version` for the GuiProjector to pick
     /// up), and push per-residue scores directly to viso for
-    /// color-by-score display modes. Off the `SceneChange` spine
+    /// color-by-score display modes. Off the `SessionUpdate` spine
     /// entirely: scores have two consumers (the GuiProjector via
     /// `HistorySyncCursor` and viso via a direct overlay push) and
     /// neither needs to ride the spine (RX10 decision B).
@@ -709,13 +709,13 @@ impl App {
     /// either way.
     #[cfg(not(target_arch = "wasm32"))]
     fn refresh_scores(&mut self) {
-        use foldit_runner::orchestrator::SessionContext;
+        use foldit_runner::orchestrator::DispatchContext;
         use std::collections::HashMap;
 
         let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
             return;
         };
-        let reports = orch.collect_scores(&SessionContext::default());
+        let reports = orch.collect_scores(&DispatchContext::default());
         if reports.is_empty() {
             return;
         }
@@ -1167,7 +1167,7 @@ impl App {
     fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
         use foldit_runner::orchestrator::{
             EntityId as RunnerEntityId, ResidueRef,
-            SessionContext as RunnerSessionContext, TransitionKind,
+            DispatchContext as RunnerDispatchContext, TransitionKind,
         };
 
         let Some(engine) = self.engine.as_ref() else { return false };
@@ -1198,7 +1198,7 @@ impl App {
         let params = crate::pull_drag::build_start_params(&route);
         let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
 
-        let ctx = RunnerSessionContext {
+        let ctx = RunnerDispatchContext {
             focused_entity_id: Some(RunnerEntityId(u64::from(route.entity_id.raw()))),
             selection: vec![ResidueRef {
                 entity_id: RunnerEntityId(u64::from(route.entity_id.raw())),
@@ -1332,7 +1332,7 @@ impl App {
 
     pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
         // Undo / Redo are not plugin ops -- they operate on the
-        // Document history directly, with `&mut self` to reach
+        // Session history directly, with `&mut self` to reach
         // both store + engine.
         match action {
             foldit_gui::ActionId::Undo => self.handle_undo(),
@@ -1342,7 +1342,7 @@ impl App {
 
     /// Dispatch a plugin op by op-id. Resolves the op against the
     /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
-    /// builds a `SessionContext` from the GUI-provided focus +
+    /// builds a `DispatchContext` from the GUI-provided focus +
     /// selection. Op-ids unknown to the registry are logged and
     /// dropped (the catalog couldn't have surfaced them, so this is
     /// either a stale GUI cache or a misrouted message).
@@ -1355,7 +1355,7 @@ impl App {
 
             use foldit_runner::orchestrator::{
                 EntityId as RunnerEntityId, ResidueRef,
-                SessionContext as RunnerSessionContext,
+                DispatchContext as RunnerDispatchContext,
             };
 
             let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
@@ -1396,7 +1396,7 @@ impl App {
                 );
             let plugin_id = cached.plugin_id.clone();
 
-            let ctx = RunnerSessionContext {
+            let ctx = RunnerDispatchContext {
                 focused_entity_id: op.focused_entity_id.map(RunnerEntityId),
                 selection: op
                     .selection
@@ -1793,7 +1793,7 @@ impl App {
     }
 
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
-    /// `Document` method. Refusals are logged; the GUI surface
+    /// `Session` method. Refusals are logged; the GUI surface
     /// shows the result by virtue of the head not moving (no separate
     /// toast / error channel — `HistoryError::EntityLocked` only
     /// fires while the user's own action is still running, where the
@@ -1804,7 +1804,7 @@ impl App {
         if self.engine.is_none() {
             return;
         }
-        let result: Result<HistoryOutcome, DocumentError> = match cmd {
+        let result: Result<HistoryOutcome, SessionError> = match cmd {
             HistoryCommand::JumpCheckpoint { id } => self
                 .store
                 .jump_checkpoint(id.into_inner())
@@ -2083,7 +2083,7 @@ impl App {
             self.frontend.set_scene_entities(scene_entities);
             let focused = match engine.focus() {
                 Focus::Entity(eid) => Some(eid.raw()),
-                Focus::Session => None,
+                Focus::All => None,
             };
             self.frontend.set_focused_entity(focused);
         }
@@ -2126,9 +2126,9 @@ impl App {
     /// Drive one frame.
     ///
     /// Order:
-    /// 1. drain pending plugin updates (apply to `Document`; emits
-    ///    `SceneChange`s through the funnel).
-    /// 2. drain the `SceneChange` spine in one go.
+    /// 1. drain pending plugin updates (apply to `Session`; emits
+    ///    `SessionUpdate`s through the funnel).
+    /// 2. drain the `SessionUpdate` spine in one go.
     /// 3. route the batch: plugin broadcaster fan-out and render
     ///    projector publish (both no-op on empty batches).
     /// 4. poll plugin scores (refresh head scores, ui_dirty SCORE/HISTORY).
@@ -2146,7 +2146,7 @@ impl App {
         //      `pump_scene_changes` per-event, but that race-condition'd
         //      against the render projector reading the same spine, so
         //      the per-handler pumps were removed in RX13.
-        let changes = self.store.take_scene_changes();
+        let changes = self.store.take_updates();
         if !changes.is_empty() {
             if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
                 self.plugin_driver

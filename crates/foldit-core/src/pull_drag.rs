@@ -32,7 +32,7 @@ use molex::{Element, MoleculeEntity};
 #[cfg(not(target_arch = "wasm32"))]
 use viso::{AtomRef, PullInfo};
 
-use crate::document::Document;
+use crate::session::Session;
 
 /// Op id for the residue-anchored cart-pull (backbone pull).
 pub(crate) const OP_PULL_BACKBONE: &str = "ActionLocalMinimizePull";
@@ -58,7 +58,7 @@ pub(crate) struct PullRoute {
     /// Entity-flat 0-based residue index (matches `viso::AtomRef`).
     pub flat_residue: u32,
     /// Molex entity id of the picked entity. Used both for the
-    /// SessionContext focus and to compute the rosetta-pose residue
+    /// DispatchContext focus and to compute the rosetta-pose residue
     /// from `residue_in_entity` once multi-entity routing lands.
     pub entity_id: MolexEntityId,
 }
@@ -88,7 +88,7 @@ pub(crate) struct PullDrag {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn route_atom_pick(
-    store: &Document,
+    store: &Session,
     entity_id: u32,
     atom_idx: u32,
 ) -> Option<PullRoute> {
@@ -138,7 +138,7 @@ pub(crate) fn route_atom_pick(
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn route_residue_pick(
-    store: &Document,
+    store: &Session,
     flat_residue: u32,
     atom_name: &str,
     entity_id: MolexEntityId,

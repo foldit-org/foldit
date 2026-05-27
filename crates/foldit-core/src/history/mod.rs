@@ -457,7 +457,7 @@ impl History {
     /// `entity_id → root_snapshot`. Refused while `Active` (the running
     /// action freezes the assembly per § Lock semantics).
     ///
-    /// Used by [`crate::document::Document::promote_preview`] to
+    /// Used by [`crate::session::Session::promote_preview`] to
     /// move a previously-transient entity into history.
     pub fn add_entity(
         &mut self,
