@@ -2465,6 +2465,30 @@ impl App {
     // never left empty in the outer map. Removing the last residue on
     // an entity removes the entity entry.
 
+    /// Flatten [`App::selection`] through the engine's per-entity
+    /// residue offsets and overwrite the GPU residue selection. No-op
+    /// before an engine is attached or before the first full rebuild
+    /// has produced an offsets map. Entities absent from the offsets
+    /// map (e.g. not yet meshed) contribute nothing.
+    fn flush_selection_to_viso(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        let mut flat: Vec<i32> = Vec::new();
+        {
+            let offsets = engine.entity_residue_offsets();
+            for (eid, residues) in &self.selection {
+                let Some(&base) = offsets.get(eid) else {
+                    continue;
+                };
+                for r in residues {
+                    flat.push((base + *r) as i32);
+                }
+            }
+        }
+        engine.set_selection(flat);
+    }
+
     /// Mark a single residue on `entity` as selected. Idempotent:
     /// re-selecting an already-selected residue is a no-op.
     pub(crate) fn select_residue(&mut self, entity: EntityId, residue_index: u32) {
@@ -2472,6 +2496,7 @@ impl App {
             .entry(entity)
             .or_default()
             .insert(residue_index);
+        self.flush_selection_to_viso();
     }
 
     /// Mark a single residue on `entity` as deselected. Idempotent on
@@ -2506,6 +2531,7 @@ impl App {
     /// Drop the entire selection across all entities.
     pub(crate) fn clear_selection(&mut self) {
         self.selection.clear();
+        self.flush_selection_to_viso();
     }
 
     /// Flip the selected state of `(entity, residue_index)` and return
@@ -2520,6 +2546,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
+        self.flush_selection_to_viso();
         now_selected
     }
 
