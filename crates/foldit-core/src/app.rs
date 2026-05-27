@@ -25,7 +25,8 @@ use foldit_gui::{
 use foldit_runner::Orchestrator;
 use molex::entity::molecule::id::EntityId;
 use viso::{
-    Focus, InputEvent, InputProcessor, VisoCommand, VisoEngine,
+    classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus,
+    KeyBindings, VisoEngine,
 };
 
 use crate::session::{Session, SessionError, EntityOrigin};
@@ -318,7 +319,7 @@ fn apply_streaming_assembly(
 /// the [`AppState`] machine that gates the Loading → InPuzzle transition.
 pub struct App {
     engine: Option<VisoEngine>,
-    input: InputProcessor,
+    keybindings: KeyBindings,
     store: Session,
     ui_dirty: DirtyFlags,
     plugin_driver: PluginDriver,
@@ -378,7 +379,7 @@ impl App {
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
         Self {
             engine: None,
-            input: InputProcessor::new(),
+            keybindings: KeyBindings::default(),
             store: Session::new(),
             ui_dirty: DirtyFlags::empty(),
             plugin_driver: PluginDriver::new(),
@@ -856,40 +857,46 @@ impl App {
     /// On a viso built-in miss, falls through to the plugin hotkey
     /// catalog (built-ins win by being checked first).
     pub fn handle_keybinding(&mut self, key_str: &str) -> bool {
-        let Some(cmd) = self.input.handle_key_press(key_str) else {
-            return self.try_hotkey_dispatch(key_str);
-        };
-        let Some(engine) = &mut self.engine else { return false };
-
-        // Actions that need foldit-specific pre/post processing
-        match cmd {
-            VisoCommand::ToggleTrajectory => {
+        // foldit-specific overrides: trajectory load-on-demand, ESC =
+        // cancel-in-flight-op, and the dropped auto-rotate binding.
+        // These short-circuit the generic viso keybinding dispatch.
+        match key_str {
+            "KeyT" => {
+                let Some(engine) = &mut self.engine else { return false };
                 if engine.has_trajectory() {
-                    engine.execute(VisoCommand::ToggleTrajectory);
+                    engine.toggle_trajectory();
                 } else if let Some(path) = trajectory_path_from_args() {
                     engine.load_trajectory(std::path::Path::new(&path));
                 } else {
                     log::info!("No trajectory loaded. Pass --trajectory <path.dcd> to load one.");
                 }
+                return true;
             }
-            VisoCommand::ClearSelection => {
+            "Escape" => {
                 #[cfg(not(target_arch = "wasm32"))]
                 self.plugin_driver.cancel_all_active_streams();
                 self.cancel_operations();
+                return true;
             }
-            VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
-                engine.execute(cmd);
-                log::info!(
-                    "Focus: {}",
-                    render_projector::focus_description(&self.store, &engine.focus())
-                );
-                // Focus-driven lock update lands when the bridge
-                // plugin's `update_assembly` + selection-derived locks
-                // are wired.
-                self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
-            }
-            // All other commands: delegate entirely to viso
-            other => { engine.execute(other); }
+            // Auto-rotate keybinding is intentionally dropped in foldit.
+            "KeyR" => return true,
+            _ => {}
+        }
+
+        let Some(engine) = &mut self.engine else { return false };
+
+        if !self.keybindings.dispatch(key_str, engine) {
+            return self.try_hotkey_dispatch(key_str);
+        }
+
+        // Focus-changing keys need a GUI dirty flush; viso's built-in
+        // ran above but doesn't know about foldit's projector cadence.
+        if matches!(key_str, "Tab" | "Backquote") {
+            log::info!(
+                "Focus: {}",
+                render_projector::focus_description(&self.store, &engine.focus())
+            );
+            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
         }
         true
     }
@@ -908,7 +915,6 @@ impl App {
             return;
         };
         log::info!("Cancelling current operation");
-        engine.execute(VisoCommand::ClearSelection);
         let preview_ids: Vec<EntityId> = self.store.preview_ids().collect();
         if !preview_ids.is_empty() {
             for id in &preview_ids {
@@ -943,14 +949,19 @@ impl App {
         {
             match &input {
                 ViewportInput::PointerMove { x, y, .. }
-                    if self.input.mouse_pressed()
+                    if self
+                        .engine
+                        .as_ref()
+                        .is_some_and(viso::VisoEngine::mouse_pressed)
                         && self.plugin_driver.stream_host.pull_drag.is_none() =>
                 {
                     if self.try_begin_pull_drag(*x, *y) {
                         // viso recorded the press; drop its mouse
                         // state so the now-suppressed pointer-up
                         // can't fire a stray click → selection.
-                        self.input.release_mouse_state();
+                        if let Some(engine) = self.engine.as_mut() {
+                            engine.release_mouse_state();
+                        }
                         self.update_pull_drag(*x, *y);
                         self.finalize_viewport_input();
                         return;
@@ -989,6 +1000,11 @@ impl App {
 
         let Some(engine) = &mut self.engine else { return };
 
+        // `Some` only if a left-button release classified as a click;
+        // deferred so the selection mutations below run after the
+        // `engine` borrow ends.
+        let mut pending_click: Option<ClickEvent> = None;
+
         match input {
             ViewportInput::PointerDown {
                 x, y, button, shift, ..
@@ -999,20 +1015,10 @@ impl App {
                     1 => viso::MouseButton::Middle,
                     _ => return,
                 };
-                if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
+                engine.feed_modifiers(shift);
                 engine.set_cursor_pos(x, y);
-                if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
-                let hovered = engine.hovered_target();
-                if let Some(cmd) = self.input.handle_event(
-                    InputEvent::MouseButton { button: viso_button, pressed: true },
-                    hovered,
-                ) {
-                    engine.execute(cmd);
-                }
+                engine.feed_pointer_motion(x, y);
+                let _ = engine.feed_pointer_button(viso_button, true);
             }
             ViewportInput::PointerUp {
                 x, y, button, shift, ..
@@ -1023,91 +1029,76 @@ impl App {
                     1 => viso::MouseButton::Middle,
                     _ => return,
                 };
-                if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
+                engine.feed_modifiers(shift);
                 engine.set_cursor_pos(x, y);
-                if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
-                let hovered = engine.hovered_target();
-                if let Some(cmd) = self.input.handle_event(
-                    InputEvent::MouseButton { button: viso_button, pressed: false },
-                    hovered,
-                ) {
-                    engine.execute(cmd);
-                }
+                engine.feed_pointer_motion(x, y);
+                pending_click = engine.feed_pointer_button(viso_button, false);
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
-                if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged { shift }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
+                engine.feed_modifiers(shift);
                 engine.set_cursor_pos(x, y);
-                if let Some(cmd) = self.input.handle_event(InputEvent::CursorMoved { x, y }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
+                engine.feed_pointer_motion(x, y);
             }
             ViewportInput::Scroll { delta } => {
-                if let Some(cmd) = self.input.handle_event(InputEvent::Scroll { delta }, engine.hovered_target()) {
-                    engine.execute(cmd);
-                }
+                engine.feed_scroll(delta);
             }
             ViewportInput::Key { code, pressed } => {
                 if pressed {
-                    if let Some(cmd) = self.input.handle_key_press(&code) {
-                        match cmd {
-                            // Drop viso's R-binding for turntable auto-rotate;
-                            // we don't expose a rotate keybinding in foldit.
-                            VisoCommand::ToggleAutoRotate => {}
-                            VisoCommand::ToggleTrajectory => {
-                                if engine.has_trajectory() {
-                                    engine.execute(VisoCommand::ToggleTrajectory);
-                                } else if let Some(path) = trajectory_path_from_args() {
-                                    engine.load_trajectory(std::path::Path::new(&path));
+                    // foldit-specific overrides land first; viso's
+                    // generic table picks up the rest.
+                    match code.as_str() {
+                        // Drop viso's R-binding for turntable auto-rotate;
+                        // we don't expose a rotate keybinding in foldit.
+                        "KeyR" => {}
+                        "KeyT" => {
+                            if engine.has_trajectory() {
+                                engine.toggle_trajectory();
+                            } else if let Some(path) = trajectory_path_from_args() {
+                                engine.load_trajectory(std::path::Path::new(&path));
+                            }
+                        }
+                        "Escape" => {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            self.plugin_driver.cancel_all_active_streams();
+                            pending_cancel = true;
+                        }
+                        other => {
+                            if self.keybindings.dispatch(other, engine) {
+                                if matches!(other, "Tab" | "Backquote") {
+                                    // (lock update deferred — see comment above)
+                                    self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
                                 }
-                            }
-                            VisoCommand::ClearSelection => {
+                            } else {
+                                // No viso built-in claims this key — resolve it
+                                // against the plugin hotkey catalog. Disjoint
+                                // field borrow (`self.plugin_driver`) so it
+                                // coexists with the live `engine` borrow;
+                                // dispatch is deferred to after the match.
                                 #[cfg(not(target_arch = "wasm32"))]
-                                self.plugin_driver
-                                    .cancel_all_active_streams();
-                                pending_cancel = true;
-                            }
-                            VisoCommand::CycleFocus | VisoCommand::ResetFocus => {
-                                engine.execute(cmd);
-                                // (lock update deferred — see comment above)
-                                self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
-                            }
-                            other => { engine.execute(other); }
-                        }
-                    } else {
-                        // No viso built-in claims this key — resolve it
-                        // against the plugin hotkey catalog. Disjoint
-                        // field borrow (`self.plugin_driver`) so it
-                        // coexists with the live `engine` borrow;
-                        // dispatch is deferred to after the match.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            pending_hotkey_op = self
-                                .plugin_driver
-                                .orchestrator
-                                .as_ref()
-                                .and_then(|orch| {
-                                    orch.ops_catalog()
-                                        .into_iter()
-                                        .find(|e| {
-                                            e.hotkey.as_deref()
-                                                == Some(code.as_str())
-                                        })
-                                        .map(|e| e.op_id)
-                                });
-                            if pending_hotkey_op.is_none() {
-                                log::debug!(
-                                    "Unhandled key code from frontend: {code}"
-                                );
+                                {
+                                    pending_hotkey_op = self
+                                        .plugin_driver
+                                        .orchestrator
+                                        .as_ref()
+                                        .and_then(|orch| {
+                                            orch.ops_catalog()
+                                                .into_iter()
+                                                .find(|e| {
+                                                    e.hotkey.as_deref()
+                                                        == Some(other)
+                                                })
+                                                .map(|e| e.op_id)
+                                        });
+                                    if pending_hotkey_op.is_none() {
+                                        log::debug!(
+                                            "Unhandled key code from frontend: {other}"
+                                        );
+                                    }
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                log::debug!("Unhandled key code from frontend: {other}");
                             }
                         }
-                        #[cfg(target_arch = "wasm32")]
-                        log::debug!("Unhandled key code from frontend: {code}");
                     }
                 }
             }
@@ -1132,6 +1123,10 @@ impl App {
         // preview-removal + republish.
         if pending_cancel {
             self.cancel_operations();
+        }
+
+        if let Some(click) = pending_click {
+            self.apply_click_to_selection(&click);
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same
@@ -1882,15 +1877,15 @@ impl App {
         button: viso::MouseButton,
         pressed: bool,
     ) {
-        if let Some(engine) = &mut self.engine {
-            let hovered = engine.hovered_target();
-            if let Some(cmd) = self
-                .input
-                .handle_event(InputEvent::MouseButton { button, pressed }, hovered)
-            {
-                engine.execute(cmd);
-            }
+        let pending_click = if let Some(engine) = &mut self.engine {
+            let click = engine.feed_pointer_button(button, pressed);
             update_all_visualizations(engine, None);
+            click
+        } else {
+            None
+        };
+        if let Some(click) = pending_click {
+            self.apply_click_to_selection(&click);
         }
     }
 
@@ -1906,19 +1901,13 @@ impl App {
     /// pass `y * 0.01`). Conversion lives in the host.
     pub fn handle_native_mouse_wheel(&mut self, scroll_delta: f32) {
         if let Some(engine) = &mut self.engine {
-            if let Some(cmd) = self.input.handle_event(InputEvent::Scroll { delta: scroll_delta }, engine.hovered_target()) {
-                engine.execute(cmd);
-            }
+            engine.feed_scroll(scroll_delta);
         }
     }
 
     pub fn handle_native_modifiers(&mut self, shift: bool) {
         if let Some(engine) = &mut self.engine {
-            if let Some(cmd) = self.input.handle_event(InputEvent::ModifiersChanged {
-                shift,
-            }, engine.hovered_target()) {
-                engine.execute(cmd);
-            }
+            engine.feed_modifiers(shift);
         }
     }
 
@@ -2497,6 +2486,32 @@ impl App {
             }
         }
         engine.set_selection(flat);
+    }
+
+    /// Apply a viso click-event to the selection store. Empty-area
+    /// clicks clear the selection; non-empty expansions either replace
+    /// (no modifier) or toggle (shift held) on a per-residue basis.
+    /// Targets with an empty expansion (atom picks, non-protein hits)
+    /// are no-ops on shift-held click and a clear on plain click; we
+    /// follow the same "replace selection with the click's expansion"
+    /// rule, which collapses to "clear" when the expansion is empty.
+    fn apply_click_to_selection(&mut self, click: &ClickEvent) {
+        match classify_click_for_selection(click) {
+            ClickSelectionAction::Clear => {
+                self.clear_selection();
+            }
+            ClickSelectionAction::Replace(residues) => {
+                self.clear_selection();
+                for (entity, residue) in residues {
+                    self.select_residue(entity, residue);
+                }
+            }
+            ClickSelectionAction::Toggle(residues) => {
+                for (entity, residue) in residues {
+                    let _ = self.toggle_residue(entity, residue);
+                }
+            }
+        }
     }
 
     /// Mark a single residue on `entity` as selected. Idempotent:
