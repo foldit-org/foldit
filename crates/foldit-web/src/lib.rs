@@ -40,7 +40,9 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 
 use foldit_core::App;
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
-use foldit_gui::{ActionId, Dispatcher, OpDispatch, ParameterizedAction, ViewportInput};
+use foldit_gui::{
+    ActionId, Dispatcher, EntitySelection, OpDispatch, ParameterizedAction, ViewportInput,
+};
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
 
@@ -179,6 +181,17 @@ impl FolditApp {
         let op: OpDispatch = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("dispatch_op parse: {e}")))?;
         self.app.borrow_mut().on_dispatch_op(op);
+        Ok(())
+    }
+
+    /// Forward a panel-originated selection mutation. `json` is the
+    /// JSON-encoded `Vec<EntitySelection>` (matches the
+    /// `IpcMessage::SetSelection { entries }` payload).
+    #[wasm_bindgen(js_name = setSelection)]
+    pub fn set_selection(&self, json: &str) -> Result<(), JsValue> {
+        let entries: Vec<EntitySelection> = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("set_selection parse: {e}")))?;
+        self.app.borrow_mut().on_set_selection(entries);
         Ok(())
     }
 

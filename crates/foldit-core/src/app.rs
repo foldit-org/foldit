@@ -840,7 +840,6 @@ impl App {
         self.handle_dispatch_op(foldit_gui::OpDispatch {
             op_id,
             focused_entity_id: None,
-            selection: Vec::new(),
             params: std::collections::HashMap::new(),
         });
         true
@@ -873,9 +872,17 @@ impl App {
                 return true;
             }
             "Escape" => {
-                #[cfg(not(target_arch = "wasm32"))]
-                self.plugin_driver.cancel_all_active_streams();
-                self.cancel_operations();
+                // First ESC clears any active selection; only a second
+                // ESC (selection already empty) cancels in-flight
+                // streams + previews. Keeps a selection-clear gesture
+                // from accidentally dropping work-in-flight.
+                if !self.selection_is_empty() {
+                    self.clear_selection();
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.plugin_driver.cancel_all_active_streams();
+                    self.cancel_operations();
+                }
                 return true;
             }
             // Auto-rotate keybinding is intentionally dropped in foldit.
@@ -901,19 +908,19 @@ impl App {
         true
     }
 
-    /// Cancel the in-flight operation: clear the viso selection, drop any
-    /// in-progress preview entities, republish, and flag the GUI dirty.
-    /// Stream lock release + commit live in `apply_backend_updates`'
-    /// terminal arms; doing them here races a follow-up dispatch that's
-    /// quick enough to slip in before the terminal drains. Lives on
-    /// `App` so the `RenderProjector` stays a field touched only inside
-    /// App methods (the coordination boundary), never threaded as a
-    /// parameter.
+    /// Cancel the in-flight operation: drop any in-progress preview
+    /// entities, republish, and flag the GUI dirty. Selection is a
+    /// separate concept (see `clear_selection`); cancelling an operation
+    /// does not touch it. Stream lock release + commit live in
+    /// `apply_backend_updates`' terminal arms; doing them here races a
+    /// follow-up dispatch that's quick enough to slip in before the
+    /// terminal drains. Lives on `App` so the `RenderProjector` stays a
+    /// field touched only inside App methods (the coordination
+    /// boundary), never threaded as a parameter.
     fn cancel_operations(&mut self) {
-        self.clear_selection();
-        let Some(engine) = self.engine.as_mut() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         log::info!("Cancelling current operation");
         let preview_ids: Vec<EntityId> = self.store.preview_ids().collect();
         if !preview_ids.is_empty() {
@@ -927,8 +934,7 @@ impl App {
                 preview_ids.len()
             );
         }
-        self.ui_dirty |=
-            DirtyFlags::ACTIONS | DirtyFlags::SELECTION | DirtyFlags::LOADING;
+        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
     }
 
     // ── Viewport input (from webview) ──
@@ -992,11 +998,15 @@ impl App {
         // `&mut self`.
         #[cfg(not(target_arch = "wasm32"))]
         let mut pending_hotkey_op: Option<String> = None;
-        // ClearSelection/ESC cancel needs `&mut self`, but `engine` is
-        // borrowed for the rest of the match and used again by
-        // `update_all_visualizations` after it. Defer the cancel past that
-        // last engine use, mirroring the `pending_hotkey_op` deferral.
-        let mut pending_cancel = false;
+        // ESC routing needs `&mut self`, but `engine` is borrowed for
+        // the rest of the match and used again by
+        // `update_all_visualizations` after it. Defer past that last
+        // engine use, mirroring the `pending_hotkey_op` deferral. The
+        // deferred block reads `selection_is_empty()` live (matching
+        // `handle_keybinding`) so any selection mutation that happens
+        // earlier in this call (e.g. a deferred `pending_click`) can't
+        // strand the ESC arm against a stale snapshot.
+        let mut pending_escape = false;
 
         let Some(engine) = &mut self.engine else { return };
 
@@ -1058,9 +1068,13 @@ impl App {
                             }
                         }
                         "Escape" => {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.plugin_driver.cancel_all_active_streams();
-                            pending_cancel = true;
+                            // Two-stage clear/cancel resolved in the
+                            // deferred block below against a live
+                            // `selection_is_empty()` read, so a
+                            // pending_click applied in the same call
+                            // window can't desync the branch choice.
+                            // Mirrors the `handle_keybinding` ESC arm.
+                            pending_escape = true;
                         }
                         other => {
                             if self.keybindings.dispatch(other, engine) {
@@ -1117,16 +1131,23 @@ impl App {
         update_all_visualizations(engine, pull);
 
         // `engine`'s last use was above — `&mut self` is free again, so
-        // the deferred actions below can run. Ordering of the cancel vs.
-        // `update_all_visualizations` is immaterial: the latter only sets
-        // band/pull overlays, disjoint from cancel's selection-clear +
-        // preview-removal + republish.
-        if pending_cancel {
-            self.cancel_operations();
-        }
-
+        // the deferred actions below can run. Apply the pending click
+        // before the ESC branch so the latter's `selection_is_empty()`
+        // read sees the post-click state (any single call only carries
+        // one of the two today, but the live-read keeps the two-stage
+        // ESC gesture correct regardless of producer order).
         if let Some(click) = pending_click {
             self.apply_click_to_selection(&click);
+        }
+
+        if pending_escape {
+            if !self.selection_is_empty() {
+                self.clear_selection();
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.plugin_driver.cancel_all_active_streams();
+                self.cancel_operations();
+            }
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same
@@ -1138,7 +1159,6 @@ impl App {
             self.handle_dispatch_op(foldit_gui::OpDispatch {
                 op_id,
                 focused_entity_id: None,
-                selection: Vec::new(),
                 params: std::collections::HashMap::new(),
             });
         }
@@ -1346,10 +1366,11 @@ impl App {
 
     /// Dispatch a plugin op by op-id. Resolves the op against the
     /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
-    /// builds a `DispatchContext` from the GUI-provided focus +
-    /// selection. Op-ids unknown to the registry are logged and
-    /// dropped (the catalog couldn't have surfaced them, so this is
-    /// either a stale GUI cache or a misrouted message).
+    /// builds a `DispatchContext` from the GUI-provided focus and the
+    /// authoritative in-core `App.selection`. Op-ids unknown to the
+    /// registry are logged and dropped (the catalog couldn't have
+    /// surfaced them, so this is either a stale GUI cache or a
+    /// misrouted message).
     pub fn handle_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1361,6 +1382,23 @@ impl App {
                 EntityId as RunnerEntityId, ResidueRef,
                 DispatchContext as RunnerDispatchContext,
             };
+
+            // Snapshot the authoritative selection store before the
+            // upcoming `&mut self.plugin_driver` borrow. Flatten
+            // BTreeMap<EntityId, BTreeSet<u32>> into the wire-shape
+            // ResidueRef list the orchestrator's DispatchContext
+            // expects.
+            let selection: Vec<ResidueRef> = self
+                .selection
+                .iter()
+                .flat_map(|(entity, residues)| {
+                    let runner_id = RunnerEntityId(u64::from(entity.raw()));
+                    residues.iter().map(move |&residue_index| ResidueRef {
+                        entity_id: runner_id,
+                        residue_index,
+                    })
+                })
+                .collect();
 
             let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                 log::warn!(
@@ -1402,14 +1440,7 @@ impl App {
 
             let ctx = RunnerDispatchContext {
                 focused_entity_id: op.focused_entity_id.map(RunnerEntityId),
-                selection: op
-                    .selection
-                    .iter()
-                    .map(|r| ResidueRef {
-                        entity_id: RunnerEntityId(r.entity_id),
-                        residue_index: r.residue_index,
-                    })
-                    .collect(),
+                selection,
             };
             let params: std::collections::HashMap<
                 String,
@@ -2612,6 +2643,41 @@ impl App {
     pub(crate) fn selection_total_count(&self) -> usize {
         self.selection.values().map(|set| set.len()).sum()
     }
+
+    /// Apply a panel-originated selection mutation: wholesale replace
+    /// the current selection with `entries`. The wire-side `entity_id`
+    /// is a raw `u32`; look it up against the store's existing ids
+    /// instead of minting a new one through the allocator (which would
+    /// silently advance and break the next genuine allocation).
+    /// Entries that don't match any live entity are dropped — panels
+    /// can race a structure swap, and a stale id should clear silently
+    /// rather than fail loudly. An empty `entries` list clears the
+    /// selection entirely.
+    ///
+    /// Both `clear_selection` and `set_residues_on` self-set
+    /// [`foldit_gui::DirtyFlags::SELECTION`] and call
+    /// `flush_selection_to_viso`, so the GPU residue selection and the
+    /// frontend mirror stay in lockstep without an extra dirty-flag
+    /// flush here. Per-entity residue lists are collected into
+    /// `BTreeSet`, so duplicate or out-of-order indices in the wire
+    /// payload are silently normalized.
+    pub fn handle_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {
+        self.clear_selection();
+        for entry in entries {
+            let Some(entity) = self
+                .store
+                .ids()
+                .find(|id| id.raw() == entry.entity_id)
+            else {
+                log::trace!(
+                    "handle_set_selection: unknown entity_id {} (dropping)",
+                    entry.entity_id
+                );
+                continue;
+            };
+            self.set_residues_on(entity, entry.residues);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2641,6 +2707,10 @@ impl foldit_gui::Dispatcher for App {
 
     fn on_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
         self.handle_parameterized_action(action);
+    }
+
+    fn on_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {
+        self.handle_set_selection(entries);
     }
 
     fn handle_request(
@@ -2955,5 +3025,40 @@ mod selection_tests {
         // removing ids[1], `selected_entities` enumerates ids[0],
         // ids[2] in that order.
         assert_eq!(ents, vec![ids[0], ids[2]]);
+    }
+
+    #[test]
+    fn handle_set_selection_clears_on_empty_input() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        app.select_residue(ids[0], 7);
+        assert!(!app.selection_is_empty());
+        // Empty entries: clear (`clear_selection` always runs first; no
+        // entry loop body) — independent of whether the empty store
+        // could even resolve a raw id.
+        app.handle_set_selection(Vec::new());
+        assert!(app.selection_is_empty());
+    }
+
+    #[test]
+    fn handle_set_selection_drops_unknown_entity_ids() {
+        let mut app = fresh_app();
+        let ids = mint_ids(1);
+        // Seed a non-empty selection so we can prove the clear ran.
+        app.select_residue(ids[0], 9);
+        // The test stub has no loaded structure, so `self.store.ids()`
+        // is empty and every raw id is unresolvable. The mutator clears
+        // the existing selection and drops the unknown entries.
+        app.handle_set_selection(vec![
+            foldit_gui::EntitySelection {
+                entity_id: 0,
+                residues: vec![1, 2, 3],
+            },
+            foldit_gui::EntitySelection {
+                entity_id: 999,
+                residues: vec![5],
+            },
+        ]);
+        assert!(app.selection_is_empty());
     }
 }
