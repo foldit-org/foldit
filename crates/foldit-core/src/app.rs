@@ -353,6 +353,15 @@ pub struct App {
     /// `selected_entities` yields only entities that currently have
     /// at least one selected residue.
     selection: BTreeMap<EntityId, BTreeSet<u32>>,
+    /// Last per-residue score vector pushed to viso, keyed by raw
+    /// entity id. Used to skip pushing identical scores every tick: the
+    /// scorer streams the same value continuously at idle, and a repeat
+    /// push forces viso to recompute colors + reupload for nothing. An
+    /// absent key means nothing has been pushed for that entity yet;
+    /// `Some(vec)` mirrors the last `Some(scores)` push; `None` mirrors
+    /// the last clearing (`None`) push. Cleared on topology swaps so a
+    /// new structure with coincidentally-equal scores still pushes.
+    last_pushed_scores: std::collections::HashMap<u32, Option<Vec<f64>>>,
 }
 
 /// Objective metadata for an active puzzle. Populated from the puzzle
@@ -394,6 +403,7 @@ impl App {
             app_state: AppState::Loading,
             awaiting_initial_score: false,
             selection: BTreeMap::new(),
+            last_pushed_scores: std::collections::HashMap::new(),
         }
     }
 
@@ -784,7 +794,11 @@ impl App {
         // its full residue count; missing residues default to 0.0 (the
         // mid-palette stop in absolute mode, the lower quantile in
         // relative mode -- close enough for a first-pass render).
+        // Borrow the two disjoint `self` fields the loop touches before
+        // entering it (the engine sink + the last-pushed cache) so the
+        // dirty-check below doesn't fight the `&mut self.engine` borrow.
         let Some(engine) = self.engine.as_mut() else { return };
+        let last_pushed = &mut self.last_pushed_scores;
         // Build (raw_entity_id -> residue_count) once via head_assembly so
         // we don't need a mut borrow on store to mint molex EntityIds.
         let head = self.store.head_assembly();
@@ -811,11 +825,27 @@ impl App {
                     scores[i] = val;
                 }
             }
+            // Skip the push when the vector matches the one already on
+            // viso for this entity. The scorer streams the same value at
+            // idle, so without this the engine recomputes colors +
+            // reuploads the buffer every frame for no change.
+            let unchanged = matches!(
+                last_pushed.get(&entity_id),
+                Some(Some(prev)) if *prev == scores
+            );
+            if unchanged {
+                log::debug!(
+                    "[App] per-residue scores unchanged for viso entity \
+                     {entity_id}; skipping push"
+                );
+                continue;
+            }
             log::info!(
                 "[App] applied {entry_count} per-residue scores to viso entity \
                  {entity_id} (residue_count={residue_count})"
             );
-            engine.set_per_residue_scores(entity_id, Some(scores));
+            engine.set_per_residue_scores(entity_id, Some(scores.clone()));
+            last_pushed.insert(entity_id, Some(scores));
         }
     }
 
@@ -1712,6 +1742,10 @@ impl App {
         // numerically without referring to the same entities, so clear.
         // Going through the mutator self-sets SELECTION dirty.
         self.clear_selection();
+        // Same collision concern for the per-residue score cache: a new
+        // entity reusing an old raw id with coincidentally-equal scores
+        // must still push, so drop the cache on the topology swap.
+        self.last_pushed_scores.clear();
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
@@ -1822,9 +1856,18 @@ impl App {
     /// `set_assembly` (when it didn't).
     fn after_head_move(&mut self) {
         if let Some(engine) = self.engine.as_mut() {
+            let last_pushed = &mut self.last_pushed_scores;
             let ids: Vec<EntityId> = self.store.ids().collect();
             for eid in ids {
-                engine.set_per_residue_scores(eid.raw(), None);
+                let raw = eid.raw();
+                // Skip a redundant clear: if the last push for this
+                // entity was already a clear (`None`), viso is neutral
+                // and re-pushing `None` would reupload for no change.
+                if matches!(last_pushed.get(&raw), Some(None)) {
+                    continue;
+                }
+                engine.set_per_residue_scores(raw, None);
+                last_pushed.insert(raw, None);
             }
         }
 
