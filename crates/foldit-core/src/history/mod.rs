@@ -46,10 +46,10 @@ use smallvec::SmallVec;
 // inverting the dependency direction (foldit → foldit_gui, never
 // the reverse). Re-exported through this module for ergonomic
 // `foldit::history::CheckpointId` use sites.
-pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId};
+pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId, WireId};
 
 mod types;
-pub use types::{CheckpointKind, EntityActionKind, FilterStatus};
+pub use types::{CheckpointKind, EntityActionKind, FilterStatus, WiggleMask};
 
 mod storage;
 pub use storage::{Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget};
