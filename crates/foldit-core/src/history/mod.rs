@@ -46,23 +46,19 @@ use smallvec::SmallVec;
 // inverting the dependency direction (foldit → foldit_gui, never
 // the reverse). Re-exported through this module for ergonomic
 // `foldit::history::CheckpointId` use sites.
-pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId, WireId};
+pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId};
 
 mod types;
-pub use types::{
-    AminoAcid, CheckpointKind, EntityActionKind, FilterStatus, WiggleMask,
-};
+pub use types::{CheckpointKind, EntityActionKind, FilterStatus};
 
 mod storage;
-pub use storage::{
-    Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget,
-};
+pub use storage::{Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget};
 
 mod ongoing;
 pub use ongoing::OngoingState;
 
 mod error;
-pub use error::{BestKind, HistoryError};
+pub use error::HistoryError;
 
 // ── History (the public type) ──────────────────────────────────────────
 
@@ -567,10 +563,7 @@ impl History {
     /// New events land here as a new [`HistoryEvent`] variant. A
     /// sibling root would carry state this function doesn't know about
     /// and is therefore illegal (G3).
-    fn record(
-        &mut self,
-        event: HistoryEvent,
-    ) -> Result<HistoryEventOutcome, HistoryError> {
+    fn record(&mut self, event: HistoryEvent) -> Result<HistoryEventOutcome, HistoryError> {
         // ── Action-lock pre-check ─────────────────────────────────────
         // While Active, the only legal events are Commit / Abort.
         // Per strategy doc § Lock semantics, the running action
@@ -590,9 +583,7 @@ impl History {
                 | HistoryEvent::JumpCheckpoint { .. } => {
                     return Err(HistoryError::EntityLocked { entity: locked })
                 }
-                HistoryEvent::AddEntity { .. } => {
-                    return Err(HistoryError::ActiveActionInProgress)
-                }
+                HistoryEvent::AddEntity { .. } => return Err(HistoryError::ActiveActionInProgress),
             }
         }
 
@@ -612,9 +603,12 @@ impl History {
         );
 
         let result = match event {
-            HistoryEvent::Begin { entity, kind, payload, label } => {
-                self.do_begin(entity, kind, payload, label)?
-            }
+            HistoryEvent::Begin {
+                entity,
+                kind,
+                payload,
+                label,
+            } => self.do_begin(entity, kind, payload, label)?,
             HistoryEvent::Commit => self.do_commit()?,
             HistoryEvent::Abort => self.do_abort()?,
             HistoryEvent::RecordEntityUpdate {
@@ -624,15 +618,20 @@ impl History {
                 label,
                 raw_score,
                 game_score,
-            } => self.do_record_entity_update(entity, kind, payload, label, raw_score, game_score)?,
+            } => {
+                self.do_record_entity_update(entity, kind, payload, label, raw_score, game_score)?
+            }
             HistoryEvent::LaneUndo { entity, target } => self.do_lane_undo(entity, target)?,
             HistoryEvent::LaneRedo { entity, branch } => self.do_lane_redo(entity, branch)?,
             HistoryEvent::Undo => self.do_undo()?,
             HistoryEvent::Redo { branch } => self.do_redo(branch)?,
             HistoryEvent::JumpCheckpoint { id } => self.do_jump(id)?,
-            HistoryEvent::AddEntity { entity_id, payload, kind, label } => {
-                self.do_add_entity(entity_id, payload, kind, label)?
-            }
+            HistoryEvent::AddEntity {
+                entity_id,
+                payload,
+                kind,
+                label,
+            } => self.do_add_entity(entity_id, payload, kind, label)?,
         };
 
         if is_push {
@@ -650,9 +649,9 @@ impl History {
     }
 }
 
-mod record;
 mod eviction;
 mod invariant;
+mod record;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

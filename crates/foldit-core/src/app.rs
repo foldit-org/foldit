@@ -25,24 +25,19 @@ use foldit_gui::{
 use foldit_runner::Orchestrator;
 use molex::entity::molecule::id::EntityId;
 use viso::{
-    classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus,
-    KeyBindings, VisoEngine,
+    classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus, KeyBindings, VisoEngine,
 };
 
-use crate::session::{Session, SessionError, EntityOrigin};
 use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::{ActiveStreamEntry, OpOutcome};
 use crate::render_projector::{self, RenderProjector};
+use crate::session::{EntityOrigin, Session, SessionError};
 use crate::wire_params;
 
-fn score_for_mode(
-    raw: Option<f64>,
-    game: Option<f64>,
-    mode: ScoringMode,
-) -> Option<f64> {
+fn score_for_mode(raw: Option<f64>, game: Option<f64>, mode: ScoringMode) -> Option<f64> {
     match mode {
         ScoringMode::Game => game,
         ScoringMode::Scientist => raw,
@@ -267,9 +262,7 @@ fn entity_type_of(
 /// [`Transition`]. The variant names are kept in 1:1 sync — this is a
 /// mechanical mapping, not a semantic rename.
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_transition(
-    kind: foldit_runner::orchestrator::TransitionKind,
-) -> viso::Transition {
+fn resolve_transition(kind: foldit_runner::orchestrator::TransitionKind) -> viso::Transition {
     use foldit_runner::orchestrator::TransitionKind;
     match kind {
         TransitionKind::Snap => viso::Transition::snap(),
@@ -447,9 +440,7 @@ impl App {
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use foldit_runner::orchestrator::{
-                EntityId as RunnerEntityId, PluginUpdate,
-            };
+            use foldit_runner::orchestrator::{EntityId as RunnerEntityId, PluginUpdate};
 
             let updates = self.plugin_driver.drain_updates();
             if updates.is_empty() {
@@ -490,34 +481,14 @@ impl App {
                             );
                             continue;
                         };
-                        if apply_streaming_assembly(
-                            &mut self.store,
-                            &assembly,
-                            None,
-                        ) {
+                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             visual_dirty = true;
                             if let (Some(entry), Some(entity)) = (
                                 self.plugin_driver.stream_entry(request_id),
-                                self.store
-                                    .history()
-                                    .ongoing()
-                                    .locked_entity(),
+                                self.store.history().ongoing().locked_entity(),
                             ) {
-                                pending_transition =
-                                    Some((entity, entry.transition));
+                                pending_transition = Some((entity, entry.transition));
                             }
-                            // Per-frame score refresh while a stream
-                            // runs. Pendings don't trigger the
-                            // broadcast-driven refresh path (only
-                            // committed mutations do), so without this
-                            // the score widget + per-residue color
-                            // overlay sit stale until Final/Cancel
-                            // commits. The query is synchronous and
-                            // cheap (~ms for rosetta); Pending cadence
-                            // is gated by `POLL_INTERVAL` (50ms), so
-                            // worst case is ~20 score queries/sec.
-                            self.refresh_scores();
-                            self.ui_dirty |= DirtyFlags::SCORE;
                         }
                     }
                     PluginUpdate::Cancelled {
@@ -530,16 +501,9 @@ impl App {
                             .plugin_driver
                             .stream_entry(request_id)
                             .map(|e| e.transition);
-                        if apply_streaming_assembly(
-                            &mut self.store,
-                            &assembly,
-                            None,
-                        ) {
-                            let locked_for_transition = self
-                                .store
-                                .history()
-                                .ongoing()
-                                .locked_entity();
+                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
+                            let locked_for_transition =
+                                self.store.history().ongoing().locked_entity();
                             if let Err(e) = self.store.commit_action() {
                                 log::warn!(
                                     "plugin update Cancelled rid={request_id} \
@@ -553,9 +517,7 @@ impl App {
                                 pending_transition = Some((entity, t));
                             }
                         }
-                        let _ = self
-                            .plugin_driver
-                            .release_terminal_stream(request_id);
+                        let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
                             "plugin update Cancelled rid={request_id} \
                              entities={}",
@@ -572,21 +534,14 @@ impl App {
                             .plugin_driver
                             .stream_entry(request_id)
                             .map(|e| e.transition);
-                        if apply_streaming_assembly(
-                            &mut self.store,
-                            &assembly,
-                            None,
-                        ) {
+                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             // Capture the locked entity *before*
                             // commit_action moves OngoingState to Idle:
                             // queue_entity_transition runs after this
                             // loop and would otherwise have nothing to
                             // key against.
-                            let locked_for_transition = self
-                                .store
-                                .history()
-                                .ongoing()
-                                .locked_entity();
+                            let locked_for_transition =
+                                self.store.history().ongoing().locked_entity();
                             // Stream completed cleanly: commit the
                             // tentative so the partial result becomes
                             // a permanent undo entry.
@@ -603,9 +558,7 @@ impl App {
                                 pending_transition = Some((entity, t));
                             }
                         }
-                        let _ = self
-                            .plugin_driver
-                            .release_terminal_stream(request_id);
+                        let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
                             "plugin update Final rid={request_id} \
                              entities={}",
@@ -635,8 +588,7 @@ impl App {
                                     .map(|locked| {
                                         entry.handle.entities.iter().any(
                                             |runner_eid: &RunnerEntityId| {
-                                                runner_eid.0
-                                                    == u64::from(locked.raw())
+                                                runner_eid.0 == u64::from(locked.raw())
                                             },
                                         )
                                     })
@@ -652,9 +604,7 @@ impl App {
                                 visual_dirty = true;
                             }
                         }
-                        let _ = self
-                            .plugin_driver
-                            .release_terminal_stream(request_id);
+                        let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::warn!(
                             "plugin update Error rid={request_id} \
                              message={message}"
@@ -676,10 +626,7 @@ impl App {
                     // by `tick` via the Edit/HeadMoved emitted by
                     // `action_update` / `commit_action`.
                     if let Some((entity, kind)) = pending_transition {
-                        engine.queue_entity_transition(
-                            entity.raw(),
-                            resolve_transition(kind),
-                        );
+                        engine.queue_entity_transition(entity.raw(), resolve_transition(kind));
                     }
                 }
             }
@@ -704,14 +651,17 @@ impl App {
     /// `HistorySyncCursor` and viso via a direct overlay push) and
     /// neither needs to ride the spine (RX10 decision B).
     ///
-    /// Called once per [`Self::tick`] (cadence unweld from
-    /// per-broadcast — RX13).
+    /// Synchronous (blocking) score poll. `tick` calls this each frame
+    /// only until the first score lands, so the Loading -> InPuzzle gate
+    /// flips promptly; once a score exists `tick` switches to the async
+    /// path (`request_scores` + `poll_async_scores`). Dirty flags are set
+    /// by `apply_score_reports` when a report actually applies.
+    #[cfg(not(target_arch = "wasm32"))]
     fn poll_plugin_scores(&mut self) {
         if self.plugin_driver.orchestrator.is_none() {
             return;
         }
         self.refresh_scores();
-        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
     }
 
     /// Fan out the well-known `score` query across every plugin that
@@ -729,15 +679,63 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn refresh_scores(&mut self) {
         use foldit_runner::orchestrator::DispatchContext;
+
+        // Blocking score round-trip. Used only until the first score
+        // lands, where a synchronous result keeps the Loading -> InPuzzle
+        // flip deterministic. Once a score exists the caller switches to
+        // `request_scores` + `poll_async_scores` so the render thread
+        // never blocks on the worker.
+        let reports = {
+            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+                return;
+            };
+            orch.collect_scores(&DispatchContext::default())
+        };
+        self.apply_score_reports(reports);
+    }
+
+    /// Fire a non-blocking `score` query at every provider with no query
+    /// already in flight. The reply lands on a stored receiver drained by
+    /// [`Self::poll_async_scores`]; the render thread never blocks. One
+    /// outstanding query per provider coalesces a fast pose stream
+    /// against a slow scorer.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_scores(&mut self) {
+        use foldit_runner::orchestrator::DispatchContext;
+        if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
+            orch.request_scores(&DispatchContext::default());
+        }
+    }
+
+    /// Drain whatever async `score` replies have arrived and apply them.
+    /// Non-blocking; no-op when nothing is ready.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_async_scores(&mut self) {
+        let reports = {
+            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+                return;
+            };
+            orch.poll_score_results()
+        };
+        self.apply_score_reports(reports);
+    }
+
+    /// Merge score reports into the head checkpoint and push per-residue
+    /// scores to viso. Shared tail of the blocking (bootstrap) and async
+    /// (steady-state) score paths; no-op on an empty report set. Dirty
+    /// flags are set here so both paths mark SCORE/HISTORY exactly when a
+    /// report actually applies.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_score_reports(
+        &mut self,
+        reports: std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>,
+    ) {
         use std::collections::HashMap;
 
-        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-            return;
-        };
-        let reports = orch.collect_scores(&DispatchContext::default());
         if reports.is_empty() {
             return;
         }
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
 
         let mut total: Option<f64> = None;
         // entity_id -> Vec<(residue_index, score)>; merged across all
@@ -756,13 +754,15 @@ impl App {
                 report.per_residue.len()
             );
             for rs in &report.per_residue {
-                let Some(rref) = rs.residue.as_ref() else { continue };
+                let Some(rref) = rs.residue.as_ref() else {
+                    continue;
+                };
                 #[allow(clippy::cast_possible_truncation)]
                 let entity_id = rref.entity_id as u32;
-                per_entity.entry(entity_id).or_default().push((
-                    rref.residue_index,
-                    f64::from(rs.score),
-                ));
+                per_entity
+                    .entry(entity_id)
+                    .or_default()
+                    .push((rref.residue_index, f64::from(rs.score)));
             }
         }
         if let Some(t) = total {
@@ -797,7 +797,9 @@ impl App {
         // Borrow the two disjoint `self` fields the loop touches before
         // entering it (the engine sink + the last-pushed cache) so the
         // dirty-check below doesn't fight the `&mut self.engine` borrow.
-        let Some(engine) = self.engine.as_mut() else { return };
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
         let last_pushed = &mut self.last_pushed_scores;
         // Build (raw_entity_id -> residue_count) once via head_assembly so
         // we don't need a mut borrow on store to mint molex EntityIds.
@@ -891,7 +893,9 @@ impl App {
         // These short-circuit the generic viso keybinding dispatch.
         match key_str {
             "KeyT" => {
-                let Some(engine) = &mut self.engine else { return false };
+                let Some(engine) = &mut self.engine else {
+                    return false;
+                };
                 if engine.has_trajectory() {
                     engine.toggle_trajectory();
                 } else if let Some(path) = trajectory_path_from_args() {
@@ -920,7 +924,9 @@ impl App {
             _ => {}
         }
 
-        let Some(engine) = &mut self.engine else { return false };
+        let Some(engine) = &mut self.engine else {
+            return false;
+        };
 
         if !self.keybindings.dispatch(key_str, engine) {
             return self.try_hotkey_dispatch(key_str);
@@ -959,10 +965,7 @@ impl App {
             }
             // PreviewDiscarded rides the spine — the next tick's render
             // projector republishes.
-            log::info!(
-                "Removed {} in-progress preview entities",
-                preview_ids.len()
-            );
+            log::info!("Removed {} in-progress preview entities", preview_ids.len());
         }
         self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
     }
@@ -1038,7 +1041,9 @@ impl App {
         // strand the ESC arm against a stale snapshot.
         let mut pending_escape = false;
 
-        let Some(engine) = &mut self.engine else { return };
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
 
         // `Some` only if a left-button release classified as a click;
         // deferred so the selection mutations below run after the
@@ -1047,7 +1052,11 @@ impl App {
 
         match input {
             ViewportInput::PointerDown {
-                x, y, button, shift, ..
+                x,
+                y,
+                button,
+                shift,
+                ..
             } => {
                 let viso_button = match button {
                     0 => viso::MouseButton::Left,
@@ -1061,7 +1070,11 @@ impl App {
                 let _ = engine.feed_pointer_button(viso_button, true);
             }
             ViewportInput::PointerUp {
-                x, y, button, shift, ..
+                x,
+                y,
+                button,
+                shift,
+                ..
             } => {
                 let viso_button = match button {
                     0 => viso::MouseButton::Left,
@@ -1120,23 +1133,15 @@ impl App {
                                 // dispatch is deferred to after the match.
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    pending_hotkey_op = self
-                                        .plugin_driver
-                                        .orchestrator
-                                        .as_ref()
-                                        .and_then(|orch| {
+                                    pending_hotkey_op =
+                                        self.plugin_driver.orchestrator.as_ref().and_then(|orch| {
                                             orch.ops_catalog()
                                                 .into_iter()
-                                                .find(|e| {
-                                                    e.hotkey.as_deref()
-                                                        == Some(other)
-                                                })
+                                                .find(|e| e.hotkey.as_deref() == Some(other))
                                                 .map(|e| e.op_id)
                                         });
                                     if pending_hotkey_op.is_none() {
-                                        log::debug!(
-                                            "Unhandled key code from frontend: {other}"
-                                        );
+                                        log::debug!("Unhandled key code from frontend: {other}");
                                     }
                                 }
                                 #[cfg(target_arch = "wasm32")]
@@ -1155,7 +1160,12 @@ impl App {
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self
+            .plugin_driver
+            .stream_host
+            .pull_drag
+            .as_ref()
+            .map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, pull);
@@ -1202,7 +1212,12 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
         self.ui_dirty |= DirtyFlags::UI;
-        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self
+            .plugin_driver
+            .stream_host
+            .pull_drag
+            .as_ref()
+            .map(|d| d.pull_info.clone());
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, pull);
         }
@@ -1220,23 +1235,23 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
         use foldit_runner::orchestrator::{
-            EntityId as RunnerEntityId, ResidueRef,
-            DispatchContext as RunnerDispatchContext, TransitionKind,
+            DispatchContext as RunnerDispatchContext, EntityId as RunnerEntityId, ResidueRef,
+            TransitionKind,
         };
 
-        let Some(engine) = self.engine.as_ref() else { return false };
+        let Some(engine) = self.engine.as_ref() else {
+            return false;
+        };
         let target = engine.hovered_target();
         let store = &self.store;
         let route = match target {
-            viso::PickTarget::Atom { entity_id, atom_idx } => {
-                crate::pull_drag::route_atom_pick(store, entity_id, atom_idx)
-            }
-            viso::PickTarget::Residue(flat) => engine
-                .picked_residue_atom(flat, (x, y))
-                .and_then(|picked| {
-                    let molex_id = store
-                        .ids()
-                        .find(|id| id.raw() == picked.entity_id)?;
+            viso::PickTarget::Atom {
+                entity_id,
+                atom_idx,
+            } => crate::pull_drag::route_atom_pick(store, entity_id, atom_idx),
+            viso::PickTarget::Residue(flat) => {
+                engine.picked_residue_atom(flat, (x, y)).and_then(|picked| {
+                    let molex_id = store.ids().find(|id| id.raw() == picked.entity_id)?;
                     crate::pull_drag::route_residue_pick(
                         store,
                         flat,
@@ -1244,7 +1259,8 @@ impl App {
                         molex_id,
                         picked.local_residue,
                     )
-                }),
+                })
+            }
             viso::PickTarget::None => None,
         };
         let Some(route) = route else { return false };
@@ -1260,7 +1276,9 @@ impl App {
             }],
         };
 
-        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else { return false };
+        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+            return false;
+        };
         let Some(cached) = orch.plugin_registry().get_op(route.op_id).cloned() else {
             log::warn!(
                 "try_begin_pull_drag: op id {:?} missing from registry",
@@ -1270,12 +1288,9 @@ impl App {
         };
         let plugin_id = cached.plugin_id.clone();
 
-        let (rid, handle) = match orch.dispatch_start_stream(
-            route.op_id,
-            ctx,
-            params,
-            |id| entity_type_of(store, id),
-        ) {
+        let (rid, handle) = match orch
+            .dispatch_start_stream(route.op_id, ctx, params, |id| entity_type_of(store, id))
+        {
             Ok(r) => r,
             Err(e) => {
                 log::warn!(
@@ -1301,9 +1316,7 @@ impl App {
                 op_id: String::from(route.op_id),
                 display: String::from("Pull"),
             };
-            if let Err(e) =
-                self.store.begin_action(kind, String::from("Pull"))
-            {
+            if let Err(e) = self.store.begin_action(kind, String::from("Pull")) {
                 log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
             }
         }
@@ -1333,7 +1346,9 @@ impl App {
     fn update_pull_drag(&mut self, x: f32, y: f32) {
         use foldit_runner::orchestrator::ParamValue;
 
-        let Some(drag) = self.plugin_driver.stream_host.pull_drag.as_mut() else { return };
+        let Some(drag) = self.plugin_driver.stream_host.pull_drag.as_mut() else {
+            return;
+        };
         drag.pull_info.screen_target = (x, y);
 
         let (residue, atom_name, plugin_id, request_id) = (
@@ -1343,25 +1358,24 @@ impl App {
             drag.request_id,
         );
 
-        let Some(engine) = self.engine.as_ref() else { return };
-        let Some(atom_pos) = engine.resolve_atom_position(residue, &atom_name)
-        else {
+        let Some(engine) = self.engine.as_ref() else {
             return;
         };
-        let target =
-            engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
+        let Some(atom_pos) = engine.resolve_atom_position(residue, &atom_name) else {
+            return;
+        };
+        let target = engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
 
-        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else { return };
+        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else {
+            return;
+        };
         let mut params = std::collections::HashMap::new();
         let _ = params.insert(
             String::from("endpoint"),
             ParamValue::Vec3([target.x, target.y, target.z]),
         );
-        if let Err(e) = orch.dispatch_update_stream(&plugin_id, request_id, params)
-        {
-            log::trace!(
-                "update_pull_drag: dispatch_update_stream rid={request_id} failed: {e}"
-            );
+        if let Err(e) = orch.dispatch_update_stream(&plugin_id, request_id, params) {
+            log::trace!("update_pull_drag: dispatch_update_stream rid={request_id} failed: {e}");
         }
     }
 
@@ -1372,11 +1386,13 @@ impl App {
     /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
-        let Some(drag) = self.plugin_driver.stream_host.pull_drag.take() else { return };
-        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else { return };
-        if let Err(e) =
-            orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id)
-        {
+        let Some(drag) = self.plugin_driver.stream_host.pull_drag.take() else {
+            return;
+        };
+        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else {
+            return;
+        };
+        if let Err(e) = orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id) {
             log::trace!(
                 "end_pull_drag: dispatch_cancel_stream rid={} failed: {e}",
                 drag.request_id,
@@ -1409,8 +1425,7 @@ impl App {
             self.apply_backend_updates();
 
             use foldit_runner::orchestrator::{
-                EntityId as RunnerEntityId, ResidueRef,
-                DispatchContext as RunnerDispatchContext,
+                DispatchContext as RunnerDispatchContext, EntityId as RunnerEntityId, ResidueRef,
             };
 
             // Snapshot the authoritative selection store before the
@@ -1438,13 +1453,8 @@ impl App {
                 return;
             };
 
-            let Some(cached) =
-                orch.plugin_registry().get_op(&op.op_id).cloned()
-            else {
-                log::warn!(
-                    "handle_dispatch_op: op-id {:?} not in registry",
-                    op.op_id
-                );
+            let Some(cached) = orch.plugin_registry().get_op(&op.op_id).cloned() else {
+                log::warn!("handle_dispatch_op: op-id {:?} not in registry", op.op_id);
                 return;
             };
 
@@ -1472,14 +1482,11 @@ impl App {
                 focused_entity_id: op.focused_entity_id.map(RunnerEntityId),
                 selection,
             };
-            let params: std::collections::HashMap<
-                String,
-                foldit_runner::orchestrator::ParamValue,
-            > = op
-                .params
-                .into_iter()
-                .map(|(k, v)| (k, wire_params::param_value_from_wire(v)))
-                .collect();
+            let params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> =
+                op.params
+                    .into_iter()
+                    .map(|(k, v)| (k, wire_params::param_value_from_wire(v)))
+                    .collect();
 
             // Drop the orchestrator borrow before reaching back into
             // `self.plugin_driver` for the consolidated dispatch.
@@ -1509,11 +1516,7 @@ impl App {
             // new one (which would advance the allocator).
             let action_entity = op
                 .focused_entity_id
-                .and_then(|raw| {
-                    self.store
-                        .ids()
-                        .find(|id| u64::from(id.raw()) == raw)
-                })
+                .and_then(|raw| self.store.ids().find(|id| u64::from(id.raw()) == raw))
                 .or_else(|| first_protein_entity(&self.store));
 
             // Skip on dispatch failure: any open tentative belongs to
@@ -1546,14 +1549,10 @@ impl App {
                     self.apply_invoke_result(&bytes, transition);
                 }
                 Err(e) => {
-                    log::error!(
-                        "handle_dispatch_op({:?}): dispatch failed: {e}",
-                        op.op_id
-                    );
+                    log::error!("handle_dispatch_op({:?}): dispatch failed: {e}", op.op_id);
                 }
             }
-            self.ui_dirty |=
-                DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
+            self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1583,8 +1582,7 @@ impl App {
                 return;
             }
         };
-        let applied =
-            apply_streaming_assembly(&mut self.store, &assembly, None);
+        let applied = apply_streaming_assembly(&mut self.store, &assembly, None);
         if applied {
             let entity = self.store.history().ongoing().locked_entity();
             if let Err(e) = self.store.commit_action() {
@@ -1597,14 +1595,10 @@ impl App {
                     // call set_assembly which consumes the queued
                     // transition; HeadMoved from commit_action is the
                     // spine signal that triggers the publish).
-                    engine.queue_entity_transition(
-                        eid.raw(),
-                        resolve_transition(transition),
-                    );
+                    engine.queue_entity_transition(eid.raw(), resolve_transition(transition));
                 }
             }
-            self.ui_dirty |=
-                DirtyFlags::SCENE | DirtyFlags::HISTORY;
+            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;
         } else if self.store.has_ongoing_action() {
             // Nothing matched (e.g. plugin returned an empty / unrelated
             // assembly): drop the tentative.
@@ -1612,17 +1606,11 @@ impl App {
         }
     }
 
-    pub fn handle_parameterized_action(
-        &mut self,
-        action: foldit_gui::ParameterizedAction,
-    ) {
+    pub fn handle_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
         self.handle_parameterized_action_inner(action);
     }
 
-    fn handle_parameterized_action_inner(
-        &mut self,
-        action: foldit_gui::ParameterizedAction,
-    ) {
+    fn handle_parameterized_action_inner(&mut self, action: foldit_gui::ParameterizedAction) {
         use foldit_gui::ParameterizedAction;
 
         // History-side commands take &mut self (no engine borrow held).
@@ -1686,8 +1674,7 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
-            ParameterizedAction::History { .. }
-            | ParameterizedAction::AdvanceBubble { .. } => {
+            ParameterizedAction::History { .. } | ParameterizedAction::AdvanceBubble { .. } => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `ParameterizedAction` (G10): a new
                 // variant without a handler is a compile error.
@@ -1771,12 +1758,15 @@ impl App {
 
                 let ss_override = puzzle_data.ss_override;
                 let cam = &puzzle_data.camera;
-                let cam_eye = glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
+                let cam_eye =
+                    glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
                 let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
                 let mut ids: Vec<EntityId> = Vec::new();
                 for entity in puzzle_data.entities {
-                    if let Some(id) = load_entity_into_history(&mut self.store, entity, title.clone()) {
+                    if let Some(id) =
+                        load_entity_into_history(&mut self.store, entity, title.clone())
+                    {
                         ids.push(id);
                     }
                 }
@@ -1811,10 +1801,8 @@ impl App {
             }
             Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
         }
-        self.ui_dirty |= DirtyFlags::LOADING
-            | DirtyFlags::SCORE
-            | DirtyFlags::ACTIONS
-            | DirtyFlags::PUZZLE;
+        self.ui_dirty |=
+            DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::PUZZLE;
     }
 
     // ── Tutorial-bubble cursor ──
@@ -1825,8 +1813,7 @@ impl App {
     /// and clears); back saturates at 0.
     fn advance_bubble(&mut self, back: bool) {
         if back {
-            self.gui_projector.current_bubble =
-                self.gui_projector.current_bubble.saturating_sub(1);
+            self.gui_projector.current_bubble = self.gui_projector.current_bubble.saturating_sub(1);
         } else if self.gui_projector.current_bubble < self.gui_projector.bubbles.len() {
             self.gui_projector.current_bubble += 1;
         }
@@ -1898,16 +1885,17 @@ impl App {
                     HistoryOutcome::Noop
                 }
             }),
-            HistoryCommand::Redo { branch } => self
-                .store
-                .redo(branch.map(|w| w.into_inner()))
-                .map(|opt| match opt {
-                    Some(_) => HistoryOutcome::HeadMoved,
-                    None => {
-                        log::info!("Redo: nowhere forward to go");
-                        HistoryOutcome::Noop
-                    }
-                }),
+            HistoryCommand::Redo { branch } => {
+                self.store
+                    .redo(branch.map(|w| w.into_inner()))
+                    .map(|opt| match opt {
+                        Some(_) => HistoryOutcome::HeadMoved,
+                        None => {
+                            log::info!("Redo: nowhere forward to go");
+                            HistoryOutcome::Noop
+                        }
+                    })
+            }
             HistoryCommand::LaneUndo { entity, target } => self
                 .store
                 .lane_undo(entity, target.into_inner())
@@ -1928,10 +1916,9 @@ impl App {
                 .store
                 .set_exclude_from_best(id.into_inner(), exclude)
                 .map(|_| HistoryOutcome::Curated),
-            HistoryCommand::AbortAction => self
-                .store
-                .abort_action()
-                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::AbortAction => {
+                self.store.abort_action().map(|_| HistoryOutcome::HeadMoved)
+            }
         };
 
         match result {
@@ -1946,11 +1933,7 @@ impl App {
 
     // ── Native input (when webview is not ready) ──
 
-    pub fn handle_native_mouse_input(
-        &mut self,
-        button: viso::MouseButton,
-        pressed: bool,
-    ) {
+    pub fn handle_native_mouse_input(&mut self, button: viso::MouseButton, pressed: bool) {
         let pending_click = if let Some(engine) = &mut self.engine {
             let click = engine.feed_pointer_button(button, pressed);
             update_all_visualizations(engine, None);
@@ -1991,10 +1974,17 @@ impl App {
         // Pre-snapshot pull info under an immutable borrow so the
         // subsequent `&mut engine` doesn't conflict.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self
+            .plugin_driver
+            .stream_host
+            .pull_drag
+            .as_ref()
+            .map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
-        let Some(engine) = &mut self.engine else { return };
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
         update_all_visualizations(engine, pull);
     }
 
@@ -2100,7 +2090,9 @@ impl App {
             }
         }
         if app_dirty.contains(DirtyFlags::ACTIONS) {
-            self.frontend.set_actions(wire_params::build_actions_list(&self.plugin_driver.orchestrator));
+            self.frontend.set_actions(wire_params::build_actions_list(
+                &self.plugin_driver.orchestrator,
+            ));
         }
         if app_dirty.contains(DirtyFlags::LOADING) {
             self.frontend.set_loading_progress(None);
@@ -2203,7 +2195,6 @@ impl App {
                 }
             }
         }
-
     }
 
     // ── The per-frame drive loop ──
@@ -2232,6 +2223,7 @@ impl App {
         //      against the render projector reading the same spine, so
         //      the per-handler pumps were removed in RX13.
         let changes = self.store.take_updates();
+        let n_changes = changes.len();
         if !changes.is_empty() {
             if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
                 self.plugin_driver
@@ -2239,17 +2231,40 @@ impl App {
                     .broadcast(&changes, &self.store, orch);
             }
             if let Some(engine) = self.engine.as_mut() {
-                self.render_projector
-                    .project(&changes, &self.store, engine);
+                self.render_projector.project(&changes, &self.store, engine);
             }
         }
 
-        // 4. Plugin score poll. Tick-driven cadence (RX13).
-        self.poll_plugin_scores();
+        // 4. Plugin score poll. Scores go stale only on an assembly
+        //    change (every mutation emits a SessionUpdate, including
+        //    those from non-scoring plugins), and the query runs off the
+        //    render thread so a slow scorer never stalls rendering. Until
+        //    the first score lands the poll is synchronous so the
+        //    Loading -> InPuzzle gate flips promptly.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.has_initial_score() {
+                // No score yet: blocking poll each tick until the first
+                // one lands. Brief, one-time per load.
+                self.poll_plugin_scores();
+            } else {
+                // Steady state: fire only on an assembly change, never
+                // block the render thread; apply replies as they arrive.
+                if n_changes > 0 {
+                    self.request_scores();
+                }
+                self.poll_async_scores();
+            }
+        }
 
         // 5. Engine update + 6. visualization overlay.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.stream_host.pull_drag.as_ref().map(|d| d.pull_info.clone());
+        let pull = self
+            .plugin_driver
+            .stream_host
+            .pull_drag
+            .as_ref()
+            .map(|d| d.pull_info.clone());
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         if let Some(engine) = self.engine.as_mut() {
@@ -2385,10 +2400,7 @@ impl App {
             );
             return;
         };
-        log::info!(
-            "[App] discovering plugins under {}",
-            plugins_root.display()
-        );
+        log::info!("[App] discovering plugins under {}", plugins_root.display());
 
         // Snapshot the initial assembly under an immutable store borrow
         // so we can hand it to `ensure_plugin_registered` for each plugin
@@ -2431,9 +2443,7 @@ impl App {
                 let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                     return;
                 };
-                match orch
-                    .ensure_plugin_registered(plugin_id, initial_assembly.clone())
-                {
+                match orch.ensure_plugin_registered(plugin_id, initial_assembly.clone()) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         log::warn!(
@@ -2465,9 +2475,7 @@ impl App {
             );
             return;
         }
-        let normalized = match molex::ops::wire::deserialize_assembly(
-            post_init_bytes,
-        ) {
+        let normalized = match molex::ops::wire::deserialize_assembly(post_init_bytes) {
             Ok(a) => a,
             Err(e) => {
                 log::warn!(
@@ -2497,8 +2505,7 @@ impl App {
             );
             return;
         }
-        let applied =
-            apply_streaming_assembly(&mut self.store, &normalized, None);
+        let applied = apply_streaming_assembly(&mut self.store, &normalized, None);
         if !applied {
             log::warn!(
                 "[App] rosetta post-Init apply_streaming_assembly did not \
@@ -2510,9 +2517,7 @@ impl App {
             return;
         }
         if let Err(e) = self.store.commit_action() {
-            log::warn!(
-                "[App] rosetta post-Init commit_action failed: {e}"
-            );
+            log::warn!("[App] rosetta post-Init commit_action failed: {e}");
             return;
         }
         log::info!(
@@ -2707,11 +2712,7 @@ impl App {
     pub fn handle_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {
         self.clear_selection();
         for entry in entries {
-            let Some(entity) = self
-                .store
-                .ids()
-                .find(|id| id.raw() == entry.entity_id)
-            else {
+            let Some(entity) = self.store.ids().find(|id| id.raw() == entry.entity_id) else {
                 log::trace!(
                     "handle_set_selection: unknown entity_id {} (dropping)",
                     entry.entity_id
@@ -2768,7 +2769,9 @@ impl foldit_gui::Dispatcher for App {
                     .get("filepath")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| "missing 'filepath'".to_string())?;
-                let bytes = self.host.read_file(filepath)
+                let bytes = self
+                    .host
+                    .read_file(filepath)
                     .map_err(|e| format!("read {}: {}", filepath, e))?;
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -2778,10 +2781,7 @@ impl foldit_gui::Dispatcher for App {
                 // Stub: real implementation would look up display strings
                 // for hotkey ids. Until that surface lands, return empty so
                 // HelpMenuPanel rejects gracefully instead of timing out.
-                let hotkey = payload
-                    .get("hotkey")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let hotkey = payload.get("hotkey").and_then(|v| v.as_str()).unwrap_or("");
                 Err(format!("hotkey lookup not implemented (hotkey={})", hotkey))
             }
             RequestKind::ServerRequest => {
@@ -2791,7 +2791,10 @@ impl foldit_gui::Dispatcher for App {
                     .get("endpoint")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                Err(format!("server request not implemented (endpoint={})", endpoint))
+                Err(format!(
+                    "server request not implemented (endpoint={})",
+                    endpoint
+                ))
             }
         }
     }
@@ -2806,10 +2809,7 @@ impl foldit_gui::Dispatcher for App {
 /// capsule + cone arrow renders whenever the caller hands a
 /// `Some(PullInfo)` from a live drag; clears otherwise so a finished
 /// or cancelled drag leaves no overlay.
-fn update_all_visualizations(
-    engine: &mut VisoEngine,
-    pull: Option<viso::PullInfo>,
-) {
+fn update_all_visualizations(engine: &mut VisoEngine, pull: Option<viso::PullInfo>) {
     engine.update_bands(vec![]);
     engine.update_pull(pull);
 }
@@ -2856,8 +2856,7 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
     }
     let mut cursor = exe.parent()?.to_path_buf();
     loop {
-        let candidate =
-            cursor.join("crates/foldit-runner/plugins");
+        let candidate = cursor.join("crates/foldit-runner/plugins");
         if candidate.is_dir() {
             return Some(candidate);
         }
@@ -2867,7 +2866,6 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
     }
     None
 }
-
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -2996,10 +2994,7 @@ mod selection_tests {
         app.select_residue(a, 1);
         app.set_residues_on(b, [42, 43]);
         // Mutating B must not have touched A.
-        assert_eq!(
-            app.selected_residues_on(a).expect("present").len(),
-            1
-        );
+        assert_eq!(app.selected_residues_on(a).expect("present").len(), 1);
     }
 
     #[test]
