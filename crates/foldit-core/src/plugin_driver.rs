@@ -45,6 +45,13 @@ impl PluginDriver {
         }
     }
 
+    /// Construct and install a fresh orchestrator handle. Called on
+    /// structure load (and again on the load-error path) to replace any
+    /// prior handle before plugin discovery runs.
+    pub(crate) fn init_orchestrator(&mut self) {
+        self.orchestrator = Some(foldit_runner::Orchestrator::new());
+    }
+
     /// Release any lock state when puzzle topology changes.
     pub fn reset_for_new_structure(&mut self) {
         if let Some(ref mut orch) = self.orchestrator {
@@ -176,6 +183,97 @@ impl PluginDriver {
                 Ok(OpOutcome::Stream)
             }
         }
+    }
+
+    // ── Score paths ─────────────────────────────────────────────────────
+    //
+    // Forward the well-known `score` query to the orchestrator, building
+    // the default dispatch context internally so the score query covers
+    // the whole assembly. App owns merging the returned reports into the
+    // head checkpoint and pushing per-residue colors.
+
+    /// Blocking score round-trip: fan the `score` query across every
+    /// provider and return one report per provider that replied. Used
+    /// until the first score lands, where a synchronous result keeps the
+    /// load gate deterministic. Empty map when no orchestrator is wired up.
+    pub(crate) fn collect_scores_blocking(
+        &mut self,
+    ) -> std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>
+    {
+        use foldit_runner::orchestrator::DispatchContext;
+        self.orchestrator
+            .as_mut()
+            .map(|orch| orch.collect_scores(&DispatchContext::default()))
+            .unwrap_or_default()
+    }
+
+    /// Fire a non-blocking `score` query at every provider with none
+    /// already in flight. Replies land on stored receivers drained by
+    /// [`Self::poll_score_results`]. No-op when no orchestrator exists.
+    pub(crate) fn request_scores(&mut self) {
+        use foldit_runner::orchestrator::DispatchContext;
+        if let Some(orch) = self.orchestrator.as_mut() {
+            orch.request_scores(&DispatchContext::default());
+        }
+    }
+
+    /// Drain whatever async `score` replies have arrived. Non-blocking;
+    /// empty map when nothing is ready or no orchestrator exists.
+    pub(crate) fn poll_score_results(
+        &mut self,
+    ) -> std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>
+    {
+        self.orchestrator
+            .as_mut()
+            .map(|orch| orch.poll_score_results())
+            .unwrap_or_default()
+    }
+
+    // ── Bootstrap discover + register ───────────────────────────────────
+
+    /// Discover plugins under `root` and register each against the given
+    /// initial assembly, bringing up its worker session. Returns the
+    /// `(plugin_id, post_init_bytes)` pair for every plugin that
+    /// registered successfully; the post-Init bytes carry each plugin's
+    /// normalized assembly for the caller to apply. Empty `Vec` when no
+    /// orchestrator is wired up or discovery fails — both degrade the app
+    /// to viewer-only rather than erroring.
+    pub(crate) fn discover_and_register(
+        &mut self,
+        root: &std::path::Path,
+        initial_assembly: Vec<u8>,
+    ) -> Vec<(String, Vec<u8>)> {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        let discovered = match orch.discover_plugins(root) {
+            Ok(ids) => ids,
+            Err(e) => {
+                log::warn!(
+                    "[PluginDriver] discover_plugins({}) failed: {e}; plugins disabled",
+                    root.display()
+                );
+                return Vec::new();
+            }
+        };
+        log::info!("[PluginDriver] discovered plugins: {discovered:?}");
+        let mut registered = Vec::with_capacity(discovered.len());
+        for plugin_id in &discovered {
+            match orch.ensure_plugin_registered(plugin_id, initial_assembly.clone())
+            {
+                Ok(bytes) => {
+                    log::info!("[PluginDriver] {plugin_id} plugin ready");
+                    registered.push((plugin_id.clone(), bytes));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[PluginDriver] ensure_plugin_registered('{plugin_id}') \
+                         failed: {e}; {plugin_id} plugin disabled"
+                    );
+                }
+            }
+        }
+        registered
     }
 }
 

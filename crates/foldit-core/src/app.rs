@@ -22,7 +22,6 @@ use foldit_gui::{
     HistoryCommand, HistoryLiveUpdate, HistorySection, ScoringMode, TextBubbleButton,
     TextBubblePayload, WireId,
 };
-use foldit_runner::Orchestrator;
 use molex::entity::molecule::id::EntityId;
 use viso::{
     classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus, KeyBindings, VisoEngine,
@@ -678,19 +677,12 @@ impl App {
     /// either way.
     #[cfg(not(target_arch = "wasm32"))]
     fn refresh_scores(&mut self) {
-        use foldit_runner::orchestrator::DispatchContext;
-
         // Blocking score round-trip. Used only until the first score
         // lands, where a synchronous result keeps the Loading -> InPuzzle
         // flip deterministic. Once a score exists the caller switches to
         // `request_scores` + `poll_async_scores` so the render thread
         // never blocks on the worker.
-        let reports = {
-            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-                return;
-            };
-            orch.collect_scores(&DispatchContext::default())
-        };
+        let reports = self.plugin_driver.collect_scores_blocking();
         self.apply_score_reports(reports);
     }
 
@@ -701,22 +693,14 @@ impl App {
     /// against a slow scorer.
     #[cfg(not(target_arch = "wasm32"))]
     fn request_scores(&mut self) {
-        use foldit_runner::orchestrator::DispatchContext;
-        if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
-            orch.request_scores(&DispatchContext::default());
-        }
+        self.plugin_driver.request_scores();
     }
 
     /// Drain whatever async `score` replies have arrived and apply them.
     /// Non-blocking; no-op when nothing is ready.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_async_scores(&mut self) {
-        let reports = {
-            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-                return;
-            };
-            orch.poll_score_results()
-        };
+        let reports = self.plugin_driver.poll_score_results();
         self.apply_score_reports(reports);
     }
 
@@ -2337,11 +2321,10 @@ impl App {
 
                 log::info!("Loaded structure: {}", name);
 
-                // Construct + assign the orchestrator BEFORE
-                // `bootstrap_plugins` so the method can reach it
-                // through `self.plugin_driver.orchestrator.as_mut()`
-                // instead of threading a locally-owned `&mut Orchestrator`.
-                self.plugin_driver.orchestrator = Some(Orchestrator::new());
+                // Install a fresh orchestrator BEFORE `bootstrap_plugins`
+                // so discovery + registration run against the handle the
+                // plugin driver owns.
+                self.plugin_driver.init_orchestrator();
                 self.bootstrap_plugins();
 
                 // Republish: bootstrap may have committed rosetta's
@@ -2353,7 +2336,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", path, e);
-                self.plugin_driver.orchestrator = Some(Orchestrator::new());
+                self.plugin_driver.init_orchestrator();
             }
         }
 
@@ -2380,10 +2363,9 @@ impl App {
     /// dir / dylib should degrade the app to viewer-only, not crash the
     /// load.
     ///
-    /// Caller must have assigned `self.plugin_driver.orchestrator` to
-    /// `Some(Orchestrator::new())` before calling — this method reaches
-    /// the orchestrator through that field rather than taking one as a
-    /// parameter.
+    /// Caller must have installed a fresh orchestrator on the plugin
+    /// driver before calling; this method drives discovery + registration
+    /// through the driver and applies any per-plugin post-Init result.
     ///
     /// If Rosetta's Init returns a non-empty normalized assembly (full-atom
     /// pose with hydrogens / terminal O / etc. added), it is committed as
@@ -2402,9 +2384,12 @@ impl App {
         };
         log::info!("[App] discovering plugins under {}", plugins_root.display());
 
-        // Snapshot the initial assembly under an immutable store borrow
-        // so we can hand it to `ensure_plugin_registered` for each plugin
-        // without re-borrowing across iterations.
+        // Snapshot the initial assembly under an immutable store borrow so
+        // the plugin driver can hand it to `ensure_plugin_registered` for
+        // each plugin. Registration uses this one pre-normalization
+        // snapshot for every plugin, so applying rosetta's post-Init result
+        // afterward (below) does not change what later plugins register
+        // against.
         let initial_assembly = {
             let head_before = self.store.head_assembly();
             match molex::ops::wire::serialize_assembly(&head_before) {
@@ -2419,45 +2404,17 @@ impl App {
             }
         };
 
-        // Discover under a mut orch borrow scoped to this block so we
-        // can later interleave orch and store calls.
-        let discovered = {
-            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-                return;
-            };
-            match orch.discover_plugins(&plugins_root) {
-                Ok(ids) => ids,
-                Err(e) => {
-                    log::warn!(
-                        "[App] discover_plugins({}) failed: {e}; plugins disabled",
-                        plugins_root.display()
-                    );
-                    return;
-                }
-            }
-        };
-        log::info!("[App] discovered plugins: {discovered:?}");
+        let registered = self
+            .plugin_driver
+            .discover_and_register(&plugins_root, initial_assembly);
 
-        for plugin_id in &discovered {
-            let post_init_bytes = {
-                let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-                    return;
-                };
-                match orch.ensure_plugin_registered(plugin_id, initial_assembly.clone()) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        log::warn!(
-                            "[App] ensure_plugin_registered('{plugin_id}') failed: \
-                             {e}; {plugin_id} plugin disabled"
-                        );
-                        continue;
-                    }
-                }
-            };
-            log::info!("[App] {plugin_id} plugin ready");
-
+        // Apply each plugin's post-Init normalization into the store. Only
+        // rosetta returns a non-empty normalized assembly today; the loop
+        // stays generic so additional normalizing plugins drop in without
+        // host-side wiring changes.
+        for (plugin_id, post_init_bytes) in &registered {
             if plugin_id == "rosetta" {
-                self.apply_rosetta_post_init(&post_init_bytes);
+                self.apply_rosetta_post_init(post_init_bytes);
             }
         }
     }
