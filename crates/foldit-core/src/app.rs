@@ -257,26 +257,6 @@ fn entity_type_of(
     })
 }
 
-/// Translate the runner-side manifest enum to a concrete viso
-/// [`Transition`]. The variant names are kept in 1:1 sync — this is a
-/// mechanical mapping, not a semantic rename.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolve_transition(kind: foldit_runner::orchestrator::TransitionKind) -> viso::Transition {
-    use foldit_runner::orchestrator::TransitionKind;
-    match kind {
-        TransitionKind::Snap => viso::Transition::snap(),
-        TransitionKind::Smooth => viso::Transition::smooth(),
-        TransitionKind::CollapseExpand => viso::Transition::collapse_expand(
-            std::time::Duration::from_millis(150),
-            std::time::Duration::from_millis(150),
-        ),
-        TransitionKind::BackboneThenExpand => viso::Transition::backbone_then_expand(
-            std::time::Duration::from_millis(200),
-            std::time::Duration::from_millis(100),
-        ),
-    }
-}
-
 /// Overwrite the ongoing action's tentative payload from a streaming
 /// assembly. Only the entity locked by `begin_action` is rewritten;
 /// peer entities in the same incoming Assembly are ignored (whole-pose
@@ -448,21 +428,15 @@ impl App {
 
             let mut visual_dirty = false;
             let mut had_terminal = false;
-            // Resolved animation preset for whichever stream produced
-            // the latest visual update in this drain, queued on the
-            // engine so the next tick's render-projector publish
-            // animates in instead of snapping. Single-action invariant
-            // means at most one stream is mutating at a time, so
-            // last-write-wins is correct. The entity is captured
-            // alongside the transition (not re-resolved via
-            // `ongoing().locked_entity()` after the loop) because the
-            // `Final` arm commits the action inline and moves
-            // OngoingState to Idle, after which locked_entity is
-            // None — the Invoke path's apply_invoke_result captures
-            // the same way for the same reason.
+            // Animation for the latest visual update this drain, queued
+            // on the engine so the next tick's publish animates instead
+            // of snapping (single-action invariant => last-write-wins).
+            // Inferred from the prior-vs-incoming structural delta,
+            // captured before `apply_streaming_assembly` overwrites the
+            // tentative.
             let mut pending_transition: Option<(
                 molex::entity::molecule::id::EntityId,
-                foldit_runner::orchestrator::TransitionKind,
+                viso::Transition,
             )> = None;
             for update in updates {
                 match update {
@@ -480,13 +454,17 @@ impl App {
                             );
                             continue;
                         };
+                        // Infer before the apply overwrites the tentative.
+                        let locked = self.store.history().ongoing().locked_entity();
+                        let inferred = locked.and_then(|eid| {
+                            let prev = self.store.entity(eid)?;
+                            let new = assembly.entity(eid)?;
+                            Some(crate::transition::infer_transition(prev, new))
+                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             visual_dirty = true;
-                            if let (Some(entry), Some(entity)) = (
-                                self.plugin_driver.stream_entry(request_id),
-                                self.store.history().ongoing().locked_entity(),
-                            ) {
-                                pending_transition = Some((entity, entry.transition));
+                            if let (Some(entity), Some(t)) = (locked, inferred) {
+                                pending_transition = Some((entity, t));
                             }
                         }
                     }
@@ -496,13 +474,15 @@ impl App {
                     } => {
                         // Cancel-as-commit: same shape as Final below.
                         had_terminal = true;
-                        let stream_transition = self
-                            .plugin_driver
-                            .stream_entry(request_id)
-                            .map(|e| e.transition);
+                        // Infer before the apply/commit below drop the
+                        // prior pose and the lock.
+                        let locked = self.store.history().ongoing().locked_entity();
+                        let inferred = locked.and_then(|eid| {
+                            let prev = self.store.entity(eid)?;
+                            let new = assembly.entity(eid)?;
+                            Some(crate::transition::infer_transition(prev, new))
+                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
-                            let locked_for_transition =
-                                self.store.history().ongoing().locked_entity();
                             if let Err(e) = self.store.commit_action() {
                                 log::warn!(
                                     "plugin update Cancelled rid={request_id} \
@@ -510,9 +490,7 @@ impl App {
                                 );
                             }
                             visual_dirty = true;
-                            if let (Some(t), Some(entity)) =
-                                (stream_transition, locked_for_transition)
-                            {
+                            if let (Some(entity), Some(t)) = (locked, inferred) {
                                 pending_transition = Some((entity, t));
                             }
                         }
@@ -529,18 +507,15 @@ impl App {
                         ..
                     } => {
                         had_terminal = true;
-                        let stream_transition = self
-                            .plugin_driver
-                            .stream_entry(request_id)
-                            .map(|e| e.transition);
+                        // Infer before the apply/commit below drop the
+                        // prior pose and the lock.
+                        let locked = self.store.history().ongoing().locked_entity();
+                        let inferred = locked.and_then(|eid| {
+                            let prev = self.store.entity(eid)?;
+                            let new = assembly.entity(eid)?;
+                            Some(crate::transition::infer_transition(prev, new))
+                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
-                            // Capture the locked entity *before*
-                            // commit_action moves OngoingState to Idle:
-                            // queue_entity_transition runs after this
-                            // loop and would otherwise have nothing to
-                            // key against.
-                            let locked_for_transition =
-                                self.store.history().ongoing().locked_entity();
                             // Stream completed cleanly: commit the
                             // tentative so the partial result becomes
                             // a permanent undo entry.
@@ -551,9 +526,7 @@ impl App {
                                 );
                             }
                             visual_dirty = true;
-                            if let (Some(t), Some(entity)) =
-                                (stream_transition, locked_for_transition)
-                            {
+                            if let (Some(entity), Some(t)) = (locked, inferred) {
                                 pending_transition = Some((entity, t));
                             }
                         }
@@ -624,8 +597,8 @@ impl App {
                     // at a time). The publish itself is spine-driven
                     // by `tick` via the Edit/HeadMoved emitted by
                     // `action_update` / `commit_action`.
-                    if let Some((entity, kind)) = pending_transition {
-                        engine.queue_entity_transition(entity.raw(), resolve_transition(kind));
+                    if let Some((entity, transition)) = pending_transition {
+                        engine.queue_entity_transition(entity.raw(), transition);
                     }
                 }
             }
@@ -1220,7 +1193,6 @@ impl App {
     fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
         use foldit_runner::orchestrator::{
             DispatchContext as RunnerDispatchContext, EntityId as RunnerEntityId, ResidueRef,
-            TransitionKind,
         };
 
         let Some(engine) = self.engine.as_ref() else {
@@ -1310,7 +1282,6 @@ impl App {
             ActiveStreamEntry {
                 handle,
                 plugin_id: plugin_id.clone(),
-                transition: TransitionKind::default(),
             },
         );
         self.plugin_driver.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
@@ -1442,24 +1413,15 @@ impl App {
                 return;
             };
 
-            // Resolve display label + animation preset from the
-            // manifest catalog. Falls back to the op id + Smooth when
-            // the op isn't surfaced as a button (the dispatcher still
-            // routes; the history entry just shows the op id, and
-            // animation gets the host default).
-            let (display, transition) = orch
+            // Resolve the display label from the manifest catalog.
+            // Falls back to the op id when the op isn't surfaced as a
+            // button (the dispatcher still routes; the history entry
+            // just shows the op id).
+            let display = orch
                 .ops_catalog()
                 .into_iter()
                 .find(|e| e.plugin_id == cached.plugin_id && e.op_id == op.op_id)
-                .map_or_else(
-                    || {
-                        (
-                            op.op_id.clone(),
-                            foldit_runner::orchestrator::TransitionKind::default(),
-                        )
-                    },
-                    |e| (e.display, e.transition),
-                );
+                .map_or_else(|| op.op_id.clone(), |e| e.display);
             let plugin_id = cached.plugin_id.clone();
 
             let ctx = RunnerDispatchContext {
@@ -1485,7 +1447,6 @@ impl App {
                 ctx,
                 params,
                 plugin_id.clone(),
-                transition,
                 |id| entity_type_of(store, id),
             );
 
@@ -1530,7 +1491,7 @@ impl App {
                     // does the cleanup; nothing else to do here.
                 }
                 Ok(OpOutcome::Invoke(bytes)) => {
-                    self.apply_invoke_result(&bytes, transition);
+                    self.apply_invoke_result(&bytes);
                 }
                 Err(e) => {
                     log::error!("handle_dispatch_op({:?}): dispatch failed: {e}", op.op_id);
@@ -1547,15 +1508,11 @@ impl App {
     /// Apply the assembly bytes returned by a one-shot `dispatch_invoke`
     /// to the ongoing tentative and commit it. Mirrors the Stream-side
     /// `Final` path; called from `handle_dispatch_op` for `OpKind::Invoke`.
-    /// `transition` is the manifest-declared animation preset, queued
-    /// on the locked entity so the next tick's render-projector
-    /// publish eases the result in rather than snapping.
+    /// The transition is inferred from the prior-vs-result structural
+    /// delta and queued on the locked entity so the next tick's
+    /// render-projector publish eases the result in rather than snapping.
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_invoke_result(
-        &mut self,
-        bytes: &[u8],
-        transition: foldit_runner::orchestrator::TransitionKind,
-    ) {
+    fn apply_invoke_result(&mut self, bytes: &[u8]) {
         let assembly = match molex::ops::wire::deserialize_assembly(bytes) {
             Ok(a) => a,
             Err(e) => {
@@ -1566,20 +1523,21 @@ impl App {
                 return;
             }
         };
+        // Infer before the apply overwrites the tentative.
+        let entity = self.store.history().ongoing().locked_entity();
+        let inferred = entity.and_then(|eid| {
+            let prev = self.store.entity(eid)?;
+            let new = assembly.entity(eid)?;
+            Some(crate::transition::infer_transition(prev, new))
+        });
         let applied = apply_streaming_assembly(&mut self.store, &assembly, None);
         if applied {
-            let entity = self.store.history().ongoing().locked_entity();
             if let Err(e) = self.store.commit_action() {
                 log::warn!("dispatch_invoke: commit_action failed: {e}");
             }
             if let Some(engine) = self.engine.as_mut() {
-                if let Some(eid) = entity {
-                    // Queue the manifest-declared animation for the
-                    // upcoming render projector publish (tick will
-                    // call set_assembly which consumes the queued
-                    // transition; HeadMoved from commit_action is the
-                    // spine signal that triggers the publish).
-                    engine.queue_entity_transition(eid.raw(), resolve_transition(transition));
+                if let (Some(eid), Some(transition)) = (entity, inferred) {
+                    engine.queue_entity_transition(eid.raw(), transition);
                 }
             }
             self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;

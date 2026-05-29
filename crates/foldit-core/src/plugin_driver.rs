@@ -88,10 +88,9 @@ impl PluginDriver {
             .unwrap_or_default()
     }
 
-    /// Read accessor for an in-flight stream entry. Used by the Pending
-    /// arm of `apply_backend_updates` to look up the resolved
-    /// `TransitionKind`, and by the Error arm to inspect
-    /// `handle.entities` before the terminal cleanup releases the handle.
+    /// Read accessor for an in-flight stream entry. Used by the Error
+    /// arm of `apply_backend_updates` to inspect `handle.entities`
+    /// before the terminal cleanup releases the handle.
     pub(crate) fn stream_entry(&self, rid: u64) -> Option<&ActiveStreamEntry> {
         self.stream_host.active_streams.get(&rid)
     }
@@ -99,25 +98,18 @@ impl PluginDriver {
     /// Terminal stream cleanup (Cancelled / Final / Error): remove the
     /// entry from the active-streams table, release its dispatch locks
     /// on the orchestrator, and clear `pull_drag` if it pointed at this
-    /// stream. Returns the entry's `(plugin_id, transition)` so callers
-    /// can log or replay the manifest transition without re-querying.
-    pub(crate) fn release_terminal_stream(
-        &mut self,
-        rid: u64,
-    ) -> Option<(String, foldit_runner::orchestrator::TransitionKind)> {
+    /// stream. Returns the entry's `plugin_id` so callers can log
+    /// without re-querying.
+    pub(crate) fn release_terminal_stream(&mut self, rid: u64) -> Option<String> {
         let entry = self.stream_host.active_streams.remove(&rid)?;
-        let ActiveStreamEntry {
-            handle,
-            plugin_id,
-            transition,
-        } = entry;
+        let ActiveStreamEntry { handle, plugin_id } = entry;
         if let Some(orch) = self.orchestrator.as_mut() {
             orch.release_dispatch_locks(handle);
         }
         if matches!(&self.stream_host.pull_drag, Some(d) if d.request_id == rid) {
             self.stream_host.pull_drag = None;
         }
-        Some((plugin_id, transition))
+        Some(plugin_id)
     }
 
     /// Send a cancel to every in-flight stream's plugin. Used by the
@@ -141,9 +133,9 @@ impl PluginDriver {
     /// One-call dispatch: hand the orchestrator a pre-built session
     /// context + params, branch on `kind`, and for streams, insert the
     /// `ActiveStreamEntry` so the matching terminal arm can find it.
-    /// `App` still owns the catalog lookup that produces `plugin_id` /
-    /// `transition` and the post-processing (`begin_action`,
-    /// `apply_invoke_result`, broadcaster pump, score poll).
+    /// `App` still owns the catalog lookup that produces `plugin_id`
+    /// and the post-processing (`begin_action`, `apply_invoke_result`,
+    /// broadcaster pump, score poll).
     pub(crate) fn dispatch_op(
         &mut self,
         op_id: &str,
@@ -154,7 +146,6 @@ impl PluginDriver {
             foldit_runner::orchestrator::ParamValue,
         >,
         plugin_id: String,
-        transition: foldit_runner::orchestrator::TransitionKind,
         entity_type_of: impl Fn(
             foldit_runner::orchestrator::EntityId,
         ) -> Option<foldit_runner::orchestrator::EntityType>,
@@ -174,11 +165,7 @@ impl PluginDriver {
                     .map_err(|e| e.to_string())?;
                 let _ = self.stream_host.active_streams.insert(
                     rid,
-                    ActiveStreamEntry {
-                        handle,
-                        plugin_id,
-                        transition,
-                    },
+                    ActiveStreamEntry { handle, plugin_id },
                 );
                 Ok(OpOutcome::Stream)
             }
@@ -489,14 +476,10 @@ pub(crate) struct StreamHost {
 /// Bundle stored per running stream so `apply_backend_updates` /
 /// `cancel_operations` can release locks and dispatch cancel against
 /// the right plugin worker without re-querying the orchestrator.
-/// `transition` is the viso animation preset to queue on each Pending
-/// snapshot — resolved from the manifest catalog once at dispatch
-/// time so per-poll handling stays orchestrator-free.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
-    pub(crate) transition: foldit_runner::orchestrator::TransitionKind,
 }
 
 #[cfg(test)]
