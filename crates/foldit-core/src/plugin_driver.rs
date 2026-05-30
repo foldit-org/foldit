@@ -12,7 +12,7 @@
 //! stream state they need.
 
 use molex::ops::edit::AssemblyEdit;
-use molex::{Assembly, MoleculeEntity};
+use molex::Assembly;
 
 use crate::session::{Session, SessionUpdate};
 
@@ -371,7 +371,7 @@ fn encode_payload(
 ) -> Option<foldit_runner::orchestrator::BroadcastPayload> {
     use foldit_runner::orchestrator::BroadcastPayload;
     if let Some(prior) = prior {
-        if let Some(edits) = assembly_coord_delta(prior, new) {
+        if let Some(edits) = assembly_diff(prior, new) {
             if let Ok(bytes) = molex::ops::wire::delta::serialize_edits(&edits) {
                 return Some(BroadcastPayload::Delta(bytes));
             }
@@ -383,56 +383,15 @@ fn encode_payload(
         .map(BroadcastPayload::Full)
 }
 
-/// Decide whether a single-entity mutation can be broadcast as a
-/// coord-only `SetEntityCoords` delta. Returns `Some(edit)` when the
-/// prior and new payloads share id, type, atom count, and full polymer
-/// topology (residue layout + per-residue variants); returns `None` when
-/// anything else changed — at which point the caller falls back to a
-/// `Full` broadcast.
-///
-/// Atom-level fields beyond `position` (element, name, formal_charge,
-/// occupancy, b_factor) are intentionally not re-checked: action
-/// lifecycle mutations only touch positions, and a delta receiver that
-/// applies `SetEntityCoords` preserves its own copy of those fields. A
-/// receiver that needs non-position atom updates falls back through the
-/// Full path.
-fn coord_only_delta(prior: &MoleculeEntity, new: &MoleculeEntity) -> Option<AssemblyEdit> {
-    if prior.id() != new.id() {
-        return None;
-    }
-    if prior.molecule_type() != new.molecule_type() {
-        return None;
-    }
-    if prior.atom_count() != new.atom_count() {
-        return None;
-    }
-    match (prior.residues(), new.residues()) {
-        (Some(p_res), Some(n_res)) => {
-            if p_res.len() != n_res.len() {
-                return None;
-            }
-            for (p, n) in p_res.iter().zip(n_res.iter()) {
-                if p.name != n.name || p.atom_range != n.atom_range || p.variants != n.variants {
-                    return None;
-                }
-            }
-        }
-        (None, None) => {}
-        _ => return None,
-    }
-    Some(AssemblyEdit::SetEntityCoords {
-        entity: new.id(),
-        coords: new.positions(),
-    })
-}
-
-/// Whole-assembly coord diff. Returns `Some(edits)` (possibly empty when
-/// nothing moved) when every entity in `new` shares id + topology with
-/// the entity at the same position in `prior`; returns `None` otherwise
-/// (entity added, removed, reordered, or any per-entity topology
-/// divergence). Same-topology head moves emit Delta; cross-topology jumps
-/// fall back to Full.
-fn assembly_coord_delta(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {
+/// Whole-assembly diff, via [`molex::MoleculeEntity::diff`]. Returns
+/// `Some(edits)` (possibly empty when nothing moved) when `prior` and `new`
+/// carry the same entity-id set in the same order, so every entity is
+/// pairwise-diffable; returns `None` when an entity was added, removed, or
+/// reordered, or when any per-entity change isn't representable as an edit
+/// (a residue insert/delete) — at which point the caller broadcasts a full
+/// snapshot. Coord moves ride the delta as `SetEntityCoords`, mutations as
+/// `MutateResidue`.
+fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {
     let prior_entities = prior.entities();
     let new_entities = new.entities();
     if prior_entities.len() != new_entities.len() {
@@ -440,11 +399,10 @@ fn assembly_coord_delta(prior: &Assembly, new: &Assembly) -> Option<Vec<Assembly
     }
     let mut edits = Vec::new();
     for (p, n) in prior_entities.iter().zip(new_entities.iter()) {
-        let edit = coord_only_delta(p, n)?;
-        if p.positions() == n.positions() {
-            continue;
+        if p.id() != n.id() {
+            return None;
         }
-        edits.push(edit);
+        edits.extend(p.diff(n).ok()?);
     }
     Some(edits)
 }
@@ -490,7 +448,7 @@ mod tests {
     use molex::entity::molecule::atom::Atom;
     use molex::entity::molecule::bulk::BulkEntity;
     use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
-    use molex::{Element, MoleculeType};
+    use molex::{Element, MoleculeEntity, MoleculeType};
 
     fn mk_bulk(id: EntityId, pos: glam::Vec3) -> MoleculeEntity {
         let atom = Atom {

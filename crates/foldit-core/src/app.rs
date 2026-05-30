@@ -428,16 +428,6 @@ impl App {
 
             let mut visual_dirty = false;
             let mut had_terminal = false;
-            // Animation for the latest visual update this drain, queued
-            // on the engine so the next tick's publish animates instead
-            // of snapping (single-action invariant => last-write-wins).
-            // Inferred from the prior-vs-incoming structural delta,
-            // captured before `apply_streaming_assembly` overwrites the
-            // tentative.
-            let mut pending_transition: Option<(
-                molex::entity::molecule::id::EntityId,
-                viso::Transition,
-            )> = None;
             for update in updates {
                 match update {
                     PluginUpdate::Pending {
@@ -454,18 +444,8 @@ impl App {
                             );
                             continue;
                         };
-                        // Infer before the apply overwrites the tentative.
-                        let locked = self.store.history().ongoing().locked_entity();
-                        let inferred = locked.and_then(|eid| {
-                            let prev = self.store.entity(eid)?;
-                            let new = assembly.entity(eid)?;
-                            Some(crate::transition::infer_transition(prev, new))
-                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             visual_dirty = true;
-                            if let (Some(entity), Some(t)) = (locked, inferred) {
-                                pending_transition = Some((entity, t));
-                            }
                         }
                     }
                     PluginUpdate::Cancelled {
@@ -474,14 +454,6 @@ impl App {
                     } => {
                         // Cancel-as-commit: same shape as Final below.
                         had_terminal = true;
-                        // Infer before the apply/commit below drop the
-                        // prior pose and the lock.
-                        let locked = self.store.history().ongoing().locked_entity();
-                        let inferred = locked.and_then(|eid| {
-                            let prev = self.store.entity(eid)?;
-                            let new = assembly.entity(eid)?;
-                            Some(crate::transition::infer_transition(prev, new))
-                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             if let Err(e) = self.store.commit_action() {
                                 log::warn!(
@@ -490,9 +462,6 @@ impl App {
                                 );
                             }
                             visual_dirty = true;
-                            if let (Some(entity), Some(t)) = (locked, inferred) {
-                                pending_transition = Some((entity, t));
-                            }
                         }
                         let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
@@ -507,14 +476,6 @@ impl App {
                         ..
                     } => {
                         had_terminal = true;
-                        // Infer before the apply/commit below drop the
-                        // prior pose and the lock.
-                        let locked = self.store.history().ongoing().locked_entity();
-                        let inferred = locked.and_then(|eid| {
-                            let prev = self.store.entity(eid)?;
-                            let new = assembly.entity(eid)?;
-                            Some(crate::transition::infer_transition(prev, new))
-                        });
                         if apply_streaming_assembly(&mut self.store, &assembly, None) {
                             // Stream completed cleanly: commit the
                             // tentative so the partial result becomes
@@ -526,9 +487,6 @@ impl App {
                                 );
                             }
                             visual_dirty = true;
-                            if let (Some(entity), Some(t)) = (locked, inferred) {
-                                pending_transition = Some((entity, t));
-                            }
                         }
                         let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
@@ -585,23 +543,6 @@ impl App {
                 }
             }
 
-            if visual_dirty {
-                if let Some(engine) = self.engine.as_mut() {
-                    // Queue the animation preset for the streaming
-                    // entity *before* set_assembly fires on the next
-                    // tick — the engine picks both up together and
-                    // animates from current GPU positions to the new
-                    // pose; without the transition, sync_scene_to_renderers
-                    // snaps. The entity was captured at update time
-                    // (single-action invariant — at most one in flight
-                    // at a time). The publish itself is spine-driven
-                    // by `tick` via the Edit/HeadMoved emitted by
-                    // `action_update` / `commit_action`.
-                    if let Some((entity, transition)) = pending_transition {
-                        engine.queue_entity_transition(entity.raw(), transition);
-                    }
-                }
-            }
             if had_terminal {
                 self.ui_dirty |= DirtyFlags::SCORE
                     | DirtyFlags::ACTIONS
@@ -1523,22 +1464,10 @@ impl App {
                 return;
             }
         };
-        // Infer before the apply overwrites the tentative.
-        let entity = self.store.history().ongoing().locked_entity();
-        let inferred = entity.and_then(|eid| {
-            let prev = self.store.entity(eid)?;
-            let new = assembly.entity(eid)?;
-            Some(crate::transition::infer_transition(prev, new))
-        });
         let applied = apply_streaming_assembly(&mut self.store, &assembly, None);
         if applied {
             if let Err(e) = self.store.commit_action() {
                 log::warn!("dispatch_invoke: commit_action failed: {e}");
-            }
-            if let Some(engine) = self.engine.as_mut() {
-                if let (Some(eid), Some(transition)) = (entity, inferred) {
-                    engine.queue_entity_transition(eid.raw(), transition);
-                }
             }
             self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;
         } else if self.store.has_ongoing_action() {
