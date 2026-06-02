@@ -244,7 +244,7 @@ impl PluginDriver {
         plugin_id: String,
         entity_type_of: impl Fn(
             foldit_runner::orchestrator::EntityId,
-        ) -> Option<foldit_runner::orchestrator::EntityType>,
+        ) -> Option<molex::EntityKind>,
     ) -> Result<OpOutcome, DispatchError> {
         use foldit_runner::orchestrator::{
             DispatchContext, EntityId as RunnerEntityId, OpKind, ResidueRef,
@@ -440,6 +440,12 @@ pub(crate) enum DispatchError {
     /// A required entity was already locked by another op; carries the raw
     /// id of the locked entity.
     EntityLocked { entity: u64 },
+    /// The plugin's backend worker is already running an op; only one op
+    /// per backend at a time.
+    BackendBusy {
+        /// The plugin whose backend is busy.
+        plugin_id: String,
+    },
     /// Any other dispatch failure, rendered to a string.
     Failed(String),
 }
@@ -457,6 +463,9 @@ fn map_dispatch_error(
             entity,
             ..
         }) => DispatchError::EntityLocked { entity: entity.0 },
+        OpDispatchError::LockRefused(RunnerDispatchError::BackendBusy {
+            plugin_id,
+        }) => DispatchError::BackendBusy { plugin_id },
         other => DispatchError::Failed(other.to_string()),
     }
 }
@@ -833,7 +842,35 @@ mod tests {
         );
         match map_dispatch_error(runner_err) {
             DispatchError::EntityLocked { entity } => assert_eq!(entity, 7),
+            DispatchError::BackendBusy { plugin_id } => {
+                panic!("expected EntityLocked, got BackendBusy({plugin_id})")
+            }
             DispatchError::Failed(s) => panic!("expected EntityLocked, got Failed({s})"),
+        }
+    }
+
+    /// A runner backend-busy refusal must surface as the core
+    /// `BackendBusy` variant (advisory), not `Failed`.
+    #[test]
+    fn backend_busy_maps_to_backend_busy() {
+        use foldit_runner::orchestrator::{
+            DispatchError as RunnerDispatchError, OpDispatchError,
+        };
+        let runner_err = OpDispatchError::LockRefused(
+            RunnerDispatchError::BackendBusy {
+                plugin_id: String::from("rosetta"),
+            },
+        );
+        match map_dispatch_error(runner_err) {
+            DispatchError::BackendBusy { plugin_id } => {
+                assert_eq!(plugin_id, "rosetta");
+            }
+            DispatchError::EntityLocked { entity } => {
+                panic!("expected BackendBusy, got EntityLocked({entity})")
+            }
+            DispatchError::Failed(s) => {
+                panic!("expected BackendBusy, got Failed({s})")
+            }
         }
     }
 

@@ -177,6 +177,13 @@ impl Session {
         self.transient.get(&id).map(|arc| arc.as_ref())
     }
 
+    /// The structural kind of a live entity, or `None` if no entity with
+    /// this id exists in the session head / previews.
+    #[must_use]
+    pub fn entity_type(&self, id: EntityId) -> Option<molex::EntityKind> {
+        self.entity(id).map(MoleculeEntity::entity_kind)
+    }
+
     /// Look up an entity's metadata.
     #[must_use]
     pub fn metadata(&self, id: EntityId) -> Option<&EntityMetadata> {

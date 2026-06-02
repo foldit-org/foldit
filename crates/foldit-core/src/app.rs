@@ -238,27 +238,15 @@ fn first_protein_entity(store: &Session) -> Option<EntityId> {
     store.proteins().next().map(|(eid, _, _)| eid)
 }
 
-/// Bridge a runner [`EntityId`](foldit_runner::orchestrator::EntityId)
-/// to the orchestrator's [`EntityType`](foldit_runner::orchestrator::EntityType)
-/// by looking the entity up in the [`Session`] and mapping the
-/// `MoleculeEntity` variant 1:1. Used by `dispatch_op` callers so the
-/// orchestrator can pick per-entity locks instead of falling back to
-/// `LockTargets::SessionWide`. Returns `None` when the runner id has no
-/// matching molex id in the current head (no committed lane or preview).
+/// Reverse-lookup: find the molex entity id whose raw value matches a
+/// runner entity id. (App still keys dispatch closures by runner
+/// `EntityId`; that key is slated for later removal.)
 #[cfg(not(target_arch = "wasm32"))]
-fn entity_type_of(
+fn to_molex(
     store: &Session,
     id: foldit_runner::orchestrator::EntityId,
-) -> Option<foldit_runner::orchestrator::EntityType> {
-    use foldit_runner::orchestrator::EntityType;
-    use molex::MoleculeEntity;
-    let molex_id = store.ids().find(|m| u64::from(m.raw()) == id.0)?;
-    store.entity(molex_id).map(|me| match me {
-        MoleculeEntity::Protein(_) => EntityType::Protein,
-        MoleculeEntity::NucleicAcid(_) => EntityType::NucleicAcid,
-        MoleculeEntity::SmallMolecule(_) => EntityType::SmallMolecule,
-        MoleculeEntity::Bulk(_) => EntityType::Bulk,
-    })
+) -> Option<EntityId> {
+    store.ids().find(|m| u64::from(m.raw()) == id.0)
 }
 
 /// Overwrite the ongoing action's tentative payload from a streaming
@@ -1119,9 +1107,12 @@ impl App {
         };
         let plugin_id = cached.plugin_id.clone();
 
-        let (rid, handle) = match orch
-            .dispatch_start_stream(route.op_id, ctx, params, |id| entity_type_of(store, id))
-        {
+        let (rid, handle) = match orch.dispatch_start_stream(
+            route.op_id,
+            ctx,
+            params,
+            |id| to_molex(store, id).and_then(|m| store.entity_type(m)),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 log::warn!(
@@ -1304,7 +1295,7 @@ impl App {
             let dispatch_outcome =
                 self.plugin_driver
                     .dispatch_op(intent, plugin_id.clone(), |id| {
-                        entity_type_of(store, id)
+                        to_molex(store, id).and_then(|m| store.entity_type(m))
                     });
 
             // Resolve which entity this op targets. The focused entity
@@ -1372,6 +1363,12 @@ impl App {
                         "handle_dispatch_op({:?}): dispatch refused, entity {entity} locked",
                         op.op_id
                     );
+                }
+                Err(DispatchError::BackendBusy { plugin_id }) => {
+                    // Advisory refusal: the plugin's backend worker is
+                    // already running an op. No edit was begun (gated on
+                    // `is_ok`), so there is nothing to open or roll back.
+                    log::info!("dispatch refused: backend {plugin_id} busy");
                 }
                 Err(DispatchError::Failed(s)) => {
                     log::error!("handle_dispatch_op({:?}): dispatch failed: {s}", op.op_id);
