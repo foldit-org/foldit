@@ -229,39 +229,80 @@ impl PluginDriver {
         }
     }
 
-    /// One-call dispatch: hand the orchestrator a pre-built session
-    /// context + params, branch on `kind`, and for streams, insert the
-    /// `ActiveStreamEntry` so the matching terminal arm can find it.
-    /// `App` still owns the catalog lookup that produces `plugin_id`
-    /// and the post-processing (`begin_action`, `apply_invoke_result`,
-    /// broadcaster pump, score poll).
+    /// One-call dispatch: take the core-shaped [`DispatchIntent`], resolve
+    /// the op kind off the registry, flatten the selection / convert params
+    /// into the orchestrator's wire shapes, branch on Invoke vs Stream, and
+    /// for streams insert the `ActiveStreamEntry` so the matching terminal
+    /// arm can find it. `App` still owns the catalog lookup that produces
+    /// `plugin_id` (passed in, since `App` needs it for `begin_action`) and
+    /// the post-processing (`begin_action`, `apply_invoke_result`,
+    /// broadcaster pump, score poll). Returns a core-shaped
+    /// [`DispatchError`] that names no orchestrator type.
     pub(crate) fn dispatch_op(
         &mut self,
-        op_id: &str,
-        kind: foldit_runner::orchestrator::OpKind,
-        ctx: foldit_runner::orchestrator::DispatchContext,
-        params: std::collections::HashMap<
-            String,
-            foldit_runner::orchestrator::ParamValue,
-        >,
+        intent: DispatchIntent,
         plugin_id: String,
         entity_type_of: impl Fn(
             foldit_runner::orchestrator::EntityId,
         ) -> Option<foldit_runner::orchestrator::EntityType>,
-    ) -> Result<OpOutcome, String> {
-        use foldit_runner::orchestrator::OpKind;
-        let Some(orch) = self.orchestrator.as_mut() else {
-            return Err(String::from("orchestrator not initialized"));
+    ) -> Result<OpOutcome, DispatchError> {
+        use foldit_runner::orchestrator::{
+            DispatchContext, EntityId as RunnerEntityId, OpKind, ResidueRef,
         };
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Err(DispatchError::Failed(String::from(
+                "orchestrator not initialized",
+            )));
+        };
+
+        // Resolve Invoke vs Stream off the op registry. An op-id the
+        // registry can't surface is dropped as a failed dispatch (no
+        // destructive side effect), matching the prior drop-and-warn.
+        let Some(cached) = orch.plugin_registry().get_op(&intent.op_id).cloned()
+        else {
+            return Err(DispatchError::Failed(format!(
+                "op-id {:?} not in registry",
+                intent.op_id
+            )));
+        };
+        let kind = cached.kind;
+
+        // Flatten the authoritative selection (molex ids) into the
+        // wire-shape `ResidueRef` list the orchestrator's context expects.
+        let selection: Vec<ResidueRef> = intent
+            .selection
+            .iter()
+            .flat_map(|(entity, residues)| {
+                let runner_id = RunnerEntityId(u64::from(entity.raw()));
+                residues.iter().map(move |&residue_index| ResidueRef {
+                    entity_id: runner_id,
+                    residue_index,
+                })
+            })
+            .collect();
+
+        let ctx = DispatchContext {
+            focused_entity_id: intent.focused_entity_id.map(RunnerEntityId),
+            selection,
+        };
+        let params: std::collections::HashMap<
+            String,
+            foldit_runner::orchestrator::ParamValue,
+        > = intent
+            .params
+            .into_iter()
+            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+            .collect();
+
         match kind {
             OpKind::Invoke => orch
-                .dispatch_invoke(op_id, ctx, params, entity_type_of)
+                .dispatch_invoke(&intent.op_id, ctx, params, entity_type_of)
                 .map(OpOutcome::Invoke)
-                .map_err(|e| e.to_string()),
+                .map_err(map_dispatch_error),
             OpKind::Stream => {
                 let (rid, handle) = orch
-                    .dispatch_start_stream(op_id, ctx, params, entity_type_of)
-                    .map_err(|e| e.to_string())?;
+                    .dispatch_start_stream(&intent.op_id, ctx, params, entity_type_of)
+                    .map_err(map_dispatch_error)?;
                 let _ = self.stream_host.active_streams.insert(
                     rid,
                     ActiveStreamEntry {
@@ -364,6 +405,59 @@ impl PluginDriver {
             }
         }
         registered
+    }
+}
+
+/// Core-shaped dispatch request handed to [`PluginDriver::dispatch_op`].
+/// Carries only molex / gui-wire types so `App` never builds the
+/// orchestrator's `DispatchContext` / `ResidueRef` / `ParamValue` shapes;
+/// the flatten and conversion happen inside `dispatch_op`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct DispatchIntent {
+    /// The authoritative in-core selection (molex `EntityId`, same type as
+    /// `App.selection`), flattened to per-residue refs at dispatch time.
+    pub selection: std::collections::BTreeMap<
+        molex::entity::molecule::id::EntityId,
+        std::collections::BTreeSet<u32>,
+    >,
+    /// The GUI-provided focus, a raw gui-wire entity id (not a runner
+    /// `EntityId`); wrapped into the runner id inside `dispatch_op`.
+    pub focused_entity_id: Option<u64>,
+    /// The op to dispatch; resolved against the registry for Invoke vs Stream.
+    pub op_id: String,
+    /// Op params in gui-wire form, converted to the orchestrator's native
+    /// `ParamValue` inside `dispatch_op`.
+    pub params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+}
+
+/// Core-side reason a dispatch was refused or failed, produced by
+/// [`PluginDriver::dispatch_op`]. Deliberately carries no orchestrator
+/// type: the lock refusal is reshaped into a raw entity id so `App`
+/// distinguishes a busy-entity refusal (advisory, no error log) from a
+/// genuine failure without naming any runner error.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum DispatchError {
+    /// A required entity was already locked by another op; carries the raw
+    /// id of the locked entity.
+    EntityLocked { entity: u64 },
+    /// Any other dispatch failure, rendered to a string.
+    Failed(String),
+}
+
+/// Reshape a runner `OpDispatchError` into the core-side [`DispatchError`].
+/// The lock-refusal arm is unwrapped to the bare entity id so no runner
+/// type crosses the boundary; everything else collapses to `Failed`.
+#[cfg(not(target_arch = "wasm32"))]
+fn map_dispatch_error(
+    e: foldit_runner::orchestrator::OpDispatchError,
+) -> DispatchError {
+    use foldit_runner::orchestrator::{DispatchError as RunnerDispatchError, OpDispatchError};
+    match e {
+        OpDispatchError::LockRefused(RunnerDispatchError::EntityLocked {
+            entity,
+            ..
+        }) => DispatchError::EntityLocked { entity: entity.0 },
+        other => DispatchError::Failed(other.to_string()),
     }
 }
 
@@ -719,5 +813,38 @@ mod tests {
     /// `insert_preview` overwrites the entity's id, so any valid id works.
     fn mk_bulk_dummy_id() -> EntityId {
         EntityIdAllocator::new().allocate()
+    }
+
+    // ── map_dispatch_error: runner refusal → core shape ──
+
+    /// A runner lock-refusal must surface as the core `EntityLocked`
+    /// variant carrying the bare entity id, so `App` can treat a busy
+    /// entity as advisory without ever naming a runner type.
+    #[test]
+    fn lock_refusal_maps_to_entity_locked() {
+        use foldit_runner::orchestrator::{
+            DispatchError as RunnerDispatchError, OpDispatchError,
+        };
+        let runner_err = OpDispatchError::LockRefused(
+            RunnerDispatchError::EntityLocked {
+                entity: foldit_runner::orchestrator::EntityId(7),
+                current_op: None,
+            },
+        );
+        match map_dispatch_error(runner_err) {
+            DispatchError::EntityLocked { entity } => assert_eq!(entity, 7),
+            DispatchError::Failed(s) => panic!("expected EntityLocked, got Failed({s})"),
+        }
+    }
+
+    /// Any non-lock runner error collapses to `Failed`.
+    #[test]
+    fn other_dispatch_error_maps_to_failed() {
+        use foldit_runner::orchestrator::OpDispatchError;
+        let runner_err = OpDispatchError::UnknownOp("nope".to_string());
+        assert!(matches!(
+            map_dispatch_error(runner_err),
+            DispatchError::Failed(_)
+        ));
     }
 }

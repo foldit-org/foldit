@@ -31,7 +31,9 @@ use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::plugin_driver::{ActiveStreamEntry, OpEvent, OpOutcome};
+use crate::plugin_driver::{
+    ActiveStreamEntry, DispatchError, DispatchIntent, OpEvent, OpOutcome,
+};
 use crate::render_projector::{self, RenderProjector};
 use crate::session::{EntityOrigin, Session, SessionError};
 use crate::wire_params;
@@ -1257,27 +1259,6 @@ impl App {
             // see released locks.
             self.apply_backend_updates();
 
-            use foldit_runner::orchestrator::{
-                DispatchContext as RunnerDispatchContext, EntityId as RunnerEntityId, ResidueRef,
-            };
-
-            // Snapshot the authoritative selection store before the
-            // upcoming `&mut self.plugin_driver` borrow. Flatten
-            // BTreeMap<EntityId, BTreeSet<u32>> into the wire-shape
-            // ResidueRef list the orchestrator's DispatchContext
-            // expects.
-            let selection: Vec<ResidueRef> = self
-                .selection
-                .iter()
-                .flat_map(|(entity, residues)| {
-                    let runner_id = RunnerEntityId(u64::from(entity.raw()));
-                    residues.iter().map(move |&residue_index| ResidueRef {
-                        entity_id: runner_id,
-                        residue_index,
-                    })
-                })
-                .collect();
-
             let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                 log::warn!(
                     "handle_dispatch_op({:?}): orchestrator not initialized",
@@ -1294,7 +1275,9 @@ impl App {
             // Resolve the display label from the manifest catalog.
             // Falls back to the op id when the op isn't surfaced as a
             // button (the dispatcher still routes; the history entry
-            // just shows the op id).
+            // just shows the op id). `plugin_id` is needed below for
+            // `begin_action`; both are plain `String` fields off `cached`,
+            // so reading them here names no orchestrator type.
             let display = orch
                 .ops_catalog()
                 .into_iter()
@@ -1302,31 +1285,27 @@ impl App {
                 .map_or_else(|| op.op_id.clone(), |e| e.display);
             let plugin_id = cached.plugin_id.clone();
 
-            let ctx = RunnerDispatchContext {
-                focused_entity_id: op.focused_entity_id.map(RunnerEntityId),
-                selection,
-            };
-            let params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> =
-                op.params
-                    .into_iter()
-                    .map(|(k, v)| (k, wire_params::param_value_from_wire(v)))
-                    .collect();
-
             // Drop the orchestrator borrow before reaching back into
             // `self.plugin_driver` for the consolidated dispatch.
             let _ = orch;
+            // Hand the driver a core-shaped intent: the selection flatten,
+            // param conversion, and `DispatchContext` build all live behind
+            // `dispatch_op` now, so this path names no orchestrator type.
+            let intent = DispatchIntent {
+                selection: self.selection.clone(),
+                focused_entity_id: op.focused_entity_id,
+                op_id: op.op_id.clone(),
+                params: op.params,
+            };
             // Hoist a shared borrow of the store so the lookup closure
             // can capture it alongside the upcoming `&mut self.plugin_driver`
             // call (disjoint field paths).
             let store = &self.store;
-            let dispatch_outcome = self.plugin_driver.dispatch_op(
-                &op.op_id,
-                cached.kind,
-                ctx,
-                params,
-                plugin_id.clone(),
-                |id| entity_type_of(store, id),
-            );
+            let dispatch_outcome =
+                self.plugin_driver
+                    .dispatch_op(intent, plugin_id.clone(), |id| {
+                        entity_type_of(store, id)
+                    });
 
             // Resolve which entity this op targets. The focused entity
             // wins; otherwise pick the lone protein in the head
@@ -1385,8 +1364,17 @@ impl App {
                 Ok(OpOutcome::Invoke(bytes)) => {
                     self.apply_invoke_result(&bytes, core_token);
                 }
-                Err(e) => {
-                    log::error!("handle_dispatch_op({:?}): dispatch failed: {e}", op.op_id);
+                Err(DispatchError::EntityLocked { entity }) => {
+                    // Advisory refusal: the target entity is busy with
+                    // another op. No edit was begun (gated on `is_ok`), so
+                    // there is nothing to open or roll back.
+                    log::warn!(
+                        "handle_dispatch_op({:?}): dispatch refused, entity {entity} locked",
+                        op.op_id
+                    );
+                }
+                Err(DispatchError::Failed(s)) => {
+                    log::error!("handle_dispatch_op({:?}): dispatch failed: {s}", op.op_id);
                 }
             }
             self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
