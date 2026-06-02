@@ -132,9 +132,17 @@ impl Session {
         let head_id = self.history.checkpoints().head();
         let mut entities: Vec<Arc<MoleculeEntity>> = Vec::new();
         if let Some(head) = self.history.checkpoint(head_id) {
-            for (eid, snap_id) in &head.entity_heads {
-                if let Some(snap) = self.history.snapshot(*eid, *snap_id) {
-                    entities.push(Arc::clone(&snap.payload));
+            // Membership (which entities, in what order) comes from the
+            // committed head; the snapshot read comes from each lane's
+            // head, which is the open tentative when an action holds the
+            // lane and the committed snapshot otherwise. This makes the
+            // live view follow an in-flight action; an action never
+            // changes membership.
+            for eid in head.entity_heads.keys() {
+                if let Some(lane) = self.history.lane(*eid) {
+                    if let Some(snap) = lane.snapshot(lane.head()) {
+                        entities.push(Arc::clone(&snap.payload));
+                    }
                 }
             }
         }
@@ -150,15 +158,19 @@ impl Session {
         &self.history
     }
 
-    /// Look up an entity by id. Searches committed lane heads first,
-    /// then transient previews.
+    /// Look up an entity by id. Reads the lane head (the open tentative
+    /// when an action holds the lane, else the committed snapshot) for any
+    /// entity in the committed membership, then falls back to transient
+    /// previews.
     #[must_use]
     pub fn entity(&self, id: EntityId) -> Option<&MoleculeEntity> {
         let head_id = self.history.checkpoints().head();
         if let Some(head) = self.history.checkpoint(head_id) {
-            if let Some(snap_id) = head.entity_heads.get(&id).copied() {
-                if let Some(snap) = self.history.snapshot(id, snap_id) {
-                    return Some(snap.payload.as_ref());
+            if head.entity_heads.contains_key(&id) {
+                if let Some(lane) = self.history.lane(id) {
+                    if let Some(snap) = lane.snapshot(lane.head()) {
+                        return Some(snap.payload.as_ref());
+                    }
                 }
             }
         }
@@ -213,23 +225,31 @@ impl Session {
         self.transient.keys().copied()
     }
 
-    /// Whether an action is in flight.
+    /// Whether the action identified by `request_id` is in flight.
     #[must_use]
-    pub fn has_ongoing_action(&self) -> bool {
-        self.history.ongoing().is_active()
+    pub fn is_pending(&self, request_id: u64) -> bool {
+        self.history.is_pending(request_id)
+    }
+
+    /// The request id of the sole in-flight action, if exactly one is
+    /// open; `None` otherwise.
+    #[must_use]
+    pub fn sole_pending_request_id(&self) -> Option<u64> {
+        self.history.sole_pending_request_id()
     }
 
     // ── Action lifecycle (G6: typed mutation intent) ──────────────────
 
     /// Begin a streaming action. The kind determines the entity (via
     /// `kind.entity()`); the current lane head's payload is forked into
-    /// the tentative snapshot. Refused if the action's entity isn't in
-    /// the committed set or isn't owned by this kind.
+    /// the tentative snapshot. Returns the action's `request_id`. Refused
+    /// if the action's entity isn't in the committed set or isn't owned by
+    /// this kind.
     pub fn begin_action(
         &mut self,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<CheckpointId, SessionError> {
+    ) -> Result<u64, SessionError> {
         let entity = kind.entity().ok_or(SessionError::ActionRequiresEntity)?;
         let snap_id = self
             .history
@@ -260,13 +280,14 @@ impl Session {
     /// spine for the render projector.
     pub fn action_update(
         &mut self,
+        request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
         filter_status: Option<FilterStatus>,
-        mutate: impl FnOnce(&mut MoleculeEntity),
+        mutate: impl FnMut(&mut MoleculeEntity),
     ) -> Result<(), SessionError> {
         self.history
-            .action_update(raw_score, game_score, filter_status, mutate)?;
+            .action_update(request_id, raw_score, game_score, filter_status, mutate)?;
         // A tentative live frame: render projector picks it up via the
         // spine and rebuilds from `head_assembly`. Payload-less because
         // the projectors re-derive from `Session` anyway.
@@ -274,19 +295,20 @@ impl Session {
         Ok(())
     }
 
-    /// Commit the in-flight action. Flips tentative flags; recomputes
-    /// best cursors; transitions to `Idle`. Returns the now-committed
+    /// Commit the action identified by `request_id`. Composes and mints
+    /// the committed checkpoint from the committed graph head plus the
+    /// edit's lanes; recomputes best cursors. Returns the now-committed
     /// checkpoint id.
-    pub fn commit_action(&mut self) -> Result<CheckpointId, SessionError> {
-        let ckpt = self.history.commit_action()?;
+    pub fn commit_action(&mut self, request_id: u64) -> Result<CheckpointId, SessionError> {
+        let ckpt = self.history.commit_action(request_id)?;
         self.apply(SessionUpdate::HeadMoved);
         Ok(ckpt)
     }
 
-    /// Abort the in-flight action. Removes the tentative snapshot and
-    /// checkpoint; head pointers fall back to their parents.
-    pub fn abort_action(&mut self) -> Result<(), SessionError> {
-        self.history.abort_action()?;
+    /// Abort the action identified by `request_id`. Removes its tentative
+    /// snapshot(s); lane heads fall back to their parents.
+    pub fn abort_action(&mut self, request_id: u64) -> Result<(), SessionError> {
+        self.history.abort_action(request_id)?;
         self.apply(SessionUpdate::HeadMoved);
         Ok(())
     }
@@ -395,6 +417,27 @@ impl Session {
     /// `HistorySyncCursor`.
     pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
         self.history.set_head_scores(raw_score, game_score);
+    }
+
+    /// Stamp scores on the current composition node: the open pending edit
+    /// if an action is in flight, else the committed head checkpoint. This
+    /// is the score-write the per-tick poll uses so the live score follows
+    /// an in-flight action without ever touching the committed parent.
+    pub fn set_current_composition_scores(
+        &mut self,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+    ) {
+        self.history
+            .set_current_composition_scores(raw_score, game_score);
+    }
+
+    /// Read the `(raw, game)` score of the current composition node (open
+    /// pending edit if any, else the committed head). The live-score read
+    /// surface, mirroring the geometry read surface in [`Self::entity`].
+    #[must_use]
+    pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
+        self.history.current_composition_scores()
     }
 
     // ── Preview API — transient, never in history ─────────────────────

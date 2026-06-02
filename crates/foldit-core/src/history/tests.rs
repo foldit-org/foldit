@@ -321,7 +321,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
     .unwrap();
 
     // Begin an action on `e`.
-    let _tent = h
+    let rid = h
         .begin_action(
             e,
             CheckpointKind::Wiggle {
@@ -385,7 +385,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
     ));
 
     // Commit → OK.
-    h.commit_action().unwrap();
+    h.commit_action(rid).unwrap();
     // Now nav unblocks.
     assert!(h.undo().is_ok());
 }
@@ -397,27 +397,116 @@ fn abort_action_drops_tentative() {
     let lane_len_before = h.lane(e).unwrap().len();
     let ckpt_len_before = h.checkpoints().len();
 
-    h.begin_action(
-        e,
-        CheckpointKind::Wiggle {
-            entity: e,
-            mask: WiggleMask::default(),
-            duration_ms: 100,
-        },
-        arc_entity(e),
-        Cow::Borrowed("about-to-abort"),
-    )
-    .unwrap();
+    let rid = h
+        .begin_action(
+            e,
+            CheckpointKind::Wiggle {
+                entity: e,
+                mask: WiggleMask::default(),
+                duration_ms: 100,
+            },
+            arc_entity(e),
+            Cow::Borrowed("about-to-abort"),
+        )
+        .unwrap();
 
-    // While Active: lane and graph each grew by 1.
+    // While in flight: the lane grew by one tentative snapshot, but a
+    // begin mints no checkpoint, so the checkpoint graph is unchanged.
     assert_eq!(h.lane(e).unwrap().len(), lane_len_before + 1);
-    assert_eq!(h.checkpoints().len(), ckpt_len_before + 1);
+    assert_eq!(h.checkpoints().len(), ckpt_len_before);
+    assert!(h.has_pending());
 
-    h.abort_action().unwrap();
-    // Restored.
+    h.abort_action(rid).unwrap();
+    // Restored: the tentative snapshot is gone and nothing is pending.
     assert_eq!(h.lane(e).unwrap().len(), lane_len_before);
     assert_eq!(h.checkpoints().len(), ckpt_len_before);
-    assert!(matches!(h.ongoing(), OngoingState::Idle));
+    assert!(!h.has_pending());
+}
+
+#[test]
+fn in_flight_score_spares_committed_parent_then_lands_on_commit() {
+    let (mut h, ids) = mk_history(1);
+    let e = ids[0];
+    // Give the committed parent (root) a known score.
+    h.set_head_scores(Some(10.0), Some(100.0));
+    let parent = h.checkpoints().head();
+    assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
+
+    let rid = h
+        .begin_action(
+            e,
+            CheckpointKind::Wiggle {
+                entity: e,
+                mask: WiggleMask::default(),
+                duration_ms: 1,
+            },
+            arc_entity(e),
+            Cow::Borrowed("w"),
+        )
+        .unwrap();
+    // Stream a score into the open action.
+    h.action_update(rid, Some(42.0), Some(420.0), None, |_| {})
+        .unwrap();
+
+    // Mid-action: the committed parent is untouched; the live composition
+    // score reflects the streamed value.
+    assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
+    assert_eq!(h.checkpoint(parent).unwrap().game_score, Some(100.0));
+    assert_eq!(h.current_composition_scores(), (Some(42.0), Some(420.0)));
+
+    // Commit mints a checkpoint carrying the streamed score; the parent
+    // still holds its own.
+    let committed = h.commit_action(rid).unwrap();
+    assert_eq!(h.checkpoint(committed).unwrap().raw_score, Some(42.0));
+    assert_eq!(h.checkpoint(committed).unwrap().game_score, Some(420.0));
+    assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
+}
+
+#[test]
+fn committed_node_references_peer_committed_head_not_its_tentative() {
+    let (mut h, ids) = mk_history(2);
+    let e1 = ids[0];
+    let e2 = ids[1];
+    let e2_committed = h.lane(e2).unwrap().head();
+
+    // Two concurrent open actions, one per lane (begin on a free lane
+    // while another is open is allowed).
+    let rid1 = h
+        .begin_action(
+            e1,
+            CheckpointKind::Wiggle {
+                entity: e1,
+                mask: WiggleMask::default(),
+                duration_ms: 1,
+            },
+            arc_entity(e1),
+            Cow::Borrowed("w1"),
+        )
+        .unwrap();
+    let rid2 = h
+        .begin_action(
+            e2,
+            CheckpointKind::Wiggle {
+                entity: e2,
+                mask: WiggleMask::default(),
+                duration_ms: 1,
+            },
+            arc_entity(e2),
+            Cow::Borrowed("w2"),
+        )
+        .unwrap();
+    // e2's lane head is now its open tentative, distinct from its
+    // committed head.
+    assert_ne!(h.lane(e2).unwrap().head(), e2_committed);
+
+    // Commit e1 while e2 is still open: the new checkpoint's entity_heads
+    // for e2 must point at e2's COMMITTED head, never its open tentative.
+    let c1 = h.commit_action(rid1).unwrap();
+    assert_eq!(h.checkpoint(c1).unwrap().entity_heads[&e2], e2_committed);
+
+    // e2's own commit then advances e2 off the now-committed head.
+    let c2 = h.commit_action(rid2).unwrap();
+    assert_ne!(h.checkpoint(c2).unwrap().entity_heads[&e2], e2_committed);
 }
 
 // ── Lane undo ────────────────────────────────────────────────────
@@ -614,17 +703,28 @@ fn invariant_holds(h: &History) -> Result<(), String> {
         .checkpoints
         .get(h.checkpoints.head)
         .ok_or_else(|| "head checkpoint is dead".to_string())?;
-    for (eid, sid) in &head_ckpt.entity_heads {
+    // Point 1, relaxed for the open-action model: the lane head is either
+    // the committed snapshot, or a tentative snapshot whose parent is it.
+    for (eid, committed_snap) in &head_ckpt.entity_heads {
         let lane = h
             .lanes
             .get(eid)
             .ok_or_else(|| format!("ref to unknown entity {}", eid.raw()))?;
-        if lane.head != *sid {
+        if lane.head == *committed_snap {
+            continue;
+        }
+        let head_snap = lane
+            .snapshots
+            .get(lane.head)
+            .ok_or_else(|| format!("lane head missing for entity {}", eid.raw()))?;
+        if !(head_snap.tentative && head_snap.parent == Some(*committed_snap)) {
             return Err(format!(
-                "lane head mismatch for entity {} (expected {:?}, got {:?})",
+                "lane head for entity {} is neither committed snap {:?} nor a \
+                 tentative child of it (got {:?}, tentative={})",
                 eid.raw(),
-                sid,
-                lane.head
+                committed_snap,
+                lane.head,
+                head_snap.tentative
             ));
         }
     }
@@ -643,6 +743,10 @@ proptest! {
     ) {
         let (mut h, ids) = mk_history(2);
         let e = ids[0];
+        // Track the sole open action's request id across ops (begin sets
+        // it, commit/abort clear it). A None/stale id makes update/commit/
+        // abort return NoOngoingAction, which the invariant tolerates.
+        let mut rid: Option<u64> = None;
 
         for op in ops {
             let _ = match op {
@@ -659,22 +763,39 @@ proptest! {
                         None,
                     )
                     .map(|_| ()),
-                Op::BeginAction => h
-                    .begin_action(
-                        e,
-                        CheckpointKind::Wiggle {
-                            entity: e,
-                            mask: WiggleMask::default(),
-                            duration_ms: 1,
-                        },
-                        arc_entity(e),
-                        Cow::Borrowed("b"),
-                    )
-                    .map(|_| ()),
-                Op::UpdateAction => h
-                    .action_update(Some(0.0), Some(0.0), None, |_| {}),
-                Op::Commit => h.commit_action().map(|_| ()),
-                Op::Abort => h.abort_action().map(|_| ()),
+                Op::BeginAction => match h.begin_action(
+                    e,
+                    CheckpointKind::Wiggle {
+                        entity: e,
+                        mask: WiggleMask::default(),
+                        duration_ms: 1,
+                    },
+                    arc_entity(e),
+                    Cow::Borrowed("b"),
+                ) {
+                    Ok(id) => {
+                        rid = Some(id);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                },
+                Op::UpdateAction => {
+                    h.action_update(rid.unwrap_or(u64::MAX), Some(0.0), Some(0.0), None, |_| {})
+                }
+                Op::Commit => {
+                    let r = h.commit_action(rid.unwrap_or(u64::MAX)).map(|_| ());
+                    if r.is_ok() {
+                        rid = None;
+                    }
+                    r
+                }
+                Op::Abort => {
+                    let r = h.abort_action(rid.unwrap_or(u64::MAX)).map(|_| ());
+                    if r.is_ok() {
+                        rid = None;
+                    }
+                    r
+                }
                 Op::Undo => h.undo().map(|_| ()),
                 Op::Redo => h.redo(None).map(|_| ()),
                 Op::LaneUndoToRoot => {

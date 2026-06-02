@@ -29,15 +29,6 @@ impl History {
             .filter(|id| !keep_ckpts.contains(id))
             .collect();
         for victim in victims {
-            // The tentative checkpoint must never be evicted: if a
-            // begin_action just pushed, the new tentative IS the head
-            // and is in `keep_ckpts`, so this won't fire on it. Defense
-            // in depth — a tentative not on the head path would mean
-            // an internal invariant violation, not a state we want to
-            // silently destroy.
-            if self.checkpoints.checkpoints[victim].tentative {
-                continue;
-            }
             self.dec_refs_for_checkpoint(victim);
             self.detach_checkpoint(victim);
             let _ = self.checkpoints.checkpoints.remove(victim);
@@ -97,7 +88,7 @@ impl History {
     /// Called from `record` exactly once after each event.
     pub(super) fn evict_to_budget(&mut self) {
         // Checkpoints: oldest-first; protected: root, head-path, pinned,
-        // best, best_that_counts, tentative.
+        // best, best_that_counts.
         while self.checkpoints.checkpoints.len() > self.checkpoints.budget.max_checkpoints {
             let Some(victim) = self.pick_checkpoint_eviction() else { break };
             self.dec_refs_for_checkpoint(victim);
@@ -132,13 +123,12 @@ impl History {
         self.checkpoints
             .checkpoints
             .iter()
-            .filter(|(id, ckpt)| {
+            .filter(|(id, _)| {
                 *id != self.checkpoints.root
                     && !head_path.contains(id)
                     && !self.checkpoints.pinned.contains(id)
                     && self.checkpoints.best != Some(*id)
                     && self.checkpoints.best_that_counts != Some(*id)
-                    && !ckpt.tentative
             })
             .min_by_key(|(_, ckpt)| ckpt.timestamp)
             .map(|(id, _)| id)
@@ -197,7 +187,7 @@ impl History {
         let mut best: Option<(CheckpointId, f64)> = None;
         let mut best_counts: Option<(CheckpointId, f64)> = None;
         for (id, ckpt) in self.checkpoints.checkpoints.iter() {
-            if ckpt.tentative || ckpt.exclude_from_best {
+            if ckpt.exclude_from_best {
                 continue;
             }
             if let Some(score) = ckpt.raw_score {

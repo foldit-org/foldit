@@ -126,7 +126,8 @@ fn project_history(store: &Session) -> HistorySection {
                 raw_score: ckpt.raw_score,
                 game_score: ckpt.game_score,
                 filter_status: filter_status_wire(&ckpt.filter_status),
-                tentative: ckpt.tentative,
+                // No committed checkpoint is ever tentative.
+                tentative: false,
                 pinned: cps.is_pinned(id),
                 exclude_from_best: ckpt.exclude_from_best,
             }
@@ -171,13 +172,14 @@ enum HistoryOutcome {
     Noop,
 }
 
-/// Read the score for the *current head checkpoint*, projected through
-/// the active scoring mode. Replaces the old `App::latest_score` field
-/// (G1: derive, don't store).
+/// Read the score for the *current composition node* (the open pending
+/// edit when an action is in flight, else the committed head checkpoint),
+/// projected through the active scoring mode. Following the composition
+/// node keeps the displayed score on an in-flight action's streamed score
+/// without ever reading the committed parent (G1: derive, don't store).
 fn head_score(store: &Session, mode: ScoringMode) -> Option<f64> {
-    let head_id = store.history().checkpoints().head();
-    let ckpt = store.history().checkpoint(head_id)?;
-    score_for_mode(ckpt.raw_score, ckpt.game_score, mode)
+    let (raw, game) = store.current_composition_scores();
+    score_for_mode(raw, game, mode)
 }
 
 /// Move one freshly-loaded entity through the preview→promote pipeline
@@ -269,9 +271,10 @@ fn apply_streaming_assembly(
     store: &mut Session,
     incoming: &molex::Assembly,
     raw_score: Option<f64>,
+    request_id: u64,
 ) -> bool {
     let mut applied = false;
-    let res = store.action_update(raw_score, raw_score, None, |entity_mut| {
+    let res = store.action_update(request_id, raw_score, raw_score, None, |entity_mut| {
         if let Some(src) = incoming.entity(entity_mut.id()) {
             *entity_mut = src.clone();
             applied = true;
@@ -419,7 +422,7 @@ impl App {
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use foldit_runner::orchestrator::{EntityId as RunnerEntityId, PluginUpdate};
+            use foldit_runner::orchestrator::PluginUpdate;
 
             let updates = self.plugin_driver.drain_updates();
             if updates.is_empty() {
@@ -444,8 +447,16 @@ impl App {
                             );
                             continue;
                         };
-                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
-                            visual_dirty = true;
+                        let core_token = self
+                            .plugin_driver
+                            .stream_host
+                            .active_streams
+                            .get(&request_id)
+                            .and_then(|e| e.core_token);
+                        if let Some(token) = core_token {
+                            if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
+                                visual_dirty = true;
+                            }
                         }
                     }
                     PluginUpdate::Cancelled {
@@ -454,14 +465,22 @@ impl App {
                     } => {
                         // Cancel-as-commit: same shape as Final below.
                         had_terminal = true;
-                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
-                            if let Err(e) = self.store.commit_action() {
-                                log::warn!(
-                                    "plugin update Cancelled rid={request_id} \
-                                     commit_action failed: {e}"
-                                );
+                        let core_token = self
+                            .plugin_driver
+                            .stream_host
+                            .active_streams
+                            .get(&request_id)
+                            .and_then(|e| e.core_token);
+                        if let Some(token) = core_token {
+                            if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
+                                if let Err(e) = self.store.commit_action(token) {
+                                    log::warn!(
+                                        "plugin update Cancelled rid={request_id} \
+                                         commit_action failed: {e}"
+                                    );
+                                }
+                                visual_dirty = true;
                             }
-                            visual_dirty = true;
                         }
                         let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
@@ -476,17 +495,25 @@ impl App {
                         ..
                     } => {
                         had_terminal = true;
-                        if apply_streaming_assembly(&mut self.store, &assembly, None) {
-                            // Stream completed cleanly: commit the
-                            // tentative so the partial result becomes
-                            // a permanent undo entry.
-                            if let Err(e) = self.store.commit_action() {
-                                log::warn!(
-                                    "plugin update Final rid={request_id} \
-                                     commit_action failed: {e}"
-                                );
+                        let core_token = self
+                            .plugin_driver
+                            .stream_host
+                            .active_streams
+                            .get(&request_id)
+                            .and_then(|e| e.core_token);
+                        if let Some(token) = core_token {
+                            if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
+                                // Stream completed cleanly: commit the
+                                // tentative so the partial result becomes
+                                // a permanent undo entry.
+                                if let Err(e) = self.store.commit_action(token) {
+                                    log::warn!(
+                                        "plugin update Final rid={request_id} \
+                                         commit_action failed: {e}"
+                                    );
+                                }
+                                visual_dirty = true;
                             }
-                            visual_dirty = true;
                         }
                         let _ = self.plugin_driver.release_terminal_stream(request_id);
                         log::info!(
@@ -500,38 +527,28 @@ impl App {
                         message,
                     } => {
                         // Spontaneous failure only (timeout, exception,
-                        // transport, STALE_GEN). Never commits; abort
-                        // is gated to this stream's entity so a stale
-                        // Error can't drop another op's tentative. Peek
-                        // at the entry through `stream_entry` to read
-                        // `handle.entities` before
-                        // `release_terminal_stream` consumes the handle.
+                        // transport, STALE_GEN). Never commits; aborts
+                        // exactly the edit this stream owns, resolved by
+                        // the stored core token (a stale Error for a
+                        // stream that never began an action, or whose
+                        // edit already committed, is a no-op).
                         had_terminal = true;
-                        let owns_tentative = self
+                        let core_token = self
                             .plugin_driver
-                            .stream_entry(request_id)
-                            .and_then(|entry| {
-                                self.store
-                                    .history()
-                                    .ongoing()
-                                    .locked_entity()
-                                    .map(|locked| {
-                                        entry.handle.entities.iter().any(
-                                            |runner_eid: &RunnerEntityId| {
-                                                runner_eid.0 == u64::from(locked.raw())
-                                            },
-                                        )
-                                    })
-                            })
-                            .unwrap_or(false);
-                        if owns_tentative {
-                            if let Err(e) = self.store.abort_action() {
-                                log::warn!(
-                                    "plugin update Error rid={request_id} \
-                                     abort_action failed: {e}"
-                                );
-                            } else {
-                                visual_dirty = true;
+                            .stream_host
+                            .active_streams
+                            .get(&request_id)
+                            .and_then(|e| e.core_token);
+                        if let Some(token) = core_token {
+                            if self.store.is_pending(token) {
+                                if let Err(e) = self.store.abort_action(token) {
+                                    log::warn!(
+                                        "plugin update Error rid={request_id} \
+                                         abort_action failed: {e}"
+                                    );
+                                } else {
+                                    visual_dirty = true;
+                                }
                             }
                         }
                         let _ = self.plugin_driver.release_terminal_stream(request_id);
@@ -684,7 +701,12 @@ impl App {
             const SCORE_MINIMUM: f64 = 0.0;
             let raw = t;
             let game = ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM);
-            self.store.set_head_scores(Some(raw), Some(game));
+            // Route to the current composition node: the open pending edit
+            // while an action is in flight (so the streamed score never
+            // touches the committed parent), else the committed head. This
+            // is the single score-write funnel for both the bootstrap
+            // blocking poll and the steady-state async poll.
+            self.store.set_current_composition_scores(Some(raw), Some(game));
         }
 
         // Push per-residue scores into the engine so Score / ScoreRelative
@@ -1206,23 +1228,28 @@ impl App {
             .store
             .ids()
             .find(|id| id.raw() == route.entity_id.raw());
-        if let Some(entity) = action_entity {
+        let core_token = action_entity.and_then(|entity| {
             let kind = CheckpointKind::PluginOp {
                 entity,
                 plugin_id: plugin_id.clone(),
                 op_id: String::from(route.op_id),
                 display: String::from("Pull"),
             };
-            if let Err(e) = self.store.begin_action(kind, String::from("Pull")) {
-                log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
+            match self.store.begin_action(kind, String::from("Pull")) {
+                Ok(token) => Some(token),
+                Err(e) => {
+                    log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
+                    None
+                }
             }
-        }
+        });
 
         let _ = self.plugin_driver.stream_host.active_streams.insert(
             rid,
             ActiveStreamEntry {
                 handle,
                 plugin_id: plugin_id.clone(),
+                core_token,
             },
         );
         self.plugin_driver.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
@@ -1407,32 +1434,46 @@ impl App {
 
             // Skip on dispatch failure: any open tentative belongs to
             // a prior op, not this one.
-            if dispatch_outcome.is_ok() {
-                if let Some(entity) = action_entity {
+            let core_token = if dispatch_outcome.is_ok() {
+                action_entity.and_then(|entity| {
                     let kind = CheckpointKind::PluginOp {
                         entity,
                         plugin_id: plugin_id.clone(),
                         op_id: op.op_id.clone(),
                         display: display.clone(),
                     };
-                    if let Err(e) = self.store.begin_action(kind, display) {
-                        log::trace!(
-                            "handle_dispatch_op({:?}): begin_action skipped: {e}",
-                            op.op_id
-                        );
+                    match self.store.begin_action(kind, display) {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            log::trace!(
+                                "handle_dispatch_op({:?}): begin_action skipped: {e}",
+                                op.op_id
+                            );
+                            None
+                        }
                     }
-                }
-            }
+                })
+            } else {
+                None
+            };
 
             match dispatch_outcome {
-                Ok(OpOutcome::Stream) => {
+                Ok(OpOutcome::Stream { request_id }) => {
                     // Stream dispatch: `PluginDriver::dispatch_op`
-                    // already inserted the `ActiveStreamEntry`. The
-                    // matching terminal arm in `apply_backend_updates`
-                    // does the cleanup; nothing else to do here.
+                    // already inserted the `ActiveStreamEntry`. Record the
+                    // core token on it so the terminal arm can commit /
+                    // abort the right edit; cleanup happens there.
+                    if let Some(entry) = self
+                        .plugin_driver
+                        .stream_host
+                        .active_streams
+                        .get_mut(&request_id)
+                    {
+                        entry.core_token = core_token;
+                    }
                 }
                 Ok(OpOutcome::Invoke(bytes)) => {
-                    self.apply_invoke_result(&bytes);
+                    self.apply_invoke_result(&bytes, core_token);
                 }
                 Err(e) => {
                     log::error!("handle_dispatch_op({:?}): dispatch failed: {e}", op.op_id);
@@ -1453,27 +1494,32 @@ impl App {
     /// delta and queued on the locked entity so the next tick's
     /// render-projector publish eases the result in rather than snapping.
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_invoke_result(&mut self, bytes: &[u8]) {
+    fn apply_invoke_result(&mut self, bytes: &[u8], core_token: Option<u64>) {
+        let Some(token) = core_token else {
+            // No edit was begun for this invoke (begin skipped), so there
+            // is nothing to apply into or commit.
+            return;
+        };
         let assembly = match molex::ops::wire::deserialize_assembly(bytes) {
             Ok(a) => a,
             Err(e) => {
                 log::warn!("dispatch_invoke: decode failed: {e:?}");
-                if self.store.has_ongoing_action() {
-                    let _ = self.store.commit_action();
+                if self.store.is_pending(token) {
+                    let _ = self.store.commit_action(token);
                 }
                 return;
             }
         };
-        let applied = apply_streaming_assembly(&mut self.store, &assembly, None);
+        let applied = apply_streaming_assembly(&mut self.store, &assembly, None, token);
         if applied {
-            if let Err(e) = self.store.commit_action() {
+            if let Err(e) = self.store.commit_action(token) {
                 log::warn!("dispatch_invoke: commit_action failed: {e}");
             }
             self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;
-        } else if self.store.has_ongoing_action() {
+        } else if self.store.is_pending(token) {
             // Nothing matched (e.g. plugin returned an empty / unrelated
             // assembly): drop the tentative.
-            let _ = self.store.commit_action();
+            let _ = self.store.commit_action(token);
         }
     }
 
@@ -1787,9 +1833,10 @@ impl App {
                 .store
                 .set_exclude_from_best(id.into_inner(), exclude)
                 .map(|_| HistoryOutcome::Curated),
-            HistoryCommand::AbortAction => {
-                self.store.abort_action().map(|_| HistoryOutcome::HeadMoved)
-            }
+            HistoryCommand::AbortAction => match self.store.sole_pending_request_id() {
+                Some(rid) => self.store.abort_action(rid).map(|_| HistoryOutcome::HeadMoved),
+                None => Ok(HistoryOutcome::Noop),
+            },
         };
 
         match result {
@@ -2342,14 +2389,17 @@ impl App {
             op_id: String::from("_init_normalize"),
             display: String::from("Init"),
         };
-        if let Err(e) = self.store.begin_action(kind, String::from("Init")) {
-            log::warn!(
-                "[App] rosetta post-Init begin_action failed: {e}; \
-                 skipping normalization apply"
-            );
-            return;
-        }
-        let applied = apply_streaming_assembly(&mut self.store, &normalized, None);
+        let core_token = match self.store.begin_action(kind, String::from("Init")) {
+            Ok(token) => token,
+            Err(e) => {
+                log::warn!(
+                    "[App] rosetta post-Init begin_action failed: {e}; \
+                     skipping normalization apply"
+                );
+                return;
+            }
+        };
+        let applied = apply_streaming_assembly(&mut self.store, &normalized, None, core_token);
         if !applied {
             log::warn!(
                 "[App] rosetta post-Init apply_streaming_assembly did not \
@@ -2357,10 +2407,10 @@ impl App {
                  the rosetta-returned entity ID does not match any store \
                  entity ID."
             );
-            let _ = self.store.commit_action();
+            let _ = self.store.commit_action(core_token);
             return;
         }
-        if let Err(e) = self.store.commit_action() {
+        if let Err(e) = self.store.commit_action(core_token) {
             log::warn!("[App] rosetta post-Init commit_action failed: {e}");
             return;
         }
@@ -2942,5 +2992,109 @@ mod selection_tests {
             },
         ]);
         assert!(app.selection_is_empty());
+    }
+
+    /// One committed Bulk entity, promoted into history so the store has a
+    /// non-root committed head.
+    fn mk_bulk() -> molex::MoleculeEntity {
+        use molex::entity::molecule::atom::Atom;
+        use molex::entity::molecule::bulk::BulkEntity;
+        use molex::{Element, MoleculeType};
+        let id = EntityIdAllocator::new().allocate();
+        let atom = Atom {
+            position: glam::Vec3::ZERO,
+            occupancy: 1.0,
+            b_factor: 0.0,
+            element: Element::O,
+            name: *b"O   ",
+            formal_charge: 0,
+        };
+        molex::MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
+    }
+
+    /// The score *write* funnel must follow the composition node: while an
+    /// action is open, a streamed score lands on the pending edit and is
+    /// minted onto the committed checkpoint only at commit; the committed
+    /// parent is never overwritten mid-action. Drives the real app-layer
+    /// path (`apply_score_reports`), which is what regressed when only the
+    /// read side was rerouted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn apply_score_reports_routes_to_pending_edit_not_committed_parent() {
+        use crate::history::{CheckpointKind, WiggleMask};
+        use crate::session::EntityOrigin;
+
+        let mut app = fresh_app();
+        // Commit one entity so the head is a real checkpoint, and stamp a
+        // known score on it (the committed parent).
+        let id = app
+            .store
+            .insert_preview(mk_bulk(), "e".to_string(), EntityOrigin::Loaded);
+        app.store
+            .promote_preview(
+                id,
+                CheckpointKind::PromotedPreview { entity: id },
+                None,
+                None,
+                "e",
+            )
+            .expect("promote");
+        app.store.set_head_scores(Some(10.0), Some(100.0));
+        let parent = app.store.history().checkpoints().head();
+        assert_eq!(
+            app.store.history().checkpoint(parent).unwrap().raw_score,
+            Some(10.0)
+        );
+
+        // Open an action on that entity.
+        let rid = app
+            .store
+            .begin_action(
+                CheckpointKind::Wiggle {
+                    entity: id,
+                    mask: WiggleMask::default(),
+                    duration_ms: 1,
+                },
+                "w",
+            )
+            .expect("begin_action");
+
+        // Drive the real score funnel with a streamed total.
+        let mut reports = std::collections::HashMap::new();
+        let _ = reports.insert(
+            "rosetta".to_string(),
+            foldit_runner::proto::plugin::ScoreReport {
+                total: 42.0,
+                terms: Default::default(),
+                per_residue: Vec::new(),
+            },
+        );
+        app.apply_score_reports(reports);
+
+        // Mid-action: the committed parent is untouched; the composition
+        // node carries the streamed score.
+        assert_eq!(
+            app.store.history().checkpoint(parent).unwrap().raw_score,
+            Some(10.0),
+            "committed parent score must not change mid-action"
+        );
+        assert_eq!(app.store.current_composition_scores().0, Some(42.0));
+
+        // After commit: the minted checkpoint carries the streamed score;
+        // the parent still holds its own.
+        let committed = app.store.commit_action(rid).expect("commit");
+        let game = ((-42.0_f64 + 800.0) * 10.0).max(0.0);
+        assert_eq!(
+            app.store.history().checkpoint(committed).unwrap().raw_score,
+            Some(42.0)
+        );
+        assert_eq!(
+            app.store.history().checkpoint(committed).unwrap().game_score,
+            Some(game)
+        );
+        assert_eq!(
+            app.store.history().checkpoint(parent).unwrap().raw_score,
+            Some(10.0)
+        );
     }
 }

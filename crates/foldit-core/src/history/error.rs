@@ -19,9 +19,10 @@ pub enum HistoryError {
     /// have nothing to operate on.
     #[error("no action is in flight")]
     NoOngoingAction,
-    /// A mutation tried to touch an entity locked by the running
-    /// action. (Multi-client locks live one layer up — see
-    /// [`OngoingState`] doc.)
+    /// A navigation / immediate-commit mutation was refused because an
+    /// action is in flight (the committed graph head is frozen while any
+    /// pending edit is open). Multi-client locks live one layer up in the
+    /// runner's orchestrator.
     #[error("entity {} is locked by the running action", entity.raw())]
     EntityLocked { entity: EntityId },
     /// Entity is not part of any current checkpoint or lane.

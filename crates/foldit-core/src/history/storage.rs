@@ -52,8 +52,9 @@ pub struct EntitySnapshot {
     pub label: Cow<'static, str>,
     /// Wall-clock timestamp.
     pub timestamp: SystemTime,
-    /// True iff this snapshot is the tentative of the running [`Active`]
-    /// action. Mutually exclusive with the [`OngoingState::Idle`] state.
+    /// True iff this snapshot is the open tentative of an in-flight
+    /// action (named by exactly one entry in `History::pending`). Always
+    /// the head of its lane while set; flipped to `false` at commit.
     pub tentative: bool,
     /// Number of live checkpoints whose `entity_heads` references this
     /// snapshot. Refuses eviction while > 0.
@@ -131,8 +132,6 @@ pub struct Checkpoint {
     pub filter_status: FilterStatus,
     /// User-set "skip me when computing best" flag.
     pub exclude_from_best: bool,
-    /// Mirror of the matching tentative snapshot's flag.
-    pub tentative: bool,
 }
 
 /// The unified checkpoint graph plus its cursors.

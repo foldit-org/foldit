@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 
 use super::{
     Checkpoint, CheckpointId, CheckpointKind, EntityActionKind, EntityHistory, EntitySnapshot,
-    EntitySnapshotId, FilterStatus, History, HistoryError, HistoryEventOutcome, OngoingState,
+    EntitySnapshotId, FilterStatus, History, HistoryError, HistoryEventOutcome, PendingEdit,
 };
 
 impl History {
@@ -28,7 +28,8 @@ impl History {
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
     ) -> Result<HistoryEventOutcome, HistoryError> {
-        // ongoing == Idle is guaranteed by the caller-side pre-check.
+        // The lane-free / lane-not-busy precondition is enforced by the
+        // caller-side pre-check.
         if !self.lanes.contains_key(&entity) {
             return Err(HistoryError::UnknownEntity { entity });
         }
@@ -38,7 +39,11 @@ impl History {
             .entity_action_kind()
             .unwrap_or(EntityActionKind::Loaded);
 
-        // Push tentative snapshot on the entity's lane.
+        // Push the tentative snapshot on the entity's lane and advance the
+        // lane head. No checkpoint is minted and the committed graph head
+        // does not move: the checkpoint is composed at commit from the
+        // committed head, so a committed node never references another
+        // action's open tentative.
         let lane = self.lanes.get_mut(&entity).expect("checked above");
         let parent = lane.head;
         let new_snap = lane.snapshots.insert(EntitySnapshot {
@@ -46,7 +51,7 @@ impl History {
             children: SmallVec::new(),
             payload,
             kind: action_kind,
-            label: label.clone(),
+            label,
             timestamp: now,
             tentative: true,
             checkpoint_refs: 0,
@@ -54,25 +59,76 @@ impl History {
         lane.snapshots[parent].children.push(new_snap);
         lane.head = new_snap;
 
-        // Build the tentative checkpoint's entity_heads — preserve
-        // canonical order; replace `entity`'s entry.
+        // Register the open composition under a fresh request id.
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let mut lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = SmallVec::new();
+        lanes.push((entity, new_snap));
+        let _ = self.pending.insert(
+            request_id,
+            PendingEdit {
+                lanes,
+                kind,
+                raw_score: None,
+                game_score: None,
+                filter_status: FilterStatus::NotEvaluated,
+            },
+        );
+
+        Ok(HistoryEventOutcome::Began { request_id })
+    }
+
+    pub(super) fn do_commit(
+        &mut self,
+        request_id: u64,
+    ) -> Result<HistoryEventOutcome, HistoryError> {
+        let edit = self
+            .pending
+            .swap_remove(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?;
+        let now = SystemTime::now();
+
+        // Recover the action label from the (first) held lane's tentative
+        // snapshot — `do_begin` stamped it there. The committed checkpoint
+        // carries it so the history panel shows the action's name.
+        let label = edit
+            .lanes
+            .first()
+            .and_then(|(entity, snap_id)| {
+                self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id))
+            })
+            .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
+
+        // Flip each held lane's tentative snapshot to committed.
+        for (entity, snap_id) in &edit.lanes {
+            let lane = self.lanes.get_mut(entity).expect("pending lane (G8)");
+            lane.snapshots[*snap_id].tentative = false;
+        }
+
+        // Compose the new checkpoint's entity_heads from the CURRENT
+        // committed graph head (never lane heads): start from its map and
+        // overlay this edit's lanes. Reading the committed head for the
+        // peer entities is what keeps a committed node from referencing
+        // another open edit's tentative.
         let parent_ckpt_id = self.checkpoints.head;
-        let parent_ckpt = &self.checkpoints.checkpoints[parent_ckpt_id];
-        let mut entity_heads = parent_ckpt.entity_heads.clone();
-        entity_heads.insert(entity, new_snap);
+        let mut entity_heads = self.checkpoints.checkpoints[parent_ckpt_id]
+            .entity_heads
+            .clone();
+        for (entity, snap_id) in &edit.lanes {
+            entity_heads.insert(*entity, *snap_id);
+        }
 
         let new_ckpt = self.checkpoints.checkpoints.insert(Checkpoint {
             parent: Some(parent_ckpt_id),
             children: SmallVec::new(),
             entity_heads,
-            kind: kind.clone(),
+            kind: edit.kind,
             label,
             timestamp: now,
-            raw_score: None,
-            game_score: None,
-            filter_status: FilterStatus::NotEvaluated,
+            raw_score: edit.raw_score,
+            game_score: edit.game_score,
+            filter_status: edit.filter_status,
             exclude_from_best: false,
-            tentative: true,
         });
         self.checkpoints.checkpoints[parent_ckpt_id]
             .children
@@ -80,78 +136,36 @@ impl History {
         self.checkpoints.head = new_ckpt;
 
         self.inc_refs_for_checkpoint(new_ckpt);
-
-        self.ongoing = OngoingState::Active {
-            entity,
-            tentative_snapshot: new_snap,
-            tentative_checkpoint: new_ckpt,
-            kind,
-        };
+        self.recompute_best();
 
         Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
 
-    pub(super) fn do_commit(&mut self) -> Result<HistoryEventOutcome, HistoryError> {
-        let (entity, snap_id, ckpt_id) = match &self.ongoing {
-            OngoingState::Idle => return Err(HistoryError::NoOngoingAction),
-            OngoingState::Active {
-                entity,
-                tentative_snapshot,
-                tentative_checkpoint,
-                ..
-            } => (*entity, *tentative_snapshot, *tentative_checkpoint),
-        };
+    pub(super) fn do_abort(
+        &mut self,
+        request_id: u64,
+    ) -> Result<HistoryEventOutcome, HistoryError> {
+        let edit = self
+            .pending
+            .swap_remove(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?;
 
-        let lane = self.lanes.get_mut(&entity).expect("active lane (G8)");
-        lane.snapshots[snap_id].tentative = false;
-
-        let ckpt = self
-            .checkpoints
-            .checkpoints
-            .get_mut(ckpt_id)
-            .expect("active checkpoint (G8)");
-        ckpt.tentative = false;
-
-        self.recompute_best();
-        self.ongoing = OngoingState::Idle;
-
-        Ok(HistoryEventOutcome::Pushed(ckpt_id))
-    }
-
-    pub(super) fn do_abort(&mut self) -> Result<HistoryEventOutcome, HistoryError> {
-        let (entity, snap_id, ckpt_id) = match &self.ongoing {
-            OngoingState::Idle => return Err(HistoryError::NoOngoingAction),
-            OngoingState::Active {
-                entity,
-                tentative_snapshot,
-                tentative_checkpoint,
-                ..
-            } => (*entity, *tentative_snapshot, *tentative_checkpoint),
-        };
-
-        // Remove tentative checkpoint first (drops its refs).
-        self.dec_refs_for_checkpoint(ckpt_id);
-        self.detach_checkpoint(ckpt_id);
-        let removed_ckpt = self
-            .checkpoints
-            .checkpoints
-            .remove(ckpt_id)
-            .expect("active checkpoint (G8)");
-        let parent_ckpt = removed_ckpt
-            .parent
-            .expect("tentative is never the root checkpoint");
-        self.checkpoints.head = parent_ckpt;
-
-        // Remove tentative snapshot from its lane.
-        let lane = self.lanes.get_mut(&entity).expect("active lane (G8)");
-        let removed_snap = lane.snapshots.remove(snap_id).expect("active snap (G8)");
-        let parent_snap = removed_snap.parent.expect("tentative is never lane root");
-        if let Some(parent) = lane.snapshots.get_mut(parent_snap) {
-            parent.children.retain(|c| *c != snap_id);
+        // Tear down each held lane's tentative snapshot; the lane head
+        // falls back to the tentative's parent. There is no checkpoint to
+        // remove (a begin mints none) and the committed graph head never
+        // moved, so nothing else unwinds.
+        for (entity, snap_id) in &edit.lanes {
+            let lane = self.lanes.get_mut(entity).expect("pending lane (G8)");
+            let removed = lane
+                .snapshots
+                .remove(*snap_id)
+                .expect("pending snap (G8)");
+            let parent_snap = removed.parent.expect("tentative is never lane root");
+            if let Some(parent) = lane.snapshots.get_mut(parent_snap) {
+                parent.children.retain(|c| c != snap_id);
+            }
+            lane.head = parent_snap;
         }
-        lane.head = parent_snap;
-
-        self.ongoing = OngoingState::Idle;
 
         Ok(HistoryEventOutcome::Aborted)
     }
@@ -204,7 +218,6 @@ impl History {
             game_score,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
-            tentative: false,
         });
         self.checkpoints.checkpoints[parent_ckpt_id]
             .children
@@ -340,7 +353,6 @@ impl History {
             game_score: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
-            tentative: false,
         });
         self.checkpoints.checkpoints[parent_ckpt_id]
             .children
@@ -356,9 +368,6 @@ impl History {
     pub(super) fn do_jump(&mut self, id: CheckpointId) -> Result<HistoryEventOutcome, HistoryError> {
         if !self.checkpoints.checkpoints.contains_key(id) {
             return Err(HistoryError::UnknownCheckpoint { id });
-        }
-        if self.checkpoints.checkpoints[id].tentative {
-            return Err(HistoryError::TentativeNotJumpable);
         }
         self.move_checkpoint_head_to(id)
     }
@@ -390,7 +399,6 @@ impl History {
             game_score: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
-            tentative: false,
         });
         self.checkpoints.checkpoints[parent_ckpt_id]
             .children

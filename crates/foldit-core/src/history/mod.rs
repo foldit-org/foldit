@@ -13,7 +13,9 @@
 //!    (score, filter status). It does **not** own snapshot payloads.
 //!
 //! **Cross-DAG invariant.** For every `e ∈ keys(checkpoint_head.entity_heads)`,
-//! `checkpoint_head.entity_heads[e] == lane_head(e)`. Asserted at the tail of
+//! the lane head is either that committed snapshot, or a tentative
+//! snapshot whose parent is it (an in-flight action's open tentative sits
+//! one step past the committed head on its lane). Asserted at the tail of
 //! every DAG-bearing event under `debug_assertions`.
 //!
 //! **Single record root.** Every checkpoint-bearing event funnels through
@@ -22,10 +24,11 @@
 //! mutation (`action_update`) and curation (pin / unpin / exclude / budget)
 //! do not change DAG topology and do not go through the root.
 //!
-//! **Lock layering.** `History` enforces only the *action lock* — refusing
-//! navigation/mutation that would touch the entity held by an in-flight
-//! [`OngoingState::Active`]. Multi-client locking (the case where the runner
-//! is server-side and clients are remote) is owned by the runner's
+//! **Lock layering.** `History` enforces only the structural *action
+//! lock* — one open tentative per lane, and a frozen committed graph head
+//! (no navigation / immediate-commit mutation) while any action is in
+//! flight. Multi-client locking (the case where the runner is
+//! server-side and clients are remote) is owned by the runner's
 //! orchestrator (its `EntityLockTable`), not by foldit-core; do not push it
 //! into this module.
 
@@ -54,8 +57,8 @@ pub use types::{CheckpointKind, EntityActionKind, FilterStatus, WiggleMask};
 mod storage;
 pub use storage::{Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget};
 
-mod ongoing;
-pub use ongoing::OngoingState;
+mod pending;
+use pending::PendingEdit;
 
 mod error;
 pub use error::HistoryError;
@@ -75,8 +78,14 @@ pub struct History {
     pub(super) lanes: IndexMap<EntityId, EntityHistory>,
     /// Unified checkpoint graph + cursors.
     pub(super) checkpoints: CheckpointGraph,
-    /// Streaming-action state machine (G2).
-    pub(super) ongoing: OngoingState,
+    /// In-flight actions keyed by request id. Empty in the resting
+    /// state; one entry per open action (0 or 1 until concurrent
+    /// dispatch lands, but the map and per-lane keying support fan-out).
+    /// Replaces the old ambient single-action flag.
+    pub(super) pending: IndexMap<u64, PendingEdit>,
+    /// Monotonic source of request ids. `begin_action` mints the next
+    /// value; never reused within a session.
+    pub(super) next_request_id: u64,
     /// Bumped on push / move / evict — full reproject on the wire.
     pub(super) topology_version: u64,
     /// Bumped on tentative in-place byte mutation — small live-update
@@ -97,8 +106,12 @@ enum HistoryEvent {
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
     },
-    Commit,
-    Abort,
+    Commit {
+        request_id: u64,
+    },
+    Abort {
+        request_id: u64,
+    },
     RecordEntityUpdate {
         entity: EntityId,
         kind: CheckpointKind,
@@ -139,6 +152,11 @@ enum HistoryEventOutcome {
         to: CheckpointId,
     },
     Aborted,
+    /// A `Begin` registered a new pending edit; carries its request id.
+    /// Under the open-action model a begin mints no checkpoint.
+    Began {
+        request_id: u64,
+    },
 }
 
 impl History {
@@ -190,7 +208,6 @@ impl History {
             game_score: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
-            tentative: false,
         });
 
         let history = Self {
@@ -204,7 +221,8 @@ impl History {
                 pinned: HashSet::new(),
                 budget: HistoryBudget::default(),
             },
-            ongoing: OngoingState::Idle,
+            pending: IndexMap::new(),
+            next_request_id: 0,
             topology_version: 0,
             live_version: 0,
         };
@@ -234,10 +252,28 @@ impl History {
         self.lanes.iter().map(|(eid, lane)| (*eid, lane))
     }
 
-    /// Current ongoing-action state.
+    /// Whether any action is in flight.
     #[must_use]
-    pub fn ongoing(&self) -> &OngoingState {
-        &self.ongoing
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Whether the action identified by `request_id` is in flight.
+    #[must_use]
+    pub fn is_pending(&self, request_id: u64) -> bool {
+        self.pending.contains_key(&request_id)
+    }
+
+    /// The request id of the sole in-flight action, if exactly one is
+    /// open. `None` when none or more than one is open (no unambiguous
+    /// target).
+    #[must_use]
+    pub fn sole_pending_request_id(&self) -> Option<u64> {
+        if self.pending.len() == 1 {
+            self.pending.keys().next().copied()
+        } else {
+            None
+        }
     }
 
     /// Topology version — bumped on push / move / evict. Triggers full
@@ -269,75 +305,81 @@ impl History {
     // ── Public surface — thin shims over record ───────────────────────
 
     /// Begin a streaming action on `entity`. Pushes a tentative snapshot
-    /// (parent = current lane head) and a tentative checkpoint
-    /// (parent = current graph head). Refused while another action is
-    /// in flight.
+    /// (parent = current lane head) and advances the lane head, but mints
+    /// no checkpoint and does not move the committed graph head: the
+    /// checkpoint is composed and minted, already committed, at commit.
+    /// Registers a pending edit and returns its freshly-minted
+    /// `request_id`. Refused if `entity`'s lane already has an open
+    /// tentative.
     pub fn begin_action(
         &mut self,
         entity: EntityId,
         kind: CheckpointKind,
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
-    ) -> Result<CheckpointId, HistoryError> {
-        let result = self.record(HistoryEvent::Begin {
+    ) -> Result<u64, HistoryError> {
+        match self.record(HistoryEvent::Begin {
             entity,
             kind,
             payload,
             label,
-        })?;
-        match result {
-            HistoryEventOutcome::Pushed(id) => Ok(id),
-            _ => unreachable!("Begin always pushes"),
+        })? {
+            HistoryEventOutcome::Began { request_id } => Ok(request_id),
+            _ => unreachable!("Begin always returns Began"),
         }
     }
 
-    /// Per-cycle update. Mutates the tentative snapshot's payload via
-    /// `Arc::make_mut`, updates the tentative checkpoint's score, bumps
-    /// `live_version` only. Does NOT change DAG topology and is not
-    /// routed through `record`.
+    /// Per-cycle update of the action identified by `request_id`. Mutates
+    /// each held lane's tentative snapshot payload via `Arc::make_mut`
+    /// (fanned across every lane in the edit), accumulates the live
+    /// composition score on the pending edit (no tentative checkpoint
+    /// exists to hold it), and bumps `live_version` only. Does NOT change
+    /// DAG topology and is not routed through `record`.
     ///
-    /// Returns `NoOngoingAction` if no action is in flight.
+    /// Returns `NoOngoingAction` if `request_id` names no in-flight action.
     pub fn action_update(
         &mut self,
+        request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
         filter_status: Option<FilterStatus>,
-        mutate: impl FnOnce(&mut MoleculeEntity),
+        mut mutate: impl FnMut(&mut MoleculeEntity),
     ) -> Result<(), HistoryError> {
-        let (entity, snap_id, ckpt_id) = match &self.ongoing {
-            OngoingState::Idle => return Err(HistoryError::NoOngoingAction),
-            OngoingState::Active {
-                entity,
-                tentative_snapshot,
-                tentative_checkpoint,
-                ..
-            } => (*entity, *tentative_snapshot, *tentative_checkpoint),
-        };
-
-        let lane = self
+        // Snapshot the lane set up front so the per-lane mutation loop
+        // doesn't hold a borrow of `self.pending` while it borrows
+        // `self.lanes` mutably.
+        let lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = self
+            .pending
+            .get(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?
             .lanes
-            .get_mut(&entity)
-            .expect("active lane must exist (G8)");
-        let snap = lane
-            .snapshots
-            .get_mut(snap_id)
-            .expect("tentative snapshot must exist (G8)");
-        let payload = Arc::make_mut(&mut snap.payload);
-        mutate(payload);
+            .clone();
 
-        let ckpt = self
-            .checkpoints
-            .checkpoints
-            .get_mut(ckpt_id)
-            .expect("tentative checkpoint must exist (G8)");
+        for (entity, snap_id) in &lanes {
+            let lane = self
+                .lanes
+                .get_mut(entity)
+                .expect("pending lane must exist (G8)");
+            let snap = lane
+                .snapshots
+                .get_mut(*snap_id)
+                .expect("tentative snapshot must exist (G8)");
+            let payload = Arc::make_mut(&mut snap.payload);
+            mutate(payload);
+        }
+
+        let edit = self
+            .pending
+            .get_mut(&request_id)
+            .expect("checked above");
         if let Some(s) = raw_score {
-            ckpt.raw_score = Some(s);
+            edit.raw_score = Some(s);
         }
         if let Some(s) = game_score {
-            ckpt.game_score = Some(s);
+            edit.game_score = Some(s);
         }
         if let Some(fs) = filter_status {
-            ckpt.filter_status = fs;
+            edit.filter_status = fs;
         }
 
         self.live_version = self.live_version.saturating_add(1);
@@ -348,22 +390,69 @@ impl History {
         Ok(())
     }
 
-    /// Commit the in-flight action. Flips tentative flags to `false`;
-    /// recomputes best cursors; transitions back to `Idle`.
-    pub fn commit_action(&mut self) -> Result<CheckpointId, HistoryError> {
-        match self.record(HistoryEvent::Commit)? {
+    /// Commit the action identified by `request_id`. Flips each held
+    /// lane's tentative snapshot to committed, composes a new checkpoint
+    /// from the current committed graph head plus the edit's lanes (so
+    /// the committed node never references a peer's open tentative),
+    /// stamps the edit's accumulated score onto it, advances the graph
+    /// head, recomputes best cursors, and drops the pending edit.
+    pub fn commit_action(&mut self, request_id: u64) -> Result<CheckpointId, HistoryError> {
+        match self.record(HistoryEvent::Commit { request_id })? {
             HistoryEventOutcome::Pushed(id) => Ok(id),
             _ => unreachable!("Commit returns the now-real checkpoint"),
         }
     }
 
-    /// Abort the in-flight action. Removes the tentative snapshot from
-    /// its lane and the tentative checkpoint from the graph; head
-    /// pointers fall back to their parents; transitions to `Idle`.
-    pub fn abort_action(&mut self) -> Result<(), HistoryError> {
-        match self.record(HistoryEvent::Abort)? {
+    /// Abort the action identified by `request_id`. Removes each held
+    /// lane's tentative snapshot; lane heads fall back to their parents.
+    /// No checkpoint is removed (a begin mints none) and the committed
+    /// graph head does not move.
+    pub fn abort_action(&mut self, request_id: u64) -> Result<(), HistoryError> {
+        match self.record(HistoryEvent::Abort { request_id })? {
             HistoryEventOutcome::Aborted => Ok(()),
             _ => unreachable!("Abort returns Aborted"),
+        }
+    }
+
+    /// Stamp scores on the current composition node: the first open
+    /// pending edit if any, else the committed head checkpoint. The async
+    /// score query is whole-assembly and carries no request id; with at
+    /// most one open edit (the single-dispatch reality) "first" is the
+    /// sole edit, so attribution is unambiguous. Bumps `live_version`
+    /// only; no DAG topology change, no `SessionUpdate`. Idempotent on
+    /// `(None, None)`.
+    pub fn set_current_composition_scores(
+        &mut self,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+    ) {
+        if raw_score.is_none() && game_score.is_none() {
+            return;
+        }
+        if let Some(edit) = self.pending.values_mut().next() {
+            if let Some(s) = raw_score {
+                edit.raw_score = Some(s);
+            }
+            if let Some(s) = game_score {
+                edit.game_score = Some(s);
+            }
+            self.live_version = self.live_version.saturating_add(1);
+        } else {
+            self.set_head_scores(raw_score, game_score);
+        }
+    }
+
+    /// Read the `(raw, game)` score of the current composition node: the
+    /// sole open pending edit if one exists, else the committed head
+    /// checkpoint. The live-score read surface follows the in-flight
+    /// action, mirroring the geometry read surface (`Session::entity`).
+    #[must_use]
+    pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
+        if let Some(edit) = self.pending.values().next() {
+            (edit.raw_score, edit.game_score)
+        } else {
+            let head = &self.checkpoints.checkpoints[self.checkpoints.head];
+            (head.raw_score, head.game_score)
         }
     }
 
@@ -552,10 +641,34 @@ impl History {
         }
     }
 
+    // ── Action-lock helpers ───────────────────────────────────────────
+
+    /// Whether `entity`'s lane head snapshot is an open tentative (i.e.
+    /// the lane already belongs to an in-flight action). `false` for an
+    /// unknown entity (`do_begin` reports `UnknownEntity` for that).
+    fn lane_head_is_tentative(&self, entity: EntityId) -> bool {
+        self.lanes
+            .get(&entity)
+            .and_then(|l| l.snapshot(l.head()))
+            .is_some_and(|s| s.tentative)
+    }
+
+    /// A representative locked entity to name in an `EntityLocked`
+    /// refusal: the first lane of the first pending edit. Callers gate on
+    /// a non-empty pending map.
+    fn first_pending_entity(&self) -> EntityId {
+        self.pending
+            .values()
+            .next()
+            .and_then(|e| e.lanes.first())
+            .map(|(eid, _)| *eid)
+            .expect("first_pending_entity called with empty pending map")
+    }
+
     // ── Private root: every DAG-bearing event funnels here (G3) ──────
 
     /// The single root through which every checkpoint- or lane-DAG-
-    /// bearing event passes. Validates the [`OngoingState`]
+    /// bearing event passes. Validates the action-lock
     /// preconditions, performs the mutation, updates `checkpoint_refs`,
     /// runs eviction, bumps `topology_version`, and asserts the cross-
     /// DAG invariant (G8).
@@ -565,15 +678,24 @@ impl History {
     /// and is therefore illegal (G3).
     fn record(&mut self, event: HistoryEvent) -> Result<HistoryEventOutcome, HistoryError> {
         // ── Action-lock pre-check ─────────────────────────────────────
-        // While Active, the only legal events are Commit / Abort.
-        // Per strategy doc § Lock semantics, the running action
-        // freezes every lane (not just its own); navigation and record
-        // updates are refused uniformly.
-        if let OngoingState::Active { entity: locked, .. } = &self.ongoing {
-            let locked = *locked;
+        // Reframed off the pending-edit map. While any action is open
+        // the committed graph head is frozen (each commit composes from
+        // it), so navigation and immediate-commit mutations are refused.
+        // A new action may still begin on a *free* lane (multi-lane
+        // fan-out); only a lane that already has an open tentative
+        // refuses begin.
+        if !self.pending.is_empty() {
             match &event {
-                HistoryEvent::Commit | HistoryEvent::Abort => {}
-                HistoryEvent::Begin { .. } | HistoryEvent::RecordEntityUpdate { .. } => {
+                // Commit / Abort resolve their own request_id in the arm.
+                HistoryEvent::Commit { .. } | HistoryEvent::Abort { .. } => {}
+                HistoryEvent::Begin { entity, .. } => {
+                    if self.lane_head_is_tentative(*entity) {
+                        return Err(HistoryError::ActiveActionInProgress);
+                    }
+                }
+                // Both move the committed head, which would strand an
+                // open edit's commit composition.
+                HistoryEvent::RecordEntityUpdate { .. } | HistoryEvent::AddEntity { .. } => {
                     return Err(HistoryError::ActiveActionInProgress)
                 }
                 HistoryEvent::LaneUndo { .. }
@@ -581,9 +703,10 @@ impl History {
                 | HistoryEvent::Undo
                 | HistoryEvent::Redo { .. }
                 | HistoryEvent::JumpCheckpoint { .. } => {
-                    return Err(HistoryError::EntityLocked { entity: locked })
+                    return Err(HistoryError::EntityLocked {
+                        entity: self.first_pending_entity(),
+                    })
                 }
-                HistoryEvent::AddEntity { .. } => return Err(HistoryError::ActiveActionInProgress),
             }
         }
 
@@ -609,8 +732,8 @@ impl History {
                 payload,
                 label,
             } => self.do_begin(entity, kind, payload, label)?,
-            HistoryEvent::Commit => self.do_commit()?,
-            HistoryEvent::Abort => self.do_abort()?,
+            HistoryEvent::Commit { request_id } => self.do_commit(request_id)?,
+            HistoryEvent::Abort { request_id } => self.do_abort(request_id)?,
             HistoryEvent::RecordEntityUpdate {
                 entity,
                 kind,

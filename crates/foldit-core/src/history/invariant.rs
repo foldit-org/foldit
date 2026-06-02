@@ -2,9 +2,11 @@
 //! release build replaces this with a no-op (the caller wraps every
 //! invocation in `if cfg!(debug_assertions)`).
 
+use std::collections::HashSet;
+
 use molex::entity::molecule::id::EntityId;
 
-use super::{EntitySnapshotId, History, OngoingState};
+use super::{EntitySnapshotId, History};
 
 impl History {
     // ── Cross-DAG invariant (G8) ──────────────────────────────────────
@@ -17,19 +19,29 @@ impl History {
     pub(super) fn assert_invariant(&self) {
         let head_ckpt = &self.checkpoints.checkpoints[self.checkpoints.head];
 
-        // 1. checkpoint_head.entity_heads[e] == lane_head(e).
-        for (eid, snap_id) in &head_ckpt.entity_heads {
+        // 1. For each (e, committed_snap) in the committed head's
+        //    entity_heads, the lane head is either that committed snap, or
+        //    a tentative snapshot whose parent is it (an open action's
+        //    in-flight tentative sits one step past the committed head).
+        for (eid, committed_snap) in &head_ckpt.entity_heads {
             let lane = self
                 .lanes
                 .get(eid)
                 .unwrap_or_else(|| panic!("invariant: head ckpt references unknown entity {}", eid.raw()));
-            assert_eq!(
-                lane.head,
-                *snap_id,
-                "invariant: lane head mismatch for entity {} (expected {:?}, got {:?})",
+            if lane.head == *committed_snap {
+                continue;
+            }
+            let head_snap = lane.snapshots.get(lane.head).unwrap_or_else(|| {
+                panic!("invariant: lane head missing for entity {}", eid.raw())
+            });
+            assert!(
+                head_snap.tentative && head_snap.parent == Some(*committed_snap),
+                "invariant: lane head for entity {} is neither the committed snap {:?} \
+                 nor a tentative child of it (got {:?}, tentative={})",
                 eid.raw(),
-                snap_id,
-                lane.head
+                committed_snap,
+                lane.head,
+                head_snap.tentative,
             );
         }
 
@@ -60,81 +72,49 @@ impl History {
             );
         }
 
-        // 3. tentative coupling: exactly one tentative iff Active.
-        match &self.ongoing {
-            OngoingState::Idle => {
-                for lane in self.lanes.values() {
-                    for (_, snap) in lane.snapshots.iter() {
-                        assert!(!snap.tentative, "invariant: tentative snapshot while Idle");
-                    }
+        // 3. Per-request tentative coherence: every tentative snapshot is
+        //    the head of exactly one lane and is named by exactly one
+        //    pending edit, and vice versa (bijection). (No checkpoint is
+        //    ever tentative — a begin mints none — which the absence of
+        //    the field now makes structural.)
+        let mut tentative_lane_heads: HashSet<(EntityId, EntitySnapshotId)> = HashSet::new();
+        for (eid, lane) in &self.lanes {
+            for (sid, snap) in lane.snapshots.iter() {
+                if snap.tentative {
+                    assert_eq!(
+                        lane.head, sid,
+                        "invariant: tentative snapshot is not its lane head for entity {}",
+                        eid.raw()
+                    );
+                    let fresh = tentative_lane_heads.insert((*eid, sid));
+                    assert!(fresh, "invariant: duplicate tentative lane head");
                 }
-                for (_, ckpt) in self.checkpoints.checkpoints.iter() {
-                    assert!(!ckpt.tentative, "invariant: tentative checkpoint while Idle");
-                }
-            }
-            OngoingState::Active {
-                entity,
-                tentative_snapshot,
-                tentative_checkpoint,
-                ..
-            } => {
-                let lane = self
-                    .lanes
-                    .get(entity)
-                    .expect("invariant: Active references unknown entity");
-                let snap = lane
-                    .snapshots
-                    .get(*tentative_snapshot)
-                    .expect("invariant: Active references unknown snapshot");
-                assert!(
-                    snap.tentative,
-                    "invariant: Active tentative snapshot is not flagged"
-                );
-                assert_eq!(
-                    lane.head, *tentative_snapshot,
-                    "invariant: Active's tentative snapshot is not the lane head"
-                );
-                let ckpt = self
-                    .checkpoints
-                    .checkpoints
-                    .get(*tentative_checkpoint)
-                    .expect("invariant: Active references unknown checkpoint");
-                assert!(
-                    ckpt.tentative,
-                    "invariant: Active tentative checkpoint is not flagged"
-                );
-                assert_eq!(
-                    self.checkpoints.head, *tentative_checkpoint,
-                    "invariant: Active's tentative checkpoint is not the graph head"
-                );
-                // exactly one tentative snapshot, on the active lane.
-                let mut tentative_count = 0;
-                for (eid, lane) in &self.lanes {
-                    for (sid, snap) in lane.snapshots.iter() {
-                        if snap.tentative {
-                            tentative_count += 1;
-                            assert_eq!(
-                                (*eid, sid),
-                                (*entity, *tentative_snapshot),
-                                "invariant: stray tentative snapshot"
-                            );
-                        }
-                    }
-                }
-                assert_eq!(tentative_count, 1, "invariant: not exactly one tentative snapshot");
-                let mut tentative_ckpts = 0;
-                for (id, ckpt) in self.checkpoints.checkpoints.iter() {
-                    if ckpt.tentative {
-                        tentative_ckpts += 1;
-                        assert_eq!(
-                            id, *tentative_checkpoint,
-                            "invariant: stray tentative checkpoint"
-                        );
-                    }
-                }
-                assert_eq!(tentative_ckpts, 1, "invariant: not exactly one tentative checkpoint");
             }
         }
+        let mut pending_lane_heads: HashSet<(EntityId, EntitySnapshotId)> = HashSet::new();
+        for edit in self.pending.values() {
+            for (eid, sid) in &edit.lanes {
+                let lane = self
+                    .lanes
+                    .get(eid)
+                    .expect("invariant: pending edit references unknown entity");
+                let snap = lane
+                    .snapshots
+                    .get(*sid)
+                    .expect("invariant: pending edit references unknown snapshot");
+                assert!(snap.tentative, "invariant: pending edit lane head is not tentative");
+                assert_eq!(
+                    lane.head, *sid,
+                    "invariant: pending edit lane is not the lane head"
+                );
+                let fresh = pending_lane_heads.insert((*eid, *sid));
+                assert!(fresh, "invariant: a lane appears in more than one pending edit");
+            }
+        }
+        assert_eq!(
+            tentative_lane_heads, pending_lane_heads,
+            "invariant: tentative snapshots and pending-edit lanes are not in bijection"
+        );
     }
 
     #[cfg(not(debug_assertions))]

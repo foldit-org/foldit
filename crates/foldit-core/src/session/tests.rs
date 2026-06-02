@@ -339,11 +339,11 @@ fn action_update_emits_tentative_edit() {
     // post-mutation coords are reachable through the document; the
     // payload itself is no longer on the spine.
     let (mut store, id) = store_with_protein(2);
-    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
+    let rid = store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     let _ = store.take_updates();
 
     store
-        .action_update(None, None, None, |e| {
+        .action_update(rid, None, None, None, |e| {
             for atom in e.atom_set_mut() {
                 atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
             }
@@ -368,9 +368,9 @@ fn action_update_emits_tentative_edit() {
 #[test]
 fn commit_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
-    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
+    let rid = store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     store
-        .action_update(None, None, None, |e| {
+        .action_update(rid, None, None, None, |e| {
             for atom in e.atom_set_mut() {
                 atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
             }
@@ -380,7 +380,7 @@ fn commit_action_emits_head_moved() {
     // take only sees the commit.
     let _ = store.take_updates();
 
-    store.commit_action().expect("commit_action");
+    store.commit_action(rid).expect("commit_action");
     let changes = store.take_updates();
     assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
 }
@@ -388,9 +388,9 @@ fn commit_action_emits_head_moved() {
 #[test]
 fn abort_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
-    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
+    let rid = store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     let _ = store.take_updates();
-    store.abort_action().expect("abort_action");
+    store.abort_action(rid).expect("abort_action");
     let changes = store.take_updates();
     assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
 }
@@ -398,11 +398,11 @@ fn abort_action_emits_head_moved() {
 #[test]
 fn undo_then_redo_each_emit_head_moved() {
     let (mut store, id) = store_with_protein(2);
-    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
+    let rid = store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     store
-        .action_update(None, None, None, |_| {})
+        .action_update(rid, None, None, None, |_| {})
         .expect("action_update");
-    store.commit_action().expect("commit_action");
+    store.commit_action(rid).expect("commit_action");
     let _ = store.take_updates();
 
     store.undo().expect("undo");
@@ -435,11 +435,11 @@ fn redo_at_leaf_emits_nothing() {
 fn lane_undo_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let original = store.history().lane(id).expect("lane").head();
-    store.begin_action(wiggle(id), "wiggle").expect("begin_action");
+    let rid = store.begin_action(wiggle(id), "wiggle").expect("begin_action");
     store
-        .action_update(None, None, None, |_| {})
+        .action_update(rid, None, None, None, |_| {})
         .expect("action_update");
-    store.commit_action().expect("commit_action");
+    store.commit_action(rid).expect("commit_action");
     let _ = store.take_updates();
 
     store.lane_undo(id, original).expect("lane_undo");

@@ -102,7 +102,9 @@ impl PluginDriver {
     /// without re-querying.
     pub(crate) fn release_terminal_stream(&mut self, rid: u64) -> Option<String> {
         let entry = self.stream_host.active_streams.remove(&rid)?;
-        let ActiveStreamEntry { handle, plugin_id } = entry;
+        let ActiveStreamEntry {
+            handle, plugin_id, ..
+        } = entry;
         if let Some(orch) = self.orchestrator.as_mut() {
             orch.release_dispatch_locks(handle);
         }
@@ -165,9 +167,13 @@ impl PluginDriver {
                     .map_err(|e| e.to_string())?;
                 let _ = self.stream_host.active_streams.insert(
                     rid,
-                    ActiveStreamEntry { handle, plugin_id },
+                    ActiveStreamEntry {
+                        handle,
+                        plugin_id,
+                        core_token: None,
+                    },
                 );
-                Ok(OpOutcome::Stream)
+                Ok(OpOutcome::Stream { request_id: rid })
             }
         }
     }
@@ -275,10 +281,12 @@ pub(crate) enum OpOutcome {
     /// bytes, to feed into `apply_invoke_result`.
     Invoke(Vec<u8>),
     /// Stream dispatch succeeded; the `DispatchHandle` is already
-    /// stored in `StreamHost::active_streams`, so the caller has
-    /// nothing left to do for the dispatch itself. The matching
-    /// terminal arm in `apply_backend_updates` performs the cleanup.
-    Stream,
+    /// stored in `StreamHost::active_streams` under `request_id` (the
+    /// runner rid), so the caller has nothing left to do for the
+    /// dispatch itself beyond recording the core token on the entry. The
+    /// matching terminal arm in `apply_backend_updates` performs the
+    /// cleanup.
+    Stream { request_id: u64 },
 }
 
 // ── Plugin broadcaster ──────────────────────────────────────────────────
@@ -438,6 +446,12 @@ pub(crate) struct StreamHost {
 pub(crate) struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
+    /// Core-side `request_id` from `Session::begin_action`, set after the
+    /// dispatch's history side-effect runs. `None` when no action was
+    /// begun for this stream (e.g. a multi-entity dispatch with no focus).
+    /// The terminal arm looks this up to commit / abort the right edit,
+    /// replacing the old entity-coincidence join.
+    pub(crate) core_token: Option<u64>,
 }
 
 #[cfg(test)]
