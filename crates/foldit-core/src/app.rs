@@ -31,7 +31,7 @@ use crate::gui_projector::GuiProjector;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::plugin_driver::{ActiveStreamEntry, OpOutcome};
+use crate::plugin_driver::{ActiveStreamEntry, OpEvent, OpOutcome};
 use crate::render_projector::{self, RenderProjector};
 use crate::session::{EntityOrigin, Session, SessionError};
 use crate::wire_params;
@@ -422,140 +422,50 @@ impl App {
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use foldit_runner::orchestrator::PluginUpdate;
-
-            let updates = self.plugin_driver.drain_updates();
-            if updates.is_empty() {
+            let events = self.plugin_driver.drain_op_events();
+            if events.is_empty() {
                 return;
             }
 
             let mut visual_dirty = false;
             let mut had_terminal = false;
-            for update in updates {
-                match update {
-                    PluginUpdate::Pending {
-                        request_id,
-                        latest_assembly,
-                        progress,
-                        stage,
-                    } => {
-                        let Some(assembly) = latest_assembly else {
-                            log::trace!(
-                                "plugin update Pending rid={request_id} \
-                                 progress={progress:?} stage={stage:?} \
-                                 entities=0 (skipped: no assembly)"
-                            );
-                            continue;
-                        };
-                        let core_token = self
-                            .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
-                            .and_then(|e| e.core_token);
-                        if let Some(token) = core_token {
-                            if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
-                                visual_dirty = true;
-                            }
+            for event in events {
+                match event {
+                    OpEvent::Update { token, assembly } => {
+                        if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
+                            visual_dirty = true;
                         }
                     }
-                    PluginUpdate::Cancelled {
-                        request_id,
-                        assembly,
-                    } => {
-                        // Cancel-as-commit: same shape as Final below.
+                    OpEvent::Commit { token, assembly } => {
                         had_terminal = true;
-                        let core_token = self
-                            .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
-                            .and_then(|e| e.core_token);
-                        if let Some(token) = core_token {
+                        if let Some(token) = token {
                             if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
+                                // Stream finished: commit the tentative so
+                                // the partial result becomes a permanent
+                                // undo entry.
                                 if let Err(e) = self.store.commit_action(token) {
-                                    log::warn!(
-                                        "plugin update Cancelled rid={request_id} \
-                                         commit_action failed: {e}"
-                                    );
+                                    log::warn!("commit_action failed: {e}");
                                 }
                                 visual_dirty = true;
                             }
                         }
-                        let _ = self.plugin_driver.release_terminal_stream(request_id);
-                        log::info!(
-                            "plugin update Cancelled rid={request_id} \
-                             entities={}",
-                            assembly.entities().len()
-                        );
                     }
-                    PluginUpdate::Final {
-                        request_id,
-                        assembly,
-                        ..
-                    } => {
+                    OpEvent::Abort { token, reason } => {
+                        // Spontaneous failure: never commits; aborts
+                        // exactly the edit this stream owns. A terminal
+                        // with no open edit, or whose edit already
+                        // committed, is a no-op.
                         had_terminal = true;
-                        let core_token = self
-                            .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
-                            .and_then(|e| e.core_token);
-                        if let Some(token) = core_token {
-                            if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
-                                // Stream completed cleanly: commit the
-                                // tentative so the partial result becomes
-                                // a permanent undo entry.
-                                if let Err(e) = self.store.commit_action(token) {
-                                    log::warn!(
-                                        "plugin update Final rid={request_id} \
-                                         commit_action failed: {e}"
-                                    );
-                                }
-                                visual_dirty = true;
-                            }
-                        }
-                        let _ = self.plugin_driver.release_terminal_stream(request_id);
-                        log::info!(
-                            "plugin update Final rid={request_id} \
-                             entities={}",
-                            assembly.entities().len()
-                        );
-                    }
-                    PluginUpdate::Error {
-                        request_id,
-                        message,
-                    } => {
-                        // Spontaneous failure only (timeout, exception,
-                        // transport, STALE_GEN). Never commits; aborts
-                        // exactly the edit this stream owns, resolved by
-                        // the stored core token (a stale Error for a
-                        // stream that never began an action, or whose
-                        // edit already committed, is a no-op).
-                        had_terminal = true;
-                        let core_token = self
-                            .plugin_driver
-                            .stream_host
-                            .active_streams
-                            .get(&request_id)
-                            .and_then(|e| e.core_token);
-                        if let Some(token) = core_token {
+                        if let Some(token) = token {
                             if self.store.is_pending(token) {
                                 if let Err(e) = self.store.abort_action(token) {
-                                    log::warn!(
-                                        "plugin update Error rid={request_id} \
-                                         abort_action failed: {e}"
-                                    );
+                                    log::warn!("abort_action failed: {e}");
                                 } else {
                                     visual_dirty = true;
                                 }
                             }
                         }
-                        let _ = self.plugin_driver.release_terminal_stream(request_id);
-                        log::warn!(
-                            "plugin update Error rid={request_id} \
-                             message={message}"
-                        );
+                        log::warn!("plugin op aborted: {reason}");
                     }
                 }
             }

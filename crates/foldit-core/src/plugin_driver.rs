@@ -5,11 +5,16 @@
 //! (the spine's plugin projection), and (on native builds) the in-flight
 //! `StreamHost` state, plus the orchestrator-lifecycle handlers that
 //! touch only the orchestrator (`reset_for_new_structure`, `shutdown`).
-//! The two big dispatch methods (`handle_dispatch_op` and
-//! `apply_backend_updates`) interleave orchestrator I/O with store
-//! mutations, so they stay on `App` until they are decomposed in RX8;
-//! `App` reaches into `self.plugin_driver` for the orchestrator and
-//! stream state they need.
+//! Inbound plugin traffic is drained here too: [`PluginDriver::drain_op_events`]
+//! consumes the orchestrator's raw `PluginUpdate`s and the stream table,
+//! resolving each into a core-side [`OpEvent`] keyed by the edit token so
+//! `App` applies them without naming orchestrator types or touching the
+//! stream bookkeeping.
+//!
+//! `App::handle_dispatch_op` still interleaves orchestrator I/O with store
+//! mutations (it begins the edit only after the dispatch succeeds), so it
+//! stays on `App` and reaches into `self.plugin_driver` for the orchestrator
+//! and stream state it needs.
 
 use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
@@ -77,22 +82,114 @@ impl PluginDriver {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PluginDriver {
-    /// Drain whatever the orchestrator has queued for the host. Returns an
-    /// empty `Vec` when no orchestrator is wired up.
-    pub(crate) fn drain_updates(
-        &mut self,
-    ) -> Vec<foldit_runner::orchestrator::PluginUpdate> {
-        self.orchestrator
+    /// Drain the orchestrator's queued plugin traffic and resolve each
+    /// raw `PluginUpdate` into a core-side [`OpEvent`] keyed by the edit
+    /// token, performing the terminal stream cleanup as it goes. Returns
+    /// an empty `Vec` when no orchestrator is wired up.
+    ///
+    /// The runner's two success terminals (`Final` and `Cancelled`)
+    /// collapse into one [`OpEvent::Commit`]: core commits either
+    /// identically. The token is resolved from the stream table *before*
+    /// the terminal releases its entry. A mid-stream frame with no open
+    /// edit (no token) is dropped at this barrier; a terminal with no
+    /// token still surfaces (so `App` accounts for it) but carries
+    /// nothing to commit or abort.
+    pub(crate) fn drain_op_events(&mut self) -> Vec<OpEvent> {
+        let updates = self
+            .orchestrator
             .as_mut()
             .map(|orch| orch.drain_plugin_updates())
-            .unwrap_or_default()
-    }
-
-    /// Read accessor for an in-flight stream entry. Used by the Error
-    /// arm of `apply_backend_updates` to inspect `handle.entities`
-    /// before the terminal cleanup releases the handle.
-    pub(crate) fn stream_entry(&self, rid: u64) -> Option<&ActiveStreamEntry> {
-        self.stream_host.active_streams.get(&rid)
+            .unwrap_or_default();
+        let mut events = Vec::with_capacity(updates.len());
+        for update in updates {
+            use foldit_runner::orchestrator::PluginUpdate;
+            match update {
+                PluginUpdate::Pending {
+                    request_id,
+                    latest_assembly,
+                    progress,
+                    stage,
+                } => {
+                    let Some(assembly) = latest_assembly else {
+                        log::trace!(
+                            "plugin update Pending rid={request_id} \
+                             progress={progress:?} stage={stage:?} \
+                             (skipped: no assembly)"
+                        );
+                        continue;
+                    };
+                    // Resolve before any cleanup; a frame with no open
+                    // edit is dropped at this barrier.
+                    let token = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .and_then(|e| e.core_token);
+                    let Some(token) = token else {
+                        log::trace!(
+                            "plugin update Pending rid={request_id} \
+                             (skipped: no open edit)"
+                        );
+                        continue;
+                    };
+                    events.push(OpEvent::Update { token, assembly });
+                }
+                PluginUpdate::Cancelled {
+                    request_id,
+                    assembly,
+                } => {
+                    let token = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .and_then(|e| e.core_token);
+                    let entities = assembly.entities().len();
+                    events.push(OpEvent::Commit { token, assembly });
+                    // Free the table entry / dispatch lock / pull-drag
+                    // regardless of whether an edit was open.
+                    let _ = self.release_terminal_stream(request_id);
+                    log::info!(
+                        "plugin update Cancelled rid={request_id} entities={entities}"
+                    );
+                }
+                PluginUpdate::Final {
+                    request_id,
+                    assembly,
+                    ..
+                } => {
+                    let token = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .and_then(|e| e.core_token);
+                    let entities = assembly.entities().len();
+                    events.push(OpEvent::Commit { token, assembly });
+                    let _ = self.release_terminal_stream(request_id);
+                    log::info!(
+                        "plugin update Final rid={request_id} entities={entities}"
+                    );
+                }
+                PluginUpdate::Error {
+                    request_id,
+                    message,
+                } => {
+                    let token = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .and_then(|e| e.core_token);
+                    events.push(OpEvent::Abort {
+                        token,
+                        reason: message.clone(),
+                    });
+                    let _ = self.release_terminal_stream(request_id);
+                    log::warn!(
+                        "plugin update Error rid={request_id} message={message}"
+                    );
+                }
+            }
+        }
+        events
     }
 
     /// Terminal stream cleanup (Cancelled / Final / Error): remove the
@@ -289,6 +386,32 @@ pub(crate) enum OpOutcome {
     Stream { request_id: u64 },
 }
 
+/// Core-side projection of inbound plugin traffic, produced by
+/// [`PluginDriver::drain_op_events`]. Each variant enumerates one of
+/// core's edit-lifecycle verbs keyed by the resolved core edit token
+/// (never the runner request id), and owns its `Assembly` so the
+/// returned batch outlives the driver borrow that produced it. `App`
+/// applies these without naming any orchestrator type.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum OpEvent {
+    /// Mid-stream tentative frame. Always carries a token: a frame with
+    /// no open edit is dropped at the barrier rather than surfaced here.
+    Update { token: u64, assembly: Assembly },
+    /// Terminal success. The runner's distinct `Final` and `Cancelled`
+    /// terminals collapse here because core commits either identically.
+    /// `token` is `None` when the stream ran without an edit ever being
+    /// opened; `App` still treats it as a terminal but has nothing to
+    /// commit.
+    Commit {
+        token: Option<u64>,
+        assembly: Assembly,
+    },
+    /// Terminal failure. `token` is `None` under the same no-open-edit
+    /// condition as `Commit`; `App` still accounts for the terminal but
+    /// has nothing to abort.
+    Abort { token: Option<u64>, reason: String },
+}
+
 // ── Plugin broadcaster ──────────────────────────────────────────────────
 
 /// Plugin projection of the [`SessionUpdate`] spine.
@@ -422,8 +545,8 @@ fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> 
 pub(crate) struct StreamHost {
     /// In-flight stream handles keyed by request_id. Populated by
     /// `handle_dispatch_op` on `StartStream`; the matching
-    /// `release_dispatch_locks` runs in `apply_backend_updates` when
-    /// the stream's terminal `PluginUpdate` arrives. The stored
+    /// `release_dispatch_locks` runs in `drain_op_events` when the
+    /// stream's terminal `PluginUpdate` arrives. The stored
     /// `plugin_id` is the dispatch target for `dispatch_cancel_stream`
     /// when the user hits ESC.
     pub(crate) active_streams: std::collections::HashMap<
@@ -439,7 +562,7 @@ pub(crate) struct StreamHost {
     pub(crate) pull_drag: Option<crate::pull_drag::PullDrag>,
 }
 
-/// Bundle stored per running stream so `apply_backend_updates` /
+/// Bundle stored per running stream so `drain_op_events` /
 /// `cancel_operations` can release locks and dispatch cancel against
 /// the right plugin worker without re-querying the orchestrator.
 #[cfg(not(target_arch = "wasm32"))]
