@@ -238,17 +238,6 @@ fn first_protein_entity(store: &Session) -> Option<EntityId> {
     store.proteins().next().map(|(eid, _, _)| eid)
 }
 
-/// Reverse-lookup: find the molex entity id whose raw value matches a
-/// runner entity id. (App still keys dispatch closures by runner
-/// `EntityId`; that key is slated for later removal.)
-#[cfg(not(target_arch = "wasm32"))]
-fn to_molex(
-    store: &Session,
-    id: foldit_runner::orchestrator::EntityId,
-) -> Option<EntityId> {
-    store.ids().find(|m| u64::from(m.raw()) == id.0)
-}
-
 /// Overwrite the ongoing action's tentative payload from a streaming
 /// assembly. Only the entity locked by `begin_action` is rewritten;
 /// peer entities in the same incoming Assembly are ignored (whole-pose
@@ -1055,7 +1044,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
         use foldit_runner::orchestrator::{
-            DispatchContext as RunnerDispatchContext, EntityId as RunnerEntityId, ResidueRef,
+            DispatchContext as RunnerDispatchContext, ResidueRef,
         };
 
         let Some(engine) = self.engine.as_ref() else {
@@ -1088,9 +1077,9 @@ impl App {
         let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
 
         let ctx = RunnerDispatchContext {
-            focused_entity_id: Some(RunnerEntityId(u64::from(route.entity_id.raw()))),
+            focused_entity_id: Some(route.entity_id),
             selection: vec![ResidueRef {
-                entity_id: RunnerEntityId(u64::from(route.entity_id.raw())),
+                entity_id: route.entity_id,
                 residue_index: route.residue_in_entity,
             }],
         };
@@ -1111,7 +1100,7 @@ impl App {
             route.op_id,
             ctx,
             params,
-            |id| to_molex(store, id).and_then(|m| store.entity_type(m)),
+            |id| store.entity_type(id),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1295,7 +1284,7 @@ impl App {
             let dispatch_outcome =
                 self.plugin_driver
                     .dispatch_op(intent, plugin_id.clone(), |id| {
-                        to_molex(store, id).and_then(|m| store.entity_type(m))
+                        store.entity_type(id)
                     });
 
             // Resolve which entity this op targets. The focused entity

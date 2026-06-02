@@ -242,12 +242,10 @@ impl PluginDriver {
         &mut self,
         intent: DispatchIntent,
         plugin_id: String,
-        entity_type_of: impl Fn(
-            foldit_runner::orchestrator::EntityId,
-        ) -> Option<molex::EntityKind>,
+        entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
     ) -> Result<OpOutcome, DispatchError> {
         use foldit_runner::orchestrator::{
-            DispatchContext, EntityId as RunnerEntityId, OpKind, ResidueRef,
+            DispatchContext, OpKind, ResidueRef,
         };
         let Some(orch) = self.orchestrator.as_mut() else {
             return Err(DispatchError::Failed(String::from(
@@ -273,16 +271,18 @@ impl PluginDriver {
             .selection
             .iter()
             .flat_map(|(entity, residues)| {
-                let runner_id = RunnerEntityId(u64::from(entity.raw()));
+                let id = *entity;
                 residues.iter().map(move |&residue_index| ResidueRef {
-                    entity_id: runner_id,
+                    entity_id: id,
                     residue_index,
                 })
             })
             .collect();
 
         let ctx = DispatchContext {
-            focused_entity_id: intent.focused_entity_id.map(RunnerEntityId),
+            focused_entity_id: intent
+                .focused_entity_id
+                .map(|raw| molex::EntityId::from_raw(raw as u32)),
             selection,
         };
         let params: std::collections::HashMap<
@@ -462,7 +462,9 @@ fn map_dispatch_error(
         OpDispatchError::LockRefused(RunnerDispatchError::EntityLocked {
             entity,
             ..
-        }) => DispatchError::EntityLocked { entity: entity.0 },
+        }) => DispatchError::EntityLocked {
+            entity: u64::from(entity.raw()),
+        },
         OpDispatchError::LockRefused(RunnerDispatchError::BackendBusy {
             plugin_id,
         }) => DispatchError::BackendBusy { plugin_id },
@@ -836,7 +838,7 @@ mod tests {
         };
         let runner_err = OpDispatchError::LockRefused(
             RunnerDispatchError::EntityLocked {
-                entity: foldit_runner::orchestrator::EntityId(7),
+                entity: molex::EntityId::from_raw(7),
                 current_op: None,
             },
         );
