@@ -320,17 +320,18 @@ impl AppRunner {
             return;
         };
         log::info!(
-            "Spawning Vite dev server (pnpm run dev) in {}",
+            "Spawning Vite dev server (bun run dev) in {}",
             frontend_dir.display()
         );
 
         // Inherit stdout + stderr so vite's own logs ("VITE v5.x ready
         // in 320 ms ... Local: http://localhost:5173/") land in the
-        // user's terminal -- without this, a pnpm/vite startup hang
+        // user's terminal -- without this, a bun/vite startup hang
         // is invisible and the only signal is our 5-second waiting
-        // ticks.
+        // ticks. `bun` is a native exe on every platform, so Command
+        // resolves it directly.
         #[cfg(windows)]
-        let result = Command::new("pnpm.cmd")
+        let result = Command::new("bun")
             .args(["run", "dev"])
             .current_dir(&frontend_dir)
             .stdout(Stdio::inherit())
@@ -340,7 +341,7 @@ impl AppRunner {
         #[cfg(unix)]
         let result = {
             use std::os::unix::process::CommandExt;
-            Command::new("pnpm")
+            Command::new("bun")
                 .args(["run", "dev"])
                 .current_dir(&frontend_dir)
                 .stdin(Stdio::null())

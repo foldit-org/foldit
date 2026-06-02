@@ -7,6 +7,23 @@ fn rosetta_interactive_path() -> String {
     "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_string()
 }
 
+/// Canonicalize to an absolute path, stripping Windows' `\\?\` verbatim
+/// prefix. `std::fs::canonicalize` emits verbatim paths on Windows, which
+/// some build tools (e.g. protoc) reject as invalid filenames. On non-Windows
+/// the prefix is absent, so this just canonicalizes.
+fn canonical_clean(path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    let s = canonical.to_string_lossy();
+    let cleaned = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        return Ok(canonical);
+    };
+    Ok(std::path::PathBuf::from(cleaned))
+}
+
 fn rosetta_lib_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -51,7 +68,14 @@ enum Commands {
     /// Install the plugin Python environments in crates/foldit-runner
     SetupEnvs,
     /// Build Rosetta from ~/rosetta-interactive
-    BuildRosettaInteractive,
+    BuildRosettaInteractive {
+        /// Wipe the rosetta-interactive cmake build dir before building, so
+        /// the configure step re-runs from scratch (forwarded to build.sh
+        /// --clean / build.ps1 -Clean). Use after toolchain/compiler changes
+        /// that a cached CMakeCache.txt would otherwise reject.
+        #[arg(long)]
+        clean: bool,
+    },
     /// Create distribution bundle
     Bundle,
     /// Rebuild the molex Python extension from local source
@@ -84,7 +108,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::SetupEnvs => setup_envs(),
-        Commands::BuildRosettaInteractive => build_rosetta_interactive(),
+        Commands::BuildRosettaInteractive { clean } => build_rosetta_interactive(clean),
         Commands::Bundle => bundle(),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
@@ -175,13 +199,13 @@ fn bundle_web() -> Result<()> {
     build_web(false)?;
 
     let js_dir = Path::new("crates/foldit-gui/js");
-    println!("Running pnpm build:web in {}...", js_dir.display());
-    let status = Command::new("pnpm")
-        .args(["build:web"])
+    println!("Running bun run build:web in {}...", js_dir.display());
+    let status = Command::new("bun")
+        .args(["run", "build:web"])
         .current_dir(js_dir)
         .status()?;
     if !status.success() {
-        anyhow::bail!("pnpm build:web failed");
+        anyhow::bail!("bun run build:web failed");
     }
 
     println!("✓ web bundle ready at crates/foldit-gui/js/dist/");
@@ -250,7 +274,7 @@ fn build_molex() -> Result<()> {
     Ok(())
 }
 
-fn build_rosetta_interactive() -> Result<()> {
+fn build_rosetta_interactive(clean: bool) -> Result<()> {
     let rosetta_path = rosetta_interactive_path();
     let cmake_dir = format!("{}/source/cmake_4", rosetta_path);
 
@@ -269,23 +293,42 @@ fn build_rosetta_interactive() -> Result<()> {
     // excluded; the workspace itself pins published molex ^0.3.0 for
     // foldit-core, which does not resolve against the in-tree 0.4.x.
     // Running outside the workspace sidesteps that conflict.
+    // rustc's Windows host target is MSVC, but the Rosetta C++ is linked by
+    // zig in MinGW/GNU mode (toolchains/zig.cmake). An MSVC-ABI molex can't
+    // link into a MinGW binary (mismatched CRT / unwinding / RTTI), so on
+    // Windows build molex for the GNU target to match the link; other
+    // platforms build for the host. A GNU-ABI staticlib is named libmolex.a.
+    #[cfg(target_os = "windows")]
+    let molex_target = Some("x86_64-pc-windows-gnu");
+    #[cfg(not(target_os = "windows"))]
+    let molex_target: Option<&str> = None;
+
     println!("Building molex static library (release, c-api feature)...");
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "--manifest-path",
-            "crates/molex/Cargo.toml",
-            "--release",
-            "--features",
-            "c-api",
-        ])
-        .status()?;
+    let mut molex_args = vec![
+        "build",
+        "--manifest-path",
+        "crates/molex/Cargo.toml",
+        "--release",
+        "--features",
+        "c-api",
+    ];
+    if let Some(target) = molex_target {
+        molex_args.push("--target");
+        molex_args.push(target);
+    }
+    let status = Command::new("cargo").args(&molex_args).status()?;
     if !status.success() {
         anyhow::bail!("Failed to build molex static library");
     }
-    let molex_include = std::fs::canonicalize("crates/molex/include")?;
-    let molex_lib = std::fs::canonicalize("crates/molex/target/release/libmolex.a")?;
-    let proto_dir = std::fs::canonicalize("crates/foldit-runner/proto")?;
+
+    // `cargo build --target <t>` nests artifacts under target/<t>/release.
+    let molex_release_dir = match molex_target {
+        Some(target) => format!("crates/molex/target/{}/release", target),
+        None => "crates/molex/target/release".to_string(),
+    };
+    let molex_include = canonical_clean("crates/molex/include")?;
+    let molex_lib = canonical_clean(format!("{}/libmolex.a", molex_release_dir))?;
+    let proto_dir = canonical_clean("crates/foldit-runner/proto")?;
 
     // Delegate the cmake configure + build (and the make.py /
     // make_database.py preprocessing) to rosetta-interactive's own
@@ -293,15 +336,41 @@ fn build_rosetta_interactive() -> Result<()> {
     // appends to its CMAKE_ARGS. This avoids drift between the
     // canonical script and a parallel xtask reimplementation; any
     // future build-flag change in build.sh propagates automatically.
-    println!("Running build.sh in {}...", rosetta_path);
-    let status = Command::new("./build.sh")
+    // build.sh (Unix) and build.ps1 (Windows) are the rosetta-interactive
+    // repo's own scripts; both read the molex/proto paths from these env
+    // vars and append them as -D defines to their cmake invocation.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("powershell.exe");
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"]);
+        if clean {
+            c.arg("-Clean");
+        }
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = Command::new("./build.sh");
+        if clean {
+            c.arg("--clean");
+        }
+        c
+    };
+
+    let build_script = if cfg!(target_os = "windows") {
+        "build.ps1"
+    } else {
+        "build.sh"
+    };
+    println!("Running {} in {}...", build_script, rosetta_path);
+    let status = cmd
         .env("MOLEX_INCLUDE_DIR", molex_include.as_os_str())
         .env("MOLEX_STATIC_LIB", molex_lib.as_os_str())
         .env("FOLDIT_PROTO_DIR", proto_dir.as_os_str())
         .current_dir(&rosetta_path)
         .status()?;
     if !status.success() {
-        anyhow::bail!("rosetta-interactive build.sh failed");
+        anyhow::bail!("rosetta-interactive {} failed", build_script);
     }
 
     // Copy the dylib into the plugin directory. That's the single
@@ -480,33 +549,21 @@ fn build_gui() -> Result<()> {
     let gui_src_dir = "crates/foldit-gui/js";
 
     println!("Installing GUI dependencies...");
-    #[cfg(windows)]
-    let install_status = Command::new("cmd")
-        .args(["/c", "pnpm", "install", "--frozen-lockfile"])
+    // `bun` is a single native executable on every platform, so Command
+    // resolves it directly (no cmd /c shim dance like pnpm needed on Windows).
+    let install_status = Command::new("bun")
+        .arg("install")
         .current_dir(gui_src_dir)
         .status()?;
-    #[cfg(unix)]
-    let install_status = Command::new("pnpm")
-        .args(["install", "--frozen-lockfile"])
-        .current_dir(gui_src_dir)
-        .status()?;
-
     if !install_status.success() {
         anyhow::bail!("Failed to install GUI dependencies");
     }
 
     println!("Building GUI...");
-    #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/c", "pnpm", "build"])
+    let status = Command::new("bun")
+        .args(["run", "build"])
         .current_dir(gui_src_dir)
         .status()?;
-    #[cfg(unix)]
-    let status = Command::new("pnpm")
-        .arg("build")
-        .current_dir(gui_src_dir)
-        .status()?;
-
     if !status.success() {
         anyhow::bail!("Failed to build GUI");
     }
