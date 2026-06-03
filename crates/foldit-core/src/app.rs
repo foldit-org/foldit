@@ -38,7 +38,6 @@ use crate::plugin_driver::{
 };
 use crate::render_projector::{self, RenderProjector};
 use crate::session::{EntityOrigin, Session, SessionError};
-use crate::wire_params;
 
 fn score_for_mode(raw: Option<f64>, game: Option<f64>, mode: ScoringMode) -> Option<f64> {
     match mode {
@@ -753,12 +752,10 @@ impl App {
     /// no GUI selection). Returns true if an op was dispatched.
     #[cfg(not(target_arch = "wasm32"))]
     fn try_hotkey_dispatch(&mut self, key_str: &str) -> bool {
-        let op_id = self.plugin_driver.orchestrator.as_ref().and_then(|orch| {
-            orch.ops_catalog()
-                .into_iter()
-                .find(|e| e.hotkey.as_deref() == Some(key_str))
-                .map(|e| e.op_id)
-        });
+        let op_id = self
+            .plugin_driver
+            .hotkey_to_op(key_str)
+            .map(|(_plugin_id, op_id)| op_id);
         let Some(op_id) = op_id else { return false };
         log::info!("hotkey {key_str:?} -> dispatch plugin op {op_id:?}");
         self.handle_dispatch_op(foldit_gui::OpDispatch {
@@ -831,7 +828,9 @@ impl App {
                 "Focus: {}",
                 render_projector::focus_description(&self.store, &engine.focus())
             );
-            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
+            // ACTIONS too: per-op availability is focus-dependent, so a
+            // focus switch must re-project the catalog.
+            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI | DirtyFlags::ACTIONS;
         }
         true
     }
@@ -1015,7 +1014,10 @@ impl App {
                             if self.keybindings.dispatch(other, engine) {
                                 if matches!(other, "Tab" | "Backquote") {
                                     // (lock update deferred — see comment above)
-                                    self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI;
+                                    // ACTIONS too: per-op availability is
+                                    // focus-dependent, so re-project the catalog.
+                                    self.ui_dirty |=
+                                        DirtyFlags::SCENE | DirtyFlags::UI | DirtyFlags::ACTIONS;
                                 }
                             } else {
                                 // No viso built-in claims this key — resolve it
@@ -1025,13 +1027,10 @@ impl App {
                                 // dispatch is deferred to after the match.
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
-                                    pending_hotkey_op =
-                                        self.plugin_driver.orchestrator.as_ref().and_then(|orch| {
-                                            orch.ops_catalog()
-                                                .into_iter()
-                                                .find(|e| e.hotkey.as_deref() == Some(other))
-                                                .map(|e| e.op_id)
-                                        });
+                                    pending_hotkey_op = self
+                                        .plugin_driver
+                                        .hotkey_to_op(other)
+                                        .map(|(_plugin_id, op_id)| op_id);
                                     if pending_hotkey_op.is_none() {
                                         log::debug!("Unhandled key code from frontend: {other}");
                                     }
@@ -1274,22 +1273,23 @@ impl App {
                 return;
             };
 
-            // Resolve the display label from the manifest catalog.
-            // Falls back to the op id when the op isn't surfaced as a
-            // button (the dispatcher still routes; the history entry
-            // just shows the op id). `plugin_id` is needed below for
-            // `begin_action`; both are plain `String` fields off `cached`,
-            // so reading them here names no orchestrator type.
-            let display = orch
-                .ops_catalog()
-                .into_iter()
-                .find(|e| e.plugin_id == cached.plugin_id && e.op_id == op.op_id)
-                .map_or_else(|| op.op_id.clone(), |e| e.display);
+            // `plugin_id` is needed below for `begin_action`; it's a plain
+            // `String` field off `cached`, so reading it here names no
+            // orchestrator type.
             let plugin_id = cached.plugin_id.clone();
 
             // Drop the orchestrator borrow before reaching back into
-            // `self.plugin_driver` for the consolidated dispatch.
+            // `self.plugin_driver` for the catalog label + dispatch.
             let _ = orch;
+
+            // Resolve the display label from the manifest catalog. Falls
+            // back to the op id when the op isn't surfaced as a button
+            // (the dispatcher still routes; the history entry just shows
+            // the op id).
+            let display = self
+                .plugin_driver
+                .op_display(&plugin_id, &op.op_id)
+                .unwrap_or_else(|| op.op_id.clone());
             // Hand the driver a core-shaped intent: the selection flatten,
             // param conversion, and `DispatchContext` build all live behind
             // `dispatch_op` now, so this path names no orchestrator type.
@@ -1926,9 +1926,21 @@ impl App {
             }
         }
         if app_dirty.contains(DirtyFlags::ACTIONS) {
-            self.frontend.set_actions(wire_params::build_actions_list(
-                &self.plugin_driver.orchestrator,
-            ));
+            // Availability depends on focus + selection + lock state.
+            // Source focus the same way the SCENE arm below does, then
+            // hand the driver the authoritative selection + an entity-type
+            // closure (disjoint field borrows: `plugin_driver` / `store`).
+            let focus = match engine.focus() {
+                Focus::Entity(eid) => Some(eid),
+                Focus::All => None,
+            };
+            let store = &self.store;
+            let actions = self.plugin_driver.actions_catalog(
+                focus,
+                &self.selection,
+                |id| store.entity_type(id),
+            );
+            self.frontend.set_actions(actions);
         }
         if app_dirty.contains(DirtyFlags::LOADING) {
             self.frontend.set_loading_progress(None);
