@@ -468,6 +468,78 @@ fn committed_node_references_peer_committed_head_not_its_tentative() {
 }
 
 #[test]
+fn per_edit_scores_attribute_to_their_own_edit_not_first_wins() {
+    // The bug this guards: a single whole-assembly score used to land on
+    // "the first open edit" (`pending.values_mut().next()`), so with two
+    // concurrent edits the second never got its own score and the first
+    // got a number that wasn't its composition's. `set_edit_scores` targets
+    // the named edit, so each edit holds its own score.
+    let (mut h, ids) = mk_history(2);
+    let e1 = ids[0];
+    let e2 = ids[1];
+
+    let rid1 = 1u64;
+    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1)
+        .unwrap();
+    let rid2 = 2u64;
+    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("w2"), rid2)
+        .unwrap();
+
+    // Score each edit against its own composition, by request id. The
+    // read side `current_composition_scores` reports the first open edit,
+    // so it must reflect rid1's value, not a whole-assembly number stamped
+    // onto whichever edit opened first.
+    h.set_edit_scores(rid1, Some(11.0), Some(110.0));
+    h.set_edit_scores(rid2, Some(22.0), Some(220.0));
+    assert_eq!(h.current_composition_scores(), (Some(11.0), Some(110.0)));
+
+    // Committing transfers each edit's own score onto its checkpoint; the
+    // end-to-end proof that scores were attributed per edit, not first-wins.
+    let c1 = h.commit_action(rid1).unwrap();
+    assert_eq!(h.checkpoint(c1).unwrap().raw_score, Some(11.0));
+    assert_eq!(h.checkpoint(c1).unwrap().game_score, Some(110.0));
+    let c2 = h.commit_action(rid2).unwrap();
+    assert_eq!(h.checkpoint(c2).unwrap().raw_score, Some(22.0));
+    assert_eq!(h.checkpoint(c2).unwrap().game_score, Some(220.0));
+}
+
+#[test]
+fn edit_composition_reads_peer_committed_head_not_peer_tentative() {
+    // The composition scored for one edit must overlay only that edit's
+    // tentative lane; a peer's concurrently-open tentative must NOT leak
+    // into it (else the score would be attributed to the wrong pose).
+    let (mut h, ids) = mk_history(2);
+    let e1 = ids[0];
+    let e2 = ids[1];
+
+    let rid1 = 1u64;
+    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1)
+        .unwrap();
+    let rid2 = 2u64;
+    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("w2"), rid2)
+        .unwrap();
+    // Mutate e2's open tentative so it diverges from its committed head.
+    h.action_update(rid2, None, None, None, |entity| {
+        for atom in entity.atom_set_mut() {
+            atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
+        }
+    })
+    .unwrap();
+
+    // Edit 1's composition: e1's tentative + e2's COMMITTED head (not e2's
+    // moved tentative).
+    let comp = h.edit_composition_entities(rid1).unwrap();
+    let e2_in_comp = comp.iter().find(|e| e.id() == e2).unwrap();
+    assert_eq!(
+        e2_in_comp.positions()[0],
+        glam::Vec3::ZERO,
+        "e2 enters edit 1's composition at its committed (zero) position, \
+         not its moved (9,9,9) tentative"
+    );
+    assert!(comp.iter().any(|e| e.id() == e1), "edit's own lane is present");
+}
+
+#[test]
 fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
     // A single edit spanning two entities: one begin opens a tentative on
     // both lanes, action_update fans across both, and commit mints ONE

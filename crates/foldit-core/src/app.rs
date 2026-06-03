@@ -28,7 +28,9 @@ use viso::{
 };
 
 use crate::gui_projector::GuiProjector;
-use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
+use crate::history::{
+    CheckpointId, CheckpointKind, FilterStatus as HistoryFilterStatus, History,
+};
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::{
@@ -42,6 +44,42 @@ fn score_for_mode(raw: Option<f64>, game: Option<f64>, mode: ScoringMode) -> Opt
     match mode {
         ScoringMode::Game => game,
         ScoringMode::Scientist => raw,
+    }
+}
+
+/// Convert a rosetta raw score (REU) to foldit's game-mode display number.
+/// Verbatim port of `rosetta_score_to_game_score_either(use_minimum=true,
+/// internal=false)` (`rosetta_util.cc:2702`, constants at lines 2662-2664).
+/// The linear map is universal foldit policy, not rosetta-specific, so it
+/// lives next to the `ScoringMode` selector that picks which view reaches
+/// the GUI. Applied to both whole-assembly and composition scores so
+/// neither ever displays raw REU.
+#[cfg(not(target_arch = "wasm32"))]
+fn rosetta_raw_to_game(raw: f64) -> f64 {
+    const SCORE_OFFSET: f64 = 800.0;
+    const SCORE_SCALE: f64 = 10.0;
+    const SCORE_MINIMUM: f64 = 0.0;
+    ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM)
+}
+
+/// Accumulate one report's per-residue scores into the
+/// `entity_id -> Vec<(residue_index, score)>` map (later writers stack on
+/// earlier ones). Shared by the whole-assembly and composition paths.
+#[cfg(not(target_arch = "wasm32"))]
+fn accumulate_per_residue(
+    per_entity: &mut std::collections::HashMap<u32, Vec<(u32, f64)>>,
+    report: &foldit_runner::proto::plugin::ScoreReport,
+) {
+    for rs in &report.per_residue {
+        let Some(rref) = rs.residue.as_ref() else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let entity_id = rref.entity_id as u32;
+        per_entity
+            .entry(entity_id)
+            .or_default()
+            .push((rref.residue_index, f64::from(rs.score)));
     }
 }
 
@@ -311,6 +349,13 @@ pub struct App {
     /// the last clearing (`None`) push. Cleared on topology swaps so a
     /// new structure with coincidentally-equal scores still pushes.
     last_pushed_scores: std::collections::HashMap<u32, Option<Vec<f64>>>,
+    /// Commit-stamp correlation: each in-flight commit-time composition-score
+    /// `request_id` → the committed checkpoint its reply stamps. The checkpoint
+    /// is immutable, so its identity is stable until the reply lands. Cleared
+    /// on orchestrator reinit (request ids restart at 1 there, so a stale
+    /// entry could otherwise collide with a fresh edit id).
+    #[cfg(not(target_arch = "wasm32"))]
+    score_targets: std::collections::HashMap<u64, CheckpointId>,
 }
 
 /// Objective metadata for an active puzzle. Populated from the puzzle
@@ -353,6 +398,8 @@ impl App {
             awaiting_initial_score: false,
             selection: BTreeMap::new(),
             last_pushed_scores: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            score_targets: std::collections::HashMap::new(),
         }
     }
 
@@ -416,10 +463,17 @@ impl App {
                             if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
                                 // Stream finished: commit the tentative so
                                 // the partial result becomes a permanent
-                                // undo entry.
-                                if let Err(e) = self.store.commit_action(token) {
-                                    log::warn!("commit_action failed: {e}");
+                                // undo entry, then score the committed
+                                // union so the new checkpoint gets a
+                                // correctly-attributed score even while a
+                                // peer edit is still open.
+                                match self.store.commit_action(token) {
+                                    Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+                                    Err(e) => log::warn!("commit_action failed: {e}"),
                                 }
+                                // The edit's correlation id is now spent;
+                                // drop any lingering composition target.
+                                let _ = self.score_targets.remove(&token);
                                 visual_dirty = true;
                             }
                         }
@@ -552,55 +606,46 @@ impl App {
                 report.terms.len(),
                 report.per_residue.len()
             );
-            for rs in &report.per_residue {
-                let Some(rref) = rs.residue.as_ref() else {
-                    continue;
-                };
-                #[allow(clippy::cast_possible_truncation)]
-                let entity_id = rref.entity_id as u32;
-                per_entity
-                    .entry(entity_id)
-                    .or_default()
-                    .push((rref.residue_index, f64::from(rs.score)));
+            accumulate_per_residue(&mut per_entity, report);
+        }
+        if let Some(raw) = total {
+            // Whole-assembly score of the worker's live pose. With exactly
+            // one edit open, the live pose IS that edit's composition (its
+            // tentative + peers' committed heads), so the total is correctly
+            // the edit's score → stamp the edit. With zero or >=2 edits open,
+            // stamp the committed head; the >=2 case is transiently imperfect
+            // for live display (each open edit keeps its last value) but exact
+            // per-edit values still land at commit via the commit-stamp.
+            let game = rosetta_raw_to_game(raw);
+            match self.store.sole_pending_request_id() {
+                Some(rid) => self.store.set_edit_scores(rid, Some(raw), Some(game)),
+                None => self.store.set_head_scores(Some(raw), Some(game)),
             }
         }
-        if let Some(t) = total {
-            // Convert the rosetta raw score (REU) to foldit's game-mode
-            // display. Verbatim port of the
-            // `rosetta_score_to_game_score_either(use_minimum=true,
-            // internal=false)` branch at
-            // `plugins/rosetta/deps/rosetta-interactive/source/src/interactive/
-            // rosetta_util/rosetta_util.cc:2702`, using the constants
-            // declared on lines 2662-2663 + 2664 of the same file.
-            // Bridge-side the converter slot
-            // (`rosetta_score_to_game_score`) is null because nothing in
-            // the new plugin-host architecture calls
-            // `register_score_functions`; doing the linear map here is
-            // the right home anyway -- the formula is universal foldit
-            // policy, not rosetta-specific, and lives next to the
-            // `ScoringMode` selector that decides which view reaches the
-            // GUI.
-            const SCORE_OFFSET: f64 = 800.0;
-            const SCORE_SCALE: f64 = 10.0;
-            const SCORE_MINIMUM: f64 = 0.0;
-            let raw = t;
-            let game = ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM);
-            // Route to the current composition node: the open pending edit
-            // while an action is in flight (so the streamed score never
-            // touches the committed parent), else the committed head. This
-            // is the single score-write funnel for both the bootstrap
-            // blocking poll and the steady-state async poll.
-            self.store.set_current_composition_scores(Some(raw), Some(game));
-        }
 
-        // Push per-residue scores into the engine so Score / ScoreRelative
-        // color schemes have data. Each entity's score Vec is sized to
-        // its full residue count; missing residues default to 0.0 (the
-        // mid-palette stop in absolute mode, the lower quantile in
-        // relative mode -- close enough for a first-pass render).
-        // Borrow the two disjoint `self` fields the loop touches before
-        // entering it (the engine sink + the last-pushed cache) so the
-        // dirty-check below doesn't fight the `&mut self.engine` borrow.
+        self.push_per_residue_to_viso(per_entity);
+    }
+
+    /// Push per-residue scores into the engine so Score / ScoreRelative
+    /// color schemes have data. Each entity's score Vec is sized to its
+    /// full residue count; missing residues default to 0.0 (the mid-palette
+    /// stop in absolute mode, the lower quantile in relative mode -- close
+    /// enough for a first-pass render). Skips the push when the vector
+    /// matches the one already on viso (the scorer streams the same value
+    /// at idle; a repeat push forces a needless color recompute + reupload).
+    /// Shared by the whole-assembly and composition score paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn push_per_residue_to_viso(
+        &mut self,
+        per_entity: std::collections::HashMap<u32, Vec<(u32, f64)>>,
+    ) {
+        use std::collections::HashMap;
+        if per_entity.is_empty() {
+            return;
+        }
+        // Borrow the two disjoint `self` fields the loop touches (the engine
+        // sink + the last-pushed cache) so the dirty-check doesn't fight the
+        // `&mut self.engine` borrow.
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
@@ -631,10 +676,6 @@ impl App {
                     scores[i] = val;
                 }
             }
-            // Skip the push when the vector matches the one already on
-            // viso for this entity. The scorer streams the same value at
-            // idle, so without this the engine recomputes colors +
-            // reuploads the buffer every frame for no change.
             let unchanged = matches!(
                 last_pushed.get(&entity_id),
                 Some(Some(prev)) if *prev == scores
@@ -652,6 +693,53 @@ impl App {
             );
             engine.set_per_residue_scores(entity_id, Some(scores.clone()));
             last_pushed.insert(entity_id, Some(scores));
+        }
+    }
+
+    /// Fire a composition score for the committed union of `ckpt_id` under a
+    /// fresh `request_id`, routing the reply to stamp that (now-immutable)
+    /// checkpoint. Called right after a user-action commit so the new
+    /// checkpoint gets a correctly-attributed score even when a peer edit is
+    /// still open (so the idle whole-assembly path is not the one running).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn score_committed_checkpoint(&mut self, ckpt_id: CheckpointId) {
+        let Some(rid) = self.plugin_driver.alloc_request_id() else {
+            return;
+        };
+        let Some(assembly) = self.store.checkpoint_assembly(ckpt_id) else {
+            return;
+        };
+        let Ok(bytes) = molex::ops::wire::serialize_assembly(&assembly) else {
+            log::warn!("[App] commit-stamp serialize failed for checkpoint {ckpt_id:?}");
+            return;
+        };
+        self.plugin_driver.score_composition(bytes, rid);
+        let _ = self.score_targets.insert(rid, ckpt_id);
+    }
+
+    /// Drain composition-score replies and stamp each commit-time checkpoint
+    /// via the `request_id` map (`set_checkpoint_scores`). A `request_id`
+    /// absent from the map is just "not a commit-stamp" and needs no action.
+    /// Per-residue scores still flow to viso for every reply. The raw REU →
+    /// game-points map applies here too, so composition scores never display
+    /// raw REU.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_composition_scores(&mut self) {
+        let replies = self.plugin_driver.poll_composition_scores();
+        if replies.is_empty() {
+            return;
+        }
+        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
+        for (rid, report) in replies {
+            let raw = f64::from(report.total);
+            let game = rosetta_raw_to_game(raw);
+            if let Some(ckpt_id) = self.score_targets.get(&rid).copied() {
+                self.store.set_checkpoint_scores(ckpt_id, Some(raw), Some(game));
+                let _ = self.score_targets.remove(&rid);
+            }
+            let mut per_entity = std::collections::HashMap::new();
+            accumulate_per_residue(&mut per_entity, &report);
+            self.push_per_residue_to_viso(per_entity);
         }
     }
 
@@ -1328,8 +1416,9 @@ impl App {
         };
         let applied = apply_streaming_assembly(&mut self.store, &assembly, None, token);
         if applied {
-            if let Err(e) = self.store.commit_action(token) {
-                log::warn!("dispatch_invoke: commit_action failed: {e}");
+            match self.store.commit_action(token) {
+                Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+                Err(e) => log::warn!("dispatch_invoke: commit_action failed: {e}"),
             }
             self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;
         } else if self.store.is_pending(token) {
@@ -1337,6 +1426,8 @@ impl App {
             // assembly): drop the tentative.
             let _ = self.store.commit_action(token);
         }
+        // The edit's correlation id is spent; drop any lingering target.
+        let _ = self.score_targets.remove(&token);
     }
 
     pub fn handle_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
@@ -1649,10 +1740,26 @@ impl App {
                 .store
                 .set_exclude_from_best(id.into_inner(), exclude)
                 .map(|_| HistoryOutcome::Curated),
-            HistoryCommand::AbortAction => match self.store.sole_pending_request_id() {
-                Some(rid) => self.store.abort_action(rid).map(|_| HistoryOutcome::HeadMoved),
-                None => Ok(HistoryOutcome::Noop),
-            },
+            HistoryCommand::AbortAction => {
+                // "Discard the running action." Targeting a single edit
+                // no-ops once two edits run concurrently, so discard every
+                // open edit instead of silently doing nothing.
+                let rids: Vec<u64> = self.store.pending_request_ids().collect();
+                if rids.is_empty() {
+                    Ok(HistoryOutcome::Noop)
+                } else {
+                    for rid in rids {
+                        if let Err(e) = self.store.abort_action(rid) {
+                            log::warn!("abort_action({rid}) failed: {e}");
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let _ = self.score_targets.remove(&rid);
+                        }
+                    }
+                    Ok(HistoryOutcome::HeadMoved)
+                }
+            }
         };
 
         match result {
@@ -1979,10 +2086,20 @@ impl App {
             } else {
                 // Steady state: fire only on an assembly change, never
                 // block the render thread; apply replies as they arrive.
+                // Always the cheap whole-assembly query against the worker's
+                // already-built live pose (no per-frame pose rebuild). With
+                // exactly one edit open the live pose IS that edit's
+                // composition, so its reply attributes to the edit; per-edit
+                // exactness for any other case lands at commit via the
+                // commit-stamp.
                 if n_changes > 0 {
                     self.request_scores();
                 }
                 self.poll_async_scores();
+                // Drain composition replies: now only commit-time checkpoint
+                // stamps, fired at commit regardless of whether an edit is
+                // still open.
+                self.poll_composition_scores();
             }
         }
 
@@ -2063,8 +2180,12 @@ impl App {
 
                 // Install a fresh orchestrator BEFORE `bootstrap_plugins`
                 // so discovery + registration run against the handle the
-                // plugin driver owns.
+                // plugin driver owns. A fresh orchestrator restarts
+                // request ids at 1, so drop any stale composition targets
+                // before a new edit can reuse an old id.
                 self.plugin_driver.init_orchestrator();
+                #[cfg(not(target_arch = "wasm32"))]
+                self.score_targets.clear();
                 self.bootstrap_plugins();
 
                 // Republish: bootstrap may have committed rosetta's
@@ -2077,6 +2198,8 @@ impl App {
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", path, e);
                 self.plugin_driver.init_orchestrator();
+                #[cfg(not(target_arch = "wasm32"))]
+                self.score_targets.clear();
             }
         }
 
@@ -2840,15 +2963,14 @@ mod selection_tests {
         molex::MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
     }
 
-    /// The score *write* funnel must follow the composition node: while an
-    /// action is open, a streamed score lands on the pending edit and is
-    /// minted onto the committed checkpoint only at commit; the committed
-    /// parent is never overwritten mid-action. Drives the real app-layer
-    /// path (`apply_score_reports`), which is what regressed when only the
-    /// read side was rerouted.
+    /// A composition score for an open edit must land on that edit and be
+    /// minted onto its committed checkpoint only at commit; the committed
+    /// parent is never overwritten mid-action. This is the write the
+    /// composition-score poll performs (`set_edit_scores`), targeted by the
+    /// edit's `request_id` rather than "the first open edit".
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn apply_score_reports_routes_to_pending_edit_not_committed_parent() {
+    fn composition_score_routes_to_pending_edit_not_committed_parent() {
         use crate::history::CheckpointKind;
         use crate::session::EntityOrigin;
 
@@ -2889,17 +3011,10 @@ mod selection_tests {
             )
             .expect("begin_action");
 
-        // Drive the real score funnel with a streamed total.
-        let mut reports = std::collections::HashMap::new();
-        let _ = reports.insert(
-            "rosetta".to_string(),
-            foldit_runner::proto::plugin::ScoreReport {
-                total: 42.0,
-                terms: Default::default(),
-                per_residue: Vec::new(),
-            },
-        );
-        app.apply_score_reports(reports);
+        // Drive the composition-score write the poll path performs: stamp
+        // the open edit by its request_id.
+        let game = ((-42.0_f64 + 800.0) * 10.0).max(0.0);
+        app.store.set_edit_scores(rid, Some(42.0), Some(game));
 
         // Mid-action: the committed parent is untouched; the composition
         // node carries the streamed score.
@@ -2913,7 +3028,6 @@ mod selection_tests {
         // After commit: the minted checkpoint carries the streamed score;
         // the parent still holds its own.
         let committed = app.store.commit_action(rid).expect("commit");
-        let game = ((-42.0_f64 + 800.0) * 10.0).max(0.0);
         assert_eq!(
             app.store.history().checkpoint(committed).unwrap().raw_score,
             Some(42.0)

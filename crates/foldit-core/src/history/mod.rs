@@ -257,18 +257,6 @@ impl History {
         self.pending.contains_key(&request_id)
     }
 
-    /// The request id of the sole in-flight action, if exactly one is
-    /// open. `None` when none or more than one is open (no unambiguous
-    /// target).
-    #[must_use]
-    pub fn sole_pending_request_id(&self) -> Option<u64> {
-        if self.pending.len() == 1 {
-            self.pending.keys().next().copied()
-        } else {
-            None
-        }
-    }
-
     /// Topology version — bumped on push / move / evict. Triggers full
     /// reproject on the wire.
     #[must_use]
@@ -410,22 +398,23 @@ impl History {
         }
     }
 
-    /// Stamp scores on the current composition node: the first open
-    /// pending edit if any, else the committed head checkpoint. The async
-    /// score query is whole-assembly and carries no request id; with at
-    /// most one open edit (the single-dispatch reality) "first" is the
-    /// sole edit, so attribution is unambiguous. Bumps `live_version`
-    /// only; no DAG topology change, no `SessionUpdate`. Idempotent on
-    /// `(None, None)`.
-    pub fn set_current_composition_scores(
+    /// Stamp scores on the open edit identified by `request_id`. The edit's
+    /// accumulated score is what `do_commit` transfers onto the checkpoint
+    /// it mints, so this is how a per-edit composition score reaches the
+    /// committed node. Targeting the named edit (not "the first open one")
+    /// keeps two concurrent edits' scores from colliding. Bumps
+    /// `live_version` only; no DAG topology change. No-op when `request_id`
+    /// names no open edit, or on `(None, None)`.
+    pub fn set_edit_scores(
         &mut self,
+        request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
     ) {
         if raw_score.is_none() && game_score.is_none() {
             return;
         }
-        if let Some(edit) = self.pending.values_mut().next() {
+        if let Some(edit) = self.pending.get_mut(&request_id) {
             if let Some(s) = raw_score {
                 edit.raw_score = Some(s);
             }
@@ -433,15 +422,39 @@ impl History {
                 edit.game_score = Some(s);
             }
             self.live_version = self.live_version.saturating_add(1);
-        } else {
-            self.set_head_scores(raw_score, game_score);
+        }
+    }
+
+    /// Stamp scores on the committed checkpoint `id` in place. Used by the
+    /// commit-time composition score: the checkpoint composes the committed
+    /// union at commit, the score lands once the reply returns, and this
+    /// stamps the now-immutable node it was scored for. Bumps `live_version`
+    /// only. No-op on unknown `id` or `(None, None)`.
+    pub fn set_checkpoint_scores(
+        &mut self,
+        id: CheckpointId,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+    ) {
+        if raw_score.is_none() && game_score.is_none() {
+            return;
+        }
+        if let Some(ckpt) = self.checkpoints.checkpoints.get_mut(id) {
+            if let Some(s) = raw_score {
+                ckpt.raw_score = Some(s);
+            }
+            if let Some(s) = game_score {
+                ckpt.game_score = Some(s);
+            }
+            self.live_version = self.live_version.saturating_add(1);
         }
     }
 
     /// Read the `(raw, game)` score of the current composition node: the
-    /// sole open pending edit if one exists, else the committed head
-    /// checkpoint. The live-score read surface follows the in-flight
-    /// action, mirroring the geometry read surface (`Session::entity`).
+    /// first open pending edit if one exists, else the committed head
+    /// checkpoint. The live-score read surface for the score widget; with
+    /// per-edit composition scores each open edit holds its own correctly
+    /// attributed score, so the first one is a meaningful display value.
     #[must_use]
     pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
         if let Some(edit) = self.pending.values().next() {
@@ -450,6 +463,77 @@ impl History {
             let head = &self.checkpoints.checkpoints[self.checkpoints.head];
             (head.raw_score, head.game_score)
         }
+    }
+
+    /// The request ids of every open edit, in insertion order. Used by the
+    /// host to fire one composition score per open edit.
+    pub fn pending_request_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.keys().copied()
+    }
+
+    /// The lone open edit's request id, or `None` if zero or >1 edits are
+    /// open. When exactly one edit is open the worker's live pose IS that
+    /// edit's composition, so a whole-assembly score attributes to it.
+    #[must_use]
+    pub fn sole_pending_request_id(&self) -> Option<u64> {
+        let mut it = self.pending_request_ids();
+        let first = it.next()?;
+        if it.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    /// The entities composing the open edit `request_id`: the committed
+    /// graph head's membership, reading the edit's tentative lane for each
+    /// entity the edit holds and the committed head snapshot for every peer.
+    /// This is exactly the composition `do_commit` will mint, so scoring it
+    /// attributes correctly even while peer edits are open. `None` when
+    /// `request_id` names no open edit.
+    #[must_use]
+    pub fn edit_composition_entities(
+        &self,
+        request_id: u64,
+    ) -> Option<Vec<Arc<MoleculeEntity>>> {
+        let edit = self.pending.get(&request_id)?;
+        let head = &self.checkpoints.checkpoints[self.checkpoints.head];
+        let mut out = Vec::with_capacity(head.entity_heads.len());
+        for (eid, committed_snap) in &head.entity_heads {
+            // Overlay this edit's tentative for entities it holds; read the
+            // committed head snapshot for peers (so a peer's open edit never
+            // leaks into this composition).
+            let snap_id = edit
+                .lanes
+                .iter()
+                .find(|(e, _)| e == eid)
+                .map_or(*committed_snap, |(_, s)| *s);
+            if let Some(lane) = self.lanes.get(eid) {
+                if let Some(snap) = lane.snapshot(snap_id) {
+                    out.push(Arc::clone(&snap.payload));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The entities composing committed checkpoint `id` (its `entity_heads`
+    /// snapshots), in canonical order. `None` when `id` is unknown.
+    #[must_use]
+    pub fn checkpoint_composition_entities(
+        &self,
+        id: CheckpointId,
+    ) -> Option<Vec<Arc<MoleculeEntity>>> {
+        let ckpt = self.checkpoints.checkpoint(id)?;
+        let mut out = Vec::with_capacity(ckpt.entity_heads.len());
+        for (eid, snap_id) in &ckpt.entity_heads {
+            if let Some(lane) = self.lanes.get(eid) {
+                if let Some(snap) = lane.snapshot(*snap_id) {
+                    out.push(Arc::clone(&snap.payload));
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Atomic non-streaming entity update — used by RFD3-final / MPNN

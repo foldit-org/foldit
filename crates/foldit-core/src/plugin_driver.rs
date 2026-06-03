@@ -466,6 +466,29 @@ impl PluginDriver {
             .unwrap_or_default()
     }
 
+    /// Fire a composition-score request for `request_id`, carrying the
+    /// ASSEM02 bytes of the composition to score (one open edit's lanes
+    /// over its peers' committed heads, or a committed checkpoint's union).
+    /// Replies land on receivers drained by
+    /// [`Self::poll_composition_scores`]. No-op when no orchestrator exists.
+    pub(crate) fn score_composition(&mut self, assembly: Vec<u8>, request_id: u64) {
+        if let Some(orch) = self.orchestrator.as_mut() {
+            orch.score_composition(assembly, request_id);
+        }
+    }
+
+    /// Drain whatever composition-score replies have arrived, each tagged
+    /// with the `request_id` the host correlated it under. Non-blocking;
+    /// empty when nothing is ready or no orchestrator exists.
+    pub(crate) fn poll_composition_scores(
+        &mut self,
+    ) -> Vec<(u64, foldit_runner::proto::plugin::ScoreReport)> {
+        self.orchestrator
+            .as_mut()
+            .map(|orch| orch.poll_composition_scores())
+            .unwrap_or_default()
+    }
+
     // ── Bootstrap discover + register ───────────────────────────────────
 
     /// Discover plugins under `root` and register each against the given

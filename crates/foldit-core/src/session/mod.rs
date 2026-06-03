@@ -233,13 +233,6 @@ impl Session {
         self.history.is_pending(request_id)
     }
 
-    /// The request id of the sole in-flight action, if exactly one is
-    /// open; `None` otherwise.
-    #[must_use]
-    pub fn sole_pending_request_id(&self) -> Option<u64> {
-        self.history.sole_pending_request_id()
-    }
-
     // ── Action lifecycle (G6: typed mutation intent) ──────────────────
 
     /// Begin a streaming action over `entities` under the caller-supplied
@@ -412,25 +405,68 @@ impl Session {
         self.history.set_head_scores(raw_score, game_score);
     }
 
-    /// Stamp scores on the current composition node: the open pending edit
-    /// if an action is in flight, else the committed head checkpoint. This
-    /// is the score-write the per-tick poll uses so the live score follows
-    /// an in-flight action without ever touching the committed parent.
-    pub fn set_current_composition_scores(
+    /// Stamp a composition score on the open edit `request_id`. Targets the
+    /// named edit so two concurrent edits' scores never collide; the score
+    /// transfers onto the checkpoint that edit mints at commit.
+    pub fn set_edit_scores(
         &mut self,
+        request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
     ) {
-        self.history
-            .set_current_composition_scores(raw_score, game_score);
+        self.history.set_edit_scores(request_id, raw_score, game_score);
     }
 
-    /// Read the `(raw, game)` score of the current composition node (open
-    /// pending edit if any, else the committed head). The live-score read
-    /// surface, mirroring the geometry read surface in [`Self::entity`].
+    /// Stamp a composition score on the committed checkpoint `id` (the
+    /// commit-time stamp once the reply for its composed union returns).
+    pub fn set_checkpoint_scores(
+        &mut self,
+        id: CheckpointId,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+    ) {
+        self.history.set_checkpoint_scores(id, raw_score, game_score);
+    }
+
+    /// Read the `(raw, game)` score of the current composition node (first
+    /// open pending edit if any, else the committed head). The live-score
+    /// read surface for the score widget.
     #[must_use]
     pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
         self.history.current_composition_scores()
+    }
+
+    /// The request ids of every open edit, in insertion order.
+    pub fn pending_request_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.history.pending_request_ids()
+    }
+
+    /// The lone open edit's request id, or `None` if zero or >1 edits are
+    /// open.
+    #[must_use]
+    pub fn sole_pending_request_id(&self) -> Option<u64> {
+        self.history.sole_pending_request_id()
+    }
+
+    /// Build the assembly composing the open edit `request_id` (its
+    /// tentative lanes over its peers' committed heads), for a composition
+    /// score targeted at that edit. `None` if `request_id` names no open
+    /// edit.
+    #[must_use]
+    pub fn edit_composition_assembly(&self, request_id: u64) -> Option<Assembly> {
+        self.history
+            .edit_composition_entities(request_id)
+            .map(Assembly::from_arcs)
+    }
+
+    /// Build the assembly composing committed checkpoint `id` (its
+    /// `entity_heads`), for a commit-time composition score. `None` if `id`
+    /// is unknown.
+    #[must_use]
+    pub fn checkpoint_assembly(&self, id: CheckpointId) -> Option<Assembly> {
+        self.history
+            .checkpoint_composition_entities(id)
+            .map(Assembly::from_arcs)
     }
 
     // ── Preview API — transient, never in history ─────────────────────
