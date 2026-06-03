@@ -27,6 +27,7 @@ impl History {
         kind: CheckpointKind,
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
+        request_id: u64,
     ) -> Result<HistoryEventOutcome, HistoryError> {
         // The lane-free / lane-not-busy precondition is enforced by the
         // caller-side pre-check.
@@ -59,9 +60,8 @@ impl History {
         lane.snapshots[parent].children.push(new_snap);
         lane.head = new_snap;
 
-        // Register the open composition under a fresh request id.
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
+        // Register the open composition under the caller-supplied request
+        // id (allocated by the orchestrator).
         let mut lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = SmallVec::new();
         lanes.push((entity, new_snap));
         let _ = self.pending.insert(
@@ -75,7 +75,7 @@ impl History {
             },
         );
 
-        Ok(HistoryEventOutcome::Began { request_id })
+        Ok(HistoryEventOutcome::Began)
     }
 
     pub(super) fn do_commit(

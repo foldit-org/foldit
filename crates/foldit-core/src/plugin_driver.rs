@@ -83,17 +83,16 @@ impl PluginDriver {
 #[cfg(not(target_arch = "wasm32"))]
 impl PluginDriver {
     /// Drain the orchestrator's queued plugin traffic and resolve each
-    /// raw `PluginUpdate` into a core-side [`OpEvent`] keyed by the edit
-    /// token, performing the terminal stream cleanup as it goes. Returns
-    /// an empty `Vec` when no orchestrator is wired up.
+    /// raw `PluginUpdate` into a core-side [`OpEvent`] keyed by the
+    /// dispatch `request_id`, performing the terminal stream cleanup as it
+    /// goes. Returns an empty `Vec` when no orchestrator is wired up.
     ///
     /// The runner's two success terminals (`Final` and `Cancelled`)
     /// collapse into one [`OpEvent::Commit`]: core commits either
-    /// identically. The token is resolved from the stream table *before*
-    /// the terminal releases its entry. A mid-stream frame with no open
-    /// edit (no token) is dropped at this barrier; a terminal with no
-    /// token still surfaces (so `App` accounts for it) but carries
-    /// nothing to commit or abort.
+    /// identically. The `request_id` is the same id `App` opened the edit
+    /// under, so events carry it directly; whether an edit is actually
+    /// open under it is `App`'s call (via `is_pending` / a no-op apply),
+    /// which keeps the terminal cleanup here independent of edit state.
     pub(crate) fn drain_op_events(&mut self) -> Vec<OpEvent> {
         let updates = self
             .orchestrator
@@ -118,33 +117,22 @@ impl PluginDriver {
                         );
                         continue;
                     };
-                    // Resolve before any cleanup; a frame with no open
-                    // edit is dropped at this barrier.
-                    let token = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .and_then(|e| e.core_token);
-                    let Some(token) = token else {
-                        log::trace!(
-                            "plugin update Pending rid={request_id} \
-                             (skipped: no open edit)"
-                        );
-                        continue;
-                    };
-                    events.push(OpEvent::Update { token, assembly });
+                    // The dispatch id is the edit token. `App` no-ops the
+                    // frame if no edit is open under it.
+                    events.push(OpEvent::Update {
+                        token: request_id,
+                        assembly,
+                    });
                 }
                 PluginUpdate::Cancelled {
                     request_id,
                     assembly,
                 } => {
-                    let token = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .and_then(|e| e.core_token);
                     let entities = assembly.entities().len();
-                    events.push(OpEvent::Commit { token, assembly });
+                    events.push(OpEvent::Commit {
+                        token: Some(request_id),
+                        assembly,
+                    });
                     // Free the table entry / dispatch lock / pull-drag
                     // regardless of whether an edit was open.
                     let _ = self.release_terminal_stream(request_id);
@@ -157,13 +145,11 @@ impl PluginDriver {
                     assembly,
                     ..
                 } => {
-                    let token = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .and_then(|e| e.core_token);
                     let entities = assembly.entities().len();
-                    events.push(OpEvent::Commit { token, assembly });
+                    events.push(OpEvent::Commit {
+                        token: Some(request_id),
+                        assembly,
+                    });
                     let _ = self.release_terminal_stream(request_id);
                     log::info!(
                         "plugin update Final rid={request_id} entities={entities}"
@@ -173,13 +159,8 @@ impl PluginDriver {
                     request_id,
                     message,
                 } => {
-                    let token = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .and_then(|e| e.core_token);
                     events.push(OpEvent::Abort {
-                        token,
+                        token: Some(request_id),
                         reason: message.clone(),
                     });
                     let _ = self.release_terminal_stream(request_id);
@@ -297,7 +278,10 @@ impl PluginDriver {
         match kind {
             OpKind::Invoke => orch
                 .dispatch_invoke(&intent.op_id, ctx, params, entity_type_of)
-                .map(OpOutcome::Invoke)
+                .map(|(request_id, bytes)| OpOutcome::Invoke {
+                    request_id,
+                    bytes,
+                })
                 .map_err(map_dispatch_error),
             OpKind::Stream => {
                 let (rid, handle) = orch
@@ -305,11 +289,7 @@ impl PluginDriver {
                     .map_err(map_dispatch_error)?;
                 let _ = self.stream_host.active_streams.insert(
                     rid,
-                    ActiveStreamEntry {
-                        handle,
-                        plugin_id,
-                        core_token: None,
-                    },
+                    ActiveStreamEntry { handle, plugin_id },
                 );
                 Ok(OpOutcome::Stream { request_id: rid })
             }
@@ -321,13 +301,12 @@ impl PluginDriver {
     /// Pull-drag dispatch: take the core-shaped [`StreamStartIntent`],
     /// resolve the plugin id off the registry, build the `DispatchContext`
     /// + start params internally, call `dispatch_start_stream`, insert the
-    /// `ActiveStreamEntry` (with `core_token: None` — `App` records the
-    /// token afterward via [`Self::set_stream_core_token`]), and return the
-    /// runner rid plus the resolved plugin id. Pull-drag is always a stream,
-    /// so there is no Invoke branch. `App` keeps the `begin_action` history
-    /// side-effect (it needs the returned `plugin_id`) and the `PullDrag`
-    /// state. Returns a core-shaped [`DispatchError`] that names no
-    /// orchestrator type.
+    /// `ActiveStreamEntry`, and return the dispatch `request_id` plus the
+    /// resolved plugin id. Pull-drag is always a stream, so there is no
+    /// Invoke branch. `App` keeps the `begin_action` history side-effect
+    /// (it needs the returned `plugin_id`, and opens the edit under the
+    /// returned `request_id`) and the `PullDrag` state. Returns a
+    /// core-shaped [`DispatchError`] that names no orchestrator type.
     pub(crate) fn start_stream(
         &mut self,
         intent: StreamStartIntent,
@@ -368,7 +347,6 @@ impl PluginDriver {
             ActiveStreamEntry {
                 handle,
                 plugin_id: plugin_id.clone(),
-                core_token: None,
             },
         );
         Ok((rid, plugin_id))
@@ -406,14 +384,12 @@ impl PluginDriver {
         }
     }
 
-    /// Record the core edit token on a stream's `ActiveStreamEntry` after
-    /// `App::begin_action` mints it. Routes the post-dispatch token write
-    /// through a method instead of a raw `active_streams` reach. No-op if
-    /// the entry is gone (terminal already drained).
-    pub(crate) fn set_stream_core_token(&mut self, rid: u64, token: u64) {
-        if let Some(entry) = self.stream_host.active_streams.get_mut(&rid) {
-            entry.core_token = Some(token);
-        }
+    /// Allocate a dispatch `request_id` from the orchestrator (the single
+    /// id authority) for a host-internal action that opens an edit without
+    /// going through dispatch — e.g. seeding a post-Init normalized
+    /// assembly. `None` when no orchestrator is wired up.
+    pub(crate) fn alloc_request_id(&mut self) -> Option<u64> {
+        self.orchestrator.as_mut().map(|orch| orch.alloc_request_id())
     }
 
     /// Whether a pull-drag is currently live (the three input guards).
@@ -632,41 +608,42 @@ fn map_dispatch_error(
 /// is the producer and `App` is just one of two consumers.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum OpOutcome {
-    /// Synchronous invoke completed; payload is the plugin's reply
-    /// bytes, to feed into `apply_invoke_result`.
-    Invoke(Vec<u8>),
-    /// Stream dispatch succeeded; the `DispatchHandle` is already
-    /// stored in `StreamHost::active_streams` under `request_id` (the
-    /// runner rid), so the caller has nothing left to do for the
-    /// dispatch itself beyond recording the core token on the entry. The
-    /// matching terminal arm in `apply_backend_updates` performs the
-    /// cleanup.
+    /// Synchronous invoke completed. `request_id` is the dispatch id the
+    /// caller keys its edit on; `bytes` is the plugin's reply, fed into
+    /// `apply_invoke_result`.
+    Invoke { request_id: u64, bytes: Vec<u8> },
+    /// Stream dispatch succeeded; the `DispatchHandle` is already stored
+    /// in `StreamHost::active_streams` under `request_id` — the same id
+    /// the caller opens its edit under, so there is nothing left to
+    /// reconcile here. The matching terminal arm in
+    /// `apply_backend_updates` performs the cleanup.
     Stream { request_id: u64 },
 }
 
 /// Core-side projection of inbound plugin traffic, produced by
 /// [`PluginDriver::drain_op_events`]. Each variant enumerates one of
-/// core's edit-lifecycle verbs keyed by the resolved core edit token
-/// (never the runner request id), and owns its `Assembly` so the
+/// core's edit-lifecycle verbs keyed by the dispatch `request_id` (the
+/// single id `App` opened the edit under), and owns its `Assembly` so the
 /// returned batch outlives the driver borrow that produced it. `App`
 /// applies these without naming any orchestrator type.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum OpEvent {
-    /// Mid-stream tentative frame. Always carries a token: a frame with
-    /// no open edit is dropped at the barrier rather than surfaced here.
+    /// Mid-stream tentative frame, keyed by the dispatch `request_id`.
+    /// `App` applies it into the edit open under that id, or no-ops when
+    /// none is open.
     Update { token: u64, assembly: Assembly },
     /// Terminal success. The runner's distinct `Final` and `Cancelled`
     /// terminals collapse here because core commits either identically.
-    /// `token` is `None` when the stream ran without an edit ever being
-    /// opened; `App` still treats it as a terminal but has nothing to
-    /// commit.
+    /// `token` is the dispatch `request_id`; `App` commits the edit open
+    /// under it, or accounts for the terminal with nothing to commit when
+    /// `is_pending` reports none is open.
     Commit {
         token: Option<u64>,
         assembly: Assembly,
     },
-    /// Terminal failure. `token` is `None` under the same no-open-edit
-    /// condition as `Commit`; `App` still accounts for the terminal but
-    /// has nothing to abort.
+    /// Terminal failure. `token` is the dispatch `request_id`; `App`
+    /// aborts the edit open under it (gated on `is_pending`), or accounts
+    /// for the terminal with nothing to abort.
     Abort { token: Option<u64>, reason: String },
 }
 
@@ -827,12 +804,6 @@ pub(crate) struct StreamHost {
 pub(crate) struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
-    /// Core-side `request_id` from `Session::begin_action`, set after the
-    /// dispatch's history side-effect runs. `None` when no action was
-    /// begun for this stream (e.g. a multi-entity dispatch with no focus).
-    /// The terminal arm looks this up to commit / abort the right edit,
-    /// replacing the old entity-coincidence join.
-    pub(crate) core_token: Option<u64>,
 }
 
 #[cfg(test)]

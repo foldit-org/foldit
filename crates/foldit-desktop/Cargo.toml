@@ -17,7 +17,7 @@ foldit-runner = { path = "../foldit-runner" }
 
 # External deps
 viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.4.2", features = ["serde", "specta"] }
+molex = { version = "0.4.4", features = ["serde", "specta"] }
 
 anyhow = "1.0"
 

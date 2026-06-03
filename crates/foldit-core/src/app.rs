@@ -1088,23 +1088,21 @@ impl App {
             .store
             .ids()
             .find(|id| id.raw() == route.entity_id.raw());
-        let core_token = action_entity.and_then(|entity| {
+        if let Some(entity) = action_entity {
             let kind = CheckpointKind::PluginOp {
                 entity,
                 plugin_id: plugin_id.clone(),
                 op_id: String::from(route.op_id),
                 display: String::from("Pull"),
             };
-            match self.store.begin_action(kind, String::from("Pull")) {
-                Ok(token) => Some(token),
-                Err(e) => {
-                    log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
-                    None
-                }
+            // Open the edit under the dispatch's request_id; the stream
+            // table is keyed by the same id, so the terminal commit lands
+            // on this edit.
+            if let Err(e) =
+                self.store.begin_action(kind, String::from("Pull"), rid)
+            {
+                log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
             }
-        });
-        if let Some(token) = core_token {
-            self.plugin_driver.set_stream_core_token(rid, token);
         }
 
         self.plugin_driver.set_pull_drag(crate::pull_drag::PullDrag {
@@ -1243,9 +1241,18 @@ impl App {
                 .and_then(|raw| self.store.ids().find(|id| u64::from(id.raw()) == raw))
                 .or_else(|| first_protein_entity(&self.store));
 
-            // Skip on dispatch failure: any open tentative belongs to
-            // a prior op, not this one.
-            let core_token = if dispatch_outcome.is_ok() {
+            // The dispatch allocated the id the edit and the stream table
+            // both key on; pull it from the successful outcome.
+            let dispatch_id = match &dispatch_outcome {
+                Ok(OpOutcome::Stream { request_id })
+                | Ok(OpOutcome::Invoke { request_id, .. }) => Some(*request_id),
+                Err(_) => None,
+            };
+
+            // Open the edit under the dispatch id. Skipped on dispatch
+            // failure (any open tentative belongs to a prior op) or when
+            // no single entity owns the action.
+            let edit_token = dispatch_id.and_then(|request_id| {
                 action_entity.and_then(|entity| {
                     let kind = CheckpointKind::PluginOp {
                         entity,
@@ -1253,8 +1260,8 @@ impl App {
                         op_id: op.op_id.clone(),
                         display: display.clone(),
                     };
-                    match self.store.begin_action(kind, display) {
-                        Ok(token) => Some(token),
+                    match self.store.begin_action(kind, display.clone(), request_id) {
+                        Ok(()) => Some(request_id),
                         Err(e) => {
                             log::trace!(
                                 "handle_dispatch_op({:?}): begin_action skipped: {e}",
@@ -1264,22 +1271,17 @@ impl App {
                         }
                     }
                 })
-            } else {
-                None
-            };
+            });
 
             match dispatch_outcome {
-                Ok(OpOutcome::Stream { request_id }) => {
-                    // Stream dispatch: `PluginDriver::dispatch_op`
-                    // already inserted the `ActiveStreamEntry`. Record the
-                    // core token on it so the terminal arm can commit /
-                    // abort the right edit; cleanup happens there.
-                    if let Some(token) = core_token {
-                        self.plugin_driver.set_stream_core_token(request_id, token);
-                    }
+                Ok(OpOutcome::Stream { .. }) => {
+                    // The stream table entry (inserted by
+                    // `PluginDriver::dispatch_op`) and the edit are keyed
+                    // by the same dispatch id; the terminal arm commits /
+                    // aborts via that id. Nothing to reconcile here.
                 }
-                Ok(OpOutcome::Invoke(bytes)) => {
-                    self.apply_invoke_result(&bytes, core_token);
+                Ok(OpOutcome::Invoke { bytes, .. }) => {
+                    self.apply_invoke_result(&bytes, edit_token);
                 }
                 Err(DispatchError::EntityLocked { entity }) => {
                     // Advisory refusal: the target entity is busy with
@@ -1315,8 +1317,8 @@ impl App {
     /// delta and queued on the locked entity so the next tick's
     /// render-projector publish eases the result in rather than snapping.
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_invoke_result(&mut self, bytes: &[u8], core_token: Option<u64>) {
-        let Some(token) = core_token else {
+    fn apply_invoke_result(&mut self, bytes: &[u8], edit_token: Option<u64>) {
+        let Some(token) = edit_token else {
             // No edit was begun for this invoke (begin skipped), so there
             // is nothing to apply into or commit.
             return;
@@ -2200,17 +2202,26 @@ impl App {
             op_id: String::from("_init_normalize"),
             display: String::from("Init"),
         };
-        let core_token = match self.store.begin_action(kind, String::from("Init")) {
-            Ok(token) => token,
-            Err(e) => {
-                log::warn!(
-                    "[App] rosetta post-Init begin_action failed: {e}; \
-                     skipping normalization apply"
-                );
-                return;
-            }
+        // Host-internal action: no dispatch happened, so draw the edit's
+        // request_id straight from the orchestrator (the single id
+        // authority).
+        let Some(request_id) = self.plugin_driver.alloc_request_id() else {
+            log::warn!(
+                "[App] rosetta post-Init: no orchestrator to allocate a \
+                 request id; skipping normalization apply"
+            );
+            return;
         };
-        let applied = apply_streaming_assembly(&mut self.store, &normalized, None, core_token);
+        if let Err(e) =
+            self.store.begin_action(kind, String::from("Init"), request_id)
+        {
+            log::warn!(
+                "[App] rosetta post-Init begin_action failed: {e}; \
+                 skipping normalization apply"
+            );
+            return;
+        }
+        let applied = apply_streaming_assembly(&mut self.store, &normalized, None, request_id);
         if !applied {
             log::warn!(
                 "[App] rosetta post-Init apply_streaming_assembly did not \
@@ -2218,10 +2229,10 @@ impl App {
                  the rosetta-returned entity ID does not match any store \
                  entity ID."
             );
-            let _ = self.store.commit_action(core_token);
+            let _ = self.store.commit_action(request_id);
             return;
         }
-        if let Err(e) = self.store.commit_action(core_token) {
+        if let Err(e) = self.store.commit_action(request_id) {
             log::warn!("[App] rosetta post-Init commit_action failed: {e}");
             return;
         }
@@ -2858,8 +2869,8 @@ mod selection_tests {
         );
 
         // Open an action on that entity.
-        let rid = app
-            .store
+        let rid = 1u64;
+        app.store
             .begin_action(
                 CheckpointKind::Wiggle {
                     entity: id,
@@ -2867,6 +2878,7 @@ mod selection_tests {
                     duration_ms: 1,
                 },
                 "w",
+                rid,
             )
             .expect("begin_action");
 

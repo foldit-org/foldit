@@ -1186,6 +1186,7 @@ dependencies = [
  "anyhow",
  "foldit-runner",
  "log",
+ "molex",
  "prost",
  "pyo3",
  "windows-sys 0.59.0",
@@ -2777,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "molex"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "flate2",
  "glam",

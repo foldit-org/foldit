@@ -83,9 +83,6 @@ pub struct History {
     /// dispatch lands, but the map and per-lane keying support fan-out).
     /// Replaces the old ambient single-action flag.
     pub(super) pending: IndexMap<u64, PendingEdit>,
-    /// Monotonic source of request ids. `begin_action` mints the next
-    /// value; never reused within a session.
-    pub(super) next_request_id: u64,
     /// Bumped on push / move / evict — full reproject on the wire.
     pub(super) topology_version: u64,
     /// Bumped on tentative in-place byte mutation — small live-update
@@ -105,6 +102,7 @@ enum HistoryEvent {
         kind: CheckpointKind,
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
+        request_id: u64,
     },
     Commit {
         request_id: u64,
@@ -152,11 +150,9 @@ enum HistoryEventOutcome {
         to: CheckpointId,
     },
     Aborted,
-    /// A `Begin` registered a new pending edit; carries its request id.
-    /// Under the open-action model a begin mints no checkpoint.
-    Began {
-        request_id: u64,
-    },
+    /// A `Begin` registered a new pending edit. Under the open-action
+    /// model a begin mints no checkpoint.
+    Began,
 }
 
 impl History {
@@ -222,7 +218,6 @@ impl History {
                 budget: HistoryBudget::default(),
             },
             pending: IndexMap::new(),
-            next_request_id: 0,
             topology_version: 0,
             live_version: 0,
         };
@@ -304,12 +299,13 @@ impl History {
 
     // ── Public surface — thin shims over record ───────────────────────
 
-    /// Begin a streaming action on `entity`. Pushes a tentative snapshot
-    /// (parent = current lane head) and advances the lane head, but mints
-    /// no checkpoint and does not move the committed graph head: the
-    /// checkpoint is composed and minted, already committed, at commit.
-    /// Registers a pending edit and returns its freshly-minted
-    /// `request_id`. Refused if `entity`'s lane already has an open
+    /// Begin a streaming action on `entity` under the caller-supplied
+    /// `request_id` (allocated by the orchestrator, the single id
+    /// authority). Pushes a tentative snapshot (parent = current lane
+    /// head) and advances the lane head, but mints no checkpoint and does
+    /// not move the committed graph head: the checkpoint is composed and
+    /// minted, already committed, at commit. Registers a pending edit
+    /// under `request_id`. Refused if `entity`'s lane already has an open
     /// tentative.
     pub fn begin_action(
         &mut self,
@@ -317,14 +313,16 @@ impl History {
         kind: CheckpointKind,
         payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
-    ) -> Result<u64, HistoryError> {
+        request_id: u64,
+    ) -> Result<(), HistoryError> {
         match self.record(HistoryEvent::Begin {
             entity,
             kind,
             payload,
             label,
+            request_id,
         })? {
-            HistoryEventOutcome::Began { request_id } => Ok(request_id),
+            HistoryEventOutcome::Began => Ok(()),
             _ => unreachable!("Begin always returns Began"),
         }
     }
@@ -731,7 +729,8 @@ impl History {
                 kind,
                 payload,
                 label,
-            } => self.do_begin(entity, kind, payload, label)?,
+                request_id,
+            } => self.do_begin(entity, kind, payload, label, request_id)?,
             HistoryEvent::Commit { request_id } => self.do_commit(request_id)?,
             HistoryEvent::Abort { request_id } => self.do_abort(request_id)?,
             HistoryEvent::RecordEntityUpdate {

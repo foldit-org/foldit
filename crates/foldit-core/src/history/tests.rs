@@ -321,18 +321,19 @@ fn nav_during_active_is_refused_with_entity_locked() {
     .unwrap();
 
     // Begin an action on `e`.
-    let rid = h
-        .begin_action(
-            e,
-            CheckpointKind::Wiggle {
-                entity: e,
-                mask: WiggleMask::default(),
-                duration_ms: 100,
-            },
-            arc_entity(e),
-            Cow::Borrowed("w-active"),
-        )
-        .unwrap();
+    let rid = 1u64;
+    h.begin_action(
+        e,
+        CheckpointKind::Wiggle {
+            entity: e,
+            mask: WiggleMask::default(),
+            duration_ms: 100,
+        },
+        arc_entity(e),
+        Cow::Borrowed("w-active"),
+        rid,
+    )
+    .unwrap();
 
     // Begin again → ActiveActionInProgress.
     assert!(matches!(
@@ -343,7 +344,8 @@ fn nav_during_active_is_refused_with_entity_locked() {
                 duration_ms: 1
             },
             arc_entity(e),
-            Cow::Borrowed("nope")
+            Cow::Borrowed("nope"),
+            2,
         ),
         Err(HistoryError::ActiveActionInProgress)
     ));
@@ -397,18 +399,19 @@ fn abort_action_drops_tentative() {
     let lane_len_before = h.lane(e).unwrap().len();
     let ckpt_len_before = h.checkpoints().len();
 
-    let rid = h
-        .begin_action(
-            e,
-            CheckpointKind::Wiggle {
-                entity: e,
-                mask: WiggleMask::default(),
-                duration_ms: 100,
-            },
-            arc_entity(e),
-            Cow::Borrowed("about-to-abort"),
-        )
-        .unwrap();
+    let rid = 1u64;
+    h.begin_action(
+        e,
+        CheckpointKind::Wiggle {
+            entity: e,
+            mask: WiggleMask::default(),
+            duration_ms: 100,
+        },
+        arc_entity(e),
+        Cow::Borrowed("about-to-abort"),
+        rid,
+    )
+    .unwrap();
 
     // While in flight: the lane grew by one tentative snapshot, but a
     // begin mints no checkpoint, so the checkpoint graph is unchanged.
@@ -432,18 +435,19 @@ fn in_flight_score_spares_committed_parent_then_lands_on_commit() {
     let parent = h.checkpoints().head();
     assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
 
-    let rid = h
-        .begin_action(
-            e,
-            CheckpointKind::Wiggle {
-                entity: e,
-                mask: WiggleMask::default(),
-                duration_ms: 1,
-            },
-            arc_entity(e),
-            Cow::Borrowed("w"),
-        )
-        .unwrap();
+    let rid = 1u64;
+    h.begin_action(
+        e,
+        CheckpointKind::Wiggle {
+            entity: e,
+            mask: WiggleMask::default(),
+            duration_ms: 1,
+        },
+        arc_entity(e),
+        Cow::Borrowed("w"),
+        rid,
+    )
+    .unwrap();
     // Stream a score into the open action.
     h.action_update(rid, Some(42.0), Some(420.0), None, |_| {})
         .unwrap();
@@ -470,31 +474,34 @@ fn committed_node_references_peer_committed_head_not_its_tentative() {
     let e2_committed = h.lane(e2).unwrap().head();
 
     // Two concurrent open actions, one per lane (begin on a free lane
-    // while another is open is allowed).
-    let rid1 = h
-        .begin_action(
-            e1,
-            CheckpointKind::Wiggle {
-                entity: e1,
-                mask: WiggleMask::default(),
-                duration_ms: 1,
-            },
-            arc_entity(e1),
-            Cow::Borrowed("w1"),
-        )
-        .unwrap();
-    let rid2 = h
-        .begin_action(
-            e2,
-            CheckpointKind::Wiggle {
-                entity: e2,
-                mask: WiggleMask::default(),
-                duration_ms: 1,
-            },
-            arc_entity(e2),
-            Cow::Borrowed("w2"),
-        )
-        .unwrap();
+    // while another is open is allowed). Distinct ids: both edits are
+    // pending at once.
+    let rid1 = 1u64;
+    h.begin_action(
+        e1,
+        CheckpointKind::Wiggle {
+            entity: e1,
+            mask: WiggleMask::default(),
+            duration_ms: 1,
+        },
+        arc_entity(e1),
+        Cow::Borrowed("w1"),
+        rid1,
+    )
+    .unwrap();
+    let rid2 = 2u64;
+    h.begin_action(
+        e2,
+        CheckpointKind::Wiggle {
+            entity: e2,
+            mask: WiggleMask::default(),
+            duration_ms: 1,
+        },
+        arc_entity(e2),
+        Cow::Borrowed("w2"),
+        rid2,
+    )
+    .unwrap();
     // e2's lane head is now its open tentative, distinct from its
     // committed head.
     assert_ne!(h.lane(e2).unwrap().head(), e2_committed);
@@ -746,7 +753,9 @@ proptest! {
         // Track the sole open action's request id across ops (begin sets
         // it, commit/abort clear it). A None/stale id makes update/commit/
         // abort return NoOngoingAction, which the invariant tolerates.
+        // `next_rid` stands in for the orchestrator's monotonic allocator.
         let mut rid: Option<u64> = None;
+        let mut next_rid: u64 = 1;
 
         for op in ops {
             let _ = match op {
@@ -763,22 +772,27 @@ proptest! {
                         None,
                     )
                     .map(|_| ()),
-                Op::BeginAction => match h.begin_action(
-                    e,
-                    CheckpointKind::Wiggle {
-                        entity: e,
-                        mask: WiggleMask::default(),
-                        duration_ms: 1,
-                    },
-                    arc_entity(e),
-                    Cow::Borrowed("b"),
-                ) {
-                    Ok(id) => {
-                        rid = Some(id);
-                        Ok(())
+                Op::BeginAction => {
+                    let id = next_rid;
+                    next_rid += 1;
+                    match h.begin_action(
+                        e,
+                        CheckpointKind::Wiggle {
+                            entity: e,
+                            mask: WiggleMask::default(),
+                            duration_ms: 1,
+                        },
+                        arc_entity(e),
+                        Cow::Borrowed("b"),
+                        id,
+                    ) {
+                        Ok(()) => {
+                            rid = Some(id);
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
-                },
+                }
                 Op::UpdateAction => {
                     h.action_update(rid.unwrap_or(u64::MAX), Some(0.0), Some(0.0), None, |_| {})
                 }

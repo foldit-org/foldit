@@ -247,16 +247,19 @@ impl Session {
 
     // ── Action lifecycle (G6: typed mutation intent) ──────────────────
 
-    /// Begin a streaming action. The kind determines the entity (via
-    /// `kind.entity()`); the current lane head's payload is forked into
-    /// the tentative snapshot. Returns the action's `request_id`. Refused
-    /// if the action's entity isn't in the committed set or isn't owned by
+    /// Begin a streaming action under the caller-supplied `request_id`
+    /// (allocated by the orchestrator, the single id authority). The kind
+    /// determines the entity (via `kind.entity()`); the current lane
+    /// head's payload is forked into the tentative snapshot. Opens the
+    /// edit under `request_id` (the caller already holds it). Refused if
+    /// the action's entity isn't in the committed set or isn't owned by
     /// this kind.
     pub fn begin_action(
         &mut self,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
-    ) -> Result<u64, SessionError> {
+        request_id: u64,
+    ) -> Result<(), SessionError> {
         let entity = kind.entity().ok_or(SessionError::ActionRequiresEntity)?;
         let snap_id = self
             .history
@@ -273,7 +276,9 @@ impl Session {
                 id: snap_id,
             }))?;
         let payload = Arc::clone(&snap.payload);
-        Ok(self.history.begin_action(entity, kind, payload, label.into())?)
+        self.history
+            .begin_action(entity, kind, payload, label.into(), request_id)?;
+        Ok(())
     }
 
     /// Per-cycle update of the in-flight action. Mutates the tentative
