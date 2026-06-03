@@ -40,6 +40,17 @@ fn arc_entity(id: EntityId) -> Arc<MoleculeEntity> {
     Arc::new(mk_entity(id))
 }
 
+/// A plugin-op checkpoint kind for the record/begin tests. The op no
+/// longer names an entity (the touched set rides on `entity_heads` /
+/// the pending edit's lanes), so callers pass the entity separately.
+fn plugin_op(op_id: &str) -> CheckpointKind {
+    CheckpointKind::PluginOp {
+        plugin_id: "rosetta".to_string(),
+        op_id: op_id.to_string(),
+        display: op_id.to_string(),
+    }
+}
+
 // ── Linear push / undo / redo ─────────────────────────────────────
 
 #[test]
@@ -51,11 +62,7 @@ fn linear_push_undo_redo_single_lane() {
     let c1 = h
         .record_entity_update(
             e,
-            CheckpointKind::Wiggle {
-                entity: e,
-                mask: WiggleMask::default(),
-                duration_ms: 100,
-            },
+            plugin_op("wiggle"),
             arc_entity(e),
             Cow::Borrowed("w1"),
             None,
@@ -65,11 +72,7 @@ fn linear_push_undo_redo_single_lane() {
     let c2 = h
         .record_entity_update(
             e,
-            CheckpointKind::Wiggle {
-                entity: e,
-                mask: WiggleMask::default(),
-                duration_ms: 100,
-            },
+            plugin_op("wiggle"),
             arc_entity(e),
             Cow::Borrowed("w2"),
             None,
@@ -113,7 +116,7 @@ fn push_after_undo_drops_redo_path() {
     let c1 = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("s1"),
             None,
@@ -123,7 +126,7 @@ fn push_after_undo_drops_redo_path() {
     let c2 = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("s2"),
             None,
@@ -146,7 +149,7 @@ fn push_after_undo_drops_redo_path() {
     let c2b = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("s2b"),
             None,
@@ -179,7 +182,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     let c1 = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("c1"),
             None,
@@ -189,7 +192,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     let c2 = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("c2"),
             None,
@@ -206,7 +209,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     let c1b = h
         .record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("c1b"),
             None,
@@ -220,7 +223,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     for i in 0..6 {
         h.record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::from(format!("extra{i}")),
             None,
@@ -281,7 +284,7 @@ fn snapshot_eviction_refuses_when_referenced() {
     for i in 0..5 {
         h.record_entity_update(
             e,
-            CheckpointKind::Shake { entity: e, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::from(format!("s{i}")),
             None,
@@ -312,7 +315,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
     // Push one regular checkpoint so undo has somewhere to go.
     h.record_entity_update(
         e,
-        CheckpointKind::Shake { entity: e, duration_ms: 50 },
+        plugin_op("shake"),
         arc_entity(e),
         Cow::Borrowed("pre"),
         None,
@@ -323,13 +326,8 @@ fn nav_during_active_is_refused_with_entity_locked() {
     // Begin an action on `e`.
     let rid = 1u64;
     h.begin_action(
-        e,
-        CheckpointKind::Wiggle {
-            entity: e,
-            mask: WiggleMask::default(),
-            duration_ms: 100,
-        },
-        arc_entity(e),
+        [e],
+        plugin_op("wiggle"),
         Cow::Borrowed("w-active"),
         rid,
     )
@@ -337,16 +335,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
 
     // Begin again → ActiveActionInProgress.
     assert!(matches!(
-        h.begin_action(
-            e,
-            CheckpointKind::Shake {
-                entity: e,
-                duration_ms: 1
-            },
-            arc_entity(e),
-            Cow::Borrowed("nope"),
-            2,
-        ),
+        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 2),
         Err(HistoryError::ActiveActionInProgress)
     ));
 
@@ -374,10 +363,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
     assert!(matches!(
         h.record_entity_update(
             e,
-            CheckpointKind::Shake {
-                entity: e,
-                duration_ms: 1
-            },
+            plugin_op("shake"),
             arc_entity(e),
             Cow::Borrowed("nope"),
             None,
@@ -401,13 +387,8 @@ fn abort_action_drops_tentative() {
 
     let rid = 1u64;
     h.begin_action(
-        e,
-        CheckpointKind::Wiggle {
-            entity: e,
-            mask: WiggleMask::default(),
-            duration_ms: 100,
-        },
-        arc_entity(e),
+        [e],
+        plugin_op("wiggle"),
         Cow::Borrowed("about-to-abort"),
         rid,
     )
@@ -436,18 +417,8 @@ fn in_flight_score_spares_committed_parent_then_lands_on_commit() {
     assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
 
     let rid = 1u64;
-    h.begin_action(
-        e,
-        CheckpointKind::Wiggle {
-            entity: e,
-            mask: WiggleMask::default(),
-            duration_ms: 1,
-        },
-        arc_entity(e),
-        Cow::Borrowed("w"),
-        rid,
-    )
-    .unwrap();
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w"), rid)
+        .unwrap();
     // Stream a score into the open action.
     h.action_update(rid, Some(42.0), Some(420.0), None, |_| {})
         .unwrap();
@@ -477,31 +448,11 @@ fn committed_node_references_peer_committed_head_not_its_tentative() {
     // while another is open is allowed). Distinct ids: both edits are
     // pending at once.
     let rid1 = 1u64;
-    h.begin_action(
-        e1,
-        CheckpointKind::Wiggle {
-            entity: e1,
-            mask: WiggleMask::default(),
-            duration_ms: 1,
-        },
-        arc_entity(e1),
-        Cow::Borrowed("w1"),
-        rid1,
-    )
-    .unwrap();
+    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1)
+        .unwrap();
     let rid2 = 2u64;
-    h.begin_action(
-        e2,
-        CheckpointKind::Wiggle {
-            entity: e2,
-            mask: WiggleMask::default(),
-            duration_ms: 1,
-        },
-        arc_entity(e2),
-        Cow::Borrowed("w2"),
-        rid2,
-    )
-    .unwrap();
+    h.begin_action([e2], plugin_op("wiggle"), Cow::Borrowed("w2"), rid2)
+        .unwrap();
     // e2's lane head is now its open tentative, distinct from its
     // committed head.
     assert_ne!(h.lane(e2).unwrap().head(), e2_committed);
@@ -516,6 +467,45 @@ fn committed_node_references_peer_committed_head_not_its_tentative() {
     assert_ne!(h.checkpoint(c2).unwrap().entity_heads[&e2], e2_committed);
 }
 
+#[test]
+fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
+    // A single edit spanning two entities: one begin opens a tentative on
+    // both lanes, action_update fans across both, and commit mints ONE
+    // checkpoint whose entity_heads advanced both lanes off their
+    // committed heads. This is the multi-entity capability the post-Init
+    // path relies on.
+    let (mut h, ids) = mk_history(2);
+    let e1 = ids[0];
+    let e2 = ids[1];
+    let e1_committed = h.lane(e1).unwrap().head();
+    let e2_committed = h.lane(e2).unwrap().head();
+    let ckpt_len_before = h.checkpoints().len();
+
+    let rid = 7u64;
+    h.begin_action([e1, e2], plugin_op("init"), Cow::Borrowed("init"), rid)
+        .unwrap();
+
+    // Both lanes now hold an open tentative; no checkpoint minted yet.
+    assert_ne!(h.lane(e1).unwrap().head(), e1_committed);
+    assert_ne!(h.lane(e2).unwrap().head(), e2_committed);
+    assert_eq!(h.checkpoints().len(), ckpt_len_before);
+
+    // One update mutates both held lanes.
+    h.action_update(rid, None, None, None, |entity| {
+        for atom in entity.atom_set_mut() {
+            atom.position = glam::Vec3::new(5.0, 5.0, 5.0);
+        }
+    })
+    .unwrap();
+
+    // Commit: exactly one new checkpoint, both lanes advanced.
+    let c = h.commit_action(rid).unwrap();
+    assert_eq!(h.checkpoints().len(), ckpt_len_before + 1);
+    assert_ne!(h.checkpoint(c).unwrap().entity_heads[&e1], e1_committed);
+    assert_ne!(h.checkpoint(c).unwrap().entity_heads[&e2], e2_committed);
+    assert!(!h.has_pending());
+}
+
 // ── Lane undo ────────────────────────────────────────────────────
 
 #[test]
@@ -528,7 +518,7 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let _ = h
         .record_entity_update(
             e1,
-            CheckpointKind::Shake { entity: e1, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e1),
             Cow::Borrowed("e1-1"),
             None,
@@ -539,7 +529,7 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let _ = h
         .record_entity_update(
             e1,
-            CheckpointKind::Shake { entity: e1, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e1),
             Cow::Borrowed("e1-2"),
             None,
@@ -549,7 +539,7 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let _ = h
         .record_entity_update(
             e2,
-            CheckpointKind::Shake { entity: e2, duration_ms: 50 },
+            plugin_op("shake"),
             arc_entity(e2),
             Cow::Borrowed("e2-1"),
             None,
@@ -762,10 +752,7 @@ proptest! {
                 Op::Record => h
                     .record_entity_update(
                         e,
-                        CheckpointKind::Shake {
-                            entity: e,
-                            duration_ms: 1,
-                        },
+                        plugin_op("shake"),
                         arc_entity(e),
                         Cow::Borrowed("r"),
                         None,
@@ -776,13 +763,8 @@ proptest! {
                     let id = next_rid;
                     next_rid += 1;
                     match h.begin_action(
-                        e,
-                        CheckpointKind::Wiggle {
-                            entity: e,
-                            mask: WiggleMask::default(),
-                            duration_ms: 1,
-                        },
-                        arc_entity(e),
+                        [e],
+                        plugin_op("wiggle"),
                         Cow::Borrowed("b"),
                         id,
                     ) {

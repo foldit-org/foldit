@@ -77,13 +77,6 @@ fn bubble_to_payload(b: &crate::puzzle::Bubble) -> TextBubblePayload {
 fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
     match k {
         CheckpointKind::Loaded { .. } => CheckpointKindTag::Load,
-        CheckpointKind::Wiggle { .. } => CheckpointKindTag::Wiggle,
-        CheckpointKind::Shake { .. } => CheckpointKindTag::Shake,
-        CheckpointKind::Minimize { .. } => CheckpointKindTag::Minimize,
-        CheckpointKind::ManualMove { .. } => CheckpointKindTag::ManualMove,
-        CheckpointKind::Mutate { .. } => CheckpointKindTag::Mutate,
-        CheckpointKind::Rfd3 { .. } => CheckpointKindTag::Rfd3,
-        CheckpointKind::Mpnn { .. } => CheckpointKindTag::Mpnn,
         CheckpointKind::PromotedPreview { .. } => CheckpointKindTag::PromotedPreview,
         CheckpointKind::AddEntity { .. } => CheckpointKindTag::AddEntity,
         CheckpointKind::RemoveEntity { .. } => CheckpointKindTag::RemoveEntity,
@@ -239,13 +232,15 @@ fn first_protein_entity(store: &Session) -> Option<EntityId> {
 }
 
 /// Overwrite the ongoing action's tentative payload from a streaming
-/// assembly. Only the entity locked by `begin_action` is rewritten;
-/// peer entities in the same incoming Assembly are ignored (whole-pose
-/// streams under the single-entity action model). Score fields are
-/// propagated when the plugin embedded a total; per-residue / game
-/// scoring stay on their own refresh path.
+/// assembly. `action_update` fans the closure across every lane the edit
+/// locked, and each lane is rewritten only when the incoming assembly
+/// carries a matching entity id — so a single-entity edit rewrites its one
+/// lane and a multi-entity edit (post-Init normalization) rewrites each of
+/// its lanes that the stream touched. Score fields are propagated when the
+/// plugin embedded a total; per-residue / game scoring stay on their own
+/// refresh path.
 ///
-/// Returns `true` if a payload swap actually fired.
+/// Returns `true` if at least one payload swap actually fired.
 fn apply_streaming_assembly(
     store: &mut Session,
     incoming: &molex::Assembly,
@@ -1090,7 +1085,6 @@ impl App {
             .find(|id| id.raw() == route.entity_id.raw());
         if let Some(entity) = action_entity {
             let kind = CheckpointKind::PluginOp {
-                entity,
                 plugin_id: plugin_id.clone(),
                 op_id: String::from(route.op_id),
                 display: String::from("Pull"),
@@ -1099,7 +1093,7 @@ impl App {
             // table is keyed by the same id, so the terminal commit lands
             // on this edit.
             if let Err(e) =
-                self.store.begin_action(kind, String::from("Pull"), rid)
+                self.store.begin_action([entity], kind, String::from("Pull"), rid)
             {
                 log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
             }
@@ -1255,12 +1249,11 @@ impl App {
             let edit_token = dispatch_id.and_then(|request_id| {
                 action_entity.and_then(|entity| {
                     let kind = CheckpointKind::PluginOp {
-                        entity,
                         plugin_id: plugin_id.clone(),
                         op_id: op.op_id.clone(),
                         display: display.clone(),
                     };
-                    match self.store.begin_action(kind, display.clone(), request_id) {
+                    match self.store.begin_action([entity], kind, display.clone(), request_id) {
                         Ok(()) => Some(request_id),
                         Err(e) => {
                             log::trace!(
@@ -2155,25 +2148,28 @@ impl App {
             .plugin_driver
             .discover_and_register(&plugins_root, initial_assembly);
 
-        // Apply each plugin's post-Init normalization into the store. Only
-        // rosetta returns a non-empty normalized assembly today; the loop
-        // stays generic so additional normalizing plugins drop in without
+        // Apply each registered plugin's post-Init normalization into the
+        // store. Only rosetta returns a non-empty normalized assembly
+        // today; the empty-bytes guard inside `apply_post_init` makes the
+        // call a no-op for plugins that ship none, so the loop stays
+        // generic and additional normalizing plugins drop in without
         // host-side wiring changes.
         for (plugin_id, post_init_bytes) in &registered {
-            if plugin_id == "rosetta" {
-                self.apply_rosetta_post_init(post_init_bytes);
-            }
+            self.apply_post_init(plugin_id, post_init_bytes);
         }
     }
 
-    /// Apply rosetta's post-Init normalized assembly (full-atom pose) so
+    /// Apply a plugin's post-Init normalized assembly (full-atom pose) so
     /// the host's canonical assembly matches the plugin's internal pose
-    /// before any user action runs.
+    /// before any user action runs. Every entity the normalized assembly
+    /// touches that has a committed lane in the store is normalized inside
+    /// a single multi-lane edit, so a multi-chain session no longer drops
+    /// every entity past the first.
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_rosetta_post_init(&mut self, post_init_bytes: &[u8]) {
+    fn apply_post_init(&mut self, plugin_id: &str, post_init_bytes: &[u8]) {
         if post_init_bytes.is_empty() {
             log::warn!(
-                "[App] rosetta post-Init returned no normalized assembly; \
+                "[App] {plugin_id} post-Init returned no normalized assembly; \
                  first user action will likely snap because scene.positions \
                  stays at the pre-Init atom count."
             );
@@ -2183,22 +2179,31 @@ impl App {
             Ok(a) => a,
             Err(e) => {
                 log::warn!(
-                    "[App] rosetta post-Init assembly decode failed: {e:?}; \
+                    "[App] {plugin_id} post-Init assembly decode failed: {e:?}; \
                      skipping normalization apply"
                 );
                 return;
             }
         };
-        let Some(target_entity) = first_protein_entity(&self.store) else {
+        // Every entity the normalized assembly names that has a committed
+        // lane in the store. A protein has a lane (loaded into history);
+        // ambient / zero-residue stubs stay transient and have none, so
+        // they're skipped here.
+        let target_entities: Vec<EntityId> = normalized
+            .entities()
+            .iter()
+            .map(|e| e.id())
+            .filter(|id| self.store.history().lane(*id).is_some())
+            .collect();
+        if target_entities.is_empty() {
             log::warn!(
-                "[App] rosetta post-Init: no protein entity in store; \
-                 skipping normalization apply"
+                "[App] {plugin_id} post-Init: no store entity matches the \
+                 normalized assembly; skipping normalization apply"
             );
             return;
-        };
+        }
         let kind = CheckpointKind::PluginOp {
-            entity: target_entity,
-            plugin_id: String::from("rosetta"),
+            plugin_id: String::from(plugin_id),
             op_id: String::from("_init_normalize"),
             display: String::from("Init"),
         };
@@ -2207,16 +2212,17 @@ impl App {
         // authority).
         let Some(request_id) = self.plugin_driver.alloc_request_id() else {
             log::warn!(
-                "[App] rosetta post-Init: no orchestrator to allocate a \
+                "[App] {plugin_id} post-Init: no orchestrator to allocate a \
                  request id; skipping normalization apply"
             );
             return;
         };
         if let Err(e) =
-            self.store.begin_action(kind, String::from("Init"), request_id)
+            self.store
+                .begin_action(target_entities, kind, String::from("Init"), request_id)
         {
             log::warn!(
-                "[App] rosetta post-Init begin_action failed: {e}; \
+                "[App] {plugin_id} post-Init begin_action failed: {e}; \
                  skipping normalization apply"
             );
             return;
@@ -2224,20 +2230,20 @@ impl App {
         let applied = apply_streaming_assembly(&mut self.store, &normalized, None, request_id);
         if !applied {
             log::warn!(
-                "[App] rosetta post-Init apply_streaming_assembly did not \
+                "[App] {plugin_id} post-Init apply_streaming_assembly did not \
                  update any entity; rolling back tentative. This usually means \
-                 the rosetta-returned entity ID does not match any store \
+                 the {plugin_id}-returned entity ID does not match any store \
                  entity ID."
             );
             let _ = self.store.commit_action(request_id);
             return;
         }
         if let Err(e) = self.store.commit_action(request_id) {
-            log::warn!("[App] rosetta post-Init commit_action failed: {e}");
+            log::warn!("[App] {plugin_id} post-Init commit_action failed: {e}");
             return;
         }
         log::info!(
-            "[App] rosetta post-Init assembly applied ({} bytes)",
+            "[App] {plugin_id} post-Init assembly applied ({} bytes)",
             post_init_bytes.len()
         );
         // Republish is spine-driven: the HeadMoved from commit_action
@@ -2843,7 +2849,7 @@ mod selection_tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn apply_score_reports_routes_to_pending_edit_not_committed_parent() {
-        use crate::history::{CheckpointKind, WiggleMask};
+        use crate::history::CheckpointKind;
         use crate::session::EntityOrigin;
 
         let mut app = fresh_app();
@@ -2872,10 +2878,11 @@ mod selection_tests {
         let rid = 1u64;
         app.store
             .begin_action(
-                CheckpointKind::Wiggle {
-                    entity: id,
-                    mask: WiggleMask::default(),
-                    duration_ms: 1,
+                [id],
+                CheckpointKind::PluginOp {
+                    plugin_id: "rosetta".to_string(),
+                    op_id: "wiggle".to_string(),
+                    display: "wiggle".to_string(),
                 },
                 "w",
                 rid,
@@ -2919,5 +2926,92 @@ mod selection_tests {
             app.store.history().checkpoint(parent).unwrap().raw_score,
             Some(10.0)
         );
+    }
+
+    /// Post-Init normalization must reach *every* matching entity, not
+    /// just the first. Guards the multi-lane path `apply_post_init` opens:
+    /// one begin over the whole touched set, `apply_streaming_assembly`
+    /// fanning across both lanes, and a single commit. Before the fix the
+    /// begin ran on `first_protein_entity` only, so every entity past the
+    /// first kept its pre-Init coordinates.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn post_init_normalizes_every_matching_entity_not_just_the_first() {
+        use crate::history::CheckpointKind;
+        use crate::session::EntityOrigin;
+        use std::sync::Arc;
+
+        let mut store = Session::new();
+        // Two committed entities.
+        let e1 = store.insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+        store
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .expect("promote a");
+        let e2 = store.insert_preview(mk_bulk(), "b".to_string(), EntityOrigin::Loaded);
+        store
+            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
+            .expect("promote b");
+        let ckpts_before = store.history().checkpoints().len();
+
+        // A "normalized" assembly that displaces BOTH entities' atoms,
+        // keeping their store ids so `apply_streaming_assembly` id-matches.
+        let moved = glam::Vec3::new(7.0, 7.0, 7.0);
+        let mut a1 = store.entity(e1).expect("e1").clone();
+        for atom in a1.atom_set_mut() {
+            atom.position = moved;
+        }
+        let mut a2 = store.entity(e2).expect("e2").clone();
+        for atom in a2.atom_set_mut() {
+            atom.position = moved;
+        }
+        let normalized = molex::Assembly::from_arcs(vec![Arc::new(a1), Arc::new(a2)]);
+
+        // The multi-lane apply path `apply_post_init` runs (sans the
+        // orchestrator-driven request_id allocation, which a unit test
+        // can't stand up): collect every assembly entity with a committed
+        // lane, open ONE edit over the whole set, fan the stream across it,
+        // commit once.
+        let target_entities: Vec<EntityId> = normalized
+            .entities()
+            .iter()
+            .map(|e| e.id())
+            .filter(|id| store.history().lane(*id).is_some())
+            .collect();
+        assert_eq!(
+            target_entities.len(),
+            2,
+            "both entities must resolve to a committed lane"
+        );
+        let rid = 99u64;
+        store
+            .begin_action(
+                target_entities,
+                CheckpointKind::PluginOp {
+                    plugin_id: "rosetta".to_string(),
+                    op_id: "_init_normalize".to_string(),
+                    display: "Init".to_string(),
+                },
+                "Init",
+                rid,
+            )
+            .expect("begin multi-lane edit");
+        assert!(
+            super::apply_streaming_assembly(&mut store, &normalized, None, rid),
+            "apply_streaming_assembly must update at least one lane"
+        );
+        store.commit_action(rid).expect("commit");
+
+        // Exactly one new checkpoint, and BOTH entities carry the moved
+        // coordinates — not just the first.
+        assert_eq!(store.history().checkpoints().len(), ckpts_before + 1);
+        let head = store.head_assembly();
+        for e in [e1, e2] {
+            let ent = head.entity(e).expect("entity present in head assembly");
+            assert!(
+                ent.positions().iter().all(|p| *p == moved),
+                "entity {} was not normalized",
+                e.raw()
+            );
+        }
     }
 }

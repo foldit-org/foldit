@@ -1,5 +1,4 @@
 use super::*;
-use crate::history::WiggleMask;
 use molex::entity::molecule::atom::Atom;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::protein::ProteinEntity;
@@ -70,13 +69,14 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
     MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, b'A', None))
 }
 
-/// A coord-only [`CheckpointKind::Wiggle`] for `entity`. Shared by the
-/// record/commit/navigation tests.
-fn wiggle(entity: EntityId) -> CheckpointKind {
-    CheckpointKind::Wiggle {
-        entity,
-        mask: WiggleMask::default(),
-        duration_ms: 1,
+/// A plugin-op checkpoint kind standing in for a streaming action.
+/// Shared by the record/commit/navigation tests; the entity it runs on
+/// is passed to `begin_action` separately.
+fn wiggle() -> CheckpointKind {
+    CheckpointKind::PluginOp {
+        plugin_id: "rosetta".to_string(),
+        op_id: "wiggle".to_string(),
+        display: "wiggle".to_string(),
     }
 }
 
@@ -327,7 +327,7 @@ fn promote_preview_emits_head_moved() {
 #[test]
 fn begin_action_emits_nothing() {
     let (mut store, id) = store_with_protein(2);
-    store.begin_action(wiggle(id), "wiggle", 1).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", 1).expect("begin_action");
     assert!(store.take_updates().is_empty());
 }
 
@@ -340,7 +340,7 @@ fn action_update_emits_tentative_edit() {
     // payload itself is no longer on the spine.
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action(wiggle(id), "wiggle", rid).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     let _ = store.take_updates();
 
     store
@@ -370,7 +370,7 @@ fn action_update_emits_tentative_edit() {
 fn commit_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action(wiggle(id), "wiggle", rid).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     store
         .action_update(rid, None, None, None, |e| {
             for atom in e.atom_set_mut() {
@@ -391,7 +391,7 @@ fn commit_action_emits_head_moved() {
 fn abort_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action(wiggle(id), "wiggle", rid).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     let _ = store.take_updates();
     store.abort_action(rid).expect("abort_action");
     let changes = store.take_updates();
@@ -402,7 +402,7 @@ fn abort_action_emits_head_moved() {
 fn undo_then_redo_each_emit_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action(wiggle(id), "wiggle", rid).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
         .expect("action_update");
@@ -440,7 +440,7 @@ fn lane_undo_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let original = store.history().lane(id).expect("lane").head();
     let rid = 1u64;
-    store.begin_action(wiggle(id), "wiggle", rid).expect("begin_action");
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
         .expect("action_update");

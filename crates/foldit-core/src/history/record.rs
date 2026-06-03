@@ -14,8 +14,8 @@ use slotmap::SlotMap;
 use smallvec::SmallVec;
 
 use super::{
-    Checkpoint, CheckpointId, CheckpointKind, EntityActionKind, EntityHistory, EntitySnapshot,
-    EntitySnapshotId, FilterStatus, History, HistoryError, HistoryEventOutcome, PendingEdit,
+    Checkpoint, CheckpointId, CheckpointKind, EntityHistory, EntitySnapshot, EntitySnapshotId,
+    FilterStatus, History, HistoryError, HistoryEventOutcome, PendingEdit,
 };
 
 impl History {
@@ -23,47 +23,49 @@ impl History {
 
     pub(super) fn do_begin(
         &mut self,
-        entity: EntityId,
+        entities: SmallVec<[EntityId; 1]>,
         kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
         request_id: u64,
     ) -> Result<HistoryEventOutcome, HistoryError> {
-        // The lane-free / lane-not-busy precondition is enforced by the
-        // caller-side pre-check.
-        if !self.lanes.contains_key(&entity) {
-            return Err(HistoryError::UnknownEntity { entity });
+        // The lane-not-busy precondition is enforced by the caller-side
+        // pre-check; validate lane existence for every named entity up
+        // front so a missing lane fails before any tentative is pushed
+        // (the begin is all-or-nothing across its lanes).
+        for entity in &entities {
+            if !self.lanes.contains_key(entity) {
+                return Err(HistoryError::UnknownEntity { entity: *entity });
+            }
         }
 
         let now = SystemTime::now();
-        let action_kind = kind
-            .entity_action_kind()
-            .unwrap_or(EntityActionKind::Loaded);
 
-        // Push the tentative snapshot on the entity's lane and advance the
-        // lane head. No checkpoint is minted and the committed graph head
-        // does not move: the checkpoint is composed at commit from the
-        // committed head, so a committed node never references another
-        // action's open tentative.
-        let lane = self.lanes.get_mut(&entity).expect("checked above");
-        let parent = lane.head;
-        let new_snap = lane.snapshots.insert(EntitySnapshot {
-            parent: Some(parent),
-            children: SmallVec::new(),
-            payload,
-            kind: action_kind,
-            label,
-            timestamp: now,
-            tentative: true,
-            checkpoint_refs: 0,
-        });
-        lane.snapshots[parent].children.push(new_snap);
-        lane.head = new_snap;
+        // Open one tentative lane per entity, each forked from its own
+        // committed lane head, and advance that lane head. No checkpoint is
+        // minted and the committed graph head does not move: the checkpoint
+        // is composed at commit from the committed head, so a committed node
+        // never references another action's open tentative.
+        let mut lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = SmallVec::new();
+        for entity in &entities {
+            let lane = self.lanes.get_mut(entity).expect("checked above");
+            let parent = lane.head;
+            let payload = Arc::clone(&lane.snapshots[parent].payload);
+            let new_snap = lane.snapshots.insert(EntitySnapshot {
+                parent: Some(parent),
+                children: SmallVec::new(),
+                payload,
+                label: label.clone(),
+                timestamp: now,
+                tentative: true,
+                checkpoint_refs: 0,
+            });
+            lane.snapshots[parent].children.push(new_snap);
+            lane.head = new_snap;
+            lanes.push((*entity, new_snap));
+        }
 
         // Register the open composition under the caller-supplied request
         // id (allocated by the orchestrator).
-        let mut lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = SmallVec::new();
-        lanes.push((entity, new_snap));
         let _ = self.pending.insert(
             request_id,
             PendingEdit {
@@ -183,9 +185,6 @@ impl History {
             return Err(HistoryError::UnknownEntity { entity });
         }
         let now = SystemTime::now();
-        let action_kind = kind
-            .entity_action_kind()
-            .unwrap_or(EntityActionKind::Loaded);
 
         let lane = self.lanes.get_mut(&entity).expect("checked above");
         let parent = lane.head;
@@ -193,7 +192,6 @@ impl History {
             parent: Some(parent),
             children: SmallVec::new(),
             payload,
-            kind: action_kind,
             label: label.clone(),
             timestamp: now,
             tentative: false,
@@ -313,16 +311,12 @@ impl History {
             return Err(HistoryError::EntityAlreadyExists { entity: entity_id });
         }
         let now = SystemTime::now();
-        let action_kind = kind
-            .entity_action_kind()
-            .unwrap_or(EntityActionKind::Loaded);
 
         let mut snapshots: SlotMap<EntitySnapshotId, EntitySnapshot> = SlotMap::with_key();
         let snap_id = snapshots.insert(EntitySnapshot {
             parent: None,
             children: SmallVec::new(),
             payload,
-            kind: action_kind,
             label: label.clone(),
             timestamp: now,
             tentative: false,

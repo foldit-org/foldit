@@ -52,7 +52,7 @@ use smallvec::SmallVec;
 pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId, WireId};
 
 mod types;
-pub use types::{CheckpointKind, EntityActionKind, FilterStatus, WiggleMask};
+pub use types::{CheckpointKind, FilterStatus};
 
 mod storage;
 pub use storage::{Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget};
@@ -98,9 +98,8 @@ pub struct History {
 #[derive(Debug, Clone)]
 enum HistoryEvent {
     Begin {
-        entity: EntityId,
+        entities: SmallVec<[EntityId; 1]>,
         kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
         request_id: u64,
     },
@@ -175,7 +174,6 @@ impl History {
                 parent: None,
                 children: SmallVec::new(),
                 payload: Arc::new(entity),
-                kind: EntityActionKind::Loaded,
                 label: Cow::Borrowed("Loaded"),
                 timestamp: now,
                 tentative: false,
@@ -299,26 +297,26 @@ impl History {
 
     // ── Public surface — thin shims over record ───────────────────────
 
-    /// Begin a streaming action on `entity` under the caller-supplied
+    /// Begin a streaming action over `entities` under the caller-supplied
     /// `request_id` (allocated by the orchestrator, the single id
-    /// authority). Pushes a tentative snapshot (parent = current lane
-    /// head) and advances the lane head, but mints no checkpoint and does
-    /// not move the committed graph head: the checkpoint is composed and
-    /// minted, already committed, at commit. Registers a pending edit
-    /// under `request_id`. Refused if `entity`'s lane already has an open
-    /// tentative.
+    /// authority). Opens one tentative lane per entity, each forked from
+    /// its own committed lane head (parent = current lane head), and
+    /// advances those lane heads, but mints no checkpoint and does not
+    /// move the committed graph head: the checkpoint is composed and
+    /// minted, already committed, at commit. Registers one multi-lane
+    /// pending edit under `request_id`. Refused if any named lane already
+    /// has an open tentative. A single-entity action passes a one-element
+    /// set.
     pub fn begin_action(
         &mut self,
-        entity: EntityId,
+        entities: impl IntoIterator<Item = EntityId>,
         kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
         request_id: u64,
     ) -> Result<(), HistoryError> {
         match self.record(HistoryEvent::Begin {
-            entity,
+            entities: entities.into_iter().collect(),
             kind,
-            payload,
             label,
             request_id,
         })? {
@@ -686,8 +684,11 @@ impl History {
             match &event {
                 // Commit / Abort resolve their own request_id in the arm.
                 HistoryEvent::Commit { .. } | HistoryEvent::Abort { .. } => {}
-                HistoryEvent::Begin { entity, .. } => {
-                    if self.lane_head_is_tentative(*entity) {
+                HistoryEvent::Begin { entities, .. } => {
+                    if entities
+                        .iter()
+                        .any(|e| self.lane_head_is_tentative(*e))
+                    {
                         return Err(HistoryError::ActiveActionInProgress);
                     }
                 }
@@ -725,12 +726,11 @@ impl History {
 
         let result = match event {
             HistoryEvent::Begin {
-                entity,
+                entities,
                 kind,
-                payload,
                 label,
                 request_id,
-            } => self.do_begin(entity, kind, payload, label, request_id)?,
+            } => self.do_begin(entities, kind, label, request_id)?,
             HistoryEvent::Commit { request_id } => self.do_commit(request_id)?,
             HistoryEvent::Abort { request_id } => self.do_abort(request_id)?,
             HistoryEvent::RecordEntityUpdate {

@@ -15,7 +15,7 @@ use molex::MoleculeEntity;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 
-use super::{CheckpointId, CheckpointKind, EntityActionKind, EntitySnapshotId, FilterStatus};
+use super::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus};
 
 // ── Storage structs ────────────────────────────────────────────────────
 
@@ -46,8 +46,6 @@ pub struct EntitySnapshot {
     pub children: SmallVec<[EntitySnapshotId; 2]>,
     /// Entity payload at this point.
     pub payload: Arc<MoleculeEntity>,
-    /// Per-entity effect kind.
-    pub kind: EntityActionKind,
     /// Display label.
     pub label: Cow<'static, str>,
     /// Wall-clock timestamp.

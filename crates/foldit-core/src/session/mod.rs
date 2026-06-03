@@ -62,11 +62,6 @@ pub enum SessionError {
     /// `id` is not currently a transient preview.
     #[error("{} is not a transient preview", id.raw())]
     NotAPreview { id: EntityId },
-    /// `begin_action` was called with a [`CheckpointKind`] that doesn't
-    /// name an entity (e.g., `Loaded`, `BondsChanged`). Action lifecycle
-    /// kinds always do.
-    #[error("action lifecycle requires an entity-targeted CheckpointKind")]
-    ActionRequiresEntity,
 }
 
 // ── Session ───────────────────────────────────────────────────────────
@@ -247,37 +242,23 @@ impl Session {
 
     // ── Action lifecycle (G6: typed mutation intent) ──────────────────
 
-    /// Begin a streaming action under the caller-supplied `request_id`
-    /// (allocated by the orchestrator, the single id authority). The kind
-    /// determines the entity (via `kind.entity()`); the current lane
-    /// head's payload is forked into the tentative snapshot. Opens the
-    /// edit under `request_id` (the caller already holds it). Refused if
-    /// the action's entity isn't in the committed set or isn't owned by
-    /// this kind.
+    /// Begin a streaming action over `entities` under the caller-supplied
+    /// `request_id` (allocated by the orchestrator, the single id
+    /// authority). Opens one tentative lane per entity, each forked from
+    /// its own current lane head. Opens the edit under `request_id` (the
+    /// caller already holds it). A single-entity action passes a
+    /// one-element set; the multi-entity post-Init normalization passes
+    /// the full touched set. Refused if any named entity has no committed
+    /// lane or already holds an open tentative.
     pub fn begin_action(
         &mut self,
+        entities: impl IntoIterator<Item = EntityId>,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
         request_id: u64,
     ) -> Result<(), SessionError> {
-        let entity = kind.entity().ok_or(SessionError::ActionRequiresEntity)?;
-        let snap_id = self
-            .history
-            .checkpoint(self.history.checkpoints().head())
-            .and_then(|h| h.entity_heads.get(&entity).copied())
-            .ok_or(SessionError::History(HistoryError::UnknownEntity {
-                entity,
-            }))?;
-        let snap = self
-            .history
-            .snapshot(entity, snap_id)
-            .ok_or(SessionError::History(HistoryError::UnknownSnapshot {
-                entity,
-                id: snap_id,
-            }))?;
-        let payload = Arc::clone(&snap.payload);
         self.history
-            .begin_action(entity, kind, payload, label.into(), request_id)?;
+            .begin_action(entities, kind, label.into(), request_id)?;
         Ok(())
     }
 
