@@ -176,22 +176,21 @@ pub(crate) fn route_residue_pick(
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn build_start_params(
-    route: &PullRoute,
+    op_id: &str,
+    residue_in_entity: u32,
+    atom_name: &str,
 ) -> HashMap<String, foldit_runner::orchestrator::ParamValue> {
     use foldit_runner::orchestrator::ParamValue;
     // ParamValue::Int is i32; rosetta-pose residue is 1-indexed
     // core::Size on the bridge side. `as i32` is safe for any
     // realistic foldit pose (max residues ≪ i32::MAX).
-    let pose_residue = (route.residue_in_entity as i32) + 1;
+    let pose_residue = (residue_in_entity as i32) + 1;
     let mut params = HashMap::new();
-    let _ = params.insert(
-        String::from("residue"),
-        ParamValue::Int(pose_residue),
-    );
-    if route.op_id == OP_PULL_SIDECHAIN {
+    let _ = params.insert(String::from("residue"), ParamValue::Int(pose_residue));
+    if op_id == OP_PULL_SIDECHAIN {
         let _ = params.insert(
             String::from("atom_name"),
-            ParamValue::String(route.atom_name.clone()),
+            ParamValue::String(atom_name.to_owned()),
         );
     }
     params

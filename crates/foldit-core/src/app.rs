@@ -32,7 +32,7 @@ use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, Histor
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::{
-    ActiveStreamEntry, DispatchError, DispatchIntent, OpEvent, OpOutcome,
+    DispatchError, DispatchIntent, OpEvent, OpOutcome, StreamStartIntent,
 };
 use crate::render_projector::{self, RenderProjector};
 use crate::session::{EntityOrigin, Session, SessionError};
@@ -801,7 +801,7 @@ impl App {
                         .engine
                         .as_ref()
                         .is_some_and(viso::VisoEngine::mouse_pressed)
-                        && self.plugin_driver.stream_host.pull_drag.is_none() =>
+                        && !self.plugin_driver.has_active_pull_drag() =>
                 {
                     if self.try_begin_pull_drag(*x, *y) {
                         // viso recorded the press; drop its mouse
@@ -816,14 +816,14 @@ impl App {
                     }
                 }
                 ViewportInput::PointerMove { x, y, .. }
-                    if self.plugin_driver.stream_host.pull_drag.is_some() =>
+                    if self.plugin_driver.has_active_pull_drag() =>
                 {
                     self.update_pull_drag(*x, *y);
                     self.finalize_viewport_input();
                     return;
                 }
                 ViewportInput::PointerUp { .. }
-                    if self.plugin_driver.stream_host.pull_drag.is_some() =>
+                    if self.plugin_driver.has_active_pull_drag() =>
                 {
                     self.end_pull_drag();
                     self.finalize_viewport_input();
@@ -969,12 +969,7 @@ impl App {
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self
-            .plugin_driver
-            .stream_host
-            .pull_drag
-            .as_ref()
-            .map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, pull);
@@ -1017,16 +1012,11 @@ impl App {
     /// trailing visualization update the regular `handle_viewport_input`
     /// flow does (the spine drain itself is tick-driven now).
     /// Pre-snapshots the pull info so the engine borrow doesn't overlap
-    /// with `&self.plugin_driver.stream_host.pull_drag`.
+    /// with the live pull-drag state held in the plugin driver.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
         self.ui_dirty |= DirtyFlags::UI;
-        let pull = self
-            .plugin_driver
-            .stream_host
-            .pull_drag
-            .as_ref()
-            .map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.pull_drag_pull_info();
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, pull);
         }
@@ -1038,15 +1028,11 @@ impl App {
     /// suppresses the regular viso input flow), false otherwise.
     ///
     /// Rejected picks (non-protein entity, hydrogen atom, no atom under
-    /// the cursor, dispatch failure) leave `self.plugin_driver.stream_host.pull_drag = None`
-    /// and return false, letting the click fall through to camera /
+    /// the cursor, dispatch failure) leave no live pull-drag state and
+    /// return false, letting the click fall through to camera /
     /// selection handling.
     #[cfg(not(target_arch = "wasm32"))]
     fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
-        use foldit_runner::orchestrator::{
-            DispatchContext as RunnerDispatchContext, ResidueRef,
-        };
-
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };
@@ -1073,44 +1059,26 @@ impl App {
         };
         let Some(route) = route else { return false };
 
-        let params = crate::pull_drag::build_start_params(&route);
         let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
 
-        let ctx = RunnerDispatchContext {
-            focused_entity_id: Some(route.entity_id),
-            selection: vec![ResidueRef {
-                entity_id: route.entity_id,
-                residue_index: route.residue_in_entity,
-            }],
+        let store = &self.store;
+        let intent = StreamStartIntent {
+            op_id: route.op_id,
+            focused_entity: route.entity_id,
+            residue_in_entity: route.residue_in_entity,
+            atom_name: route.atom_name.clone(),
         };
-
-        let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
-            return false;
-        };
-        let Some(cached) = orch.plugin_registry().get_op(route.op_id).cloned() else {
-            log::warn!(
-                "try_begin_pull_drag: op id {:?} missing from registry",
-                route.op_id,
-            );
-            return false;
-        };
-        let plugin_id = cached.plugin_id.clone();
-
-        let (rid, handle) = match orch.dispatch_start_stream(
-            route.op_id,
-            ctx,
-            params,
-            |id| store.entity_type(id),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!(
-                    "try_begin_pull_drag: dispatch_start_stream {:?} failed: {e}",
-                    route.op_id,
-                );
-                return false;
-            }
-        };
+        let (rid, plugin_id) =
+            match self.plugin_driver.start_stream(intent, |id| store.entity_type(id)) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!(
+                        "try_begin_pull_drag: start_stream {:?} failed: {e:?}",
+                        route.op_id,
+                    );
+                    return false;
+                }
+            };
 
         // History side-effect — same shape as button-driven dispatch
         // so the drag's eventual commit_action lands as a regular
@@ -1135,16 +1103,11 @@ impl App {
                 }
             }
         });
+        if let Some(token) = core_token {
+            self.plugin_driver.set_stream_core_token(rid, token);
+        }
 
-        let _ = self.plugin_driver.stream_host.active_streams.insert(
-            rid,
-            ActiveStreamEntry {
-                handle,
-                plugin_id: plugin_id.clone(),
-                core_token,
-            },
-        );
-        self.plugin_driver.stream_host.pull_drag = Some(crate::pull_drag::PullDrag {
+        self.plugin_driver.set_pull_drag(crate::pull_drag::PullDrag {
             request_id: rid,
             plugin_id,
             pull_info,
@@ -1159,13 +1122,10 @@ impl App {
     /// the cone tip with the cursor.
     #[cfg(not(target_arch = "wasm32"))]
     fn update_pull_drag(&mut self, x: f32, y: f32) {
-        use foldit_runner::orchestrator::ParamValue;
-
-        let Some(drag) = self.plugin_driver.stream_host.pull_drag.as_mut() else {
+        let Some(drag) = self.plugin_driver.pull_drag_mut() else {
             return;
         };
         drag.pull_info.screen_target = (x, y);
-
         let (residue, atom_name, plugin_id, request_id) = (
             drag.pull_info.atom.residue,
             drag.pull_info.atom.atom_name.clone(),
@@ -1181,17 +1141,7 @@ impl App {
         };
         let target = engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
 
-        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else {
-            return;
-        };
-        let mut params = std::collections::HashMap::new();
-        let _ = params.insert(
-            String::from("endpoint"),
-            ParamValue::Vec3([target.x, target.y, target.z]),
-        );
-        if let Err(e) = orch.dispatch_update_stream(&plugin_id, request_id, params) {
-            log::trace!("update_pull_drag: dispatch_update_stream rid={request_id} failed: {e}");
-        }
+        self.plugin_driver.update_stream(request_id, &plugin_id, target);
     }
 
     /// Pointer-up (or any cancel signal): tear down the drag state
@@ -1201,18 +1151,10 @@ impl App {
     /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
-        let Some(drag) = self.plugin_driver.stream_host.pull_drag.take() else {
+        let Some(drag) = self.plugin_driver.take_pull_drag() else {
             return;
         };
-        let Some(orch) = self.plugin_driver.orchestrator.as_ref() else {
-            return;
-        };
-        if let Err(e) = orch.dispatch_cancel_stream(&drag.plugin_id, drag.request_id) {
-            log::trace!(
-                "end_pull_drag: dispatch_cancel_stream rid={} failed: {e}",
-                drag.request_id,
-            );
-        }
+        self.plugin_driver.end_stream(drag.request_id, &drag.plugin_id);
     }
 
     pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
@@ -1332,13 +1274,8 @@ impl App {
                     // already inserted the `ActiveStreamEntry`. Record the
                     // core token on it so the terminal arm can commit /
                     // abort the right edit; cleanup happens there.
-                    if let Some(entry) = self
-                        .plugin_driver
-                        .stream_host
-                        .active_streams
-                        .get_mut(&request_id)
-                    {
-                        entry.core_token = core_token;
+                    if let Some(token) = core_token {
+                        self.plugin_driver.set_stream_core_token(request_id, token);
                     }
                 }
                 Ok(OpOutcome::Invoke(bytes)) => {
@@ -1776,12 +1713,7 @@ impl App {
         // Pre-snapshot pull info under an immutable borrow so the
         // subsequent `&mut engine` doesn't conflict.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self
-            .plugin_driver
-            .stream_host
-            .pull_drag
-            .as_ref()
-            .map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else {
@@ -2061,12 +1993,7 @@ impl App {
 
         // 5. Engine update + 6. visualization overlay.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self
-            .plugin_driver
-            .stream_host
-            .pull_drag
-            .as_ref()
-            .map(|d| d.pull_info.clone());
+        let pull = self.plugin_driver.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         if let Some(engine) = self.engine.as_mut() {

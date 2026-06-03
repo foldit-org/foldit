@@ -316,6 +316,136 @@ impl PluginDriver {
         }
     }
 
+    // ── Pull-drag dispatch ──────────────────────────────────────────────
+
+    /// Pull-drag dispatch: take the core-shaped [`StreamStartIntent`],
+    /// resolve the plugin id off the registry, build the `DispatchContext`
+    /// + start params internally, call `dispatch_start_stream`, insert the
+    /// `ActiveStreamEntry` (with `core_token: None` — `App` records the
+    /// token afterward via [`Self::set_stream_core_token`]), and return the
+    /// runner rid plus the resolved plugin id. Pull-drag is always a stream,
+    /// so there is no Invoke branch. `App` keeps the `begin_action` history
+    /// side-effect (it needs the returned `plugin_id`) and the `PullDrag`
+    /// state. Returns a core-shaped [`DispatchError`] that names no
+    /// orchestrator type.
+    pub(crate) fn start_stream(
+        &mut self,
+        intent: StreamStartIntent,
+        entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
+    ) -> Result<(u64, String), DispatchError> {
+        use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Err(DispatchError::Failed(String::from(
+                "orchestrator not initialized",
+            )));
+        };
+        let Some(cached) = orch.plugin_registry().get_op(intent.op_id).cloned() else {
+            return Err(DispatchError::Failed(format!(
+                "op-id {:?} not in registry",
+                intent.op_id
+            )));
+        };
+        let plugin_id = cached.plugin_id.clone();
+
+        let ctx = DispatchContext {
+            focused_entity_id: Some(intent.focused_entity),
+            selection: vec![ResidueRef {
+                entity_id: intent.focused_entity,
+                residue_index: intent.residue_in_entity,
+            }],
+        };
+        let params = crate::pull_drag::build_start_params(
+            intent.op_id,
+            intent.residue_in_entity,
+            &intent.atom_name,
+        );
+
+        let (rid, handle) = orch
+            .dispatch_start_stream(intent.op_id, ctx, params, entity_type_of)
+            .map_err(map_dispatch_error)?;
+        let _ = self.stream_host.active_streams.insert(
+            rid,
+            ActiveStreamEntry {
+                handle,
+                plugin_id: plugin_id.clone(),
+                core_token: None,
+            },
+        );
+        Ok((rid, plugin_id))
+    }
+
+    /// Push a single-key `endpoint` `Vec3` update to a running pull stream.
+    /// The `"endpoint"` param key is a bridge-protocol detail and lives
+    /// behind this barrier, not in `App`. No-op (logged at trace) when no
+    /// orchestrator is wired up or the dispatch is rejected.
+    pub(crate) fn update_stream(&self, rid: u64, plugin_id: &str, endpoint: glam::Vec3) {
+        use foldit_runner::orchestrator::ParamValue;
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return;
+        };
+        let mut params = std::collections::HashMap::new();
+        let _ = params.insert(
+            String::from("endpoint"),
+            ParamValue::Vec3([endpoint.x, endpoint.y, endpoint.z]),
+        );
+        if let Err(e) = orch.dispatch_update_stream(plugin_id, rid, params) {
+            log::trace!("update_stream: dispatch_update_stream rid={rid} failed: {e}");
+        }
+    }
+
+    /// Thin pass-through that asks the orchestrator to cancel a running
+    /// pull stream. The terminal commit still flows through
+    /// `drain_op_events` on the plugin's `Cancelled` reply — this only
+    /// sends the cancel. No-op (logged) when no orchestrator exists.
+    pub(crate) fn end_stream(&self, rid: u64, plugin_id: &str) {
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return;
+        };
+        if let Err(e) = orch.dispatch_cancel_stream(plugin_id, rid) {
+            log::trace!("end_stream: dispatch_cancel_stream rid={rid} failed: {e}");
+        }
+    }
+
+    /// Record the core edit token on a stream's `ActiveStreamEntry` after
+    /// `App::begin_action` mints it. Routes the post-dispatch token write
+    /// through a method instead of a raw `active_streams` reach. No-op if
+    /// the entry is gone (terminal already drained).
+    pub(crate) fn set_stream_core_token(&mut self, rid: u64, token: u64) {
+        if let Some(entry) = self.stream_host.active_streams.get_mut(&rid) {
+            entry.core_token = Some(token);
+        }
+    }
+
+    /// Whether a pull-drag is currently live (the three input guards).
+    pub(crate) fn has_active_pull_drag(&self) -> bool {
+        self.stream_host.pull_drag.is_some()
+    }
+
+    /// Snapshot the live drag's viso `PullInfo` for the visualization
+    /// passes (cloned so the engine borrow doesn't overlap the field).
+    pub(crate) fn pull_drag_pull_info(&self) -> Option<viso::PullInfo> {
+        self.stream_host
+            .pull_drag
+            .as_ref()
+            .map(|d| d.pull_info.clone())
+    }
+
+    /// Mutable handle to the live drag (pointer-move updates its
+    /// `screen_target` and reads its rid / plugin id).
+    pub(crate) fn pull_drag_mut(&mut self) -> Option<&mut crate::pull_drag::PullDrag> {
+        self.stream_host.pull_drag.as_mut()
+    }
+
+    /// Install the live drag state on stream start.
+    pub(crate) fn set_pull_drag(&mut self, drag: crate::pull_drag::PullDrag) {
+        self.stream_host.pull_drag = Some(drag);
+    }
+
+    /// Take + clear the live drag state on pointer-up / cancel.
+    pub(crate) fn take_pull_drag(&mut self) -> Option<crate::pull_drag::PullDrag> {
+        self.stream_host.pull_drag.take()
+    }
+
     // ── Score paths ─────────────────────────────────────────────────────
     //
     // Forward the well-known `score` query to the orchestrator, building
@@ -430,12 +560,35 @@ pub(crate) struct DispatchIntent {
     pub params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
 }
 
+/// Core-shaped pull-drag start request handed to
+/// [`PluginDriver::start_stream`]. Carries only molex / core-native
+/// types; the `DispatchContext` / `ResidueRef` / `ParamValue` build all
+/// happen inside `start_stream`, so `App`'s pull-drag path names no
+/// orchestrator type. Pull-drag is always a stream (no Invoke branch).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct StreamStartIntent {
+    /// The pull op-id (one of `pull_drag::OP_PULL_*`); resolved against
+    /// the registry inside `start_stream` for the plugin id + dispatch.
+    pub op_id: &'static str,
+    /// The picked entity (already a molex id — no runner-id wrapping).
+    /// Becomes both the `DispatchContext` focus and the single
+    /// `ResidueRef`'s entity.
+    pub focused_entity: molex::EntityId,
+    /// 0-based residue index within the entity; the single selection ref
+    /// and the start-param 1-indexing both derive from it.
+    pub residue_in_entity: u32,
+    /// PDB atom name the user picked; only the sidechain op consumes it
+    /// (backbone is residue-anchored), inside `build_start_params`.
+    pub atom_name: String,
+}
+
 /// Core-side reason a dispatch was refused or failed, produced by
 /// [`PluginDriver::dispatch_op`]. Deliberately carries no orchestrator
 /// type: the lock refusal is reshaped into a raw entity id so `App`
 /// distinguishes a busy-entity refusal (advisory, no error log) from a
 /// genuine failure without naming any runner error.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
 pub(crate) enum DispatchError {
     /// A required entity was already locked by another op; carries the raw
     /// id of the locked entity.
