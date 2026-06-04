@@ -7,7 +7,7 @@ description = "Pure-logic core: session, history, plugin driver, projectors, puz
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.4", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.5", default-features = false }
 molex = { version = "0.4.4", features = ["serde", "specta"] }
 
 # Core

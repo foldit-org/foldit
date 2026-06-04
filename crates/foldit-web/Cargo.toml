@@ -16,7 +16,7 @@ foldit-runner = { path = "../foldit-runner", default-features = false }
 # Render engine. We deliberately do NOT enable viso's `web` feature here:
 # its `app::web::start` would conflict with our own canvas/rAF wiring.
 # `default-features = false` strips wry/winit/pollster.
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.5", default-features = false }
 molex = { version = "0.4.4", features = ["serde", "specta"] }
 
 # Universal
