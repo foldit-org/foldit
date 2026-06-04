@@ -34,7 +34,7 @@ use crate::history::{
 use crate::plugin_driver::PluginDriver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin_driver::{
-    DispatchError, DispatchIntent, OpEvent, OpOutcome, StreamStartIntent,
+    DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamStartIntent,
 };
 use crate::render_projector::{self, RenderProjector};
 use crate::session::{EntityOrigin, Session, SessionError};
@@ -258,14 +258,6 @@ fn load_entity_into_history(
             None
         }
     }
-}
-
-/// First protein entity in the head checkpoint, used as a fallback
-/// focus when an op-dispatch carries no `focused_entity_id`. Wave-1
-/// puzzles ship 1-chain proteins; a missing focus is the rule, not
-/// the exception. Returns `None` when no protein entity exists.
-fn first_protein_entity(store: &Session) -> Option<EntityId> {
-    store.proteins().next().map(|(eid, _, _)| eid)
 }
 
 /// Overwrite the ongoing action's tentative payload from a streaming
@@ -1299,49 +1291,50 @@ impl App {
                         store.entity_type(id)
                     });
 
-            // Resolve which entity this op targets. The focused entity
-            // wins; otherwise pick the lone protein in the head
-            // checkpoint. For multi-entity sessions with no focus we
-            // skip the history side-effect entirely (the action still
-            // runs plugin-side, the viewport just won't reflect the
-            // tentative until a per-op multi-entity action kind
-            // exists). `EntityId` is opaque — look the raw u32 up
-            // against the store's existing ids instead of minting a
-            // new one (which would advance the allocator).
-            let action_entity = op
-                .focused_entity_id
-                .and_then(|raw| self.store.ids().find(|id| u64::from(id.raw()) == raw))
-                .or_else(|| first_protein_entity(&self.store));
-
             // The dispatch allocated the id the edit and the stream table
-            // both key on; pull it from the successful outcome.
+            // both key on, and resolved the entity set the op operates on.
+            // Pull both from the successful outcome; the edit opens over the
+            // whole resolved set (a whole-pose op moves every entity, so a
+            // single-entity edit would drop every other entity's result and
+            // commit a geometrically inconsistent pose). Filter to entities
+            // with a committed lane — `begin_action` forks each lane from its
+            // current head, and transient stubs (ambient / zero-residue) have
+            // none — mirroring the post-Init normalization path.
+            let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
+                Ok(OpOutcome::Stream { scope, .. })
+                | Ok(OpOutcome::Invoke { scope, .. }) => {
+                    Some(self.lanes_for_scope(scope))
+                }
+                Err(_) => None,
+            };
             let dispatch_id = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { request_id })
+                Ok(OpOutcome::Stream { request_id, .. })
                 | Ok(OpOutcome::Invoke { request_id, .. }) => Some(*request_id),
                 Err(_) => None,
             };
 
-            // Open the edit under the dispatch id. Skipped on dispatch
-            // failure (any open tentative belongs to a prior op) or when
-            // no single entity owns the action.
-            let edit_token = dispatch_id.and_then(|request_id| {
-                action_entity.and_then(|entity| {
-                    let kind = CheckpointKind::PluginOp {
-                        plugin_id: plugin_id.clone(),
-                        op_id: op.op_id.clone(),
-                        display: display.clone(),
-                    };
-                    match self.store.begin_action([entity], kind, display.clone(), request_id) {
-                        Ok(()) => Some(request_id),
-                        Err(e) => {
-                            log::trace!(
-                                "handle_dispatch_op({:?}): begin_action skipped: {e}",
-                                op.op_id
-                            );
-                            None
-                        }
+            // Open the edit under the dispatch id over the resolved lane set.
+            // Skipped on dispatch failure (any open tentative belongs to a
+            // prior op) or when the resolved set has no editable lane.
+            let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
+                if lanes.is_empty() {
+                    return None;
+                }
+                let kind = CheckpointKind::PluginOp {
+                    plugin_id: plugin_id.clone(),
+                    op_id: op.op_id.clone(),
+                    display: display.clone(),
+                };
+                match self.store.begin_action(lanes, kind, display.clone(), request_id) {
+                    Ok(()) => Some(request_id),
+                    Err(e) => {
+                        log::trace!(
+                            "handle_dispatch_op({:?}): begin_action skipped: {e}",
+                            op.op_id
+                        );
+                        None
                     }
-                })
+                }
             });
 
             match dispatch_outcome {
@@ -1378,6 +1371,24 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = op;
+        }
+    }
+
+    /// Resolve a dispatch's [`EditScope`] into the concrete set of lanes the
+    /// edit opens over. A whole-pose op (`AllEntities`) spans every committed
+    /// entity; an entity-scoped op spans its resolved set. Either way the
+    /// result is filtered to entities that hold a committed lane — the only
+    /// ones `begin_action` can fork a tentative from — matching the post-Init
+    /// normalization path's lane filter. Transient stubs (ambient /
+    /// zero-residue entities) drop out silently.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lanes_for_scope(&self, scope: &EditScope) -> Vec<EntityId> {
+        let has_lane = |id: &EntityId| self.store.history().lane(*id).is_some();
+        match scope {
+            EditScope::AllEntities => self.store.ids().filter(has_lane).collect(),
+            EditScope::Entities(set) => {
+                set.iter().copied().filter(has_lane).collect()
+            }
         }
     }
 
@@ -3107,5 +3118,116 @@ mod selection_tests {
                 e.raw()
             );
         }
+    }
+
+    /// A whole-pose dispatch must open its edit over EVERY committed entity,
+    /// not the host's single-entity fallback guess. `EditScope::AllEntities`
+    /// resolves to all committed lanes (transient previews filtered out), and
+    /// a multi-entity streamed frame then updates every lane on commit.
+    /// Before the fix the runner's resolved target never reached core, so the
+    /// edit opened on one entity and every other entity kept its pre-op
+    /// coordinates (which also blew up the committed score).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn global_scope_opens_edit_over_all_committed_entities() {
+        use crate::history::CheckpointKind;
+        use crate::session::EntityOrigin;
+        use std::sync::Arc;
+
+        let mut app = fresh_app();
+        // Two committed entities.
+        let e1 = app
+            .store
+            .insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+        app.store
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .expect("promote a");
+        let e2 = app
+            .store
+            .insert_preview(mk_bulk(), "b".to_string(), EntityOrigin::Loaded);
+        app.store
+            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
+            .expect("promote b");
+        // A preview that is never promoted: it has no committed lane and so
+        // must be filtered out of a whole-pose edit's lane set.
+        let e_transient = app
+            .store
+            .insert_preview(mk_bulk(), "c".to_string(), EntityOrigin::Loaded);
+
+        // AllEntities resolves to exactly the two committed lanes.
+        let mut lanes = app.lanes_for_scope(&EditScope::AllEntities);
+        lanes.sort_unstable();
+        let mut expected = vec![e1, e2];
+        expected.sort_unstable();
+        assert_eq!(lanes, expected, "global scope spans committed lanes only");
+        assert!(!lanes.contains(&e_transient), "transient preview has no lane");
+
+        // Open ONE edit over the whole set, fan a multi-entity frame across
+        // it, commit once. Every lane must carry the moved coordinates.
+        let moved = glam::Vec3::new(3.0, 3.0, 3.0);
+        let mut a1 = app.store.entity(e1).expect("e1").clone();
+        for atom in a1.atom_set_mut() {
+            atom.position = moved;
+        }
+        let mut a2 = app.store.entity(e2).expect("e2").clone();
+        for atom in a2.atom_set_mut() {
+            atom.position = moved;
+        }
+        let frame = molex::Assembly::from_arcs(vec![Arc::new(a1), Arc::new(a2)]);
+
+        let rid = 7u64;
+        app.store
+            .begin_action(
+                lanes,
+                CheckpointKind::PluginOp {
+                    plugin_id: "rosetta".to_string(),
+                    op_id: "wiggle".to_string(),
+                    display: "Wiggle".to_string(),
+                },
+                "Wiggle",
+                rid,
+            )
+            .expect("begin multi-lane edit");
+        assert!(
+            super::apply_streaming_assembly(&mut app.store, &frame, None, rid),
+            "frame applies across the locked lanes"
+        );
+        app.store.commit_action(rid).expect("commit");
+
+        let head = app.store.head_assembly();
+        for e in [e1, e2] {
+            let ent = head.entity(e).expect("entity in head assembly");
+            assert!(
+                ent.positions().iter().all(|p| *p == moved),
+                "entity {} was not updated by the whole-pose edit",
+                e.raw()
+            );
+        }
+    }
+
+    /// An entity-scoped dispatch resolves to its named set, filtered to
+    /// committed lanes: a resolved id without a lane drops out rather than
+    /// refusing the whole multi-lane edit (`begin_action` is all-or-nothing).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn entity_scope_filters_to_committed_lanes() {
+        use crate::history::CheckpointKind;
+        use crate::session::EntityOrigin;
+
+        let mut app = fresh_app();
+        let e1 = app
+            .store
+            .insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+        app.store
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .expect("promote a");
+        let e_transient = app
+            .store
+            .insert_preview(mk_bulk(), "t".to_string(), EntityOrigin::Loaded);
+
+        // The resolved set names a committed entity and a transient one;
+        // only the committed lane survives the filter.
+        let scope = EditScope::Entities(vec![e1, e_transient]);
+        assert_eq!(app.lanes_for_scope(&scope), vec![e1]);
     }
 }

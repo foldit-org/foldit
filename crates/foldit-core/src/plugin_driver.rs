@@ -278,20 +278,27 @@ impl PluginDriver {
         match kind {
             OpKind::Invoke => orch
                 .dispatch_invoke(&intent.op_id, ctx, params, entity_type_of)
-                .map(|(request_id, bytes)| OpOutcome::Invoke {
+                .map(|(request_id, bytes, targets)| OpOutcome::Invoke {
                     request_id,
                     bytes,
+                    scope: edit_scope_from_targets(targets),
                 })
                 .map_err(map_dispatch_error),
             OpKind::Stream => {
                 let (rid, handle) = orch
                     .dispatch_start_stream(&intent.op_id, ctx, params, entity_type_of)
                     .map_err(map_dispatch_error)?;
+                // Derive the edit scope from the handle (the set the op
+                // actually locked) before it is consumed into the table.
+                let scope = edit_scope_from_handle(&handle);
                 let _ = self.stream_host.active_streams.insert(
                     rid,
                     ActiveStreamEntry { handle, plugin_id },
                 );
-                Ok(OpOutcome::Stream { request_id: rid })
+                Ok(OpOutcome::Stream {
+                    request_id: rid,
+                    scope,
+                })
             }
         }
     }
@@ -726,14 +733,61 @@ fn map_dispatch_error(
 pub(crate) enum OpOutcome {
     /// Synchronous invoke completed. `request_id` is the dispatch id the
     /// caller keys its edit on; `bytes` is the plugin's reply, fed into
-    /// `apply_invoke_result`.
-    Invoke { request_id: u64, bytes: Vec<u8> },
+    /// `apply_invoke_result`; `scope` is the entity set the op locked, so
+    /// the caller opens its edit over every targeted entity.
+    Invoke {
+        request_id: u64,
+        bytes: Vec<u8>,
+        scope: EditScope,
+    },
     /// Stream dispatch succeeded; the `DispatchHandle` is already stored
     /// in `StreamHost::active_streams` under `request_id` — the same id
     /// the caller opens its edit under, so there is nothing left to
     /// reconcile here. The matching terminal arm in
-    /// `apply_backend_updates` performs the cleanup.
-    Stream { request_id: u64 },
+    /// `apply_backend_updates` performs the cleanup. `scope` is the entity
+    /// set the op locked, so the caller opens its edit over every target.
+    Stream { request_id: u64, scope: EditScope },
+}
+
+/// The entity set a dispatched op resolved to, threaded from the runner's
+/// resolved lock target back to `App` so the edit opens over every entity
+/// the op operates on (not the host's single-entity fallback guess). A
+/// neutral core-owned scope: it names only `molex::EntityId`, so `App`
+/// never sees the runner's `LockTargets` / `DispatchHandle`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum EditScope {
+    /// A whole-pose / global op: the edit opens over the whole document.
+    AllEntities,
+    /// The op resolved to this specific entity set (focus / selection,
+    /// type-filtered by the runner's lock resolution).
+    Entities(Vec<molex::EntityId>),
+}
+
+/// Map a runner `DispatchHandle`'s resolved target onto the neutral
+/// [`EditScope`]: a `global_held` handle is whole-pose, otherwise the
+/// handle's locked entity set.
+#[cfg(not(target_arch = "wasm32"))]
+fn edit_scope_from_handle(
+    handle: &foldit_runner::orchestrator::DispatchHandle,
+) -> EditScope {
+    if handle.global_held {
+        EditScope::AllEntities
+    } else {
+        EditScope::Entities(handle.entities.clone())
+    }
+}
+
+/// Map the runner's resolved [`LockTargets`] (returned by `dispatch_invoke`)
+/// onto the neutral [`EditScope`].
+#[cfg(not(target_arch = "wasm32"))]
+fn edit_scope_from_targets(
+    targets: foldit_runner::orchestrator::LockTargets,
+) -> EditScope {
+    use foldit_runner::orchestrator::LockTargets;
+    match targets {
+        LockTargets::Global => EditScope::AllEntities,
+        LockTargets::Entities(set) => EditScope::Entities(set),
+    }
 }
 
 /// Core-side projection of inbound plugin traffic, produced by
