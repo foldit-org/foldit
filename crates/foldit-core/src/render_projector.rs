@@ -45,14 +45,24 @@ impl RenderProjector {
     /// publishes mean no wasted assembly builds or generation bumps).
     /// Picks `replace_assembly` when the entity id set / order has
     /// shifted since the last publish; `set_assembly` otherwise.
+    ///
+    /// Returns `true` when this publish routed `replace_assembly` (a
+    /// topology swap), which tears down viso's per-entity scene-local
+    /// state -- including the per-residue score map the Score color
+    /// scheme reads. The caller uses this to invalidate any cache that
+    /// shadows that now-wiped state (`App::last_pushed_scores`), so the
+    /// next score reply always re-pushes rather than being suppressed as
+    /// a no-op match against the pre-wipe value. Returns `false` on a
+    /// steady-state `set_assembly` (or an empty batch), which preserves
+    /// the score map.
     pub fn project(
         &mut self,
         changes: &[SessionUpdate],
         doc: &Session,
         engine: &mut viso::VisoEngine,
-    ) {
+    ) -> bool {
         if changes.is_empty() {
-            return;
+            return false;
         }
         let mut asm = doc.head_assembly();
         let new_ids: Vec<molex::entity::molecule::id::EntityId> =
@@ -69,6 +79,7 @@ impl RenderProjector {
             engine.set_assembly(asm);
         }
         self.last_published_ids = new_ids;
+        topology_changed
     }
 }
 

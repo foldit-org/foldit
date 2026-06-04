@@ -1562,6 +1562,15 @@ impl App {
         // entity reusing an old raw id with coincidentally-equal scores
         // must still push, so drop the cache on the topology swap.
         self.last_pushed_scores.clear();
+        // The same id-reuse hole exists in viso's own per-entity score
+        // map: replace_assembly now preserves scores across a swap (so a
+        // settling preview doesn't flash the survivors gray), reconciling
+        // membership by id. A puzzle reload restarts the entity allocator,
+        // so the new puzzle's ids collide with the outgoing ones and would
+        // inherit their colors; clear viso scores explicitly here.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.clear_scores();
+        }
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
@@ -2076,7 +2085,15 @@ impl App {
                     .broadcast(&changes, &self.store, orch);
             }
             if let Some(engine) = self.engine.as_mut() {
-                self.render_projector.project(&changes, &self.store, engine);
+                // A topology-replace publish wipes viso's per-entity score
+                // map. Drop the per-residue cache that shadows it so the
+                // next score reply re-pushes instead of being suppressed as
+                // an unchanged-value no-op (which would leave the Score
+                // scheme rendering flat mid-gray until the score happens to
+                // change).
+                if self.render_projector.project(&changes, &self.store, engine) {
+                    self.last_pushed_scores.clear();
+                }
             }
         }
 
