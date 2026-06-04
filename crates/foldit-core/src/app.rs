@@ -739,9 +739,10 @@ impl App {
     /// Catalog hotkey fallback. Runs only after a viso built-in
     /// `handle_key_press` *miss*, so built-ins always win. On a match
     /// against a plugin manifest `[[buttons]]` hotkey, dispatch the op
-    /// through the same `handle_dispatch_op` sink a button click uses
-    /// (focus/selection not captured here yet — same as a click with
-    /// no GUI selection). Returns true if an op was dispatched.
+    /// through the same `handle_dispatch_op` sink a button click uses;
+    /// that sink sources the live focus + selection itself, so the
+    /// hotkey op runs on the same target a button click would. Returns
+    /// true if an op was dispatched.
     #[cfg(not(target_arch = "wasm32"))]
     fn try_hotkey_dispatch(&mut self, key_str: &str) -> bool {
         let op_id = self
@@ -1242,6 +1243,19 @@ impl App {
             // see released locks.
             self.apply_backend_updates();
 
+            // Source the focused entity authoritatively from the engine's
+            // current focus, not the GUI-supplied `op.focused_entity_id`
+            // (which the hotkey paths leave as None). This makes every
+            // dispatch path -- button or hotkey -- carry the live focus to
+            // the worker, paired with the authoritative `App.selection`
+            // read into the intent below. Raw gui-wire id (u32 widened to
+            // u64), the shape `DispatchIntent` expects.
+            let focused_entity_id: Option<u64> =
+                self.engine.as_ref().and_then(|engine| match engine.focus() {
+                    Focus::Entity(eid) => Some(eid.raw() as u64),
+                    Focus::All => None,
+                });
+
             let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                 log::warn!(
                     "handle_dispatch_op({:?}): orchestrator not initialized",
@@ -1277,7 +1291,7 @@ impl App {
             // `dispatch_op` now, so this path names no orchestrator type.
             let intent = DispatchIntent {
                 selection: self.selection.clone(),
-                focused_entity_id: op.focused_entity_id,
+                focused_entity_id,
                 op_id: op.op_id.clone(),
                 params: op.params,
             };
@@ -2383,28 +2397,16 @@ impl App {
     // never left empty in the outer map. Removing the last residue on
     // an entity removes the entity entry.
 
-    /// Flatten [`App::selection`] through the engine's per-entity
-    /// residue offsets and overwrite the GPU residue selection. No-op
-    /// before an engine is attached or before the first full rebuild
-    /// has produced an offsets map. Entities absent from the offsets
-    /// map (e.g. not yet meshed) contribute nothing.
+    /// Push [`App::selection`] to the engine, which owns the per-entity
+    /// to flat-GPU-bitset derivation against its always-current residue
+    /// offsets (re-derived on every mesh rebuild, so the highlight cannot
+    /// go stale relative to a shifting residue space). No-op before an
+    /// engine is attached.
     fn flush_selection_to_viso(&mut self) {
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
-        let mut flat: Vec<i32> = Vec::new();
-        {
-            let offsets = engine.entity_residue_offsets();
-            for (eid, residues) in &self.selection {
-                let Some(&base) = offsets.get(eid) else {
-                    continue;
-                };
-                for r in residues {
-                    flat.push((base + *r) as i32);
-                }
-            }
-        }
-        engine.set_selection(flat);
+        engine.set_selection(&self.selection);
     }
 
     /// Apply a viso click-event to the selection store. Empty-area
