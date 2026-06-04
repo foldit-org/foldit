@@ -2459,7 +2459,7 @@ impl App {
             .entry(entity)
             .or_default()
             .insert(residue_index);
-        self.ui_dirty |= DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         self.flush_selection_to_viso();
     }
 
@@ -2474,7 +2474,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
-        self.ui_dirty |= DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         self.flush_selection_to_viso();
     }
 
@@ -2492,14 +2492,14 @@ impl App {
         } else {
             self.selection.insert(entity, set);
         }
-        self.ui_dirty |= DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         self.flush_selection_to_viso();
     }
 
     /// Drop the entire selection across all entities.
     pub(crate) fn clear_selection(&mut self) {
         self.selection.clear();
-        self.ui_dirty |= DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         self.flush_selection_to_viso();
     }
 
@@ -2515,7 +2515,7 @@ impl App {
                 self.selection.remove(&entity);
             }
         }
-        self.ui_dirty |= DirtyFlags::SELECTION;
+        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         self.flush_selection_to_viso();
         now_selected
     }
@@ -2562,10 +2562,11 @@ impl App {
     /// selection entirely.
     ///
     /// Both `clear_selection` and `set_residues_on` self-set
-    /// [`foldit_gui::DirtyFlags::SELECTION`] and call
-    /// `flush_selection_to_viso`, so the GPU residue selection and the
-    /// frontend mirror stay in lockstep without an extra dirty-flag
-    /// flush here. Per-entity residue lists are collected into
+    /// [`foldit_gui::DirtyFlags::SELECTION`] | [`foldit_gui::DirtyFlags::ACTIONS`]
+    /// and call `flush_selection_to_viso`, so the GPU residue selection,
+    /// the frontend mirror, and the selection-gated action catalog stay
+    /// in lockstep without an extra dirty-flag flush here. Per-entity
+    /// residue lists are collected into
     /// `BTreeSet`, so duplicate or out-of-order indices in the wire
     /// payload are silently normalized.
     pub fn handle_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {
