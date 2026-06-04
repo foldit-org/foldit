@@ -1236,16 +1236,6 @@ impl App {
         self.plugin_driver.end_stream(drag.request_id, &drag.plugin_id);
     }
 
-    pub fn handle_trigger_action(&mut self, action: foldit_gui::ActionId) {
-        // Undo / Redo are not plugin ops -- they operate on the
-        // Session history directly, with `&mut self` to reach
-        // both store + engine.
-        match action {
-            foldit_gui::ActionId::Undo => self.handle_undo(),
-            foldit_gui::ActionId::Redo => self.handle_redo(),
-        }
-    }
-
     /// Dispatch a plugin op by op-id. Resolves the op against the
     /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
     /// builds a `DispatchContext` from the GUI-provided focus and the
@@ -1430,21 +1420,17 @@ impl App {
         let _ = self.score_targets.remove(&token);
     }
 
-    pub fn handle_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
-        self.handle_parameterized_action_inner(action);
-    }
-
-    fn handle_parameterized_action_inner(&mut self, action: foldit_gui::ParameterizedAction) {
-        use foldit_gui::ParameterizedAction;
+    pub fn handle_app_command(&mut self, command: foldit_gui::AppCommand) {
+        use foldit_gui::AppCommand;
 
         // History-side commands take &mut self (no engine borrow held).
-        if let ParameterizedAction::History { cmd } = action {
+        if let AppCommand::History { cmd } = command {
             self.run_history_command(cmd);
             return;
         }
 
         // Bubble cursor advance is engine-independent.
-        if let ParameterizedAction::AdvanceBubble { back } = action {
+        if let AppCommand::AdvanceBubble { back } = command {
             self.advance_bubble(back);
             return;
         }
@@ -1456,16 +1442,10 @@ impl App {
         // Engine borrow is taken per-arm now (LoadStructure / LoadPuzzle
         // need to release the borrow before `self.tick(0.0)`, which is
         // how the render projector republishes after a load).
-        match action {
-            ParameterizedAction::LoadStructure { path } => self.handle_load_structure(path),
-            ParameterizedAction::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
-            ParameterizedAction::CreateBand { .. } => {
-                log::info!("CreateBand via IPC not yet wired");
-            }
-            ParameterizedAction::RemoveBand { .. } => {
-                log::info!("RemoveBand via IPC not yet wired");
-            }
-            ParameterizedAction::SetViewOptions { options } => {
+        match command {
+            AppCommand::LoadStructure { path } => self.handle_load_structure(path),
+            AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
+            AppCommand::SetViewOptions { options } => {
                 if let Some(engine) = self.engine.as_mut() {
                     match serde_json::from_value::<viso::options::VisoOptions>(options) {
                         Ok(opts) => {
@@ -1476,7 +1456,7 @@ impl App {
                     }
                 }
             }
-            ParameterizedAction::LoadViewPreset { name } => {
+            AppCommand::LoadViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(dir) = self.host.view_presets_dir() {
                     if let Some(engine) = self.engine.as_mut() {
@@ -1487,7 +1467,7 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
-            ParameterizedAction::SaveViewPreset { name } => {
+            AppCommand::SaveViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(dir) = self.host.view_presets_dir() {
                     if let Some(engine) = self.engine.as_mut() {
@@ -1498,10 +1478,10 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
-            ParameterizedAction::History { .. } | ParameterizedAction::AdvanceBubble { .. } => {
+            AppCommand::History { .. } | AppCommand::AdvanceBubble { .. } => {
                 // Handled in the early-return block above. The match is
-                // exhaustive over `ParameterizedAction` (G10): a new
-                // variant without a handler is a compile error.
+                // exhaustive over `AppCommand` (G10): a new variant
+                // without a handler is a compile error.
             }
         }
     }
@@ -1645,14 +1625,6 @@ impl App {
     }
 
     // ── History navigation (Undo / Redo / Jump / Pin) ──
-
-    pub fn handle_undo(&mut self) {
-        self.run_history_command(HistoryCommand::Undo);
-    }
-
-    pub fn handle_redo(&mut self) {
-        self.run_history_command(HistoryCommand::Redo { branch: None });
-    }
 
     /// Common tail for undo / redo / jump_checkpoint: clear cached
     /// per-residue scores (the values were computed against the
@@ -2598,16 +2570,12 @@ impl foldit_gui::Dispatcher for App {
         self.handle_viewport_input(input);
     }
 
-    fn on_trigger_action(&mut self, action: foldit_gui::ActionId) {
-        self.handle_trigger_action(action);
-    }
-
     fn on_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
         self.handle_dispatch_op(op);
     }
 
-    fn on_parameterized_action(&mut self, action: foldit_gui::ParameterizedAction) {
-        self.handle_parameterized_action(action);
+    fn on_app_command(&mut self, command: foldit_gui::AppCommand) {
+        self.handle_app_command(command);
     }
 
     fn on_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {

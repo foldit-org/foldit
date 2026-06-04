@@ -41,7 +41,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 use foldit_core::App;
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
 use foldit_gui::{
-    ActionId, Dispatcher, EntitySelection, OpDispatch, ParameterizedAction, ViewportInput,
+    AppCommand, Dispatcher, EntitySelection, OpDispatch, ViewportInput,
 };
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
@@ -155,22 +155,13 @@ impl FolditApp {
         Ok(())
     }
 
-    /// Forward a parameter-less action by id.
-    #[wasm_bindgen(js_name = triggerAction)]
-    pub fn trigger_action(&self, id: u32) -> Result<(), JsValue> {
-        let action = ActionId::try_from(id)
-            .map_err(|e| JsValue::from_str(&format!("trigger_action: unknown id ({e})")))?;
-        self.app.borrow_mut().on_trigger_action(action);
-        Ok(())
-    }
-
-    /// Forward a parameterized action. `json` is the JSON-encoded
-    /// `ParameterizedAction` enum.
-    #[wasm_bindgen(js_name = parameterizedAction)]
-    pub fn parameterized_action(&self, json: &str) -> Result<(), JsValue> {
-        let action: ParameterizedAction = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&format!("parameterized_action parse: {e}")))?;
-        self.app.borrow_mut().on_parameterized_action(action);
+    /// Forward a native GUI / chrome command. `json` is the JSON-encoded
+    /// `AppCommand` enum.
+    #[wasm_bindgen(js_name = appCommand)]
+    pub fn app_command(&self, json: &str) -> Result<(), JsValue> {
+        let command: AppCommand = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("app_command parse: {e}")))?;
+        self.app.borrow_mut().on_app_command(command);
         Ok(())
     }
 

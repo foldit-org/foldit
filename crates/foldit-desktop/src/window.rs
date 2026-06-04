@@ -78,9 +78,8 @@ impl AppRunner {
                     self.app.on_ready();
                 }
                 IpcMessage::ViewportInput(input) => self.app.on_viewport_input(input),
-                IpcMessage::TriggerAction(action) => self.app.on_trigger_action(action),
                 IpcMessage::DispatchOp(op) => self.app.on_dispatch_op(op),
-                IpcMessage::ParameterizedAction(action) => self.app.on_parameterized_action(action),
+                IpcMessage::AppCommand(command) => self.app.on_app_command(command),
                 IpcMessage::SetSelection { entries } => self.app.on_set_selection(entries),
                 IpcMessage::Request { wish_id, kind, payload } => {
                     let result = self.app.handle_request(kind, payload);
