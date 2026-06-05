@@ -342,6 +342,17 @@ pub struct App {
     /// entry could otherwise collide with a fresh edit id).
     #[cfg(not(target_arch = "wasm32"))]
     score_targets: std::collections::HashMap<u64, CheckpointId>,
+    /// Pull-drag intent captured at left-button-down. The pull is
+    /// determined by the down-target, not by where the cursor later
+    /// wanders: a drag that began on empty background must never grab a
+    /// residue it crosses, and a drag that began on a residue must pull
+    /// *that* residue. `Some(route)` after a left-down that resolved to a
+    /// pullable target; `None` after a down on empty / non-pullable
+    /// surface (that gesture can only camera-rotate). The first qualifying
+    /// pointer-move takes the route to open the stream; `PointerUp` clears
+    /// it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
 
 /// Objective metadata for an active puzzle. Populated from the puzzle
@@ -385,6 +396,8 @@ impl App {
             last_pushed_scores: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_pull_origin: None,
         }
     }
 
@@ -782,17 +795,13 @@ impl App {
                 return true;
             }
             "Escape" => {
-                // First ESC clears any active selection; only a second
-                // ESC (selection already empty) cancels in-flight
-                // streams + previews. Keeps a selection-clear gesture
-                // from accidentally dropping work-in-flight.
-                if !self.store.selection_is_empty() {
-                    self.store.clear_selection();
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    self.plugin_driver.cancel_all_active_streams();
-                    self.cancel_operations();
-                }
+                // ESC is cancel-only: drop in-flight streams + the
+                // current operation's previews. It never clears the
+                // selection (which is ambient); the only selection
+                // clearer is the empty-background click.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.plugin_driver.cancel_all_active_streams();
+                self.cancel_operations();
                 return true;
             }
             // Auto-rotate keybinding is intentionally dropped in foldit.
@@ -855,13 +864,15 @@ impl App {
 
         // Pull-drag interception runs ahead of viso's regular input
         // routing so an active drag suppresses camera rotation/pan.
-        // A pull opens on *drag*, not press: a left-press on an atom
-        // falls through to viso (which records the down-target, so a
-        // press+release with no move resolves to a residue selection);
-        // the first pointer-move with the button still held that
-        // resolves to a valid pull route opens the drag instead.
-        // `mouse_pressed()` is viso's own press bit, set by the
-        // preceding PointerDown's normal-path handling below.
+        // The pull target is locked at button-down, not at the move:
+        // `PointerDown` resolves the pull route at the down-cursor and
+        // stores it in `pending_pull_origin` (`None` when the down-target
+        // is empty / non-pullable). A left-press+release with no move
+        // falls through to viso as a residue selection; a press that
+        // resolved to a route opens the pull on the first move with the
+        // button still held, anchored to the down-target regardless of
+        // where the cursor has since wandered. `mouse_pressed()` is viso's
+        // own press bit, set by the preceding PointerDown.
         #[cfg(not(target_arch = "wasm32"))]
         {
             match &input {
@@ -870,9 +881,19 @@ impl App {
                         .engine
                         .as_ref()
                         .is_some_and(viso::VisoEngine::mouse_pressed)
-                        && !self.plugin_driver.has_active_pull_drag() =>
+                        && !self.plugin_driver.has_active_pull_drag()
+                        && self.pending_pull_origin.is_some() =>
                 {
-                    if self.try_begin_pull_drag(*x, *y) {
+                    // The pull intent was locked at button-down; the move
+                    // only supplies the drag endpoint. Take the route so
+                    // this gesture makes at most one start attempt — a
+                    // failed stream start falls through to camera for the
+                    // rest of the drag rather than retrying mid-gesture.
+                    let route = self
+                        .pending_pull_origin
+                        .take()
+                        .expect("guard guarantees Some");
+                    if self.begin_pull_drag_from_route(route, *x, *y) {
                         // viso recorded the press; drop its mouse
                         // state so the now-suppressed pointer-up
                         // can't fire a stray click → selection.
@@ -912,11 +933,9 @@ impl App {
         // ESC routing needs `&mut self`, but `engine` is borrowed for
         // the rest of the match and used again by
         // `update_all_visualizations` after it. Defer past that last
-        // engine use, mirroring the `pending_hotkey_op` deferral. The
-        // deferred block reads `selection_is_empty()` live (matching
-        // `handle_keybinding`) so any selection mutation that happens
-        // earlier in this call (e.g. a deferred `pending_click`) can't
-        // strand the ESC arm against a stale snapshot.
+        // engine use, mirroring the `pending_hotkey_op` deferral. ESC is
+        // cancel-only — it never touches the selection — so the deferred
+        // block is unconditional and needs no live state read.
         let mut pending_escape = false;
 
         let Some(engine) = &mut self.engine else {
@@ -946,6 +965,19 @@ impl App {
                 engine.set_cursor_pos(x, y);
                 engine.feed_pointer_motion(x, y);
                 let _ = engine.feed_pointer_button(viso_button, true);
+                // Lock the pull intent at the down-target. The engine
+                // cursor was just fed to (x, y), so resolving the route
+                // here captures what is under the press; a later move
+                // can only supply the drag endpoint, never re-pick the
+                // target. Left button only — right/middle are camera.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.pending_pull_origin = if button == 0 {
+                        Self::resolve_pull_route(engine, &self.store, x, y)
+                    } else {
+                        None
+                    };
+                }
             }
             ViewportInput::PointerUp {
                 x,
@@ -964,6 +996,13 @@ impl App {
                 engine.set_cursor_pos(x, y);
                 engine.feed_pointer_motion(x, y);
                 pending_click = engine.feed_pointer_button(viso_button, false);
+                // Gesture over: a pull that started already took the
+                // route (it's `None`); a click / camera-rotate gesture
+                // that never pulled drops its stored origin here.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.pending_pull_origin = None;
+                }
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {
                 engine.feed_modifiers(shift);
@@ -989,12 +1028,10 @@ impl App {
                             }
                         }
                         "Escape" => {
-                            // Two-stage clear/cancel resolved in the
-                            // deferred block below against a live
-                            // `selection_is_empty()` read, so a
-                            // pending_click applied in the same call
-                            // window can't desync the branch choice.
-                            // Mirrors the `handle_keybinding` ESC arm.
+                            // ESC cancels the in-flight action only; it
+                            // never clears the selection. Resolved in the
+                            // deferred block below, past the last `engine`
+                            // use. Mirrors the `handle_keybinding` ESC arm.
                             pending_escape = true;
                         }
                         other => {
@@ -1044,23 +1081,21 @@ impl App {
         update_all_visualizations(engine, pull);
 
         // `engine`'s last use was above — `&mut self` is free again, so
-        // the deferred actions below can run. Apply the pending click
-        // before the ESC branch so the latter's `selection_is_empty()`
-        // read sees the post-click state (any single call only carries
-        // one of the two today, but the live-read keeps the two-stage
-        // ESC gesture correct regardless of producer order).
+        // the deferred actions below can run. Apply any pending click (a
+        // left-release that classified as a click) to the selection; the
+        // empty-background case clears it, a residue hit selects.
         if let Some(click) = pending_click {
             self.apply_click_to_selection(&click);
         }
 
         if pending_escape {
-            if !self.store.selection_is_empty() {
-                self.store.clear_selection();
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                self.plugin_driver.cancel_all_active_streams();
-                self.cancel_operations();
-            }
+            // ESC is cancel-only: drop in-flight streams + the current
+            // operation's previews. The selection is ambient and left
+            // untouched (the only selection clearer is the empty-click
+            // path in `apply_click_to_selection`).
+            #[cfg(not(target_arch = "wasm32"))]
+            self.plugin_driver.cancel_all_active_streams();
+            self.cancel_operations();
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same
@@ -1091,23 +1126,21 @@ impl App {
         }
     }
 
-    /// Pointer-down on an atom: classify the pick, dispatch the matching
-    /// pull op-id, install drag state, and feed viso the initial
-    /// PullInfo. Returns true if a drag was initiated (so the caller
-    /// suppresses the regular viso input flow), false otherwise.
-    ///
-    /// Rejected picks (non-protein entity, hydrogen atom, no atom under
-    /// the cursor, dispatch failure) leave no live pull-drag state and
-    /// return false, letting the click fall through to camera /
-    /// selection handling.
+    /// Classify the pick under `(x, y)` into a pull route, or `None` if
+    /// the target is empty / non-pullable (non-protein entity, hydrogen
+    /// atom, no atom under the cursor). Pure resolution: reads the engine
+    /// pick + store but mutates nothing, so it can run at `PointerDown`
+    /// against the just-fed down-cursor to lock the pull's anchor. Takes
+    /// `engine` + `store` as borrows rather than `&self` so the caller can
+    /// invoke it while holding a disjoint `&mut self.engine` borrow.
     #[cfg(not(target_arch = "wasm32"))]
-    fn try_begin_pull_drag(&mut self, x: f32, y: f32) -> bool {
-        let Some(engine) = self.engine.as_ref() else {
-            return false;
-        };
-        let target = engine.hovered_target();
-        let store = &self.store;
-        let route = match target {
+    fn resolve_pull_route(
+        engine: &viso::VisoEngine,
+        store: &Session,
+        x: f32,
+        y: f32,
+    ) -> Option<crate::pull_drag::PullRoute> {
+        match engine.hovered_target() {
             viso::PickTarget::Atom {
                 entity_id,
                 atom_idx,
@@ -1125,9 +1158,22 @@ impl App {
                 })
             }
             viso::PickTarget::None => None,
-        };
-        let Some(route) = route else { return false };
+        }
+    }
 
+    /// Open a pull-drag stream from a pre-resolved `route` (locked at
+    /// button-down) with `(x, y)` as the current drag endpoint: dispatch
+    /// the matching pull op-id, open the history edit, and install drag
+    /// state. Returns true if the stream started (so the caller suppresses
+    /// the regular viso input flow), false if `start_stream` failed (the
+    /// gesture then falls through to camera handling).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_pull_drag_from_route(
+        &mut self,
+        route: crate::pull_drag::PullRoute,
+        x: f32,
+        y: f32,
+    ) -> bool {
         let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
 
         let store = &self.store;
@@ -1142,7 +1188,7 @@ impl App {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
-                        "try_begin_pull_drag: start_stream {:?} failed: {e:?}",
+                        "begin_pull_drag_from_route: start_stream {:?} failed: {e:?}",
                         route.op_id,
                     );
                     return false;
@@ -1169,7 +1215,7 @@ impl App {
             if let Err(e) =
                 self.store.begin_action([entity], kind, String::from("Pull"), rid)
             {
-                log::trace!("try_begin_pull_drag: begin_action skipped: {e}");
+                log::trace!("begin_pull_drag_from_route: begin_action skipped: {e}");
             }
         }
 
