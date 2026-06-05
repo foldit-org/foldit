@@ -33,6 +33,7 @@
 //! structural invariant, not a runtime assertion.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -81,6 +82,13 @@ pub struct Session {
     allocator: EntityIdAllocator,
     /// The full two-layer history.
     history: History,
+    /// Ambient residue selection, keyed by entity. A first-class scene
+    /// field beside `history`, but *not* history-versioned: undo / redo /
+    /// jump leave it untouched. Empty inner sets are never stored —
+    /// removing the last residue on an entity removes the entity entry,
+    /// so iterating yields only entities that currently have at least one
+    /// selected residue. [`Self::reset`] clears it on a topology swap.
+    selection: BTreeMap<EntityId, BTreeSet<u32>>,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -105,6 +113,7 @@ impl Session {
             transient: IndexMap::new(),
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
+            selection: BTreeMap::new(),
             pending_updates: Vec::new(),
         }
     }
@@ -396,36 +405,45 @@ impl Session {
     }
 
     /// Stamp scores on the current head checkpoint in place. Canonical
-    /// score write: updates the head checkpoint and bumps the History's
-    /// `live_version`; emits no `SessionUpdate`. Scores are off-spine:
-    /// plugins compute their own, and the GUI projector picks up the
-    /// new score by polling `live_version` through its
-    /// `HistorySyncCursor`.
+    /// score write: updates the head checkpoint, bumps the History's
+    /// `live_version` (the history panel's live cursor), and emits one
+    /// [`SessionUpdate::ScoresChanged`] when a value was actually written
+    /// (the GUI score-widget channel). Plugins compute their own scores
+    /// and never observe this signal.
     pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
-        self.history.set_head_scores(raw_score, game_score);
+        if self.history.set_head_scores(raw_score, game_score) {
+            self.apply(SessionUpdate::ScoresChanged);
+        }
     }
 
     /// Stamp a composition score on the open edit `request_id`. Targets the
     /// named edit so two concurrent edits' scores never collide; the score
-    /// transfers onto the checkpoint that edit mints at commit.
+    /// transfers onto the checkpoint that edit mints at commit. Emits one
+    /// [`SessionUpdate::ScoresChanged`] when a value was actually written.
     pub fn set_edit_scores(
         &mut self,
         request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
     ) {
-        self.history.set_edit_scores(request_id, raw_score, game_score);
+        if self.history.set_edit_scores(request_id, raw_score, game_score) {
+            self.apply(SessionUpdate::ScoresChanged);
+        }
     }
 
     /// Stamp a composition score on the committed checkpoint `id` (the
     /// commit-time stamp once the reply for its composed union returns).
+    /// Emits one [`SessionUpdate::ScoresChanged`] when a value was actually
+    /// written.
     pub fn set_checkpoint_scores(
         &mut self,
         id: CheckpointId,
         raw_score: Option<f64>,
         game_score: Option<f64>,
     ) {
-        self.history.set_checkpoint_scores(id, raw_score, game_score);
+        if self.history.set_checkpoint_scores(id, raw_score, game_score) {
+            self.apply(SessionUpdate::ScoresChanged);
+        }
     }
 
     /// Read the `(raw, game)` score of the current composition node (first
@@ -547,6 +565,124 @@ impl Session {
         }
     }
 
+    // ── Selection ─────────────────────────────────────────────────────
+    //
+    // Ambient residue selection (not history-versioned). Invariant
+    // maintained across every mutator: per-entity sets are never left
+    // empty in the outer map. Removing the last residue on an entity
+    // removes the entity entry, so `selected_entities` yields only
+    // entities that currently have at least one selected residue. Each
+    // mutator that changes the selection emits exactly one
+    // [`SessionUpdate::SelectionChanged`] through the funnel.
+
+    /// The current residue selection, keyed by entity. Empty inner sets
+    /// are never present (see the invariant above), so every entry
+    /// carries at least one residue.
+    #[must_use]
+    pub fn selection(&self) -> &BTreeMap<EntityId, BTreeSet<u32>> {
+        &self.selection
+    }
+
+    /// Mark a single residue on `entity` as selected. Idempotent:
+    /// re-selecting an already-selected residue is a no-op (but still
+    /// emits, matching the prior behavior where the mutator raised its
+    /// dirty bits unconditionally).
+    pub fn select_residue(&mut self, entity: EntityId, residue_index: u32) {
+        self.selection
+            .entry(entity)
+            .or_default()
+            .insert(residue_index);
+        self.apply(SessionUpdate::SelectionChanged);
+    }
+
+    /// Mark a single residue on `entity` as deselected. Idempotent on
+    /// already-empty state. If this empties the per-entity set, the
+    /// entity entry is removed from the outer map (sets are never
+    /// left empty).
+    pub fn deselect_residue(&mut self, entity: EntityId, residue_index: u32) {
+        if let Some(set) = self.selection.get_mut(&entity) {
+            set.remove(&residue_index);
+            if set.is_empty() {
+                self.selection.remove(&entity);
+            }
+        }
+        self.apply(SessionUpdate::SelectionChanged);
+    }
+
+    /// Bulk-replace the selection on a single entity. The provided
+    /// residues become the entity's full set (not merged into the
+    /// existing one). An empty input removes the entity entry.
+    pub fn set_residues_on(
+        &mut self,
+        entity: EntityId,
+        residues: impl IntoIterator<Item = u32>,
+    ) {
+        let set: BTreeSet<u32> = residues.into_iter().collect();
+        if set.is_empty() {
+            self.selection.remove(&entity);
+        } else {
+            self.selection.insert(entity, set);
+        }
+        self.apply(SessionUpdate::SelectionChanged);
+    }
+
+    /// Drop the entire selection across all entities.
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.apply(SessionUpdate::SelectionChanged);
+    }
+
+    /// Flip the selected state of `(entity, residue_index)` and return
+    /// the new state (`true` if now selected, `false` if now
+    /// deselected). Maintains the empty-set-removal invariant.
+    pub fn toggle_residue(&mut self, entity: EntityId, residue_index: u32) -> bool {
+        let set = self.selection.entry(entity).or_default();
+        let now_selected = set.insert(residue_index);
+        if !now_selected {
+            set.remove(&residue_index);
+            if set.is_empty() {
+                self.selection.remove(&entity);
+            }
+        }
+        self.apply(SessionUpdate::SelectionChanged);
+        now_selected
+    }
+
+    /// Selected residues on a specific entity, or `None` if the entity
+    /// has no selection. Sets are never empty by invariant, so
+    /// `Some(_)` always carries at least one residue.
+    #[must_use]
+    pub fn selected_residues_on(&self, entity: EntityId) -> Option<&BTreeSet<u32>> {
+        self.selection.get(&entity)
+    }
+
+    /// Point-query: is `(entity, residue_index)` selected?
+    #[must_use]
+    pub fn is_residue_selected(&self, entity: EntityId, residue_index: u32) -> bool {
+        self.selection
+            .get(&entity)
+            .is_some_and(|set| set.contains(&residue_index))
+    }
+
+    /// Iterator over the entities that currently have at least one
+    /// residue selected. Order is `BTreeMap`'s natural key order.
+    pub fn selected_entities(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.selection.keys().copied()
+    }
+
+    /// True when no residue is selected on any entity.
+    #[must_use]
+    pub fn selection_is_empty(&self) -> bool {
+        self.selection.is_empty()
+    }
+
+    /// Total number of selected residues across all entities (sum of
+    /// per-entity set sizes).
+    #[must_use]
+    pub fn selection_total_count(&self) -> usize {
+        self.selection.values().map(|set| set.len()).sum()
+    }
+
     // ── Reset ─────────────────────────────────────────────────────────
 
     /// Drop the entire history graph, clear metadata and transient.
@@ -560,6 +696,12 @@ impl Session {
         self.transient.clear();
         self.allocator = EntityIdAllocator::new();
         self.history = History::new(std::iter::empty(), PathBuf::new());
+        // Selection keys are entity ids from the outgoing assembly; the
+        // incoming one may reuse those ids without referring to the same
+        // entities (the allocator restarts), so a stale selection must be
+        // dropped on every topology swap. Co-located here so both load
+        // paths (puzzle + free-form structure) clear it.
+        self.selection.clear();
         // Drop any changes emitted before the reset — they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
         // so that change survives. The broadcaster's published snapshot is

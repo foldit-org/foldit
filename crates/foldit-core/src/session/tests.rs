@@ -483,21 +483,56 @@ fn jump_checkpoint_emits_head_moved() {
 }
 
 #[test]
-fn set_head_scores_emits_no_scene_change() {
-    // Scores are off-spine (decision B): `set_head_scores` writes the
-    // canonical raw/game numbers to the head checkpoint and bumps the
-    // history's `live_version`, but does not emit a `SessionUpdate`. The
-    // GUI projector consumes the new score via `HistorySyncCursor`;
-    // plugins never see host scores.
+fn set_head_scores_emits_scores_changed() {
+    // A score value write emits `ScoresChanged` (the GUI score widget
+    // consumes it) and also bumps the history's `live_version` (the history
+    // panel's live cursor). Plugins never see this signal.
     let (mut store, _id) = store_with_protein(2);
     let before = store.history().live_version();
     store.set_head_scores(Some(1.0), Some(2.0));
     let changes = store.take_updates();
-    assert!(changes.is_empty(), "set_head_scores emits no SessionUpdate, got {changes:?}");
+    assert!(
+        matches!(changes.as_slice(), [SessionUpdate::ScoresChanged]),
+        "set_head_scores emits exactly ScoresChanged, got {changes:?}",
+    );
     assert_ne!(
         before,
         store.history().live_version(),
-        "set_head_scores bumps live_version so the GuiProjector picks it up",
+        "set_head_scores bumps live_version so the history panel picks it up",
+    );
+}
+
+#[test]
+fn set_head_scores_noop_emits_nothing() {
+    // `(None, None)` writes nothing, so no signal is emitted.
+    let (mut store, _id) = store_with_protein(2);
+    store.set_head_scores(None, None);
+    assert!(
+        store.take_updates().is_empty(),
+        "a no-op score write emits no SessionUpdate",
+    );
+}
+
+#[test]
+fn set_edit_scores_emits_scores_changed() {
+    // Stamping the open edit's composition score rides the spine; an
+    // unknown request id writes nothing and emits nothing.
+    let (mut store, id) = store_with_protein(2);
+    let _ = store.take_updates();
+    let rid = 1u64;
+    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    let _ = store.take_updates();
+
+    store.set_edit_scores(rid, Some(3.0), Some(4.0));
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::ScoresChanged]),
+        "set_edit_scores on an open edit emits ScoresChanged",
+    );
+
+    store.set_edit_scores(999, Some(3.0), Some(4.0));
+    assert!(
+        store.take_updates().is_empty(),
+        "set_edit_scores on an unknown request id emits nothing",
     );
 }
 
@@ -519,5 +554,210 @@ fn reset_clears_pending_then_emits_one_head_moved() {
     assert!(
         matches!(changes.as_slice(), [SessionUpdate::HeadMoved]),
         "reset drops pending changes and emits exactly one HeadMoved, got {changes:?}",
+    );
+}
+
+// ── Ambient selection ─────────────────────────────────────────────────
+
+/// Mint `n` distinct entity ids in sequence. The selection map is keyed
+/// by `EntityId` and does not validate keys against membership, so these
+/// stand in for live entities without loading any.
+fn mint_ids(n: usize) -> Vec<EntityId> {
+    let mut alloc = EntityIdAllocator::new();
+    (0..n).map(|_| alloc.allocate()).collect()
+}
+
+#[test]
+fn new_session_has_empty_selection() {
+    let store = Session::new();
+    let ids = mint_ids(1);
+    assert!(store.selection_is_empty());
+    assert_eq!(store.selection_total_count(), 0);
+    assert!(store.selected_residues_on(ids[0]).is_none());
+}
+
+#[test]
+fn select_residue_is_idempotent() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.select_residue(e, 7);
+    store.select_residue(e, 7);
+    store.select_residue(e, 7);
+    assert_eq!(store.selection_total_count(), 1);
+    assert!(store.is_residue_selected(e, 7));
+    let set = store.selected_residues_on(e).expect("present");
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
+fn clear_selection_empties_the_map() {
+    let mut store = Session::new();
+    let ids = mint_ids(2);
+    store.select_residue(ids[0], 0);
+    store.select_residue(ids[1], 5);
+    assert_eq!(store.selection_total_count(), 2);
+    store.clear_selection();
+    assert!(store.selection_is_empty());
+    assert!(store.selected_residues_on(ids[0]).is_none());
+    assert!(store.selected_residues_on(ids[1]).is_none());
+    assert!(!store.is_residue_selected(ids[0], 0));
+}
+
+#[test]
+fn set_residues_on_replaces_not_merges() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.select_residue(e, 1);
+    store.select_residue(e, 2);
+    store.select_residue(e, 3);
+    store.set_residues_on(e, [10, 11]);
+    let set = store.selected_residues_on(e).expect("present");
+    assert_eq!(set.len(), 2);
+    assert!(set.contains(&10));
+    assert!(set.contains(&11));
+    assert!(!set.contains(&1));
+    assert!(!set.contains(&2));
+    assert!(!set.contains(&3));
+}
+
+#[test]
+fn set_residues_on_empty_removes_entity_entry() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.select_residue(e, 9);
+    store.set_residues_on(e, std::iter::empty());
+    assert!(store.selected_residues_on(e).is_none());
+    assert!(store.selection_is_empty());
+}
+
+#[test]
+fn multi_entity_isolation() {
+    let mut store = Session::new();
+    let ids = mint_ids(2);
+    let a = ids[0];
+    let b = ids[1];
+    store.select_residue(a, 1);
+    store.select_residue(a, 2);
+    store.select_residue(b, 100);
+
+    assert!(store.is_residue_selected(a, 1));
+    assert!(store.is_residue_selected(a, 2));
+    assert!(!store.is_residue_selected(a, 100));
+    assert!(store.is_residue_selected(b, 100));
+    assert!(!store.is_residue_selected(b, 1));
+
+    store.clear_selection();
+    store.select_residue(a, 1);
+    store.set_residues_on(b, [42, 43]);
+    // Mutating B must not have touched A.
+    assert_eq!(store.selected_residues_on(a).expect("present").len(), 1);
+}
+
+#[test]
+fn deselect_last_residue_removes_entity_entry() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.select_residue(e, 0);
+    store.select_residue(e, 1);
+    store.deselect_residue(e, 0);
+    // Set is still non-empty: entry must remain.
+    assert!(store.selected_residues_on(e).is_some());
+    store.deselect_residue(e, 1);
+    // Last residue gone: entity entry must be removed.
+    assert!(store.selected_residues_on(e).is_none());
+    assert!(store.selection_is_empty());
+}
+
+#[test]
+fn deselect_idempotent_on_missing() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    // Deselect a residue that was never selected: no panic, no phantom
+    // entity entry left behind.
+    store.deselect_residue(e, 99);
+    assert!(store.selection_is_empty());
+    store.select_residue(e, 1);
+    store.deselect_residue(e, 99);
+    assert!(store.is_residue_selected(e, 1));
+    assert_eq!(store.selection_total_count(), 1);
+}
+
+#[test]
+fn toggle_residue_round_trips() {
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    // First toggle selects.
+    assert!(store.toggle_residue(e, 3));
+    assert!(store.is_residue_selected(e, 3));
+    // Second toggle deselects and removes the empty entity entry.
+    assert!(!store.toggle_residue(e, 3));
+    assert!(!store.is_residue_selected(e, 3));
+    assert!(store.selected_residues_on(e).is_none());
+    // Toggle on a sibling residue while none are selected: same entity,
+    // but the entry was removed in step 2, so this is a fresh insert.
+    assert!(store.toggle_residue(e, 4));
+    assert!(store.is_residue_selected(e, 4));
+    assert!(!store.is_residue_selected(e, 3));
+}
+
+#[test]
+fn selected_entities_enumerates_only_nonempty() {
+    let mut store = Session::new();
+    let ids = mint_ids(3);
+    store.select_residue(ids[0], 0);
+    store.select_residue(ids[1], 0);
+    store.select_residue(ids[2], 0);
+    store.deselect_residue(ids[1], 0);
+    let ents: Vec<_> = store.selected_entities().collect();
+    // BTreeMap key order is by `EntityId`'s `Ord`, which for the molex
+    // newtype is the underlying u32 order. The allocator hands out ids in
+    // sequence so ids[0] < ids[1] < ids[2]; after removing ids[1],
+    // `selected_entities` enumerates ids[0], ids[2] in that order.
+    assert_eq!(ents, vec![ids[0], ids[2]]);
+}
+
+#[test]
+fn selection_mutation_emits_one_selection_changed() {
+    // Each selection mutator funnels through `apply`, emitting exactly one
+    // `SelectionChanged` (the App tick turns this into the viso highlight
+    // push + SELECTION/ACTIONS dirty). The signal is unconditional, even
+    // for an idempotent re-select, mirroring the prior inline dirty-raise.
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+
+    store.select_residue(e, 1);
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        "select_residue emits exactly SelectionChanged",
+    );
+
+    store.select_residue(e, 1);
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        "an idempotent re-select still emits SelectionChanged",
+    );
+
+    store.clear_selection();
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        "clear_selection emits exactly SelectionChanged",
+    );
+}
+
+#[test]
+fn reset_clears_selection() {
+    // Selection is ambient, not history-versioned, but a topology swap
+    // (`reset`) must drop it: the incoming assembly can reuse the outgoing
+    // entity ids without referring to the same entities.
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.select_residue(e, 1);
+    store.select_residue(e, 2);
+    assert!(!store.selection_is_empty());
+
+    store.reset();
+    assert!(
+        store.selection_is_empty(),
+        "reset drops the stale selection on a topology swap",
     );
 }

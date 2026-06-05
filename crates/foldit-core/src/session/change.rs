@@ -30,4 +30,18 @@ pub enum SessionUpdate {
     PreviewAdded,
     /// A preview (transient) entity was discarded from the overlay.
     PreviewDiscarded,
+    /// A head / edit / checkpoint score *value* changed. Signal-only,
+    /// like the rest of the enum: the score numbers live on the
+    /// `Document`, and consumers re-read them (the GUI score widget from
+    /// the head/composition score; the history panel from its live
+    /// cursor). A score is not a scene mutation, so the render projector
+    /// and the plugin broadcaster ignore it.
+    ScoresChanged,
+    /// The residue selection changed. Signal-only: the selected residues
+    /// live on the `Document`, and consumers re-read them (the GUI
+    /// selection mirror + selection-gated action catalog; viso's
+    /// per-entity highlight). A selection is ambient, not a geometry
+    /// mutation, so the render projector and the plugin broadcaster
+    /// ignore it.
+    SelectionChanged,
 }

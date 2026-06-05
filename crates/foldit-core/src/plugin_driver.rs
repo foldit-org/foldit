@@ -880,8 +880,10 @@ impl PluginBroadcaster {
 
     /// Whether a change is a non-tentative observable mutation.
     /// Tentative edits (live per-cycle frames) are filtered out: plugins
-    /// never see live frames. (Score updates aren't on the spine at all,
-    /// so the match has no arm for them.)
+    /// never see live frames. Signal-only updates that aren't scene
+    /// mutations (`ScoresChanged`, `SelectionChanged`) have no arm here,
+    /// so they're non-observable: plugins compute their own scores and
+    /// never see the residue selection.
     fn is_observable(change: &SessionUpdate) -> bool {
         matches!(
             change,

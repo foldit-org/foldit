@@ -37,7 +37,7 @@ use crate::plugin_driver::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamStartIntent,
 };
 use crate::render_projector::{self, RenderProjector};
-use crate::session::{EntityOrigin, Session, SessionError};
+use crate::session::{EntityOrigin, Session, SessionError, SessionUpdate};
 
 fn score_for_mode(raw: Option<f64>, game: Option<f64>, mode: ScoringMode) -> Option<f64> {
     match mode {
@@ -326,11 +326,6 @@ pub struct App {
     /// once the first plugin score lands. Mirrors the desktop runner's
     /// old field.
     awaiting_initial_score: bool,
-    /// Empty inner sets are never stored: removing the last residue
-    /// on an entity removes the entity entry, so iterating
-    /// `selected_entities` yields only entities that currently have
-    /// at least one selected residue.
-    selection: BTreeMap<EntityId, BTreeSet<u32>>,
     /// Last per-residue score vector pushed to viso, keyed by raw
     /// entity id. Used to skip pushing identical scores every tick: the
     /// scorer streams the same value continuously at idle, and a repeat
@@ -387,7 +382,6 @@ impl App {
             frontend: FrontendState::new(),
             app_state: AppState::Loading,
             awaiting_initial_score: false,
-            selection: BTreeMap::new(),
             last_pushed_scores: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
@@ -792,8 +786,8 @@ impl App {
                 // ESC (selection already empty) cancels in-flight
                 // streams + previews. Keeps a selection-clear gesture
                 // from accidentally dropping work-in-flight.
-                if !self.selection_is_empty() {
-                    self.clear_selection();
+                if !self.store.selection_is_empty() {
+                    self.store.clear_selection();
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
                     self.plugin_driver.cancel_all_active_streams();
@@ -1060,8 +1054,8 @@ impl App {
         }
 
         if pending_escape {
-            if !self.selection_is_empty() {
-                self.clear_selection();
+            if !self.store.selection_is_empty() {
+                self.store.clear_selection();
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 self.plugin_driver.cancel_all_active_streams();
@@ -1290,7 +1284,7 @@ impl App {
             // param conversion, and `DispatchContext` build all live behind
             // `dispatch_op` now, so this path names no orchestrator type.
             let intent = DispatchIntent {
-                selection: self.selection.clone(),
+                selection: self.store.selection().clone(),
                 focused_entity_id,
                 op_id: op.op_id.clone(),
                 params: op.params,
@@ -1553,11 +1547,13 @@ impl App {
         let title = self.structure_title();
         self.store.reset();
         self.plugin_driver.reset_for_new_structure();
-        // Topology swap: selection keys are entity ids from the
-        // outgoing assembly; the new puzzle's entity ids may collide
-        // numerically without referring to the same entities, so clear.
-        // Going through the mutator self-sets SELECTION dirty.
-        self.clear_selection();
+        // Topology swap: `Session::reset` already cleared the selection
+        // (entity ids from the outgoing assembly can collide numerically
+        // with the incoming ones without referring to the same entities).
+        // Emit `SelectionChanged` explicitly so the tick re-pushes the
+        // now-empty highlight to viso and raises SELECTION dirty; `reset`
+        // itself only emits `HeadMoved`.
+        self.store.clear_selection();
         // Same collision concern for the per-residue score cache: a new
         // entity reusing an old raw id with coincidentally-equal scores
         // must still push, so drop the cache on the topology swap.
@@ -1849,7 +1845,7 @@ impl App {
     }
 
     fn populate_frontend(&mut self) {
-        let selected_count = self.selection_total_count();
+        let selected_count = self.store.selection_total_count();
         let engine = match &self.engine {
             Some(e) => e,
             None => return,
@@ -1943,7 +1939,7 @@ impl App {
             let store = &self.store;
             let actions = self.plugin_driver.actions_catalog(
                 focus,
-                &self.selection,
+                store.selection(),
                 |id| store.entity_type(id),
             );
             self.frontend.set_actions(actions);
@@ -1973,7 +1969,8 @@ impl App {
         }
         if app_dirty.contains(DirtyFlags::SELECTION) {
             let entries: Vec<foldit_gui::EntitySelection> = self
-                .selection
+                .store
+                .selection()
                 .iter()
                 .map(|(eid, residues)| foldit_gui::EntitySelection {
                     entity_id: eid.raw(),
@@ -2071,28 +2068,61 @@ impl App {
         // 1. Plugin updates.
         self.apply_backend_updates();
 
-        // 2-3. Drain the spine once and route to both projectors. The
-        //      tick is the sole drain — handlers used to call
-        //      `pump_scene_changes` per-event, but that race-condition'd
-        //      against the render projector reading the same spine, so
-        //      the per-handler pumps were removed in RX13.
+        // 2-3. Drain the SessionUpdate stream once and route to both
+        //      projectors. The tick is the sole drain. Handlers used to call
+        //      `pump_scene_changes` per-event, but that race-conditioned
+        //      against the render projector reading the same update queue, so
+        //      the per-handler pumps were removed.
         let changes = self.store.take_updates();
-        let n_changes = changes.len();
+        // A ScoresChanged update signals the GUI score widget and a
+        // SelectionChanged update signals the selection mirror + viso
+        // highlight, but neither is a scene mutation: the render projector
+        // and the rescore trigger below must treat a score-only /
+        // selection-only batch as empty. Republishing geometry on such a
+        // reply is wasted work (and forces a spurious full rebuild on a
+        // topology tick); re-querying scores in response would loop.
+        let render_changes = changes
+            .iter()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    SessionUpdate::ScoresChanged | SessionUpdate::SelectionChanged
+                )
+            })
+            .count();
+        // A selection change is not broadcast to plugins and does not
+        // republish geometry; it drives the viso highlight push + the
+        // GUI selection/actions dirty. Source the highlight from the
+        // authoritative `Session` selection (disjoint borrows: `&mut
+        // self.engine` + `&self.store`).
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::SelectionChanged))
+        {
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_selection(self.store.selection());
+            }
+            self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
+        }
         if !changes.is_empty() {
+            // The broadcaster self-filters score-only batches (scores are
+            // not an observable mutation for plugins); a no-op call is cheap.
             if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
                 self.plugin_driver
                     .broadcaster
                     .broadcast(&changes, &self.store, orch);
             }
-            if let Some(engine) = self.engine.as_mut() {
-                // A topology-replace publish wipes viso's per-entity score
-                // map. Drop the per-residue cache that shadows it so the
-                // next score reply re-pushes instead of being suppressed as
-                // an unchanged-value no-op (which would leave the Score
-                // scheme rendering flat mid-gray until the score happens to
-                // change).
-                if self.render_projector.project(&changes, &self.store, engine) {
-                    self.last_pushed_scores.clear();
+            if render_changes > 0 {
+                if let Some(engine) = self.engine.as_mut() {
+                    // A topology-replace publish wipes viso's per-entity score
+                    // map. Drop the per-residue cache that shadows it so the
+                    // next score reply re-pushes instead of being suppressed as
+                    // an unchanged-value no-op (which would leave the Score
+                    // scheme rendering flat mid-gray until the score happens to
+                    // change).
+                    if self.render_projector.project(&changes, &self.store, engine) {
+                        self.last_pushed_scores.clear();
+                    }
                 }
             }
         }
@@ -2118,7 +2148,7 @@ impl App {
                 // composition, so its reply attributes to the edit; per-edit
                 // exactness for any other case lands at commit via the
                 // commit-stamp.
-                if n_changes > 0 {
+                if render_changes > 0 {
                     self.request_scores();
                 }
                 self.poll_async_scores();
@@ -2407,25 +2437,6 @@ impl App {
         }
     }
 
-    // ── Selection authority ──
-    //
-    // Apply / clear / toggle / query helpers over [`App::selection`].
-    // Invariant maintained across every mutator: per-entity sets are
-    // never left empty in the outer map. Removing the last residue on
-    // an entity removes the entity entry.
-
-    /// Push [`App::selection`] to the engine, which owns the per-entity
-    /// to flat-GPU-bitset derivation against its always-current residue
-    /// offsets (re-derived on every mesh rebuild, so the highlight cannot
-    /// go stale relative to a shifting residue space). No-op before an
-    /// engine is attached.
-    fn flush_selection_to_viso(&mut self) {
-        let Some(engine) = self.engine.as_mut() else {
-            return;
-        };
-        engine.set_selection(&self.selection);
-    }
-
     /// Apply a viso click-event to the selection store. Empty-area
     /// clicks clear the selection; non-empty expansions either replace
     /// (no modifier) or toggle (shift held) on a per-residue basis.
@@ -2436,119 +2447,20 @@ impl App {
     fn apply_click_to_selection(&mut self, click: &ClickEvent) {
         match classify_click_for_selection(click) {
             ClickSelectionAction::Clear => {
-                self.clear_selection();
+                self.store.clear_selection();
             }
             ClickSelectionAction::Replace(residues) => {
-                self.clear_selection();
+                self.store.clear_selection();
                 for (entity, residue) in residues {
-                    self.select_residue(entity, residue);
+                    self.store.select_residue(entity, residue);
                 }
             }
             ClickSelectionAction::Toggle(residues) => {
                 for (entity, residue) in residues {
-                    let _ = self.toggle_residue(entity, residue);
+                    let _ = self.store.toggle_residue(entity, residue);
                 }
             }
         }
-    }
-
-    /// Mark a single residue on `entity` as selected. Idempotent:
-    /// re-selecting an already-selected residue is a no-op.
-    pub(crate) fn select_residue(&mut self, entity: EntityId, residue_index: u32) {
-        self.selection
-            .entry(entity)
-            .or_default()
-            .insert(residue_index);
-        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
-        self.flush_selection_to_viso();
-    }
-
-    /// Mark a single residue on `entity` as deselected. Idempotent on
-    /// already-empty state. If this empties the per-entity set, the
-    /// entity entry is removed from the outer map (sets are never
-    /// left empty).
-    pub(crate) fn deselect_residue(&mut self, entity: EntityId, residue_index: u32) {
-        if let Some(set) = self.selection.get_mut(&entity) {
-            set.remove(&residue_index);
-            if set.is_empty() {
-                self.selection.remove(&entity);
-            }
-        }
-        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
-        self.flush_selection_to_viso();
-    }
-
-    /// Bulk-replace the selection on a single entity. The provided
-    /// residues become the entity's full set (not merged into the
-    /// existing one). An empty input removes the entity entry.
-    pub(crate) fn set_residues_on(
-        &mut self,
-        entity: EntityId,
-        residues: impl IntoIterator<Item = u32>,
-    ) {
-        let set: BTreeSet<u32> = residues.into_iter().collect();
-        if set.is_empty() {
-            self.selection.remove(&entity);
-        } else {
-            self.selection.insert(entity, set);
-        }
-        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
-        self.flush_selection_to_viso();
-    }
-
-    /// Drop the entire selection across all entities.
-    pub(crate) fn clear_selection(&mut self) {
-        self.selection.clear();
-        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
-        self.flush_selection_to_viso();
-    }
-
-    /// Flip the selected state of `(entity, residue_index)` and return
-    /// the new state (`true` if now selected, `false` if now
-    /// deselected). Maintains the empty-set-removal invariant.
-    pub(crate) fn toggle_residue(&mut self, entity: EntityId, residue_index: u32) -> bool {
-        let set = self.selection.entry(entity).or_default();
-        let now_selected = set.insert(residue_index);
-        if !now_selected {
-            set.remove(&residue_index);
-            if set.is_empty() {
-                self.selection.remove(&entity);
-            }
-        }
-        self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
-        self.flush_selection_to_viso();
-        now_selected
-    }
-
-    /// Selected residues on a specific entity, or `None` if the entity
-    /// has no selection. Sets are never empty by invariant, so
-    /// `Some(_)` always carries at least one residue.
-    pub(crate) fn selected_residues_on(&self, entity: EntityId) -> Option<&BTreeSet<u32>> {
-        self.selection.get(&entity)
-    }
-
-    /// Point-query: is `(entity, residue_index)` selected?
-    pub(crate) fn is_residue_selected(&self, entity: EntityId, residue_index: u32) -> bool {
-        self.selection
-            .get(&entity)
-            .is_some_and(|set| set.contains(&residue_index))
-    }
-
-    /// Iterator over the entities that currently have at least one
-    /// residue selected. Order is `BTreeMap`'s natural key order.
-    pub(crate) fn selected_entities(&self) -> impl Iterator<Item = EntityId> + '_ {
-        self.selection.keys().copied()
-    }
-
-    /// True when no residue is selected on any entity.
-    pub(crate) fn selection_is_empty(&self) -> bool {
-        self.selection.is_empty()
-    }
-
-    /// Total number of selected residues across all entities (sum of
-    /// per-entity set sizes).
-    pub(crate) fn selection_total_count(&self) -> usize {
-        self.selection.values().map(|set| set.len()).sum()
     }
 
     /// Apply a panel-originated selection mutation: wholesale replace
@@ -2559,18 +2471,11 @@ impl App {
     /// Entries that don't match any live entity are dropped — panels
     /// can race a structure swap, and a stale id should clear silently
     /// rather than fail loudly. An empty `entries` list clears the
-    /// selection entirely.
-    ///
-    /// Both `clear_selection` and `set_residues_on` self-set
-    /// [`foldit_gui::DirtyFlags::SELECTION`] | [`foldit_gui::DirtyFlags::ACTIONS`]
-    /// and call `flush_selection_to_viso`, so the GPU residue selection,
-    /// the frontend mirror, and the selection-gated action catalog stay
-    /// in lockstep without an extra dirty-flag flush here. Per-entity
-    /// residue lists are collected into
+    /// selection entirely. Per-entity residue lists are collected into
     /// `BTreeSet`, so duplicate or out-of-order indices in the wire
     /// payload are silently normalized.
     pub fn handle_set_selection(&mut self, entries: Vec<foldit_gui::EntitySelection>) {
-        self.clear_selection();
+        self.store.clear_selection();
         for entry in entries {
             let Some(entity) = self.store.ids().find(|id| id.raw() == entry.entity_id) else {
                 log::trace!(
@@ -2579,7 +2484,7 @@ impl App {
                 );
                 continue;
             };
-            self.set_residues_on(entity, entry.residues);
+            self.store.set_residues_on(entity, entry.residues);
         }
     }
 }
@@ -2765,173 +2670,16 @@ mod selection_tests {
     }
 
     #[test]
-    fn new_app_has_empty_selection() {
-        let app = fresh_app();
-        let ids = mint_ids(1);
-        assert!(app.selection_is_empty());
-        assert_eq!(app.selection_total_count(), 0);
-        assert!(app.selected_residues_on(ids[0]).is_none());
-    }
-
-    #[test]
-    fn select_residue_is_idempotent() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        app.select_residue(e, 7);
-        app.select_residue(e, 7);
-        app.select_residue(e, 7);
-        assert_eq!(app.selection_total_count(), 1);
-        assert!(app.is_residue_selected(e, 7));
-        let set = app.selected_residues_on(e).expect("present");
-        assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn clear_selection_empties_the_map() {
-        let mut app = fresh_app();
-        let ids = mint_ids(2);
-        app.select_residue(ids[0], 0);
-        app.select_residue(ids[1], 5);
-        assert_eq!(app.selection_total_count(), 2);
-        app.clear_selection();
-        assert!(app.selection_is_empty());
-        assert!(app.selected_residues_on(ids[0]).is_none());
-        assert!(app.selected_residues_on(ids[1]).is_none());
-        assert!(!app.is_residue_selected(ids[0], 0));
-    }
-
-    #[test]
-    fn set_residues_on_replaces_not_merges() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        app.select_residue(e, 1);
-        app.select_residue(e, 2);
-        app.select_residue(e, 3);
-        app.set_residues_on(e, [10, 11]);
-        let set = app.selected_residues_on(e).expect("present");
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&10));
-        assert!(set.contains(&11));
-        assert!(!set.contains(&1));
-        assert!(!set.contains(&2));
-        assert!(!set.contains(&3));
-    }
-
-    #[test]
-    fn set_residues_on_empty_removes_entity_entry() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        app.select_residue(e, 9);
-        app.set_residues_on(e, std::iter::empty());
-        assert!(app.selected_residues_on(e).is_none());
-        assert!(app.selection_is_empty());
-    }
-
-    #[test]
-    fn multi_entity_isolation() {
-        let mut app = fresh_app();
-        let ids = mint_ids(2);
-        let a = ids[0];
-        let b = ids[1];
-        app.select_residue(a, 1);
-        app.select_residue(a, 2);
-        app.select_residue(b, 100);
-
-        assert!(app.is_residue_selected(a, 1));
-        assert!(app.is_residue_selected(a, 2));
-        assert!(!app.is_residue_selected(a, 100));
-        assert!(app.is_residue_selected(b, 100));
-        assert!(!app.is_residue_selected(b, 1));
-
-        app.clear_selection();
-        app.select_residue(a, 1);
-        app.set_residues_on(b, [42, 43]);
-        // Mutating B must not have touched A.
-        assert_eq!(app.selected_residues_on(a).expect("present").len(), 1);
-    }
-
-    #[test]
-    fn deselect_last_residue_removes_entity_entry() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        app.select_residue(e, 0);
-        app.select_residue(e, 1);
-        app.deselect_residue(e, 0);
-        // Set is still non-empty: entry must remain.
-        assert!(app.selected_residues_on(e).is_some());
-        app.deselect_residue(e, 1);
-        // Last residue gone: entity entry must be removed.
-        assert!(app.selected_residues_on(e).is_none());
-        assert!(app.selection_is_empty());
-    }
-
-    #[test]
-    fn deselect_idempotent_on_missing() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        // Deselect a residue that was never selected: no panic, no
-        // phantom entity entry left behind.
-        app.deselect_residue(e, 99);
-        assert!(app.selection_is_empty());
-        app.select_residue(e, 1);
-        app.deselect_residue(e, 99);
-        assert!(app.is_residue_selected(e, 1));
-        assert_eq!(app.selection_total_count(), 1);
-    }
-
-    #[test]
-    fn toggle_residue_round_trips() {
-        let mut app = fresh_app();
-        let ids = mint_ids(1);
-        let e = ids[0];
-        // First toggle selects.
-        assert!(app.toggle_residue(e, 3));
-        assert!(app.is_residue_selected(e, 3));
-        // Second toggle deselects and removes the empty entity entry.
-        assert!(!app.toggle_residue(e, 3));
-        assert!(!app.is_residue_selected(e, 3));
-        assert!(app.selected_residues_on(e).is_none());
-        // Toggle on a sibling residue while none are selected: same
-        // entity, but the entry was removed in step 2, so this is a
-        // fresh insert.
-        assert!(app.toggle_residue(e, 4));
-        assert!(app.is_residue_selected(e, 4));
-        assert!(!app.is_residue_selected(e, 3));
-    }
-
-    #[test]
-    fn selected_entities_enumerates_only_nonempty() {
-        let mut app = fresh_app();
-        let ids = mint_ids(3);
-        app.select_residue(ids[0], 0);
-        app.select_residue(ids[1], 0);
-        app.select_residue(ids[2], 0);
-        app.deselect_residue(ids[1], 0);
-        let ents: Vec<_> = app.selected_entities().collect();
-        // BTreeMap key order is by `EntityId`'s `Ord`, which for the
-        // molex newtype is the underlying u32 order. The allocator
-        // hands out ids in sequence so ids[0] < ids[1] < ids[2]; after
-        // removing ids[1], `selected_entities` enumerates ids[0],
-        // ids[2] in that order.
-        assert_eq!(ents, vec![ids[0], ids[2]]);
-    }
-
-    #[test]
     fn handle_set_selection_clears_on_empty_input() {
         let mut app = fresh_app();
         let ids = mint_ids(1);
-        app.select_residue(ids[0], 7);
-        assert!(!app.selection_is_empty());
+        app.store.select_residue(ids[0], 7);
+        assert!(!app.store.selection_is_empty());
         // Empty entries: clear (`clear_selection` always runs first; no
         // entry loop body) — independent of whether the empty store
         // could even resolve a raw id.
         app.handle_set_selection(Vec::new());
-        assert!(app.selection_is_empty());
+        assert!(app.store.selection_is_empty());
     }
 
     #[test]
@@ -2939,7 +2687,7 @@ mod selection_tests {
         let mut app = fresh_app();
         let ids = mint_ids(1);
         // Seed a non-empty selection so we can prove the clear ran.
-        app.select_residue(ids[0], 9);
+        app.store.select_residue(ids[0], 9);
         // The test stub has no loaded structure, so `self.store.ids()`
         // is empty and every raw id is unresolvable. The mutator clears
         // the existing selection and drops the unknown entries.
@@ -2953,7 +2701,7 @@ mod selection_tests {
                 residues: vec![5],
             },
         ]);
-        assert!(app.selection_is_empty());
+        assert!(app.store.selection_is_empty());
     }
 
     /// One committed Bulk entity, promoted into history so the store has a

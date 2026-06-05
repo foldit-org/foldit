@@ -404,15 +404,17 @@ impl History {
     /// committed node. Targeting the named edit (not "the first open one")
     /// keeps two concurrent edits' scores from colliding. Bumps
     /// `live_version` only; no DAG topology change. No-op when `request_id`
-    /// names no open edit, or on `(None, None)`.
+    /// names no open edit, or on `(None, None)`. Returns `true` when a
+    /// value was actually written (so the caller can emit a score-changed
+    /// signal only on a real change).
     pub fn set_edit_scores(
         &mut self,
         request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
-    ) {
+    ) -> bool {
         if raw_score.is_none() && game_score.is_none() {
-            return;
+            return false;
         }
         if let Some(edit) = self.pending.get_mut(&request_id) {
             if let Some(s) = raw_score {
@@ -422,22 +424,26 @@ impl History {
                 edit.game_score = Some(s);
             }
             self.live_version = self.live_version.saturating_add(1);
+            return true;
         }
+        false
     }
 
     /// Stamp scores on the committed checkpoint `id` in place. Used by the
     /// commit-time composition score: the checkpoint composes the committed
     /// union at commit, the score lands once the reply returns, and this
     /// stamps the now-immutable node it was scored for. Bumps `live_version`
-    /// only. No-op on unknown `id` or `(None, None)`.
+    /// only. No-op on unknown `id` or `(None, None)`. Returns `true` when a
+    /// value was actually written (so the caller can emit a score-changed
+    /// signal only on a real change).
     pub fn set_checkpoint_scores(
         &mut self,
         id: CheckpointId,
         raw_score: Option<f64>,
         game_score: Option<f64>,
-    ) {
+    ) -> bool {
         if raw_score.is_none() && game_score.is_none() {
-            return;
+            return false;
         }
         if let Some(ckpt) = self.checkpoints.checkpoints.get_mut(id) {
             if let Some(s) = raw_score {
@@ -447,7 +453,9 @@ impl History {
                 ckpt.game_score = Some(s);
             }
             self.live_version = self.live_version.saturating_add(1);
+            return true;
         }
+        false
     }
 
     /// Read the `(raw, game)` score of the current composition node: the
@@ -697,10 +705,12 @@ impl History {
     /// This is the right call for cycle-zero scoring during session init
     /// (Rosetta streams a score before the user takes any action). It
     /// avoids the pre-fix behavior where every init cycle pushed a fresh
-    /// checkpoint on top of root + AddEntity.
-    pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
+    /// checkpoint on top of root + AddEntity. Returns `true` when a value
+    /// was actually written (so the caller can emit a score-changed signal
+    /// only on a real change); `false` on the `(None, None)` no-op.
+    pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) -> bool {
         if raw_score.is_none() && game_score.is_none() {
-            return;
+            return false;
         }
         let head_id = self.checkpoints.head;
         let ckpt = self
@@ -719,6 +729,7 @@ impl History {
         if cfg!(debug_assertions) {
             self.assert_invariant();
         }
+        true
     }
 
     // ── Action-lock helpers ───────────────────────────────────────────
