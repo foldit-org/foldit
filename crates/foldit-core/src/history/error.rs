@@ -1,6 +1,4 @@
-//! `HistoryError` - typed refusals from the mutation surface, plus
-//! the `BestKind` enum that names which "best" cursor a recompute
-//! affected.
+//! `HistoryError` - typed refusals from the mutation surface.
 
 use molex::entity::molecule::id::EntityId;
 
@@ -50,8 +48,9 @@ pub enum HistoryError {
     #[error("branch hint required: head has multiple children")]
     AmbiguousBranch,
     /// `commit_action` / `update_action` mismatch - the active entity
-    /// isn't the one the caller addressed. (Today only fires on
-    /// internal misuse; reserved for the section-3 surface.)
+    /// isn't the one the caller addressed. Reserved for the
+    /// entity-mismatch guard path; only fires on internal misuse today.
+    #[allow(dead_code)]
     #[error("entity mismatch (expected {}, got {})", expected.raw(), got.raw())]
     EntityMismatch {
         expected: EntityId,
@@ -64,13 +63,4 @@ pub enum HistoryError {
     /// `add_entity` was called with an id that already has a lane.
     #[error("entity {} already has a lane", entity.raw())]
     EntityAlreadyExists { entity: EntityId },
-}
-
-/// Which best cursor was recomputed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BestKind {
-    /// Highest raw Rosetta score.
-    Best,
-    /// Highest filter-passing raw score.
-    BestThatCounts,
 }

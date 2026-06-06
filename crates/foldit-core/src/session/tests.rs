@@ -5,6 +5,7 @@ use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::protein::ProteinEntity;
 use molex::entity::molecule::polymer::Residue;
 use molex::Element;
+use molex::MoleculeType;
 
 fn mk_atom() -> Atom {
     Atom {

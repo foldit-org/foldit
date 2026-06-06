@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
-use molex::{Assembly, MoleculeEntity, MoleculeType};
+use molex::{Assembly, MoleculeEntity};
 use viso::Focus;
 use viso::options::VisoOptions;
 
@@ -375,17 +375,6 @@ impl Session {
         self.history.sole_pending_request_id()
     }
 
-    /// Build the assembly composing the open edit `request_id` (its
-    /// tentative lanes over its peers' committed heads), for a composition
-    /// score targeted at that edit. `None` if `request_id` names no open
-    /// edit.
-    #[must_use]
-    pub fn edit_composition_assembly(&self, request_id: u64) -> Option<Assembly> {
-        self.history
-            .edit_composition_entities(request_id)
-            .map(Assembly::from_arcs)
-    }
-
     /// Build the assembly composing committed checkpoint `id` (its
     /// `entity_heads`), for a commit-time composition score. `None` if `id`
     /// is unknown.
@@ -503,29 +492,6 @@ impl Session {
         &self.term_names
     }
 
-    // ── Backend helpers ───────────────────────────────────────────────
-
-    /// Iterate committed (non-preview) protein entities together with
-    /// their metadata. Backend ops drive their work from this iterator;
-    /// previews are filtered out by construction (they're not in
-    /// `entity_heads`).
-    pub fn proteins(&self) -> impl Iterator<Item = (EntityId, &EntityMetadata, &MoleculeEntity)> {
-        let head_id = self.history.checkpoints().head();
-        let head = self.history.checkpoint(head_id);
-        let entity_heads = head.map(|h| &h.entity_heads);
-        entity_heads
-            .into_iter()
-            .flat_map(move |heads| heads.iter())
-            .filter_map(move |(eid, snap_id)| {
-                let meta = self.metadata.get(eid)?.as_ref();
-                let snap = self.history.snapshot(*eid, *snap_id)?;
-                let entity: &MoleculeEntity = snap.payload.as_ref();
-                if entity.molecule_type() != MoleculeType::Protein {
-                    return None;
-                }
-                Some((*eid, meta, entity))
-            })
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

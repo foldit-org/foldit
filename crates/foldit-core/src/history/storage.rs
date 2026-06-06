@@ -203,11 +203,5 @@ impl CheckpointGraph {
     pub fn is_empty(&self) -> bool {
         self.checkpoints.is_empty()
     }
-
-    /// Read-only access to the budget config.
-    #[must_use]
-    pub fn budget(&self) -> HistoryBudget {
-        self.budget
-    }
 }
 

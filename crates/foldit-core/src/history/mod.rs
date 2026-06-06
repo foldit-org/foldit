@@ -522,38 +522,6 @@ impl History {
         }
     }
 
-    /// The entities composing the open edit `request_id`: the committed
-    /// graph head's membership, reading the edit's tentative lane for each
-    /// entity the edit holds and the committed head snapshot for every peer.
-    /// This is exactly the composition `do_commit` will mint, so scoring it
-    /// attributes correctly even while peer edits are open. `None` when
-    /// `request_id` names no open edit.
-    #[must_use]
-    pub fn edit_composition_entities(
-        &self,
-        request_id: u64,
-    ) -> Option<Vec<Arc<MoleculeEntity>>> {
-        let edit = self.pending.get(&request_id)?;
-        let head = &self.checkpoints.checkpoints[self.checkpoints.head];
-        let mut out = Vec::with_capacity(head.entity_heads.len());
-        for (eid, committed_snap) in &head.entity_heads {
-            // Overlay this edit's tentative for entities it holds; read the
-            // committed head snapshot for peers (so a peer's open edit never
-            // leaks into this composition).
-            let snap_id = edit
-                .lanes
-                .iter()
-                .find(|(e, _)| e == eid)
-                .map_or(*committed_snap, |(_, s)| *s);
-            if let Some(lane) = self.lanes.get(eid) {
-                if let Some(snap) = lane.snapshot(snap_id) {
-                    out.push(Arc::clone(&snap.payload));
-                }
-            }
-        }
-        Some(out)
-    }
-
     /// The entities composing committed checkpoint `id` (its `entity_heads`
     /// snapshots), in canonical order. `None` when `id` is unknown.
     #[must_use]
@@ -723,6 +691,7 @@ impl History {
     }
 
     /// Replace the eviction budget.
+    #[cfg(test)]
     pub fn set_budget(&mut self, budget: HistoryBudget) {
         self.checkpoints.budget = budget;
     }
