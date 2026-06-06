@@ -1,4 +1,5 @@
 use super::*;
+use crate::history::CheckpointKind;
 use molex::entity::molecule::atom::Atom;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::protein::ProteinEntity;

@@ -134,6 +134,22 @@ impl ScoreReport {
     }
 }
 
+/// Convert a rosetta raw score (REU) to foldit's game-mode display number.
+/// Verbatim port of `rosetta_score_to_game_score_either(use_minimum=true,
+/// internal=false)` (`rosetta_util.cc:2702`, constants at lines 2662-2664).
+/// The linear map is universal foldit policy, not rosetta-specific, so it
+/// lives next to the score-view selector that picks which representation
+/// reaches the GUI (game when a puzzle is loaded, raw otherwise). Applied
+/// to both whole-assembly and composition scores so neither ever displays
+/// raw REU.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn rosetta_raw_to_game(raw: f64) -> f64 {
+    const SCORE_OFFSET: f64 = 800.0;
+    const SCORE_SCALE: f64 = 10.0;
+    const SCORE_MINIMUM: f64 = 0.0;
+    ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM)
+}
+
 /// Parse a Rosetta `.wts` weights file into `term_name -> weight`. Keeps
 /// only lines that split into exactly two whitespace tokens whose second
 /// parses as `f32` (the `term value` rows). Blank lines, `#` comments,

@@ -1,0 +1,417 @@
+use foldit_gui::HistoryCommand;
+use molex::entity::molecule::id::EntityId;
+
+use crate::app::App;
+use crate::gui_projector::project_history;
+use crate::session::SessionError;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::history::CheckpointKind;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome};
+#[cfg(not(target_arch = "wasm32"))]
+use viso::Focus;
+
+/// Outcome of a [`HistoryCommand`] dispatch — drives the per-frame
+/// follow-up the dispatcher must run (republish to viso, mark dirty,
+/// or nothing at all).
+enum HistoryOutcome {
+    /// Checkpoint head moved; rerun [`App::after_head_move`].
+    HeadMoved,
+    /// Curation flag changed (pin / unpin / exclude from best). No
+    /// head move; just mark `ACTIONS` dirty so the GUI reflects it.
+    Curated,
+    /// The command was a no-op (e.g., undo at root). No follow-up.
+    Noop,
+}
+
+impl App {
+    // ── Backend update processing ──
+
+    pub fn apply_backend_updates(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let events = self.runner_client.drain_op_events();
+            if events.is_empty() {
+                return;
+            }
+
+            // Every branch below routes through the mutation funnel, which
+            // emits the covering `SessionUpdate`: a mid-stream update emits
+            // a tentative `Edit`, a commit emits `HeadMoved` (+ a deferred
+            // `ScoresChanged` from the commit-stamp), an abort emits its own
+            // update. The GUI consumer derives its dirty set from that batch,
+            // so no explicit raise is needed here.
+            for event in events {
+                match event {
+                    OpEvent::Update { token, assembly } => {
+                        self.store.apply_streaming_assembly(&assembly, None, token);
+                    }
+                    OpEvent::Commit { token, assembly } => {
+                        if let Some(token) = token {
+                            if self.store.apply_streaming_assembly(&assembly, None, token) {
+                                // Stream finished: commit the tentative so
+                                // the partial result becomes a permanent
+                                // undo entry, then score the committed
+                                // union so the new checkpoint gets a
+                                // correctly-attributed score even while a
+                                // peer edit is still open.
+                                match self.store.commit_action(token) {
+                                    Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+                                    Err(e) => log::warn!("commit_action failed: {e}"),
+                                }
+                                // The edit's correlation id is now spent;
+                                // drop any lingering composition target.
+                                let _ = self.score_targets.remove(&token);
+                            }
+                        }
+                    }
+                    OpEvent::Abort { token, reason } => {
+                        // Spontaneous failure: never commits; aborts
+                        // exactly the edit this stream owns. A terminal
+                        // with no open edit, or whose edit already
+                        // committed, is a no-op.
+                        if let Some(token) = token {
+                            if self.store.is_pending(token) {
+                                if let Err(e) = self.store.abort_action(token) {
+                                    log::warn!("abort_action failed: {e}");
+                                }
+                            }
+                        }
+                        log::warn!("plugin op aborted: {reason}");
+                    }
+                }
+            }
+        }
+    }
+    /// Dispatch a plugin op by op-id. Resolves the op against the
+    /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
+    /// builds a `DispatchContext` from the GUI-provided focus and the
+    /// authoritative in-core `App.selection`. Op-ids unknown to the
+    /// registry are logged and dropped (the catalog couldn't have
+    /// surfaced them, so this is either a stale GUI cache or a
+    /// misrouted message).
+    pub fn handle_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Drain pending terminals so rapid follow-up dispatches
+            // see released locks.
+            self.apply_backend_updates();
+
+            // Source the focused entity authoritatively from the session's
+            // current focus, not the GUI-supplied `op.focused_entity_id`
+            // (which the hotkey paths leave as None). This makes every
+            // dispatch path -- button or hotkey -- carry the live focus to
+            // the worker, paired with the authoritative `App.selection`
+            // read into the intent below. Raw gui-wire id (u32 widened to
+            // u64), the shape `DispatchIntent` expects.
+            let focused_entity_id: Option<u64> = match self.store.focus() {
+                Focus::Entity(eid) => Some(eid.raw() as u64),
+                Focus::All => None,
+            };
+
+            let Some(orch) = self.runner_client.orchestrator.as_mut() else {
+                log::warn!(
+                    "handle_dispatch_op({:?}): orchestrator not initialized",
+                    op.op_id
+                );
+                return;
+            };
+
+            let Some(cached) = orch.plugin_registry().get_op(&op.op_id).cloned() else {
+                log::warn!("handle_dispatch_op: op-id {:?} not in registry", op.op_id);
+                return;
+            };
+
+            // `plugin_id` is needed below for `begin_action`; it's a plain
+            // `String` field off `cached`, so reading it here names no
+            // orchestrator type.
+            let plugin_id = cached.plugin_id.clone();
+
+            // Drop the orchestrator borrow before reaching back into
+            // `self.runner_client` for the catalog label + dispatch.
+            let _ = orch;
+
+            // Resolve the display label from the manifest catalog. Falls
+            // back to the op id when the op isn't surfaced as a button
+            // (the dispatcher still routes; the history entry just shows
+            // the op id).
+            let display = self
+                .runner_client
+                .op_display(&plugin_id, &op.op_id)
+                .unwrap_or_else(|| op.op_id.clone());
+            // Hand the driver a core-shaped intent: the selection flatten,
+            // param conversion, and `DispatchContext` build all live behind
+            // `dispatch_op` now, so this path names no orchestrator type.
+            let intent = DispatchIntent {
+                selection: self.store.selection().clone(),
+                focused_entity_id,
+                op_id: op.op_id.clone(),
+                params: op.params,
+            };
+            // Hoist a shared borrow of the store so the lookup closure
+            // can capture it alongside the upcoming `&mut self.runner_client`
+            // call (disjoint field paths).
+            let store = &self.store;
+            let dispatch_outcome =
+                self.runner_client
+                    .dispatch_op(intent, plugin_id.clone(), |id| {
+                        store.entity_type(id)
+                    });
+
+            // The dispatch allocated the id the edit and the stream table
+            // both key on, and resolved the entity set the op operates on.
+            // Pull both from the successful outcome; the edit opens over the
+            // whole resolved set (a whole-pose op moves every entity, so a
+            // single-entity edit would drop every other entity's result and
+            // commit a geometrically inconsistent pose). Filter to entities
+            // with a committed lane — `begin_action` forks each lane from its
+            // current head, and transient stubs (ambient / zero-residue) have
+            // none — mirroring the post-Init normalization path.
+            let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
+                Ok(OpOutcome::Stream { scope, .. })
+                | Ok(OpOutcome::Invoke { scope, .. }) => {
+                    Some(self.lanes_for_scope(scope))
+                }
+                Err(_) => None,
+            };
+            let dispatch_id = match &dispatch_outcome {
+                Ok(OpOutcome::Stream { request_id, .. })
+                | Ok(OpOutcome::Invoke { request_id, .. }) => Some(*request_id),
+                Err(_) => None,
+            };
+
+            // Open the edit under the dispatch id over the resolved lane set.
+            // Skipped on dispatch failure (any open tentative belongs to a
+            // prior op) or when the resolved set has no editable lane.
+            let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
+                if lanes.is_empty() {
+                    return None;
+                }
+                let kind = CheckpointKind::PluginOp {
+                    plugin_id: plugin_id.clone(),
+                    op_id: op.op_id.clone(),
+                    display: display.clone(),
+                };
+                match self.store.begin_action(lanes, kind, display.clone(), request_id) {
+                    Ok(()) => Some(request_id),
+                    Err(e) => {
+                        log::trace!(
+                            "handle_dispatch_op({:?}): begin_action skipped: {e}",
+                            op.op_id
+                        );
+                        None
+                    }
+                }
+            });
+
+            match dispatch_outcome {
+                Ok(OpOutcome::Stream { .. }) => {
+                    // The stream table entry (inserted by
+                    // `RunnerClient::dispatch_op`) and the edit are keyed
+                    // by the same dispatch id; the terminal arm commits /
+                    // aborts via that id. Nothing to reconcile here.
+                }
+                Ok(OpOutcome::Invoke { bytes, .. }) => {
+                    self.apply_invoke_result(&bytes, edit_token);
+                }
+                Err(DispatchError::EntityLocked { entity }) => {
+                    // Advisory refusal: the target entity is busy with
+                    // another op. No edit was begun (gated on `is_ok`), so
+                    // there is nothing to open or roll back.
+                    log::warn!(
+                        "handle_dispatch_op({:?}): dispatch refused, entity {entity} locked",
+                        op.op_id
+                    );
+                }
+                Err(DispatchError::BackendBusy { plugin_id }) => {
+                    // Advisory refusal: the plugin's backend worker is
+                    // already running an op. No edit was begun (gated on
+                    // `is_ok`), so there is nothing to open or roll back.
+                    log::info!("dispatch refused: backend {plugin_id} busy");
+                }
+                Err(DispatchError::Failed(s)) => {
+                    log::error!("handle_dispatch_op({:?}): dispatch failed: {s}", op.op_id);
+                }
+            }
+            // GUI dirty is derived from the batch: an Invoke commits
+            // (HeadMoved → SCENE | SCORE | ACTIONS) and a Stream's frames
+            // emit tentative Edits, then a HeadMoved at commit. A dispatch
+            // changes neither focus nor selection, so the action catalog
+            // (which depends only on those) is unchanged; no ACTIONS push
+            // is owed at dispatch time.
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = op;
+        }
+    }
+
+    /// Resolve a dispatch's [`EditScope`] into the concrete set of lanes the
+    /// edit opens over. A whole-pose op (`AllEntities`) spans every committed
+    /// entity; an entity-scoped op spans its resolved set. Either way the
+    /// result is filtered to entities that hold a committed lane — the only
+    /// ones `begin_action` can fork a tentative from — matching the post-Init
+    /// normalization path's lane filter. Transient stubs (ambient /
+    /// zero-residue entities) drop out silently.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn lanes_for_scope(&self, scope: &EditScope) -> Vec<EntityId> {
+        let has_lane = |id: &EntityId| self.store.history().lane(*id).is_some();
+        match scope {
+            EditScope::AllEntities => self.store.ids().filter(has_lane).collect(),
+            EditScope::Entities(set) => {
+                set.iter().copied().filter(has_lane).collect()
+            }
+        }
+    }
+    /// Apply the assembly bytes returned by a one-shot `dispatch_invoke`
+    /// to the ongoing tentative and commit it. Mirrors the Stream-side
+    /// `Final` path; called from `handle_dispatch_op` for `OpKind::Invoke`.
+    /// The transition is inferred from the prior-vs-result structural
+    /// delta and queued on the locked entity so the next tick's
+    /// render-projector publish eases the result in rather than snapping.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_invoke_result(&mut self, bytes: &[u8], edit_token: Option<u64>) {
+        let Some(token) = edit_token else {
+            // No edit was begun for this invoke (begin skipped), so there
+            // is nothing to apply into or commit.
+            return;
+        };
+        let assembly = match molex::ops::wire::deserialize_assembly(bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("dispatch_invoke: decode failed: {e:?}");
+                if self.store.is_pending(token) {
+                    let _ = self.store.commit_action(token);
+                }
+                return;
+            }
+        };
+        let applied = self.store.apply_streaming_assembly(&assembly, None, token);
+        if applied {
+            match self.store.commit_action(token) {
+                Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+                Err(e) => log::warn!("dispatch_invoke: commit_action failed: {e}"),
+            }
+            // `commit_action` emits `HeadMoved`, from which the GUI consumer
+            // derives SCENE (+ SCORE + ACTIONS); no explicit raise is owed.
+        } else if self.store.is_pending(token) {
+            // Nothing matched (e.g. plugin returned an empty / unrelated
+            // assembly): drop the tentative.
+            let _ = self.store.commit_action(token);
+        }
+        // The edit's correlation id is spent; drop any lingering target.
+        let _ = self.score_targets.remove(&token);
+    }
+    // ── History navigation (Undo / Redo / Jump / Pin) ──
+
+    /// Common tail for undo / redo / jump_checkpoint: clear cached
+    /// per-residue scores (the values were computed against the
+    /// *previous* head and become meaningless on a head move; v1 just
+    /// blanks them so the structure renders neutral instead of "gray",
+    /// v2 will async-reeval). Score is no longer cached in `App`; the GUI
+    /// projection reads it off the new head checkpoint on the next
+    /// GUI-consumer pass. The `HeadMoved` emitted by undo/redo/jump rides
+    /// the batch, from which the render projector republishes (picking
+    /// `replace_assembly` / `set_assembly`) and the GUI consumer derives
+    /// SCENE | SCORE | ACTIONS dirty.
+    fn after_head_move(&mut self) {
+        if let Some(engine) = self.engine.as_mut() {
+            let ids: Vec<EntityId> = self.store.ids().collect();
+            for eid in ids {
+                engine.set_per_residue_scores(eid.raw(), None);
+            }
+        }
+    }
+
+    /// Dispatch a [`HistoryCommand`] from the GUI to the matching
+    /// `Session` method. Refusals are logged; the GUI surface
+    /// shows the result by virtue of the head not moving (no separate
+    /// toast / error channel — `HistoryError::EntityLocked` only
+    /// fires while the user's own action is still running, where the
+    /// running indicator is the natural feedback). The match is
+    /// exhaustive (G10): adding a variant without a handler is a
+    /// compile error.
+    pub(in crate::app) fn run_history_command(&mut self, cmd: HistoryCommand) {
+        if self.engine.is_none() {
+            return;
+        }
+        let result: Result<HistoryOutcome, SessionError> = match cmd {
+            HistoryCommand::JumpCheckpoint { id } => self
+                .store
+                .jump_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::Undo => self.store.undo().map(|opt| match opt {
+                Some(_) => HistoryOutcome::HeadMoved,
+                None => {
+                    log::info!("Undo: already at root");
+                    HistoryOutcome::Noop
+                }
+            }),
+            HistoryCommand::Redo { branch } => {
+                self.store
+                    .redo(branch.map(|w| w.into_inner()))
+                    .map(|opt| match opt {
+                        Some(_) => HistoryOutcome::HeadMoved,
+                        None => {
+                            log::info!("Redo: nowhere forward to go");
+                            HistoryOutcome::Noop
+                        }
+                    })
+            }
+            HistoryCommand::LaneUndo { entity, target } => self
+                .store
+                .lane_undo(entity, target.into_inner())
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::LaneRedo { entity, branch } => self
+                .store
+                .lane_redo(entity, branch.map(|w| w.into_inner()))
+                .map(|_| HistoryOutcome::HeadMoved),
+            HistoryCommand::PinCheckpoint { id } => self
+                .store
+                .pin_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::UnpinCheckpoint { id } => self
+                .store
+                .unpin_checkpoint(id.into_inner())
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::SetExcludeFromBest { id, exclude } => self
+                .store
+                .set_exclude_from_best(id.into_inner(), exclude)
+                .map(|_| HistoryOutcome::Curated),
+            HistoryCommand::AbortAction => {
+                // "Discard the running action." Targeting a single edit
+                // no-ops once two edits run concurrently, so discard every
+                // open edit instead of silently doing nothing.
+                let rids: Vec<u64> = self.store.pending_request_ids().collect();
+                if rids.is_empty() {
+                    Ok(HistoryOutcome::Noop)
+                } else {
+                    for rid in rids {
+                        if let Err(e) = self.store.abort_action(rid) {
+                            log::warn!("abort_action({rid}) failed: {e}");
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let _ = self.score_targets.remove(&rid);
+                        }
+                    }
+                    Ok(HistoryOutcome::HeadMoved)
+                }
+            }
+        };
+
+        match result {
+            Ok(HistoryOutcome::HeadMoved) => self.after_head_move(),
+            Ok(HistoryOutcome::Curated) => {
+                // Pin / unpin / exclude mutate the history DAG's curation
+                // metadata without moving the head or bumping
+                // `topology_version`, so the GUI consumer's cursor-driven
+                // history push never re-fires. Push the refreshed history
+                // section at-site so the panel reflects the change.
+                self.frontend.set_history(project_history(&self.store));
+            }
+            Ok(HistoryOutcome::Noop) => {}
+            Err(e) => log::warn!("history command refused: {e}"),
+        }
+    }
+}
