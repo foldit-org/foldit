@@ -645,7 +645,7 @@ impl AppRunner {
 
     /// Per-frame update: process IPC, drive `App::tick`, render, push
     /// dirty frontend bytes to the webview. `App` owns the drive loop
-    /// (spine drain, score poll, engine update, visualization update,
+    /// (`SessionUpdate` drain, score poll, engine update, visualization update,
     /// state-machine, populate_frontend) — the host just sequences the
     /// IPC / surface / render side around it.
     fn tick_frame(&mut self) {
@@ -697,7 +697,7 @@ impl AppRunner {
             }
         }
 
-        // App-owned drive loop (RX13): backend updates → spine drain →
+        // App-owned drive loop: backend updates → `SessionUpdate` drain →
         // broadcaster + render projector → score poll → engine update +
         // visualization → state-machine → populate_frontend.
         self.app.tick(dt.as_secs_f32());

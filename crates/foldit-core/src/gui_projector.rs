@@ -1,36 +1,26 @@
-//! App-owned GUI projection state, cursor-driven via [`HistorySyncCursor`].
+//! GUI projection state for the third `SessionUpdate` consumer.
 //!
-//! Holds the three GUI-facing fields that `populate_frontend` reads each
-//! frame: the history-version debounce cursor, the scoring-mode display
-//! policy, and the tutorial-bubble flow (bubble vector + cursor). The
-//! *puzzle objective* (id/title/scores) lives separately on
-//! [`crate::app::App::loaded_puzzle`] (`LoadedPuzzle`), kept in lock-step
-//! with `scoring_mode` at every load site.
+//! `GuiProjector` is the state half of the GUI consumer: a single
+//! history-version debounce cursor. Its `consume` method — the projection
+//! that mirrors `Session` / `VisoEngine` / `PluginDriver` state into
+//! `FrontendState` — lives in [`crate::app`] next to the projection
+//! helpers it calls (`head_score`, `project_history`, `bubble_to_payload`).
+//! The scoring-mode display policy, tutorial-bubble flow, and puzzle
+//! objective live on [`crate::session::Session`] and reach the consumer
+//! through their own `SessionUpdate` variants.
 //!
-//! Unlike [`crate::render_projector::RenderProjector`] and the
-//! plugin broadcaster, this projector is **not** spine-driven: it picks
-//! up score changes through the cursor's `live_version` bump rather
-//! than via `take_updates`, because scores deliberately are not
-//! a `SessionUpdate` event. The host already calls `populate_frontend`
-//! per frame.
+//! Unlike [`crate::render_projector::RenderProjector`] and the plugin
+//! broadcaster, the GUI consumer also reads the History cursor below: the
+//! history channel picks up score-driven `live_version` bumps through the
+//! cursor's debounce rather than reprojecting the whole panel each tick.
 
 use web_time::Instant;
 
-/// App-owned GUI projection state read by `populate_frontend`.
+/// State for the GUI consumer (see `GuiProjector::consume` in
+/// [`crate::app`]): the history-version debounce cursor.
 pub(crate) struct GuiProjector {
     /// Debounce cursor for the history channel (topology + live).
     pub(crate) history_sync: HistorySyncCursor,
-    /// Which score representation (raw Rosetta vs. foldit-game) reaches
-    /// the GUI. Defaults to `Scientist` on CLI bootstrap; flipped to
-    /// `Game` on a campaign/intro `LoadPuzzle`.
-    pub(crate) scoring_mode: foldit_gui::state::ScoringMode,
-    /// Tutorial bubbles parsed from the active puzzle's TOML
-    /// `[[sequence]]`. Empty for scientist-mode loads.
-    pub(crate) bubbles: Vec<crate::puzzle::Bubble>,
-    /// Index into `bubbles` for the currently-displayed bubble. Reset
-    /// to 0 on every load. When `>= bubbles.len()` the sequence is
-    /// exhausted and no bubble is shown.
-    pub(crate) current_bubble: usize,
 }
 
 impl GuiProjector {
@@ -41,17 +31,12 @@ impl GuiProjector {
                 last_live: None,
                 last_live_push_at: None,
             },
-            // CLI bootstrap defaults to scientist; `LoadPuzzle` flips
-            // to Game when a campaign/intro puzzle loads.
-            scoring_mode: foldit_gui::state::ScoringMode::Scientist,
-            bubbles: Vec::new(),
-            current_bubble: 0,
         }
     }
 }
 
-/// Tracks the last history versions pushed to the frontend so
-/// `populate_frontend` can debounce/skip redundant reprojections.
+/// Tracks the last history versions pushed to the frontend so the GUI
+/// consumer can debounce/skip redundant reprojections.
 pub(crate) struct HistorySyncCursor {
     /// Last `History::topology_version()` pushed. `None` forces an
     /// initial push (G5: no `u64::MAX` sentinel).

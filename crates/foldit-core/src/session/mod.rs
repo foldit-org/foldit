@@ -40,6 +40,8 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::{Assembly, MoleculeEntity, MoleculeType};
+use viso::Focus;
+use viso::options::VisoOptions;
 
 use crate::history::{
     CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History, HistoryError,
@@ -48,6 +50,7 @@ use crate::history::{
 mod apply;
 mod change;
 pub use change::SessionUpdate;
+pub(crate) use change::SessionUpdateConsumer;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 
@@ -63,6 +66,27 @@ pub enum SessionError {
     /// `id` is not currently a transient preview.
     #[error("{} is not a transient preview", id.raw())]
     NotAPreview { id: EntityId },
+}
+
+// ── Puzzle ─────────────────────────────────────────────────────────────
+
+/// Puzzle-shaped session add-on. `None` on the [`Session`] is the default
+/// free-form ("scientist") session with no objective; `Some` is a loaded
+/// campaign/intro puzzle. Populated from the puzzle TOML on a puzzle load.
+///
+/// `start_energy` / `completion_energy` are the objective energies handed
+/// to the GUI (the same numbers, in the same units, that the puzzle TOML
+/// supplies). `bubbles` / `current_bubble` carry the tutorial sequence and
+/// its cursor; they move together — a puzzle with a tutorial sequence is
+/// `bubbles: Some(seq)` + `current_bubble: Some(0)`, and a puzzle with no
+/// sequence is both `None`.
+#[derive(Debug)]
+pub struct Puzzle {
+    pub id: u32,
+    pub start_energy: f64,
+    pub completion_energy: f64,
+    pub bubbles: Option<Vec<crate::puzzle::Bubble>>,
+    pub current_bubble: Option<usize>,
 }
 
 // ── Session ───────────────────────────────────────────────────────────
@@ -89,6 +113,41 @@ pub struct Session {
     /// so iterating yields only entities that currently have at least one
     /// selected residue. [`Self::reset`] clears it on a topology swap.
     selection: BTreeMap<EntityId, BTreeSet<u32>>,
+    /// Ambient session focus (Tab-cycle target), a first-class scene
+    /// field beside `selection`. Not history-versioned: undo / redo / jump
+    /// leave it untouched. [`Self::reset`] returns it to [`Focus::All`] on
+    /// a topology swap. viso keeps a mirror for camera framing only (focus
+    /// drives no GPU highlight); the `App` tick pushes the mirror on each
+    /// [`SessionUpdate::FocusChanged`].
+    focus: Focus,
+    /// Display title for the current session: the file stem on a free-form
+    /// load, the puzzle name on a puzzle load. Plain session state derived
+    /// from the load source; never empty in practice (a structure with no
+    /// derivable name gets `"Unknown"` at create time). [`Self::reset`]
+    /// leaves it untouched — the following load's create seam
+    /// ([`Self::start`]) overwrites it.
+    title: String,
+    /// Puzzle-shaped session state. `None` is the default free-form
+    /// ("scientist") session; `Some` is a loaded campaign/intro puzzle
+    /// carrying its objective energies and tutorial-bubble cursor. Ambient
+    /// session state, not history-versioned; [`Self::reset`] clears it on a
+    /// topology swap. Installing or clearing the objective emits
+    /// [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
+    /// [`SessionUpdate::BubbleChanged`].
+    puzzle: Option<Puzzle>,
+    /// Active view options (render settings). Ambient session state, not
+    /// history-versioned; the source of truth for what viso renders. The
+    /// `App` tick applies these to the engine on every
+    /// [`SessionUpdate::ViewOptionsChanged`]. [`Self::reset`] returns them to
+    /// [`VisoOptions::default`] on a topology swap (view options reset per
+    /// session). Holding `VisoOptions` directly relaxes the otherwise
+    /// viso-free `Session` boundary for this one field.
+    view_options: VisoOptions,
+    /// Name of the preset whose options are currently loaded, or `None` when
+    /// the active options were set manually (a manual edit no longer matches
+    /// any preset) or at startup. Ambient session state; [`Self::reset`]
+    /// clears it.
+    active_preset: Option<String>,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -114,6 +173,11 @@ impl Session {
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
             selection: BTreeMap::new(),
+            focus: Focus::default(),
+            title: "Unknown".to_string(),
+            puzzle: None,
+            view_options: VisoOptions::default(),
+            active_preset: None,
             pending_updates: Vec::new(),
         }
     }
@@ -272,7 +336,7 @@ impl Session {
     /// Emits one tentative [`SessionUpdate::Edit`] carrying the locked
     /// entity's post-mutation coordinates. The plugin broadcaster skips
     /// tentative edits (plugins don't see live frames); it completes the
-    /// spine for the render projector.
+    /// `SessionUpdate` stream for the render projector.
     pub fn action_update(
         &mut self,
         request_id: u64,
@@ -284,7 +348,7 @@ impl Session {
         self.history
             .action_update(request_id, raw_score, game_score, filter_status, mutate)?;
         // A tentative live frame: render projector picks it up via the
-        // spine and rebuilds from `head_assembly`. Payload-less because
+        // `SessionUpdate` stream and rebuilds from `head_assembly`. Payload-less because
         // the projectors re-derive from `Session` anyway.
         self.apply(SessionUpdate::Edit { tentative: true });
         Ok(())
@@ -683,6 +747,165 @@ impl Session {
         self.selection.values().map(|set| set.len()).sum()
     }
 
+    // ── Focus ─────────────────────────────────────────────────────────
+    //
+    // Ambient session focus (not history-versioned). Mutating it emits
+    // exactly one [`SessionUpdate::FocusChanged`], and only when the value
+    // actually changes — an idempotent re-focus is silent.
+
+    /// The current session focus.
+    #[must_use]
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// Set the session focus. Emits exactly one
+    /// [`SessionUpdate::FocusChanged`] when the value changes; an
+    /// idempotent re-focus emits nothing.
+    pub fn set_focus(&mut self, focus: Focus) {
+        if self.focus != focus {
+            self.focus = focus;
+            self.apply(SessionUpdate::FocusChanged);
+        }
+    }
+
+    // ── Session title ─────────────────────────────────────────────────
+
+    /// Display title for the current session (file stem on a free-form
+    /// load, puzzle name on a puzzle load). Always a real string; set by
+    /// the create seam ([`Self::start`]).
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    // ── Puzzle objective + tutorial bubbles ───────────────────────────
+    //
+    // Ambient session state (not history-versioned). The puzzle add-on
+    // carries the objective energies and the tutorial-bubble cursor. A
+    // puzzle load installs it; a free-form load clears it. Installing or
+    // clearing the objective emits exactly one
+    // [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
+    // exactly one [`SessionUpdate::BubbleChanged`].
+
+    /// The loaded puzzle, or `None` in the default free-form session.
+    #[must_use]
+    pub fn puzzle(&self) -> Option<&Puzzle> {
+        self.puzzle.as_ref()
+    }
+
+    /// Install a puzzle objective (a puzzle load). Always emits
+    /// [`SessionUpdate::PuzzleChanged`].
+    pub fn set_puzzle(&mut self, puzzle: Puzzle) {
+        self.puzzle = Some(puzzle);
+        self.apply(SessionUpdate::PuzzleChanged);
+    }
+
+    /// Drop the puzzle objective and revert to the free-form session (a
+    /// free-form structure load). Emits [`SessionUpdate::PuzzleChanged`]
+    /// only when there was a puzzle to clear.
+    pub fn clear_puzzle(&mut self) {
+        let changed = self.puzzle.is_some();
+        self.puzzle = None;
+        if changed {
+            self.apply(SessionUpdate::PuzzleChanged);
+        }
+    }
+
+    /// Begin a session over a freshly-loaded structure: install its display
+    /// `title` and `puzzle` add-on in one funnel. `puzzle` is `Some` for a
+    /// campaign/intro puzzle load (carrying its objective + tutorial
+    /// bubbles) and `None` for a free-form structure load. The single
+    /// create seam every load path routes through. The `PuzzleChanged`
+    /// comes from the inner [`Self::set_puzzle`] / [`Self::clear_puzzle`];
+    /// a title-only change (a free-form reload that leaves `puzzle` `None`)
+    /// is silent here, so its caller raises the puzzle-panel refresh
+    /// explicitly.
+    pub fn start(&mut self, title: String, puzzle: Option<Puzzle>) {
+        self.title = title;
+        match puzzle {
+            Some(p) => self.set_puzzle(p),
+            None => self.clear_puzzle(),
+        }
+    }
+
+    /// Step the tutorial-bubble cursor of the active puzzle. No-op when no
+    /// puzzle is loaded or the puzzle carries no tutorial sequence. Forward
+    /// saturates at the sequence length (one past the last bubble; the GUI
+    /// then shows no bubble); back saturates at 0. Emits
+    /// [`SessionUpdate::BubbleChanged`] only when the cursor actually moves
+    /// — a step at either clamp is silent.
+    pub fn advance_bubble(&mut self, back: bool) {
+        let Some(puzzle) = self.puzzle.as_mut() else {
+            return;
+        };
+        let Some(cursor) = puzzle.current_bubble else {
+            return;
+        };
+        let len = puzzle.bubbles.as_ref().map_or(0, Vec::len);
+        let next = if back {
+            cursor.saturating_sub(1)
+        } else if cursor < len {
+            cursor + 1
+        } else {
+            cursor
+        };
+        if next == cursor {
+            return;
+        }
+        puzzle.current_bubble = Some(next);
+        self.apply(SessionUpdate::BubbleChanged);
+    }
+
+    // ── View options + active preset ──────────────────────────────────
+    //
+    // Ambient session state (not history-versioned). The active options are
+    // the source of truth for what viso renders; the `App` tick applies
+    // them to the engine on each [`SessionUpdate::ViewOptionsChanged`]. A
+    // manual option edit clears the active preset (the options no longer
+    // match a named preset); applying a preset sets both together. Each
+    // mutator emits exactly one `ViewOptionsChanged`, and only when
+    // something actually changes.
+
+    /// The active view options.
+    #[must_use]
+    pub fn view_options(&self) -> &VisoOptions {
+        &self.view_options
+    }
+
+    /// The name of the currently-loaded preset, or `None` when the active
+    /// options were set manually.
+    #[must_use]
+    pub fn active_preset(&self) -> Option<&str> {
+        self.active_preset.as_deref()
+    }
+
+    /// Set the active view options (a manual edit). Clears the active preset
+    /// — manually-set options no longer match any named preset. Emits
+    /// [`SessionUpdate::ViewOptionsChanged`] when the options or the active
+    /// preset actually change; an idempotent set emits nothing.
+    pub fn set_view_options(&mut self, options: VisoOptions) {
+        let changed = self.view_options != options || self.active_preset.is_some();
+        self.view_options = options;
+        self.active_preset = None;
+        if changed {
+            self.apply(SessionUpdate::ViewOptionsChanged);
+        }
+    }
+
+    /// Apply a named preset: install its `options` and record `name` as the
+    /// active preset. Emits [`SessionUpdate::ViewOptionsChanged`] when the
+    /// options or the active preset actually change.
+    pub fn apply_preset(&mut self, name: String, options: VisoOptions) {
+        let changed =
+            self.view_options != options || self.active_preset.as_deref() != Some(name.as_str());
+        self.view_options = options;
+        self.active_preset = Some(name);
+        if changed {
+            self.apply(SessionUpdate::ViewOptionsChanged);
+        }
+    }
+
     // ── Reset ─────────────────────────────────────────────────────────
 
     /// Drop the entire history graph, clear metadata and transient.
@@ -702,6 +925,31 @@ impl Session {
         // dropped on every topology swap. Co-located here so both load
         // paths (puzzle + free-form structure) clear it.
         self.selection.clear();
+        // Focus is ambient session state; a topology swap returns it to
+        // the all-entities view. Set silently (no `FocusChanged`): viso
+        // independently resets its mirror to `All` on the assembly
+        // replace, and the reset's `HeadMoved` below drives the reframe.
+        self.focus = Focus::default();
+        // The puzzle add-on (objective + tutorial bubbles) is ambient
+        // session state tied to the outgoing structure. Clear it silently
+        // here (the load path that follows a reset re-installs it via the
+        // `start` create seam, whose `PuzzleChanged` drives the panel); the
+        // reset's own `HeadMoved` below stands in for the topology swap.
+        // `title` is left untouched: the following load's `start` overwrites
+        // it, and nothing reads it between the reset and that overwrite.
+        self.puzzle = None;
+        // View options + active preset are ambient session state; a topology
+        // swap resets both to defaults (view options reset per session, not
+        // persist). Unlike focus (which viso re-derives on the assembly
+        // replace), nothing pushes default options to the engine on its own,
+        // so this emits `ViewOptionsChanged` below when there was a non-
+        // default state to clear, driving the tick's `set_options` + the
+        // GUI panel refresh. A load path that wants a preset then re-applies
+        // it via `apply_preset`, whose own emit reads the latest options.
+        let view_changed =
+            self.view_options != VisoOptions::default() || self.active_preset.is_some();
+        self.view_options = VisoOptions::default();
+        self.active_preset = None;
         // Drop any changes emitted before the reset — they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
         // so that change survives. The broadcaster's published snapshot is
@@ -709,6 +957,9 @@ impl Session {
         // post-reset empty-assembly diff still advances the host's gen
         // counter, so plugins never see `from_gen` go backwards.
         self.pending_updates.clear();
+        if view_changed {
+            self.apply(SessionUpdate::ViewOptionsChanged);
+        }
         self.apply(SessionUpdate::HeadMoved);
     }
 

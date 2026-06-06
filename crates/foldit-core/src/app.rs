@@ -18,9 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
-    AppState, CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, FrontendState,
-    HistoryCommand, HistoryLiveUpdate, HistorySection, ScoringMode, TextBubbleButton,
-    TextBubblePayload, WireId,
+    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, FrontendState, HistoryCommand,
+    HistoryLiveUpdate, HistorySection, LoadingState, TextBubbleButton, TextBubblePayload, WireId,
 };
 use molex::entity::molecule::id::EntityId;
 use viso::{
@@ -37,22 +36,18 @@ use crate::plugin_driver::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamStartIntent,
 };
 use crate::render_projector::{self, RenderProjector};
-use crate::session::{EntityOrigin, Session, SessionError, SessionUpdate};
-
-fn score_for_mode(raw: Option<f64>, game: Option<f64>, mode: ScoringMode) -> Option<f64> {
-    match mode {
-        ScoringMode::Game => game,
-        ScoringMode::Scientist => raw,
-    }
-}
+use crate::session::{
+    EntityOrigin, Puzzle, Session, SessionError, SessionUpdate, SessionUpdateConsumer,
+};
 
 /// Convert a rosetta raw score (REU) to foldit's game-mode display number.
 /// Verbatim port of `rosetta_score_to_game_score_either(use_minimum=true,
 /// internal=false)` (`rosetta_util.cc:2702`, constants at lines 2662-2664).
 /// The linear map is universal foldit policy, not rosetta-specific, so it
-/// lives next to the `ScoringMode` selector that picks which view reaches
-/// the GUI. Applied to both whole-assembly and composition scores so
-/// neither ever displays raw REU.
+/// lives next to the score-view selector that picks which representation
+/// reaches the GUI (game when a puzzle is loaded, raw otherwise). Applied
+/// to both whole-assembly and composition scores so neither ever displays
+/// raw REU.
 #[cfg(not(target_arch = "wasm32"))]
 fn rosetta_raw_to_game(raw: f64) -> f64 {
     const SCORE_OFFSET: f64 = 800.0;
@@ -209,9 +204,24 @@ enum HistoryOutcome {
 /// projected through the active scoring mode. Following the composition
 /// node keeps the displayed score on an in-flight action's streamed score
 /// without ever reading the committed parent (G1: derive, don't store).
-fn head_score(store: &Session, mode: ScoringMode) -> Option<f64> {
+fn head_score(store: &Session) -> Option<f64> {
     let (raw, game) = store.current_composition_scores();
-    score_for_mode(raw, game, mode)
+    // A loaded puzzle displays the foldit game score; the free-form
+    // session displays the raw Rosetta score.
+    if store.puzzle().is_some() {
+        game
+    } else {
+        raw
+    }
+}
+
+/// The `TextBubblePayload` for the active puzzle's current bubble, or
+/// `None` when no puzzle is loaded, the puzzle has no tutorial sequence, or
+/// the cursor has walked past the last bubble.
+fn current_bubble_payload(puzzle: Option<&Puzzle>) -> Option<TextBubblePayload> {
+    let puzzle = puzzle?;
+    let cursor = puzzle.current_bubble?;
+    puzzle.bubbles.as_ref()?.get(cursor).map(bubble_to_payload)
 }
 
 /// Move one freshly-loaded entity through the preview→promote pipeline
@@ -294,47 +304,40 @@ fn apply_streaming_assembly(
 /// plugin driver, document, and the two projectors. `App` also owns the
 /// host-bound [`FrontendState`] mirror (so the load state-machine and
 /// the GUI projection both live on the same side of the host seam) and
-/// the [`AppState`] machine that gates the Loading → InPuzzle transition.
+/// the `LoadingState` machine that drives the startup phases up to the
+/// first-score `InSession` flip.
 pub struct App {
     engine: Option<VisoEngine>,
     keybindings: KeyBindings,
     store: Session,
-    ui_dirty: DirtyFlags,
     plugin_driver: PluginDriver,
     render_projector: RenderProjector,
     gui_projector: GuiProjector,
     /// Host-provided filesystem / resource access. The only path through
     /// which foldit-core touches the filesystem outside puzzle loading.
     host: Box<dyn crate::HostResources>,
-    /// Display name for the currently loaded structure (file stem on
-    /// free-form loads, puzzle name on `LoadPuzzle`). `None` before any
-    /// load; `structure_title()` falls back to `"Unknown"` in that case.
-    structure_title: Option<String>,
-    /// Objective metadata for the currently loaded puzzle. `None` in
-    /// Scientist mode (free-form structure load) and at startup before
-    /// any load; `Some` only after `LoadPuzzle` populates it from the
-    /// puzzle TOML.
-    loaded_puzzle: Option<LoadedPuzzle>,
-    /// Frontend mirror — written by [`Self::populate_frontend`] each
-    /// tick and drained by the host via [`Self::serialize_frontend_dirty`].
+    /// Frontend mirror — written by the GUI consumer
+    /// ([`GuiProjector::consume`]) at the end of each tick and drained by
+    /// the host via [`Self::serialize_frontend_dirty`].
     frontend: FrontendState,
-    /// Top-level GUI state-machine value. `App` owns the Loading →
-    /// InPuzzle transition gated on `awaiting_initial_score` +
-    /// `has_initial_score()`.
-    app_state: AppState,
+    /// App-lifetime lifecycle phase. `App` advances this through the
+    /// startup phases and flips it to `InSession` at the first-score gate
+    /// (`awaiting_initial_score` + `has_initial_score()`). Mirrored
+    /// verbatim to the frontend via [`FrontendState::set_app_state`].
+    app_state: LoadingState,
     /// Set after `load_initial_structure` returns; cleared in `tick`
     /// once the first plugin score lands. Mirrors the desktop runner's
     /// old field.
     awaiting_initial_score: bool,
-    /// Last per-residue score vector pushed to viso, keyed by raw
-    /// entity id. Used to skip pushing identical scores every tick: the
-    /// scorer streams the same value continuously at idle, and a repeat
-    /// push forces viso to recompute colors + reupload for nothing. An
-    /// absent key means nothing has been pushed for that entity yet;
-    /// `Some(vec)` mirrors the last `Some(scores)` push; `None` mirrors
-    /// the last clearing (`None`) push. Cleared on topology swaps so a
-    /// new structure with coincidentally-equal scores still pushes.
-    last_pushed_scores: std::collections::HashMap<u32, Option<Vec<f64>>>,
+    /// One-shot "push every GUI section once" signal. Raised on session
+    /// birth (the Loading → InSession flip for the initial load, and at the
+    /// end of each reload path) and consumed + cleared by `tick` on the next
+    /// GUI-consumer pass, which projects a full `DirtyFlags::all()` populate.
+    /// The incremental sections during a load still flow through the ordinary
+    /// `SessionUpdate` batch; this catches the sections no batch variant
+    /// carries (a free-form reload's puzzle-panel title, the post-load score /
+    /// action catalog).
+    needs_full_populate: bool,
     /// Commit-stamp correlation: each in-flight commit-time composition-score
     /// `request_id` → the committed checkpoint its reply stamps. The checkpoint
     /// is immutable, so its identity is stable until the reply lands. Cleared
@@ -355,45 +358,275 @@ pub struct App {
     pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
 
-/// Objective metadata for an active puzzle. Populated from the puzzle
-/// TOML on a `LoadPuzzle` event. Free-form structure loads (Scientist
-/// mode) have no objective and so leave [`App::loaded_puzzle`] as `None`.
-#[derive(Debug, Clone)]
-struct LoadedPuzzle {
-    id: u32,
-    title: String,
-    starting_score: f64,
-    target_score: f64,
+/// Advance focus one step through `focusable`, wrapping back to
+/// [`Focus::All`] after the last entity. `All` advances to the first
+/// focusable entity (or stays `All` when none are focusable). The
+/// Tab-cycle step, owned by foldit-core now that focus is session state;
+/// `focusable` is viso's eligibility list (`engine.focusable_entities()`).
+fn next_focus(current: Focus, focusable: &[EntityId]) -> Focus {
+    match current {
+        Focus::All => focusable
+            .first()
+            .map_or(Focus::All, |&id| Focus::Entity(id)),
+        Focus::Entity(cur) => match focusable.iter().position(|&id| id == cur) {
+            Some(i) if i + 1 < focusable.len() => Focus::Entity(focusable[i + 1]),
+            _ => Focus::All,
+        },
+    }
+}
+
+/// App-residue inputs the GUI projection needs beyond the `Session`,
+/// `VisoEngine`, and `PluginDriver`. Named explicitly (not `&App`) so the
+/// projection's real dependencies are visible at the call site rather than
+/// hidden behind a god-object borrow.
+pub(crate) struct GuiContext<'a> {
+    /// Host resource access — the view-preset directory listing for the
+    /// `VIEW` section. Read only on `not(wasm)`.
+    pub(crate) host: &'a dyn crate::HostResources,
+}
+
+impl GuiProjector {
+    /// Project the live `Session` / `VisoEngine` / `PluginDriver` state into
+    /// `frontend` — the third consumer of the `SessionUpdate` batch,
+    /// alongside the render and plugin projectors.
+    ///
+    /// Unlike those two it reads several subsystems (the GUI mirrors score,
+    /// selection, scene, history, puzzle, bubble, focus, view, loading), so
+    /// it does not implement the two-input `SessionUpdateConsumer<Sink>`
+    /// trait: that signature can express only one read input (`session`).
+    /// Naming the extra inputs here — `engine`, `driver`, `ctx` — is what
+    /// keeps this honest and out of the `&App` fake-abstraction trap.
+    ///
+    /// Per-section dirtiness is derived entirely from the drained `updates`
+    /// batch — each `SessionUpdate` variant maps to the GUI sections it
+    /// invalidates — plus a one-shot `full_populate` flag the tick raises on
+    /// session birth (the Loading → InSession flip and every reload) to push
+    /// every section once. There is no longer an App-side dirty residue: the
+    /// mutations that used to raise flags at their App sites now produce the
+    /// covering `SessionUpdate` variants, and those variants are mapped here.
+    pub(crate) fn consume(
+        &mut self,
+        updates: &[SessionUpdate],
+        full_populate: bool,
+        session: &Session,
+        engine: &VisoEngine,
+        driver: &PluginDriver,
+        ctx: &GuiContext<'_>,
+        frontend: &mut FrontendState,
+    ) {
+        // FPS and selected count change every frame — always push them.
+        frontend.set_fps(engine.fps());
+        frontend.ui.selected_count = session.selection_total_count();
+
+        let mut dirty = if full_populate {
+            DirtyFlags::all()
+        } else {
+            DirtyFlags::empty()
+        };
+        for update in updates {
+            dirty |= match update {
+                SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
+                SessionUpdate::Edit { tentative: true } => DirtyFlags::SCENE,
+                SessionUpdate::Edit { tentative: false } => {
+                    DirtyFlags::SCENE | DirtyFlags::ACTIONS
+                }
+                SessionUpdate::HeadMoved => {
+                    DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS
+                }
+                SessionUpdate::PreviewAdded | SessionUpdate::PreviewDiscarded => {
+                    DirtyFlags::SCENE | DirtyFlags::ACTIONS
+                }
+                SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
+                SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
+                SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
+                SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
+                SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
+            };
+        }
+
+        if dirty.is_empty() {
+            return;
+        }
+
+        // PUZZLE before SCORE: a fresh `set_puzzle_*` resets `complete=false`,
+        // and then the score check below can latch victory in the same frame
+        // without being overwritten.
+        if dirty.contains(DirtyFlags::PUZZLE) {
+            // The puzzle panel's title is the standalone session title,
+            // which on a puzzle load equals the puzzle name.
+            match session.puzzle() {
+                Some(p) => frontend.set_puzzle_game(
+                    p.id,
+                    session.title().to_string(),
+                    p.start_energy,
+                    p.completion_energy,
+                ),
+                // The free-form session has no objective; the title is the
+                // file-derived structure name.
+                None => frontend.set_puzzle_scientist(session.title().to_string()),
+            }
+            // Bubble push on puzzle swap: render the cursor's current
+            // bubble (always index 0 right after a puzzle load, since the
+            // cursor starts there). Subsequent AdvanceBubble actions
+            // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
+            frontend.set_text_bubble(current_bubble_payload(session.puzzle()));
+        }
+        if dirty.contains(DirtyFlags::TEXT_BUBBLE) {
+            frontend.set_text_bubble(current_bubble_payload(session.puzzle()));
+        }
+        if dirty.contains(DirtyFlags::SCORE) {
+            if let Some(score) = head_score(session) {
+                frontend.set_score(score, false);
+                // Victory check: with a puzzle loaded, latch it complete the
+                // first time the score crosses the toml completion energy.
+                // Higher game score = better fold (game-score formula
+                // negates), so the comparison is `>=`.
+                if let Some(p) = session.puzzle() {
+                    if p.completion_energy > 0.0 && score >= p.completion_energy {
+                        frontend.mark_puzzle_complete();
+                    }
+                }
+            }
+        }
+        if dirty.contains(DirtyFlags::ACTIONS) {
+            // Availability depends on focus + selection + lock state.
+            // Source focus from the authoritative session (same as the
+            // SCENE arm below), then hand the driver the selection + an
+            // entity-type closure.
+            let focus = match session.focus() {
+                Focus::Entity(eid) => Some(eid),
+                Focus::All => None,
+            };
+            let actions =
+                driver.actions_catalog(focus, session.selection(), |id| session.entity_type(id));
+            frontend.set_actions(actions);
+        }
+        if dirty.contains(DirtyFlags::VIEW) {
+            // Source of truth is the session, not the engine: the engine is
+            // a follower that the tick re-applies on `ViewOptionsChanged`.
+            frontend.view.options =
+                serde_json::to_value(session.view_options()).unwrap_or_default();
+
+            // Schema is static — only set once
+            if frontend.view.options_schema.is_null() {
+                frontend.view.options_schema =
+                    serde_json::to_value(viso::options::VisoOptions::json_schema())
+                        .unwrap_or_default();
+            }
+
+            // The presets *list* is a disk/library read (App/host), not
+            // session state, so it stays here.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                frontend.view.available_presets = ctx
+                    .host
+                    .view_presets_dir()
+                    .map(viso::options::VisoOptions::list_presets)
+                    .unwrap_or_default();
+            }
+            frontend.view.active_preset = session.active_preset().map(String::from);
+        }
+        if dirty.contains(DirtyFlags::SELECTION) {
+            let entries: Vec<foldit_gui::EntitySelection> = session
+                .selection()
+                .iter()
+                .map(|(eid, residues)| foldit_gui::EntitySelection {
+                    entity_id: eid.raw(),
+                    residues: residues.iter().copied().collect(),
+                })
+                .collect();
+            frontend.set_selection(entries);
+        }
+        if dirty.contains(DirtyFlags::SCENE) {
+            use molex::MoleculeType;
+            let mut scene_entities = Vec::new();
+            for (eid, _meta) in session.iter() {
+                let Some(entity) = session.entity(eid) else {
+                    continue;
+                };
+                let mol_str = match entity.molecule_type() {
+                    MoleculeType::Protein => "protein",
+                    MoleculeType::DNA => "dna",
+                    MoleculeType::RNA => "rna",
+                    MoleculeType::Ligand => "ligand",
+                    MoleculeType::Ion => "ion",
+                    MoleculeType::Water => "water",
+                    MoleculeType::Lipid => "lipid",
+                    MoleculeType::Cofactor => "cofactor",
+                    MoleculeType::Solvent => "solvent",
+                };
+                scene_entities.push(foldit_gui::SceneEntityInfo {
+                    entity_id: entity.id().raw(),
+                    label: entity.label(),
+                    molecule_type: mol_str.to_string(),
+                    atom_count: entity.atom_count(),
+                    residue_count: entity.residue_count(),
+                });
+            }
+            frontend.set_scene_entities(scene_entities);
+            let focused = match session.focus() {
+                Focus::Entity(eid) => Some(eid.raw()),
+                Focus::All => None,
+            };
+            frontend.set_focused_entity(focused);
+        }
+
+        // History push (two-channel):
+        //   - topology bump → full `HistorySection`
+        //   - live bump only → small `HistoryLiveUpdate` patch, with a
+        //     50ms (20Hz) debounce so per-cycle Rosetta scores don't
+        //     saturate the IPC. The final cycle on commit always lands
+        //     because committing also bumps `topology_version`.
+        let topology = session.history().topology_version();
+        let live = session.history().live_version();
+        let cursor = &mut self.history_sync;
+        let topology_changed = cursor.last_topology != Some(topology);
+        let live_changed = cursor.last_live != Some(live);
+
+        if topology_changed {
+            frontend.set_history(project_history(session));
+            cursor.last_topology = Some(topology);
+            cursor.last_live = Some(live);
+            cursor.last_live_push_at = Some(Instant::now());
+        } else if live_changed {
+            let now = Instant::now();
+            let debounced = cursor
+                .last_live_push_at
+                .map_or(false, |t| now.duration_since(t).as_millis() < 50);
+            if !debounced {
+                if let Some(update) = project_history_live(session.history()) {
+                    frontend.set_history_live(update);
+                    cursor.last_live = Some(live);
+                    cursor.last_live_push_at = Some(now);
+                }
+            }
+        }
+    }
 }
 
 impl App {
-    /// Display title for the currently loaded structure, or `"Unknown"`
-    /// before any load. Refreshed at every load site (`LoadStructure`,
-    /// `LoadPuzzle`, `load_initial_structure`).
-    pub fn structure_title(&self) -> String {
-        self.structure_title
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string())
-    }
-
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
         Self {
             engine: None,
-            keybindings: KeyBindings::default(),
+            keybindings: {
+                let mut kb = KeyBindings::default();
+                // Focus is foldit-core session state now: neutralize viso's
+                // Tab/Backquote focus bindings on this instance so viso no
+                // longer owns focus. The core key paths intercept these keys
+                // before any dispatch and drive `Session::set_focus` instead.
+                kb.insert("Tab".to_string(), Box::new(|_: &mut VisoEngine| {}));
+                kb.insert("Backquote".to_string(), Box::new(|_: &mut VisoEngine| {}));
+                kb
+            },
             store: Session::new(),
-            ui_dirty: DirtyFlags::empty(),
             plugin_driver: PluginDriver::new(),
             render_projector: RenderProjector::new(),
             gui_projector: GuiProjector::new(),
             host,
-            structure_title: None,
-            // No puzzle objective until `LoadPuzzle` fires; free-form
-            // `LoadStructure` keeps this as `None` too.
-            loaded_puzzle: None,
             frontend: FrontendState::new(),
-            app_state: AppState::Loading,
+            app_state: LoadingState::Initializing,
             awaiting_initial_score: false,
-            last_pushed_scores: std::collections::HashMap::new(),
+            needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -403,9 +636,18 @@ impl App {
 
     /// True once the Rosetta backend has delivered its first score
     /// update for the current session. Read by [`Self::tick`] to gate
-    /// the Loading → InPuzzle transition.
+    /// the Loading → InSession transition.
     fn has_initial_score(&self) -> bool {
-        head_score(&self.store, self.gui_projector.scoring_mode).is_some()
+        head_score(&self.store).is_some()
+    }
+
+    /// Advance the App-lifetime phase and mirror it to the frontend
+    /// transmit gate. `set_app_state` only marks the section dirty when
+    /// the value actually changes, so re-setting the same phase is a
+    /// no-op on the wire.
+    fn set_loading_state(&mut self, state: LoadingState) {
+        self.app_state = state;
+        self.frontend.set_app_state(self.app_state);
     }
 
     // ── Engine-only delegation ──
@@ -446,17 +688,18 @@ impl App {
                 return;
             }
 
-            let mut visual_dirty = false;
-            let mut had_terminal = false;
+            // Every branch below routes through the mutation funnel, which
+            // emits the covering `SessionUpdate`: a mid-stream update emits
+            // a tentative `Edit`, a commit emits `HeadMoved` (+ a deferred
+            // `ScoresChanged` from the commit-stamp), an abort emits its own
+            // update. The GUI consumer derives its dirty set from that batch,
+            // so no explicit raise is needed here.
             for event in events {
                 match event {
                     OpEvent::Update { token, assembly } => {
-                        if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
-                            visual_dirty = true;
-                        }
+                        apply_streaming_assembly(&mut self.store, &assembly, None, token);
                     }
                     OpEvent::Commit { token, assembly } => {
-                        had_terminal = true;
                         if let Some(token) = token {
                             if apply_streaming_assembly(&mut self.store, &assembly, None, token) {
                                 // Stream finished: commit the tentative so
@@ -472,7 +715,6 @@ impl App {
                                 // The edit's correlation id is now spent;
                                 // drop any lingering composition target.
                                 let _ = self.score_targets.remove(&token);
-                                visual_dirty = true;
                             }
                         }
                     }
@@ -481,13 +723,10 @@ impl App {
                         // exactly the edit this stream owns. A terminal
                         // with no open edit, or whose edit already
                         // committed, is a no-op.
-                        had_terminal = true;
                         if let Some(token) = token {
                             if self.store.is_pending(token) {
                                 if let Err(e) = self.store.abort_action(token) {
                                     log::warn!("abort_action failed: {e}");
-                                } else {
-                                    visual_dirty = true;
                                 }
                             }
                         }
@@ -495,30 +734,19 @@ impl App {
                     }
                 }
             }
-
-            if had_terminal {
-                self.ui_dirty |= DirtyFlags::SCORE
-                    | DirtyFlags::ACTIONS
-                    | DirtyFlags::SCENE
-                    | DirtyFlags::HISTORY;
-            } else if visual_dirty {
-                // Mid-stream visual updates without a terminal event:
-                // the scene needs a re-publish but not a full UI sync.
-                self.ui_dirty |= DirtyFlags::SCENE;
-            }
         }
     }
 
     /// Query every plugin's `score` op, merge totals into the head
     /// checkpoint (bumping `live_version` for the GuiProjector to pick
     /// up), and push per-residue scores directly to viso for
-    /// color-by-score display modes. Off the `SessionUpdate` spine
+    /// color-by-score display modes. Off the `SessionUpdate` stream
     /// entirely: scores have two consumers (the GuiProjector via
     /// `HistorySyncCursor` and viso via a direct overlay push) and
-    /// neither needs to ride the spine (RX10 decision B).
+    /// neither needs to ride the `SessionUpdate` stream.
     ///
     /// Synchronous (blocking) score poll. `tick` calls this each frame
-    /// only until the first score lands, so the Loading -> InPuzzle gate
+    /// only until the first score lands, so the InSession gate
     /// flips promptly; once a score exists `tick` switches to the async
     /// path (`request_scores` + `poll_async_scores`). Dirty flags are set
     /// by `apply_score_reports` when a report actually applies.
@@ -545,7 +773,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn refresh_scores(&mut self) {
         // Blocking score round-trip. Used only until the first score
-        // lands, where a synchronous result keeps the Loading -> InPuzzle
+        // lands, where a synchronous result keeps the InSession
         // flip deterministic. Once a score exists the caller switches to
         // `request_scores` + `poll_async_scores` so the render thread
         // never blocks on the worker.
@@ -573,9 +801,9 @@ impl App {
 
     /// Merge score reports into the head checkpoint and push per-residue
     /// scores to viso. Shared tail of the blocking (bootstrap) and async
-    /// (steady-state) score paths; no-op on an empty report set. Dirty
-    /// flags are set here so both paths mark SCORE/HISTORY exactly when a
-    /// report actually applies.
+    /// (steady-state) score paths; no-op on an empty report set. The SCORE
+    /// dirty flag is set here so both paths mark it exactly when a report
+    /// actually applies.
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_score_reports(
         &mut self,
@@ -586,7 +814,6 @@ impl App {
         if reports.is_empty() {
             return;
         }
-        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
 
         let mut total: Option<f64> = None;
         // entity_id -> Vec<(residue_index, score)>; merged across all
@@ -628,9 +855,13 @@ impl App {
     /// color schemes have data. Each entity's score Vec is sized to its
     /// full residue count; missing residues default to 0.0 (the mid-palette
     /// stop in absolute mode, the lower quantile in relative mode -- close
-    /// enough for a first-pass render). Skips the push when the vector
-    /// matches the one already on viso (the scorer streams the same value
-    /// at idle; a repeat push forces a needless color recompute + reupload).
+    /// enough for a first-pass render). The push is unconditional: viso is
+    /// the single owner of per-entity score state (it retains scores across
+    /// `replace_assembly` and reconciles by id), so foldit-core keeps no
+    /// shadow copy to dedup against. viso recolors on every push, but a
+    /// score query only fires on a genuine geometry change (the steady-state
+    /// poll gates on a non-score, non-selection update), and such a change
+    /// generally moves the scores too, so a byte-identical re-push is rare.
     /// Shared by the whole-assembly and composition score paths.
     #[cfg(not(target_arch = "wasm32"))]
     fn push_per_residue_to_viso(
@@ -647,7 +878,6 @@ impl App {
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
-        let last_pushed = &mut self.last_pushed_scores;
         // Build (raw_entity_id -> residue_count) once via head_assembly so
         // we don't need a mut borrow on store to mint molex EntityIds.
         let head = self.store.head_assembly();
@@ -674,23 +904,11 @@ impl App {
                     scores[i] = val;
                 }
             }
-            let unchanged = matches!(
-                last_pushed.get(&entity_id),
-                Some(Some(prev)) if *prev == scores
-            );
-            if unchanged {
-                log::debug!(
-                    "[App] per-residue scores unchanged for viso entity \
-                     {entity_id}; skipping push"
-                );
-                continue;
-            }
             log::info!(
                 "[App] applied {entry_count} per-residue scores to viso entity \
                  {entity_id} (residue_count={residue_count})"
             );
-            engine.set_per_residue_scores(entity_id, Some(scores.clone()));
-            last_pushed.insert(entity_id, Some(scores));
+            engine.set_per_residue_scores(entity_id, Some(scores));
         }
     }
 
@@ -727,7 +945,6 @@ impl App {
         if replies.is_empty() {
             return;
         }
-        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::HISTORY;
         for (rid, report) in replies {
             let raw = f64::from(report.total);
             let game = rosetta_raw_to_game(raw);
@@ -813,20 +1030,26 @@ impl App {
             return false;
         };
 
-        if !self.keybindings.dispatch(key_str, engine) {
-            return self.try_hotkey_dispatch(key_str);
-        }
-
-        // Focus-changing keys need a GUI dirty flush; viso's built-in
-        // ran above but doesn't know about foldit's projector cadence.
+        // Focus is foldit-core session state: intercept the focus gestures
+        // before viso's keybinding table and mutate the session. The tick's
+        // `FocusChanged` reaction pushes viso's camera mirror, reframes, and
+        // raises the projector dirty (the catalog re-projects because per-op
+        // availability is focus-dependent).
         if matches!(key_str, "Tab" | "Backquote") {
+            let next = match key_str {
+                "Tab" => next_focus(self.store.focus(), &engine.focusable_entities()),
+                _ => Focus::All,
+            };
+            self.store.set_focus(next);
             log::info!(
                 "Focus: {}",
-                render_projector::focus_description(&self.store, &engine.focus())
+                render_projector::focus_description(&self.store, &self.store.focus())
             );
-            // ACTIONS too: per-op availability is focus-dependent, so a
-            // focus switch must re-project the catalog.
-            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::UI | DirtyFlags::ACTIONS;
+            return true;
+        }
+
+        if !self.keybindings.dispatch(key_str, engine) {
+            return self.try_hotkey_dispatch(key_str);
         }
         true
     }
@@ -850,11 +1073,11 @@ impl App {
             for id in &preview_ids {
                 self.store.remove_preview(*id);
             }
-            // PreviewDiscarded rides the spine — the next tick's render
-            // projector republishes.
+            // PreviewDiscarded rides the `SessionUpdate` stream — the next tick's render
+            // projector republishes and the GUI consumer derives SCENE +
+            // ACTIONS dirty from the same batch.
             log::info!("Removed {} in-progress preview entities", preview_ids.len());
         }
-        self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::LOADING;
     }
 
     // ── Viewport input (from webview) ──
@@ -1034,16 +1257,20 @@ impl App {
                             // use. Mirrors the `handle_keybinding` ESC arm.
                             pending_escape = true;
                         }
+                        // Focus is foldit-core session state: mutate the
+                        // session here (disjoint `self.store` borrow). The
+                        // tick's `FocusChanged` reaction pushes viso's camera
+                        // mirror, reframes, and raises the projector dirty.
+                        "Tab" => {
+                            let next =
+                                next_focus(self.store.focus(), &engine.focusable_entities());
+                            self.store.set_focus(next);
+                        }
+                        "Backquote" => {
+                            self.store.set_focus(Focus::All);
+                        }
                         other => {
-                            if self.keybindings.dispatch(other, engine) {
-                                if matches!(other, "Tab" | "Backquote") {
-                                    // (lock update deferred — see comment above)
-                                    // ACTIONS too: per-op availability is
-                                    // focus-dependent, so re-project the catalog.
-                                    self.ui_dirty |=
-                                        DirtyFlags::SCENE | DirtyFlags::UI | DirtyFlags::ACTIONS;
-                                }
-                            } else {
+                            if !self.keybindings.dispatch(other, engine) {
                                 // No viso built-in claims this key — resolve it
                                 // against the plugin hotkey catalog. Disjoint
                                 // field borrow (`self.plugin_driver`) so it
@@ -1070,8 +1297,6 @@ impl App {
                 // Ignored: JS sends CSS pixels (logical) which are wrong on HiDPI.
             }
         }
-
-        self.ui_dirty |= DirtyFlags::UI;
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
@@ -1114,12 +1339,11 @@ impl App {
 
     /// Called after the pull-drag interception path. Mirrors the
     /// trailing visualization update the regular `handle_viewport_input`
-    /// flow does (the spine drain itself is tick-driven now).
+    /// flow does (the `SessionUpdate` drain itself is tick-driven now).
     /// Pre-snapshots the pull info so the engine borrow doesn't overlap
     /// with the live pull-drag state held in the plugin driver.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
-        self.ui_dirty |= DirtyFlags::UI;
         let pull = self.plugin_driver.pull_drag_pull_info();
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, pull);
@@ -1283,18 +1507,17 @@ impl App {
             // see released locks.
             self.apply_backend_updates();
 
-            // Source the focused entity authoritatively from the engine's
+            // Source the focused entity authoritatively from the session's
             // current focus, not the GUI-supplied `op.focused_entity_id`
             // (which the hotkey paths leave as None). This makes every
             // dispatch path -- button or hotkey -- carry the live focus to
             // the worker, paired with the authoritative `App.selection`
             // read into the intent below. Raw gui-wire id (u32 widened to
             // u64), the shape `DispatchIntent` expects.
-            let focused_entity_id: Option<u64> =
-                self.engine.as_ref().and_then(|engine| match engine.focus() {
-                    Focus::Entity(eid) => Some(eid.raw() as u64),
-                    Focus::All => None,
-                });
+            let focused_entity_id: Option<u64> = match self.store.focus() {
+                Focus::Entity(eid) => Some(eid.raw() as u64),
+                Focus::All => None,
+            };
 
             let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
                 log::warn!(
@@ -1420,7 +1643,12 @@ impl App {
                     log::error!("handle_dispatch_op({:?}): dispatch failed: {s}", op.op_id);
                 }
             }
-            self.ui_dirty |= DirtyFlags::ACTIONS | DirtyFlags::SCORE | DirtyFlags::UI;
+            // GUI dirty is derived from the batch: an Invoke commits
+            // (HeadMoved → SCENE | SCORE | ACTIONS) and a Stream's frames
+            // emit tentative Edits, then a HeadMoved at commit. A dispatch
+            // changes neither focus nor selection, so the action catalog
+            // (which depends only on those) is unchanged; no ACTIONS push
+            // is owed at dispatch time.
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1475,7 +1703,8 @@ impl App {
                 Ok(ckpt) => self.score_committed_checkpoint(ckpt),
                 Err(e) => log::warn!("dispatch_invoke: commit_action failed: {e}"),
             }
-            self.ui_dirty |= DirtyFlags::SCENE | DirtyFlags::HISTORY;
+            // `commit_action` emits `HeadMoved`, from which the GUI consumer
+            // derives SCENE (+ SCORE + ACTIONS); no explicit raise is owed.
         } else if self.store.is_pending(token) {
             // Nothing matched (e.g. plugin returned an empty / unrelated
             // assembly): drop the tentative.
@@ -1511,34 +1740,48 @@ impl App {
             AppCommand::LoadStructure { path } => self.handle_load_structure(path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
             AppCommand::SetViewOptions { options } => {
-                if let Some(engine) = self.engine.as_mut() {
-                    match serde_json::from_value::<viso::options::VisoOptions>(options) {
-                        Ok(opts) => {
-                            engine.set_options(opts);
-                            self.ui_dirty |= DirtyFlags::VIEW;
-                        }
-                        Err(e) => log::error!("Failed to deserialize view options: {}", e),
-                    }
+                // The session is the source of truth: store the options and
+                // let the tick apply them to the engine (+ raise VIEW) off
+                // the emitted `ViewOptionsChanged`.
+                match serde_json::from_value::<viso::options::VisoOptions>(options) {
+                    Ok(opts) => self.store.set_view_options(opts),
+                    Err(e) => log::error!("Failed to deserialize view options: {}", e),
                 }
             }
             AppCommand::LoadViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(dir) = self.host.view_presets_dir() {
                     if let Some(engine) = self.engine.as_mut() {
+                        // Use the engine to read the preset file off disk,
+                        // then record it as the active preset on the session
+                        // (the source of truth). The tick re-applies the
+                        // options to the engine + raises VIEW.
                         engine.load_preset(&name, dir);
-                        self.ui_dirty |= DirtyFlags::VIEW;
+                        let opts = engine.options().clone();
+                        self.store.apply_preset(name, opts);
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
             AppCommand::SaveViewPreset { name } => {
+                // Writes to the preset *library* on disk; it does not change
+                // the active view options, only the available-presets list.
+                // No `SessionUpdate` carries a disk-library change, so refresh
+                // just that list onto the frontend at-site (the same read the
+                // VIEW arm of the GUI consumer does) rather than re-pushing
+                // the whole VIEW section.
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(dir) = self.host.view_presets_dir() {
+                // Own the dir so the `&self.host` borrow is released before
+                // the disjoint `&mut self.engine` / `&mut self.frontend`
+                // borrows below.
+                if let Some(dir) = self.host.view_presets_dir().map(std::path::Path::to_path_buf) {
                     if let Some(engine) = self.engine.as_mut() {
-                        engine.save_preset(&name, dir);
-                        self.ui_dirty |= DirtyFlags::VIEW;
+                        engine.save_preset(&name, &dir);
                     }
+                    self.frontend.view.available_presets =
+                        viso::options::VisoOptions::list_presets(&dir);
+                    self.frontend.mark_dirty(DirtyFlags::VIEW);
                 }
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
@@ -1553,26 +1796,26 @@ impl App {
 
     /// Free-form file load (Scientist mode). Ingest entities, set
     /// metadata, then tick + fit the camera (tick is how the render
-    /// projector republishes — the spine carries `PreviewAdded`s and
+    /// projector republishes — the `SessionUpdate` stream carries `PreviewAdded`s and
     /// `HeadMoved`s from `load_entity_into_history`).
     fn handle_load_structure(&mut self, path: String) {
+        self.set_loading_state(LoadingState::LoadingSession);
         match crate::puzzle::load_file_as_entities(&path) {
             Ok((entities, name)) => {
                 log::info!("Loaded structure via IPC: {}", name);
                 for entity in entities {
                     let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                 }
-                self.gui_projector.scoring_mode = ScoringMode::Scientist;
-                self.structure_title = Some(name.clone());
-                self.loaded_puzzle = None;
-                self.gui_projector.bubbles.clear();
-                self.gui_projector.current_bubble = 0;
-                self.ui_dirty |= DirtyFlags::LOADING
-                    | DirtyFlags::ACTIONS
-                    | DirtyFlags::SCORE
-                    | DirtyFlags::PUZZLE;
+                // Free-form load: set the title and drop any puzzle
+                // objective + tutorial bubbles through the create seam.
+                // `start` emits `PuzzleChanged` (via `clear_puzzle`) when
+                // there was a puzzle to clear, which the tick turns into
+                // PUZZLE dirty. A scientist→scientist reload where
+                // `clear_puzzle` is a no-op emits nothing, so the puzzle
+                // panel's title refresh rides the full populate below.
+                self.store.start(name.clone(), None);
 
-                // Publish + fit. tick(0.0) drains the spine, publishes
+                // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, publishes
                 // via the render projector, and runs engine.update(0.0)
                 // so fit_camera_to_focus has bounding-radius to read.
                 self.tick(0.0);
@@ -1584,13 +1827,21 @@ impl App {
                 log::error!("Failed to load structure '{}': {}", path, e);
             }
         }
-        self.ui_dirty |= DirtyFlags::LOADING | DirtyFlags::SCORE;
+        // A reload does not re-arm the Loading → InSession gate (that fires
+        // once, at the initial load), so signal a one-shot full populate
+        // here: the next tick's GUI consumer pushes every section, covering
+        // the puzzle-panel title and post-load score / catalog that no batch
+        // variant carries on a reload.
+        self.needs_full_populate = true;
     }
 
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
     /// metadata, then tick + snap + apply the puzzle's saved pose.
     fn handle_load_puzzle(&mut self, puzzle_id: u32) {
-        let title = self.structure_title();
+        self.set_loading_state(LoadingState::LoadingSession);
+        // Entity display name for the loaded molecules: the outgoing
+        // session title (captured before `reset`, which leaves it intact).
+        let title = self.store.title().to_string();
         self.store.reset();
         self.plugin_driver.reset_for_new_structure();
         // Topology swap: `Session::reset` already cleared the selection
@@ -1600,12 +1851,8 @@ impl App {
         // now-empty highlight to viso and raises SELECTION dirty; `reset`
         // itself only emits `HeadMoved`.
         self.store.clear_selection();
-        // Same collision concern for the per-residue score cache: a new
-        // entity reusing an old raw id with coincidentally-equal scores
-        // must still push, so drop the cache on the topology swap.
-        self.last_pushed_scores.clear();
-        // The same id-reuse hole exists in viso's own per-entity score
-        // map: replace_assembly now preserves scores across a swap (so a
+        // viso's own per-entity score map has an id-reuse hole:
+        // replace_assembly now preserves scores across a swap (so a
         // settling preview doesn't flash the survivors gray), reconciling
         // membership by id. A puzzle reload restarts the entity allocator,
         // so the new puzzle's ids collide with the outgoing ones and would
@@ -1616,22 +1863,40 @@ impl App {
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
-                self.gui_projector.scoring_mode = ScoringMode::Game;
-                self.loaded_puzzle = Some(LoadedPuzzle {
-                    id: puzzle_id,
-                    title: puzzle_data.name.clone(),
-                    starting_score: puzzle_data.start_energy,
-                    target_score: puzzle_data.completion_score,
-                });
-                self.structure_title = Some(puzzle_data.name.clone());
-                self.gui_projector.bubbles = puzzle_data.bubbles;
-                self.gui_projector.current_bubble = 0;
+                // Install the puzzle (title + objective + tutorial bubbles)
+                // through the create seam. The tutorial sequence and its
+                // cursor move together: a non-empty sequence starts at index
+                // 0, an empty sequence is `None`. `start` emits
+                // `PuzzleChanged`, which the tick turns into PUZZLE dirty
+                // (the PUZZLE arm also pushes the current bubble).
+                let bubbles = if puzzle_data.bubbles.is_empty() {
+                    None
+                } else {
+                    Some(puzzle_data.bubbles)
+                };
+                let current_bubble = bubbles.as_ref().map(|_| 0);
+                self.store.start(
+                    puzzle_data.name.clone(),
+                    Some(Puzzle {
+                        id: puzzle_id,
+                        start_energy: puzzle_data.start_energy,
+                        completion_energy: puzzle_data.completion_score,
+                        bubbles,
+                        current_bubble,
+                    }),
+                );
 
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(preset_name) = &puzzle_data.view_preset {
                     if let Some(dir) = self.host.view_presets_dir() {
                         if let Some(engine) = self.engine.as_mut() {
+                            // Read the preset off disk via the engine, then
+                            // record it as the active preset on the session.
+                            // The tick(0.0) below drains the emitted
+                            // `ViewOptionsChanged` and re-applies the options.
                             engine.load_preset(preset_name, dir);
+                            let opts = engine.options().clone();
+                            self.store.apply_preset(preset_name.clone(), opts);
                         }
                     }
                 }
@@ -1651,7 +1916,7 @@ impl App {
                     }
                 }
 
-                // Topology swap rides the spine — tick's render
+                // Topology swap rides the `SessionUpdate` stream — tick's render
                 // projector picks `replace_assembly` because the id set
                 // differs from the last publish (post-reset = empty).
                 self.tick(0.0);
@@ -1681,23 +1946,24 @@ impl App {
             }
             Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
         }
-        self.ui_dirty |=
-            DirtyFlags::LOADING | DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::PUZZLE;
+        // PUZZLE rides the `start` emit drained by the inner `tick(0.0)`
+        // above (its PUZZLE arm also pushes the current bubble), and the
+        // topology swap re-pushes the entity list via the batch. A reload
+        // does not re-arm the Loading → InSession gate, so signal a one-shot
+        // full populate to push the post-load score / catalog the batch does
+        // not carry on a reload.
+        self.needs_full_populate = true;
     }
 
     // ── Tutorial-bubble cursor ──
 
-    /// Step the tutorial-bubble cursor and mark the bubble dirty so
-    /// `populate_frontend` re-pushes the new head. Forward saturates at
-    /// `bubbles.len()` (one past the end; the GUI sees `None`
-    /// and clears); back saturates at 0.
+    /// Step the tutorial-bubble cursor on the session. The cursor lives on
+    /// `Session` now; this forwards and the emitted `BubbleChanged` is
+    /// turned into TEXT_BUBBLE dirty by the tick, which re-pushes the new
+    /// head. Forward saturates one past the end (the GUI then clears);
+    /// back saturates at 0.
     fn advance_bubble(&mut self, back: bool) {
-        if back {
-            self.gui_projector.current_bubble = self.gui_projector.current_bubble.saturating_sub(1);
-        } else if self.gui_projector.current_bubble < self.gui_projector.bubbles.len() {
-            self.gui_projector.current_bubble += 1;
-        }
-        self.ui_dirty |= DirtyFlags::TEXT_BUBBLE;
+        self.store.advance_bubble(back);
     }
 
     // ── History navigation (Undo / Redo / Jump / Pin) ──
@@ -1706,31 +1972,19 @@ impl App {
     /// per-residue scores (the values were computed against the
     /// *previous* head and become meaningless on a head move; v1 just
     /// blanks them so the structure renders neutral instead of "gray",
-    /// v2 will async-reeval), and mark UI dirty. Score is no longer
-    /// cached in `App`; the GUI projection reads it off the new head
-    /// checkpoint on the next `populate_frontend` (G1). The render
-    /// projector republishes via the spine — `HeadMoved` emitted by
-    /// undo/redo/jump triggers the next tick's render projector to
-    /// pick `replace_assembly` (when entity-id set changed) or
-    /// `set_assembly` (when it didn't).
+    /// v2 will async-reeval). Score is no longer cached in `App`; the GUI
+    /// projection reads it off the new head checkpoint on the next
+    /// GUI-consumer pass. The `HeadMoved` emitted by undo/redo/jump rides
+    /// the batch, from which the render projector republishes (picking
+    /// `replace_assembly` / `set_assembly`) and the GUI consumer derives
+    /// SCENE | SCORE | ACTIONS dirty.
     fn after_head_move(&mut self) {
         if let Some(engine) = self.engine.as_mut() {
-            let last_pushed = &mut self.last_pushed_scores;
             let ids: Vec<EntityId> = self.store.ids().collect();
             for eid in ids {
-                let raw = eid.raw();
-                // Skip a redundant clear: if the last push for this
-                // entity was already a clear (`None`), viso is neutral
-                // and re-pushing `None` would reupload for no change.
-                if matches!(last_pushed.get(&raw), Some(None)) {
-                    continue;
-                }
-                engine.set_per_residue_scores(raw, None);
-                last_pushed.insert(raw, None);
+                engine.set_per_residue_scores(eid.raw(), None);
             }
         }
-
-        self.ui_dirty |= DirtyFlags::SCORE | DirtyFlags::ACTIONS | DirtyFlags::SCENE;
     }
 
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
@@ -1813,7 +2067,12 @@ impl App {
         match result {
             Ok(HistoryOutcome::HeadMoved) => self.after_head_move(),
             Ok(HistoryOutcome::Curated) => {
-                self.ui_dirty |= DirtyFlags::ACTIONS;
+                // Pin / unpin / exclude mutate the history DAG's curation
+                // metadata without moving the head or bumping
+                // `topology_version`, so the GUI consumer's cursor-driven
+                // history push never re-fires. Push the refreshed history
+                // section at-site so the panel reflects the change.
+                self.frontend.set_history(project_history(&self.store));
             }
             Ok(HistoryOutcome::Noop) => {}
             Err(e) => log::warn!("history command refused: {e}"),
@@ -1890,209 +2149,12 @@ impl App {
             .map(|v| v.to_string().into_bytes())
     }
 
-    fn populate_frontend(&mut self) {
-        let selected_count = self.store.selection_total_count();
-        let engine = match &self.engine {
-            Some(e) => e,
-            None => return,
-        };
-
-        // FPS and selected count change every frame — always push them
-        self.frontend.set_fps(engine.fps());
-        self.frontend.ui.selected_count = selected_count;
-
-        let app_dirty = self.ui_dirty;
-        self.ui_dirty = DirtyFlags::empty();
-        if app_dirty.is_empty() {
-            return;
-        }
-
-        // PUZZLE before SCORE: a fresh `set_puzzle_*` resets `complete=false`,
-        // and then the score check below can latch victory in the same frame
-        // without being overwritten.
-        if app_dirty.contains(DirtyFlags::PUZZLE) {
-            match self.gui_projector.scoring_mode {
-                ScoringMode::Game => {
-                    // Game mode implies LoadPuzzle ran, which populates
-                    // `loaded_puzzle`. The two are set together at every
-                    // mode-changing site, so a Game-mode tick with no
-                    // `loaded_puzzle` is a programming error, not a
-                    // user-visible state.
-                    if let Some(p) = &self.loaded_puzzle {
-                        self.frontend.set_puzzle_game(
-                            p.id,
-                            p.title.clone(),
-                            p.starting_score,
-                            p.target_score,
-                        );
-                    } else {
-                        log::warn!(
-                            "populate_frontend: Game mode with no loaded_puzzle; skipping set_puzzle_game",
-                        );
-                    }
-                }
-                // Scientist mode has no puzzle objective by construction
-                // (LoadStructure clears `loaded_puzzle`), so the title
-                // is the file-derived structure name.
-                ScoringMode::Scientist => {
-                    self.frontend.set_puzzle_scientist(self.structure_title())
-                }
-            }
-            // Bubble push on puzzle swap: render the cursor's current
-            // bubble (always index 0 right after LoadPuzzle, since the
-            // cursor is reset there). Subsequent AdvanceBubble actions
-            // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
-            self.frontend.set_text_bubble(
-                self.gui_projector
-                    .bubbles
-                    .get(self.gui_projector.current_bubble)
-                    .map(bubble_to_payload),
-            );
-        }
-        if app_dirty.contains(DirtyFlags::TEXT_BUBBLE) {
-            self.frontend.set_text_bubble(
-                self.gui_projector
-                    .bubbles
-                    .get(self.gui_projector.current_bubble)
-                    .map(bubble_to_payload),
-            );
-        }
-        if app_dirty.contains(DirtyFlags::SCORE) {
-            if let Some(score) = head_score(&self.store, self.gui_projector.scoring_mode) {
-                self.frontend.set_score(score, false);
-                // Victory check: in Game mode, latch puzzle as complete the
-                // first time current_score crosses the toml target. Higher
-                // game score = better fold (game-score formula negates),
-                // so the comparison is `>=`.
-                if self.gui_projector.scoring_mode == ScoringMode::Game {
-                    if let Some(p) = &self.loaded_puzzle {
-                        if p.target_score > 0.0 && score >= p.target_score {
-                            self.frontend.mark_puzzle_complete();
-                        }
-                    }
-                }
-            }
-        }
-        if app_dirty.contains(DirtyFlags::ACTIONS) {
-            // Availability depends on focus + selection + lock state.
-            // Source focus the same way the SCENE arm below does, then
-            // hand the driver the authoritative selection + an entity-type
-            // closure (disjoint field borrows: `plugin_driver` / `store`).
-            let focus = match engine.focus() {
-                Focus::Entity(eid) => Some(eid),
-                Focus::All => None,
-            };
-            let store = &self.store;
-            let actions = self.plugin_driver.actions_catalog(
-                focus,
-                store.selection(),
-                |id| store.entity_type(id),
-            );
-            self.frontend.set_actions(actions);
-        }
-        if app_dirty.contains(DirtyFlags::LOADING) {
-            self.frontend.set_loading_progress(None);
-        }
-        if app_dirty.contains(DirtyFlags::VIEW) {
-            self.frontend.view.options = serde_json::to_value(engine.options()).unwrap_or_default();
-
-            // Schema is static — only set once
-            if self.frontend.view.options_schema.is_null() {
-                self.frontend.view.options_schema =
-                    serde_json::to_value(viso::options::VisoOptions::json_schema())
-                        .unwrap_or_default();
-            }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.frontend.view.available_presets = self
-                    .host
-                    .view_presets_dir()
-                    .map(viso::options::VisoOptions::list_presets)
-                    .unwrap_or_default();
-            }
-            self.frontend.view.active_preset = engine.active_preset().map(String::from);
-        }
-        if app_dirty.contains(DirtyFlags::SELECTION) {
-            let entries: Vec<foldit_gui::EntitySelection> = self
-                .store
-                .selection()
-                .iter()
-                .map(|(eid, residues)| foldit_gui::EntitySelection {
-                    entity_id: eid.raw(),
-                    residues: residues.iter().copied().collect(),
-                })
-                .collect();
-            self.frontend.set_selection(entries);
-        }
-        if app_dirty.contains(DirtyFlags::UI) {
-            self.frontend.mark_dirty(DirtyFlags::UI);
-        }
-        if app_dirty.contains(DirtyFlags::LOADING) || app_dirty.contains(DirtyFlags::SCENE) {
-            use molex::MoleculeType;
-            let mut scene_entities = Vec::new();
-            for (eid, _meta) in self.store.iter() {
-                let Some(entity) = self.store.entity(eid) else {
-                    continue;
-                };
-                let mol_str = match entity.molecule_type() {
-                    MoleculeType::Protein => "protein",
-                    MoleculeType::DNA => "dna",
-                    MoleculeType::RNA => "rna",
-                    MoleculeType::Ligand => "ligand",
-                    MoleculeType::Ion => "ion",
-                    MoleculeType::Water => "water",
-                    MoleculeType::Lipid => "lipid",
-                    MoleculeType::Cofactor => "cofactor",
-                    MoleculeType::Solvent => "solvent",
-                };
-                scene_entities.push(foldit_gui::SceneEntityInfo {
-                    entity_id: entity.id().raw(),
-                    label: entity.label(),
-                    molecule_type: mol_str.to_string(),
-                    atom_count: entity.atom_count(),
-                    residue_count: entity.residue_count(),
-                });
-            }
-            self.frontend.set_scene_entities(scene_entities);
-            let focused = match engine.focus() {
-                Focus::Entity(eid) => Some(eid.raw()),
-                Focus::All => None,
-            };
-            self.frontend.set_focused_entity(focused);
-        }
-
-        // History push (two-channel):
-        //   - topology bump → full `HistorySection`
-        //   - live bump only → small `HistoryLiveUpdate` patch, with a
-        //     50ms (20Hz) debounce so per-cycle Rosetta scores don't
-        //     saturate the IPC. The final cycle on commit always lands
-        //     because committing also bumps `topology_version`.
-        let topology = self.store.history().topology_version();
-        let live = self.store.history().live_version();
-        let cursor = &mut self.gui_projector.history_sync;
-        let topology_changed = cursor.last_topology != Some(topology);
-        let live_changed = cursor.last_live != Some(live);
-
-        if topology_changed {
-            self.frontend.set_history(project_history(&self.store));
-            cursor.last_topology = Some(topology);
-            cursor.last_live = Some(live);
-            cursor.last_live_push_at = Some(Instant::now());
-        } else if live_changed {
-            let now = Instant::now();
-            let debounced = cursor
-                .last_live_push_at
-                .map_or(false, |t| now.duration_since(t).as_millis() < 50);
-            if !debounced {
-                if let Some(update) = project_history_live(self.store.history()) {
-                    self.frontend.set_history_live(update);
-                    cursor.last_live = Some(live);
-                    cursor.last_live_push_at = Some(now);
-                }
-            }
-        }
-    }
+    // The GUI projection now lives on `GuiProjector` as the third
+    // `SessionUpdate` consumer; see `impl GuiProjector` below. The tick
+    // builds a `GuiContext` and calls `gui_projector.consume(...)` at the
+    // end-of-tick route. There is no `populate_frontend` method anymore:
+    // its body moved verbatim onto the consumer, reading named inputs
+    // instead of `&mut self`.
 
     // ── The per-frame drive loop ──
 
@@ -2101,15 +2163,16 @@ impl App {
     /// Order:
     /// 1. drain pending plugin updates (apply to `Session`; emits
     ///    `SessionUpdate`s through the funnel).
-    /// 2. drain the `SessionUpdate` spine in one go.
+    /// 2. drain the `SessionUpdate` stream in one go.
     /// 3. route the batch: plugin broadcaster fan-out and render
     ///    projector publish (both no-op on empty batches).
-    /// 4. poll plugin scores (refresh head scores, ui_dirty SCORE/HISTORY).
+    /// 4. poll plugin scores (refresh head scores; emits `ScoresChanged`).
     /// 5. engine update (camera animation, mesh upload, etc.).
     /// 6. visualization overlay (bands / pull).
-    /// 7. Loading → InPuzzle gate (one-shot, on first score).
-    /// 8. populate frontend so the next `serialize_frontend_dirty`
-    ///    carries the latest snapshot.
+    /// 7. InSession gate (one-shot, on first score; raises full populate).
+    /// 8. GUI consumer projects the batch (+ one-shot full populate) into
+    ///    the frontend so the next `serialize_frontend_dirty` carries the
+    ///    latest snapshot.
     pub fn tick(&mut self, dt: f32) {
         // 1. Plugin updates.
         self.apply_backend_updates();
@@ -2132,15 +2195,21 @@ impl App {
             .filter(|c| {
                 !matches!(
                     c,
-                    SessionUpdate::ScoresChanged | SessionUpdate::SelectionChanged
+                    SessionUpdate::ScoresChanged
+                        | SessionUpdate::SelectionChanged
+                        | SessionUpdate::FocusChanged
+                        | SessionUpdate::BubbleChanged
+                        | SessionUpdate::PuzzleChanged
+                        | SessionUpdate::ViewOptionsChanged
                 )
             })
             .count();
         // A selection change is not broadcast to plugins and does not
-        // republish geometry; it drives the viso highlight push + the
-        // GUI selection/actions dirty. Source the highlight from the
-        // authoritative `Session` selection (disjoint borrows: `&mut
-        // self.engine` + `&self.store`).
+        // republish geometry; the viso highlight push is the only side
+        // effect here. The matching GUI dirty (SELECTION + ACTIONS) is
+        // derived from this same batch by the GUI consumer below. Source
+        // the highlight from the authoritative `Session` selection (disjoint
+        // borrows: `&mut self.engine` + `&self.store`).
         if changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::SelectionChanged))
@@ -2148,27 +2217,46 @@ impl App {
             if let Some(engine) = self.engine.as_mut() {
                 engine.set_selection(self.store.selection());
             }
-            self.ui_dirty |= DirtyFlags::SELECTION | DirtyFlags::ACTIONS;
         }
+        // A focus change is likewise not broadcast and not a geometry
+        // change. Push viso's camera-framing mirror (no reframe), then drive
+        // the reframe on the host's cadence. The matching GUI dirty (SCENE +
+        // UI + ACTIONS) is derived from this same batch by the GUI consumer.
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::FocusChanged))
+        {
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_focus(self.store.focus());
+                engine.fit_camera_to_focus();
+            }
+        }
+        // A view-options change is not broadcast and not a geometry change.
+        // The session is the source of truth; apply the options to the engine
+        // here. The matching GUI dirty (VIEW) is derived from this same batch
+        // by the GUI consumer below.
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
+        {
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_options(self.store.view_options().clone());
+            }
+        }
+        // BubbleChanged / PuzzleChanged have no viso side effect; their GUI
+        // dirty (TEXT_BUBBLE / PUZZLE) is derived from the batch by the GUI
+        // consumer below, so there are no tick arms for them anymore.
         if !changes.is_empty() {
             // The broadcaster self-filters score-only batches (scores are
             // not an observable mutation for plugins); a no-op call is cheap.
             if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
                 self.plugin_driver
                     .broadcaster
-                    .broadcast(&changes, &self.store, orch);
+                    .consume(&changes, &self.store, orch);
             }
             if render_changes > 0 {
                 if let Some(engine) = self.engine.as_mut() {
-                    // A topology-replace publish wipes viso's per-entity score
-                    // map. Drop the per-residue cache that shadows it so the
-                    // next score reply re-pushes instead of being suppressed as
-                    // an unchanged-value no-op (which would leave the Score
-                    // scheme rendering flat mid-gray until the score happens to
-                    // change).
-                    if self.render_projector.project(&changes, &self.store, engine) {
-                        self.last_pushed_scores.clear();
-                    }
+                    self.render_projector.consume(&changes, &self.store, engine);
                 }
             }
         }
@@ -2178,7 +2266,7 @@ impl App {
         //    those from non-scoring plugins), and the query runs off the
         //    render thread so a slow scorer never stalls rendering. Until
         //    the first score lands the poll is synchronous so the
-        //    Loading -> InPuzzle gate flips promptly.
+        //    InSession gate flips promptly.
         #[cfg(not(target_arch = "wasm32"))]
         {
             if !self.has_initial_score() {
@@ -2215,21 +2303,45 @@ impl App {
             update_all_visualizations(engine, pull);
         }
 
-        // 7. State-machine: flip Loading → InPuzzle the first time the
-        //    plugin score lands for the just-loaded session.
+        // 7. State-machine: flip into InSession the first time the plugin
+        //    score lands for the just-loaded session. This is the only
+        //    phase that routes the frontend to the in-puzzle UI.
         if self.awaiting_initial_score && self.has_initial_score() {
-            self.app_state = AppState::InPuzzle;
+            self.set_loading_state(LoadingState::InSession);
             self.awaiting_initial_score = false;
-            self.frontend.set_app_state(AppState::InPuzzle);
             self.frontend.set_puzzle_loaded(true);
-            self.frontend.set_score_title(self.structure_title());
-            self.frontend.set_puzzle_scientist(self.structure_title());
-            self.frontend.mark_all_dirty();
-            log::info!("Initial plugin score received — app_state=InPuzzle");
+            self.frontend.set_score_title(self.store.title().to_string());
+            self.frontend
+                .set_puzzle_scientist(self.store.title().to_string());
+            // Session birth: the GUI consumer below does a one-shot full
+            // populate (every section once) rather than flooding the
+            // transmit layer's dirty bits directly.
+            self.needs_full_populate = true;
+            log::info!("Initial plugin score received — app_state=InSession");
         }
 
-        // 8. Frontend population.
-        self.populate_frontend();
+        // 8. Frontend projection: the GUI consumer derives its dirty set
+        //    entirely from this tick's `changes` batch, plus the one-shot
+        //    `needs_full_populate` signal (session birth). The signal is
+        //    consumed (taken + cleared) only when the engine is present and
+        //    the consumer runs; with no engine attached yet it persists to a
+        //    later tick, so the birth populate is never dropped.
+        if let Some(engine) = self.engine.as_ref() {
+            let full_populate = self.needs_full_populate;
+            self.needs_full_populate = false;
+            let ctx = GuiContext {
+                host: self.host.as_ref(),
+            };
+            self.gui_projector.consume(
+                &changes,
+                full_populate,
+                &self.store,
+                engine,
+                &self.plugin_driver,
+                &ctx,
+                &mut self.frontend,
+            );
+        }
     }
 
     // ── Complex lifecycle (engine attach + initial load) ──
@@ -2261,15 +2373,21 @@ impl App {
             return;
         };
 
+        self.set_loading_state(LoadingState::LoadingSession);
+
         // Parse entities from file
         match crate::puzzle::load_file_as_entities(&path) {
             Ok((entities, name)) => {
                 for entity in entities {
                     let _ = load_entity_into_history(&mut self.store, entity, name.clone());
                 }
-                self.structure_title = Some(name.clone());
+                // Free-form initial load: set the title and ensure the
+                // free-form (no-puzzle) session through the create seam. The
+                // scientist puzzle panel + title reach the GUI at the
+                // InSession gate's `set_puzzle_scientist` push.
+                self.store.start(name.clone(), None);
 
-                // Publish + fit. tick(0.0) drains the spine, hands the
+                // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, hands the
                 // assembly to the render projector, and runs
                 // engine.update(0.0) so the pending Assembly is drained
                 // before fit_camera reads bounding-radius.
@@ -2293,7 +2411,7 @@ impl App {
                 // Republish: bootstrap may have committed rosetta's
                 // post-Init normalized assembly (full-atom pose) into
                 // the store. The HeadMoved emitted by commit_action
-                // rides the spine; tick(0.0) flushes it and polls
+                // rides the `SessionUpdate` stream; tick(0.0) flushes it and polls
                 // scores, so has_initial_score() flips synchronously.
                 self.tick(0.0);
             }
@@ -2305,18 +2423,13 @@ impl App {
             }
         }
 
-        // Push the now-populated state to the GUI on the next frame:
-        // VIEW for the engine options, ACTIONS so the catalog (wiggle
-        // etc.) renders, SCORE so the initial number from
-        // refresh_scores reaches the score widget, SCENE for the
-        // entity list, LOADING to flip out of the loading screen.
-        self.ui_dirty |= DirtyFlags::VIEW
-            | DirtyFlags::ACTIONS
-            | DirtyFlags::SCORE
-            | DirtyFlags::SCENE
-            | DirtyFlags::LOADING;
-
-        // Arm the Loading → InPuzzle gate. `tick` flips `app_state` the
+        // The now-populated state reaches the GUI via the one-shot full
+        // populate the Loading → InSession flip raises (VIEW for the engine
+        // options, ACTIONS for the catalog, SCORE for the initial number,
+        // SCENE for the entity list). The loading screen clears via the
+        // `InSession` flip itself, not a dirty flag.
+        //
+        // Arm the Loading → InSession gate. `tick` flips `app_state` the
         // first frame `has_initial_score()` returns true (plugins may
         // not have replied yet by the time we return here).
         self.awaiting_initial_score = true;
@@ -2340,6 +2453,7 @@ impl App {
     /// atom-set boundary mid-action and snap.
     #[cfg(not(target_arch = "wasm32"))]
     fn bootstrap_plugins(&mut self) {
+        self.set_loading_state(LoadingState::Initializing);
         let Some(plugins_root) = locate_plugins_root() else {
             log::warn!(
                 "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
@@ -2471,7 +2585,7 @@ impl App {
             "[App] {plugin_id} post-Init assembly applied ({} bytes)",
             post_init_bytes.len()
         );
-        // Republish is spine-driven: the HeadMoved from commit_action
+        // Republish is stream-driven: the HeadMoved from commit_action
         // rides through the next tick's render projector.
     }
 
@@ -2748,6 +2862,33 @@ mod selection_tests {
             },
         ]);
         assert!(app.store.selection_is_empty());
+    }
+
+    #[test]
+    fn next_focus_cycles_then_wraps_to_all() {
+        // The Tab-cycle step, owned by foldit-core: `All` -> first
+        // focusable -> ... -> last -> back to `All`.
+        let ids = mint_ids(2);
+        assert_eq!(
+            next_focus(Focus::All, &ids),
+            Focus::Entity(ids[0]),
+            "All advances to the first focusable entity",
+        );
+        assert_eq!(
+            next_focus(Focus::Entity(ids[0]), &ids),
+            Focus::Entity(ids[1]),
+            "a focused entity advances to the next in the list",
+        );
+        assert_eq!(
+            next_focus(Focus::Entity(ids[1]), &ids),
+            Focus::All,
+            "the last focusable entity wraps back to All",
+        );
+        // An entity that has left the focusable list (e.g. hidden) also
+        // wraps to All rather than getting stuck.
+        assert_eq!(next_focus(Focus::Entity(ids[1]), &ids[..1]), Focus::All);
+        // No focusable entities: All stays All.
+        assert_eq!(next_focus(Focus::All, &[]), Focus::All);
     }
 
     /// One committed Bulk entity, promoted into history so the store has a

@@ -2,7 +2,7 @@
 //! and the native stream bookkeeping that drives plugin operations.
 //!
 //! `PluginDriver` holds the `Orchestrator`, the [`PluginBroadcaster`]
-//! (the spine's plugin projection), and (on native builds) the in-flight
+//! (the `SessionUpdate` stream's plugin projection), and (on native builds) the in-flight
 //! `StreamHost` state, plus the orchestrator-lifecycle handlers that
 //! touch only the orchestrator (`reset_for_new_structure`, `shutdown`).
 //! Inbound plugin traffic is drained here too: [`PluginDriver::drain_op_events`]
@@ -19,7 +19,7 @@
 use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
 
-use crate::session::{Session, SessionUpdate};
+use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 
 /// Owns the orchestrator handle, the plugin broadcaster, and the
 /// native-only stream bookkeeping. `App` holds one of these and reaches
@@ -28,7 +28,7 @@ use crate::session::{Session, SessionUpdate};
 /// `App` rely on this).
 pub struct PluginDriver {
     pub orchestrator: Option<foldit_runner::Orchestrator>,
-    /// Plugin projection of the `SessionUpdate` spine: diffs its own
+    /// Plugin projection of the `SessionUpdate` stream: diffs its own
     /// last-published `Assembly` against the `Session` to fan Full/Delta
     /// broadcasts out. Disjoint from `orchestrator` so `App` can borrow
     /// both in `pump_scene_changes`.
@@ -819,7 +819,7 @@ pub(crate) enum OpEvent {
 
 // ── Plugin broadcaster ──────────────────────────────────────────────────
 
-/// Plugin projection of the [`SessionUpdate`] spine.
+/// Plugin projection of the [`SessionUpdate`] stream.
 ///
 /// Holds its own last-published `Assembly` snapshot and diffs it against
 /// the authoritative [`Session`] to fan a Full/Delta `UpdateAssembly`
@@ -830,7 +830,7 @@ pub(crate) enum OpEvent {
 /// Per drain it coalesces the batch into one snapshot-diff broadcast
 /// (vs the old one-broadcast-per-mutation queue), so the orchestrator's
 /// generation advances once per drain. It ignores tentative `Edit`s:
-/// plugins never see live frames. (Score updates are off-spine
+/// plugins never see live frames. (Score updates are off-stream
 /// entirely; canonical writes happen via `Session::set_head_scores`
 /// and never reach the broadcaster.)
 pub(crate) struct PluginBroadcaster {
@@ -850,12 +850,32 @@ impl PluginBroadcaster {
         }
     }
 
-    /// Project a drained batch of scene changes into at most one plugin
-    /// broadcast. No-ops unless the batch carries a non-tentative
-    /// observable change; otherwise diffs the held snapshot against
-    /// `doc.head_assembly()` to produce a Full or coord-only Delta,
-    /// fans it out through `orch`, and adopts the new snapshot.
-    pub(crate) fn broadcast(
+    /// Whether a change is a non-tentative observable mutation.
+    /// Tentative edits (live per-cycle frames) are filtered out: plugins
+    /// never see live frames. Signal-only updates that aren't scene
+    /// mutations (`ScoresChanged`, `SelectionChanged`, `FocusChanged`,
+    /// `BubbleChanged`, `PuzzleChanged`) have no arm here, so they're
+    /// non-observable: plugins compute their own scores and never see the
+    /// residue selection, session focus, tutorial bubbles, or puzzle
+    /// objective.
+    fn is_observable(change: &SessionUpdate) -> bool {
+        matches!(
+            change,
+            SessionUpdate::HeadMoved
+                | SessionUpdate::PreviewAdded
+                | SessionUpdate::PreviewDiscarded
+                | SessionUpdate::Edit { tentative: false }
+        )
+    }
+}
+
+/// Project a drained batch of scene changes into at most one plugin
+/// broadcast. No-ops unless the batch carries a non-tentative observable
+/// change; otherwise diffs the held snapshot against
+/// `doc.head_assembly()` to produce a Full or coord-only Delta, fans it
+/// out through the orchestrator sink, and adopts the new snapshot.
+impl SessionUpdateConsumer<foldit_runner::Orchestrator> for PluginBroadcaster {
+    fn consume(
         &mut self,
         changes: &[SessionUpdate],
         doc: &Session,
@@ -876,22 +896,6 @@ impl PluginBroadcaster {
         };
         orch.broadcast_to_plugins(&payload);
         self.last_published = Some(new);
-    }
-
-    /// Whether a change is a non-tentative observable mutation.
-    /// Tentative edits (live per-cycle frames) are filtered out: plugins
-    /// never see live frames. Signal-only updates that aren't scene
-    /// mutations (`ScoresChanged`, `SelectionChanged`) have no arm here,
-    /// so they're non-observable: plugins compute their own scores and
-    /// never see the residue selection.
-    fn is_observable(change: &SessionUpdate) -> bool {
-        matches!(
-            change,
-            SessionUpdate::HeadMoved
-                | SessionUpdate::PreviewAdded
-                | SessionUpdate::PreviewDiscarded
-                | SessionUpdate::Edit { tentative: false }
-        )
     }
 }
 
@@ -1087,7 +1091,7 @@ mod tests {
         let doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
-        bc.broadcast(&changes, &doc, &mut orch);
+        bc.consume(&changes, &doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 0, "tentative-only batch broadcasts nothing");
         assert!(bc.last_published.is_none());
     }
@@ -1097,7 +1101,7 @@ mod tests {
         let doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
-        bc.broadcast(&[], &doc, &mut orch);
+        bc.consume(&[], &doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 0);
     }
 
@@ -1112,7 +1116,7 @@ mod tests {
         let changes = doc.take_updates(); // [PreviewAdded]
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = PluginBroadcaster::new();
-        bc.broadcast(&changes, &doc, &mut orch);
+        bc.consume(&changes, &doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 1, "observable batch broadcasts once");
         assert!(bc.last_published.is_some(), "broadcaster adopts the new snapshot");
     }

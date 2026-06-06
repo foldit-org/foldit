@@ -227,7 +227,7 @@ fn reset_clears_history_metadata_and_transient() {
         .is_empty());
 }
 
-// ── SessionUpdate spine emission ────────────────────────────────────
+// ── SessionUpdate stream emission ───────────────────────────────────
 //
 // These assert the *funnel*: each mutator emits exactly the expected
 // `SessionUpdate` (or none). The Full/Delta projection of those changes is
@@ -337,7 +337,7 @@ fn action_update_emits_tentative_edit() {
     // RenderProjector rebuilds from `Session::head_assembly`. The test
     // asserts the funnel shape (one tentative Edit) and that the
     // post-mutation coords are reachable through the document; the
-    // payload itself is no longer on the spine.
+    // payload itself is no longer on the `SessionUpdate` stream.
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
     store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
@@ -515,7 +515,7 @@ fn set_head_scores_noop_emits_nothing() {
 
 #[test]
 fn set_edit_scores_emits_scores_changed() {
-    // Stamping the open edit's composition score rides the spine; an
+    // Stamping the open edit's composition score rides the `SessionUpdate` stream; an
     // unknown request id writes nothing and emits nothing.
     let (mut store, id) = store_with_protein(2);
     let _ = store.take_updates();
@@ -759,5 +759,333 @@ fn reset_clears_selection() {
     assert!(
         store.selection_is_empty(),
         "reset drops the stale selection on a topology swap",
+    );
+}
+
+#[test]
+fn focus_mutation_emits_one_focus_changed_and_guards_idempotent() {
+    // A focus change funnels through `apply`, emitting exactly one
+    // `FocusChanged` (the App tick turns this into viso's camera mirror
+    // push + SCENE/UI/ACTIONS dirty). Unlike selection, the emit is
+    // guarded: an idempotent re-focus to the current value is silent.
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+
+    store.set_focus(viso::Focus::Entity(e));
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::FocusChanged]),
+        "set_focus to a new value emits exactly FocusChanged",
+    );
+
+    store.set_focus(viso::Focus::Entity(e));
+    assert!(
+        store.take_updates().is_empty(),
+        "an idempotent re-focus emits nothing (change-guard)",
+    );
+
+    store.set_focus(viso::Focus::All);
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::FocusChanged]),
+        "set_focus back to All emits FocusChanged",
+    );
+}
+
+#[test]
+fn reset_clears_focus_to_all() {
+    // Focus is ambient, not history-versioned, but a topology swap
+    // (`reset`) returns it to the all-entities view. The reset sets it
+    // silently (no `FocusChanged`): viso resets its own mirror on the
+    // assembly replace, and `reset` already emits `HeadMoved`.
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+    store.set_focus(viso::Focus::Entity(e));
+    assert_eq!(store.focus(), viso::Focus::Entity(e));
+
+    store.reset();
+    assert_eq!(
+        store.focus(),
+        viso::Focus::All,
+        "reset returns focus to the all-entities view",
+    );
+}
+
+/// A bare tutorial bubble (all optional flow fields empty). Only the
+/// vector length matters to the cursor mutators under test.
+fn mk_bubble() -> crate::puzzle::Bubble {
+    crate::puzzle::Bubble {
+        text: String::new(),
+        color: None,
+        point_to: None,
+        point_to_index: None,
+        image: None,
+        button: None,
+        alt_button: None,
+        alt_skip: None,
+        alt_next: None,
+        no_repeat: false,
+        link_name: None,
+        link_url: None,
+        trigger: None,
+    }
+}
+
+/// A puzzle add-on carrying `bubble_count` tutorial bubbles (cursor at 0
+/// when non-empty, both `None` when empty). Only the sequence length and
+/// the cursor matter to the mutators under test.
+fn mk_puzzle(bubble_count: usize) -> Puzzle {
+    let bubbles = if bubble_count == 0 {
+        None
+    } else {
+        Some((0..bubble_count).map(|_| mk_bubble()).collect())
+    };
+    let current_bubble = bubbles.as_ref().map(|_| 0);
+    Puzzle {
+        id: 1,
+        start_energy: 0.0,
+        completion_energy: 100.0,
+        bubbles,
+        current_bubble,
+    }
+}
+
+#[test]
+fn bubble_cursor_advance_emits_one_bubble_changed() {
+    // The tutorial-bubble cursor lives inside the loaded puzzle. Stepping
+    // it funnels through `apply`, emitting exactly one `BubbleChanged` (the
+    // App tick turns this into TEXT_BUBBLE dirty). With no puzzle loaded the
+    // step is a silent no-op.
+    let mut store = Session::new();
+
+    // No puzzle: advancing is a silent no-op.
+    store.advance_bubble(false);
+    assert!(
+        store.take_updates().is_empty(),
+        "advancing with no puzzle loaded emits nothing",
+    );
+
+    // Install a 2-bubble puzzle (emits PuzzleChanged, drained here).
+    store.set_puzzle(mk_puzzle(2));
+    let _ = store.take_updates();
+    assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(0));
+
+    store.advance_bubble(false);
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::BubbleChanged]),
+        "advance forward emits exactly BubbleChanged",
+    );
+    assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(1));
+}
+
+#[test]
+fn advance_bubble_clamps_at_both_ends_silently() {
+    // Forward saturates one past the last bubble; back saturates at 0. A
+    // step that hits either clamp does not move the cursor, so it emits
+    // nothing.
+    let mut store = Session::new();
+    store.set_puzzle(mk_puzzle(2));
+    let _ = store.take_updates();
+
+    // Back at the start: already 0, clamp, silent.
+    store.advance_bubble(true);
+    assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(0));
+    assert!(
+        store.take_updates().is_empty(),
+        "stepping back at the start is silent",
+    );
+
+    // Walk forward to one-past-the-end (len = 2): 0 -> 1 -> 2.
+    store.advance_bubble(false);
+    store.advance_bubble(false);
+    let _ = store.take_updates();
+    assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(2));
+
+    // Forward at the end: clamp at len, silent.
+    store.advance_bubble(false);
+    assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(2));
+    assert!(
+        store.take_updates().is_empty(),
+        "stepping forward at the end is silent",
+    );
+}
+
+#[test]
+fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
+    // The puzzle add-on is ambient session state. `set_puzzle` always emits
+    // (a load is a change); `clear_puzzle` emits only when there was a
+    // puzzle to clear.
+    let mut store = Session::new();
+    assert!(store.puzzle().is_none());
+
+    store.set_puzzle(Puzzle {
+        id: 7,
+        start_energy: 0.0,
+        completion_energy: 100.0,
+        bubbles: None,
+        current_bubble: None,
+    });
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        "set_puzzle emits exactly PuzzleChanged",
+    );
+    assert_eq!(store.puzzle().map(|p| p.id), Some(7));
+
+    store.clear_puzzle();
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        "clear_puzzle drops the objective and emits PuzzleChanged",
+    );
+    assert!(store.puzzle().is_none());
+
+    // Idempotent: clearing when already cleared is silent.
+    store.clear_puzzle();
+    assert!(
+        store.take_updates().is_empty(),
+        "clear_puzzle on an already-cleared objective emits nothing",
+    );
+}
+
+#[test]
+fn start_sets_title_and_installs_puzzle() {
+    // The create seam funnels title + `Option<Puzzle>` setup. A free-form
+    // start over an empty session sets the title and leaves no puzzle (the
+    // inner `clear_puzzle` is a silent no-op); a puzzle start sets the title
+    // to the puzzle name and emits exactly PuzzleChanged.
+    let mut store = Session::new();
+
+    store.start("apo".to_string(), None);
+    assert_eq!(store.title(), "apo");
+    assert!(store.puzzle().is_none());
+    assert!(
+        store.take_updates().is_empty(),
+        "free-form start over an empty session emits nothing",
+    );
+
+    store.start("Intro".to_string(), Some(mk_puzzle(0)));
+    assert_eq!(store.title(), "Intro");
+    assert!(store.puzzle().is_some());
+    assert!(
+        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        "puzzle start emits exactly PuzzleChanged",
+    );
+}
+
+#[test]
+fn reset_clears_puzzle_and_leaves_title() {
+    // A topology swap (`reset`) drops the ambient puzzle add-on (objective +
+    // bubble flow) tied to the outgoing structure. The clear is silent (the
+    // load path that follows re-installs via `start`); `reset` already emits
+    // `HeadMoved`. `title` is left untouched for the following `start` to
+    // overwrite.
+    let mut store = Session::new();
+    store.start("P".to_string(), Some(mk_puzzle(1)));
+    store.advance_bubble(false);
+    let _ = store.take_updates();
+
+    store.reset();
+
+    assert!(store.puzzle().is_none(), "reset drops the puzzle add-on");
+    assert_eq!(store.title(), "P", "reset leaves the title untouched");
+}
+
+/// A non-default `VisoOptions`, distinguishable from the default by a
+/// single toggle. Only used to exercise the change-guard.
+fn mk_non_default_options() -> viso::options::VisoOptions {
+    let mut opts = viso::options::VisoOptions::default();
+    opts.debug.show_normals = true;
+    opts
+}
+
+#[test]
+fn set_view_options_emits_one_change_and_clears_preset() {
+    // View options + active preset are ambient session state. A manual
+    // `set_view_options` installs the options and clears the active preset
+    // (manually-set options no longer match a named preset), emitting
+    // exactly one `ViewOptionsChanged` when something changes. The App tick
+    // turns this into `engine.set_options` + the VIEW GUI dirty.
+    let mut store = Session::new();
+    assert_eq!(store.view_options(), &viso::options::VisoOptions::default());
+    assert!(store.active_preset().is_none());
+
+    // Seed an active preset so the next manual set has a preset to clear.
+    store.apply_preset("warm".to_string(), mk_non_default_options());
+    let _ = store.take_updates();
+    assert_eq!(store.active_preset(), Some("warm"));
+
+    // A manual set to the default options still differs (options change +
+    // preset clears), so it emits and drops the active preset.
+    store.set_view_options(viso::options::VisoOptions::default());
+    assert!(
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::ViewOptionsChanged]
+        ),
+        "set_view_options emits exactly ViewOptionsChanged",
+    );
+    assert_eq!(store.view_options(), &viso::options::VisoOptions::default());
+    assert!(
+        store.active_preset().is_none(),
+        "a manual set clears the active preset",
+    );
+
+    // Idempotent: same options, preset already cleared -> silent.
+    store.set_view_options(viso::options::VisoOptions::default());
+    assert!(
+        store.take_updates().is_empty(),
+        "an idempotent set with no preset to clear emits nothing",
+    );
+}
+
+#[test]
+fn apply_preset_emits_and_sets_both() {
+    // `apply_preset` installs the options and records the preset name,
+    // emitting exactly one `ViewOptionsChanged`.
+    let mut store = Session::new();
+    let opts = mk_non_default_options();
+
+    store.apply_preset("warm".to_string(), opts.clone());
+    assert!(
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::ViewOptionsChanged]
+        ),
+        "apply_preset emits exactly ViewOptionsChanged",
+    );
+    assert_eq!(store.view_options(), &opts, "apply_preset installs options");
+    assert_eq!(
+        store.active_preset(),
+        Some("warm"),
+        "apply_preset records the preset name",
+    );
+
+    // Idempotent: same preset + same options -> silent.
+    store.apply_preset("warm".to_string(), opts);
+    assert!(
+        store.take_updates().is_empty(),
+        "re-applying the same preset emits nothing",
+    );
+}
+
+#[test]
+fn reset_restores_default_view_options() {
+    // A topology swap (`reset`) returns view options + active preset to
+    // their defaults (view options reset per session, not persist). Unlike
+    // focus, nothing re-pushes default options to the engine on its own, so
+    // the reset emits `ViewOptionsChanged` when there was a non-default
+    // state to clear.
+    let mut store = Session::new();
+    store.apply_preset("warm".to_string(), mk_non_default_options());
+    let _ = store.take_updates();
+    assert_ne!(store.view_options(), &viso::options::VisoOptions::default());
+    assert_eq!(store.active_preset(), Some("warm"));
+
+    store.reset();
+    assert_eq!(
+        store.view_options(),
+        &viso::options::VisoOptions::default(),
+        "reset restores default view options",
+    );
+    assert!(
+        store.active_preset().is_none(),
+        "reset clears the active preset",
     );
 }
