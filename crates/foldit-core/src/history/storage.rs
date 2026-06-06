@@ -126,6 +126,12 @@ pub struct Checkpoint {
     pub raw_score: Option<f64>,
     /// Game-points score.
     pub game_score: Option<f64>,
+    /// RAW (unweighted) per-term breakdown of this checkpoint's
+    /// composition, the source of truth for per-residue coloring. `None`
+    /// until a score with a breakdown is stamped on this node; aligned to
+    /// the session's `term_names`. Crate-private (the type is): the render
+    /// projector re-derives the displayed colors from it on `ScoresChanged`.
+    pub(crate) breakdown: Option<crate::scores::StoredBreakdown>,
     /// Filter evaluation status.
     pub filter_status: FilterStatus,
     /// User-set "skip me when computing best" flag.

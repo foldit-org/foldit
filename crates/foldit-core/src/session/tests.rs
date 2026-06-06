@@ -489,7 +489,7 @@ fn set_head_scores_emits_scores_changed() {
     // panel's live cursor). Plugins never see this signal.
     let (mut store, _id) = store_with_protein(2);
     let before = store.history().live_version();
-    store.set_head_scores(Some(1.0), Some(2.0));
+    store.set_head_scores(Some(1.0), Some(2.0), None);
     let changes = store.take_updates();
     assert!(
         matches!(changes.as_slice(), [SessionUpdate::ScoresChanged]),
@@ -506,7 +506,7 @@ fn set_head_scores_emits_scores_changed() {
 fn set_head_scores_noop_emits_nothing() {
     // `(None, None)` writes nothing, so no signal is emitted.
     let (mut store, _id) = store_with_protein(2);
-    store.set_head_scores(None, None);
+    store.set_head_scores(None, None, None);
     assert!(
         store.take_updates().is_empty(),
         "a no-op score write emits no SessionUpdate",
@@ -523,13 +523,13 @@ fn set_edit_scores_emits_scores_changed() {
     store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     let _ = store.take_updates();
 
-    store.set_edit_scores(rid, Some(3.0), Some(4.0));
+    store.set_edit_scores(rid, Some(3.0), Some(4.0), None);
     assert!(
         matches!(store.take_updates().as_slice(), [SessionUpdate::ScoresChanged]),
         "set_edit_scores on an open edit emits ScoresChanged",
     );
 
-    store.set_edit_scores(999, Some(3.0), Some(4.0));
+    store.set_edit_scores(999, Some(3.0), Some(4.0), None);
     assert!(
         store.take_updates().is_empty(),
         "set_edit_scores on an unknown request id emits nothing",

@@ -200,6 +200,7 @@ impl History {
             timestamp: now,
             raw_score: None,
             game_score: None,
+            breakdown: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });
@@ -412,6 +413,7 @@ impl History {
         request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
     ) -> bool {
         if raw_score.is_none() && game_score.is_none() {
             return false;
@@ -422,6 +424,11 @@ impl History {
             }
             if let Some(s) = game_score {
                 edit.game_score = Some(s);
+            }
+            // The breakdown rides the scalar-score write (same node, same
+            // call); a `Some` overwrites, a `None` leaves the prior one.
+            if breakdown.is_some() {
+                edit.breakdown = breakdown;
             }
             self.live_version = self.live_version.saturating_add(1);
             return true;
@@ -441,6 +448,7 @@ impl History {
         id: CheckpointId,
         raw_score: Option<f64>,
         game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
     ) -> bool {
         if raw_score.is_none() && game_score.is_none() {
             return false;
@@ -451,6 +459,11 @@ impl History {
             }
             if let Some(s) = game_score {
                 ckpt.game_score = Some(s);
+            }
+            // The breakdown rides the scalar-score write (same node, same
+            // call); a `Some` overwrites, a `None` leaves the prior one.
+            if breakdown.is_some() {
+                ckpt.breakdown = breakdown;
             }
             self.live_version = self.live_version.saturating_add(1);
             return true;
@@ -470,6 +483,22 @@ impl History {
         } else {
             let head = &self.checkpoints.checkpoints[self.checkpoints.head];
             (head.raw_score, head.game_score)
+        }
+    }
+
+    /// The RAW per-term breakdown of the current composition node: the
+    /// first open pending edit if one exists, else the committed head
+    /// checkpoint. Same node-selection rule as
+    /// [`Self::current_composition_scores`]; the render projector re-derives
+    /// the displayed per-residue colors from it. `None` until a score with a
+    /// breakdown has been stamped on that node.
+    #[must_use]
+    pub fn current_composition_breakdown(&self) -> Option<&crate::scores::StoredBreakdown> {
+        if let Some(edit) = self.pending.values().next() {
+            edit.breakdown.as_ref()
+        } else {
+            let head = &self.checkpoints.checkpoints[self.checkpoints.head];
+            head.breakdown.as_ref()
         }
     }
 
@@ -708,7 +737,12 @@ impl History {
     /// checkpoint on top of root + AddEntity. Returns `true` when a value
     /// was actually written (so the caller can emit a score-changed signal
     /// only on a real change); `false` on the `(None, None)` no-op.
-    pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) -> bool {
+    pub fn set_head_scores(
+        &mut self,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
+    ) -> bool {
         if raw_score.is_none() && game_score.is_none() {
             return false;
         }
@@ -723,6 +757,11 @@ impl History {
         }
         if let Some(s) = game_score {
             ckpt.game_score = Some(s);
+        }
+        // The breakdown rides the scalar-score write (same node, same
+        // call); a `Some` overwrites, a `None` leaves the prior one.
+        if breakdown.is_some() {
+            ckpt.breakdown = breakdown;
         }
         self.live_version = self.live_version.saturating_add(1);
 

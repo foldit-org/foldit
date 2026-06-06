@@ -57,28 +57,6 @@ fn rosetta_raw_to_game(raw: f64) -> f64 {
     ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM)
 }
 
-/// Accumulate one report's core-weighted per-residue scores into the
-/// `entity_id -> Vec<(residue_index, score)>` map (later writers stack on
-/// earlier ones). Takes the `(entity_id, residue_index, weighted_score)`
-/// list [`ScoreReport::weighted_per_residue`] produces, so the per-residue
-/// scalars are core-weighted (raw terms × session weights), not the
-/// plugin's pre-weighted values. Shared by the whole-assembly and
-/// composition paths.
-#[cfg(not(target_arch = "wasm32"))]
-fn accumulate_per_residue(
-    per_entity: &mut std::collections::HashMap<u32, Vec<(u32, f64)>>,
-    weighted: &[(u64, u32, f64)],
-) {
-    for &(entity_id, residue_index, score) in weighted {
-        #[allow(clippy::cast_possible_truncation)]
-        let entity_id = entity_id as u32;
-        per_entity
-            .entry(entity_id)
-            .or_default()
-            .push((residue_index, score));
-    }
-}
-
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
@@ -806,117 +784,68 @@ impl App {
         self.apply_score_reports(reports);
     }
 
-    /// Merge score reports into the head checkpoint and push per-residue
-    /// scores to viso. Shared tail of the blocking (bootstrap) and async
-    /// (steady-state) score paths; no-op on an empty report set. The SCORE
-    /// dirty flag is set here so both paths mark it exactly when a report
-    /// actually applies.
+    /// Weight a score report and stamp the weighted total + the RAW per-term
+    /// breakdown onto the current composition node. Shared tail of the
+    /// blocking (bootstrap) and async (steady-state) score paths; no-op on an
+    /// empty report set. Stamping emits `ScoresChanged`; the render projector
+    /// re-derives the displayed per-residue colors from the session-owned
+    /// breakdown on that signal (no direct viso push here anymore).
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_score_reports(
         &mut self,
         reports: std::collections::HashMap<String, crate::scores::ScoreReport>,
     ) {
-        use std::collections::HashMap;
-
         if reports.is_empty() {
             return;
         }
 
-        let mut total: Option<f64> = None;
-        // entity_id -> Vec<(residue_index, score)>; merged across all
-        // reporting plugins (later writers stack on top of earlier ones
-        // for now -- when multiple plugins score per-residue we'll need a
-        // merge strategy choice).
-        let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
-        for (plugin_id, report) in &reports {
+        // Today only one plugin (Rosetta) returns a non-trivial report, and
+        // the session holds a single `term_names` alignment key, so a single
+        // breakdown is the source of truth. Pick the first report: its
+        // weighted total drives the score widget and its RAW terms become the
+        // session-owned breakdown the render projector re-derives colors from.
+        // (When multiple plugins score per-residue a merge strategy will be
+        // needed; until then the first report wins, matching the previous
+        // total selection.)
+        let mut chosen: Option<crate::scores::ScoreReport> = None;
+        for (plugin_id, report) in reports {
             let weighted_total = report.weighted_total(self.store.term_weights());
-            if total.is_none() {
-                total = Some(weighted_total);
-            }
             log::info!(
                 "[App] score from {plugin_id}: total={weighted_total} terms={} per_residue={}",
                 report.term_names.len(),
                 report.per_residue_terms.len()
             );
-            let weighted = report.weighted_per_residue(self.store.term_weights());
-            accumulate_per_residue(&mut per_entity, &weighted);
-        }
-        if let Some(raw) = total {
-            // Whole-assembly score of the worker's live pose. With exactly
-            // one edit open, the live pose IS that edit's composition (its
-            // tentative + peers' committed heads), so the total is correctly
-            // the edit's score → stamp the edit. With zero or >=2 edits open,
-            // stamp the committed head; the >=2 case is transiently imperfect
-            // for live display (each open edit keeps its last value) but exact
-            // per-edit values still land at commit via the commit-stamp.
-            let game = rosetta_raw_to_game(raw);
-            match self.store.sole_pending_request_id() {
-                Some(rid) => self.store.set_edit_scores(rid, Some(raw), Some(game)),
-                None => self.store.set_head_scores(Some(raw), Some(game)),
+            if chosen.is_none() {
+                chosen = Some(report);
             }
         }
-
-        self.push_per_residue_to_viso(per_entity);
-    }
-
-    /// Push per-residue scores into the engine so Score / ScoreRelative
-    /// color schemes have data. Each entity's score Vec is sized to its
-    /// full residue count; missing residues default to 0.0 (the mid-palette
-    /// stop in absolute mode, the lower quantile in relative mode -- close
-    /// enough for a first-pass render). The push is unconditional: viso is
-    /// the single owner of per-entity score state (it retains scores across
-    /// `replace_assembly` and reconciles by id), so foldit-core keeps no
-    /// shadow copy to dedup against. viso recolors on every push, but a
-    /// score query only fires on a genuine geometry change (the steady-state
-    /// poll gates on a non-score, non-selection update), and such a change
-    /// generally moves the scores too, so a byte-identical re-push is rare.
-    /// Shared by the whole-assembly and composition score paths.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn push_per_residue_to_viso(
-        &mut self,
-        per_entity: std::collections::HashMap<u32, Vec<(u32, f64)>>,
-    ) {
-        use std::collections::HashMap;
-        if per_entity.is_empty() {
-            return;
-        }
-        // Borrow the two disjoint `self` fields the loop touches (the engine
-        // sink + the last-pushed cache) so the dirty-check doesn't fight the
-        // `&mut self.engine` borrow.
-        let Some(engine) = self.engine.as_mut() else {
+        let Some(report) = chosen else {
             return;
         };
-        // Build (raw_entity_id -> residue_count) once via head_assembly so
-        // we don't need a mut borrow on store to mint molex EntityIds.
-        let head = self.store.head_assembly();
-        let residue_counts: HashMap<u32, usize> = head
-            .entities()
-            .iter()
-            .map(|e| (e.id().raw(), e.residue_count()))
-            .collect();
-        for (entity_id, mut entries) in per_entity {
-            let Some(&residue_count) = residue_counts.get(&entity_id) else {
-                log::warn!(
-                    "[App] per-residue scores arrived for unknown entity \
-                     {entity_id} (host has entities {:?})",
-                    residue_counts.keys().collect::<Vec<_>>()
-                );
-                continue;
-            };
-            let mut scores = vec![0.0_f64; residue_count];
-            entries.sort_unstable_by_key(|(idx, _)| *idx);
-            let entry_count = entries.len();
-            for (idx, val) in entries {
-                let i = idx as usize;
-                if i < scores.len() {
-                    scores[i] = val;
-                }
-            }
-            log::info!(
-                "[App] applied {entry_count} per-residue scores to viso entity \
-                 {entity_id} (residue_count={residue_count})"
-            );
-            engine.set_per_residue_scores(entity_id, Some(scores));
+
+        let raw = report.weighted_total(self.store.term_weights());
+        let game = rosetta_raw_to_game(raw);
+        // Install the alignment key before stamping the breakdown (idempotent
+        // in steady state) so the write-time alignment invariant holds.
+        self.store.set_term_names(report.term_names);
+        let breakdown = crate::scores::StoredBreakdown {
+            whole_pose_terms: report.whole_pose_terms,
+            per_residue_terms: report.per_residue_terms,
+        };
+        // Whole-assembly score of the worker's live pose. With exactly one
+        // edit open, the live pose IS that edit's composition (its tentative +
+        // peers' committed heads), so the total + breakdown are the edit's →
+        // stamp the edit. With zero or >=2 edits open, stamp the committed
+        // head; the >=2 case is transiently imperfect for live display (each
+        // open edit keeps its last value) but exact per-edit values still land
+        // at commit via the commit-stamp.
+        match self.store.sole_pending_request_id() {
+            Some(rid) => self
+                .store
+                .set_edit_scores(rid, Some(raw), Some(game), Some(breakdown)),
+            None => self
+                .store
+                .set_head_scores(Some(raw), Some(game), Some(breakdown)),
         }
     }
 
@@ -942,11 +871,14 @@ impl App {
     }
 
     /// Drain composition-score replies and stamp each commit-time checkpoint
-    /// via the `request_id` map (`set_checkpoint_scores`). A `request_id`
-    /// absent from the map is just "not a commit-stamp" and needs no action.
-    /// Per-residue scores still flow to viso for every reply. The raw REU →
-    /// game-points map applies here too, so composition scores never display
-    /// raw REU.
+    /// (its weighted total + RAW per-term breakdown) via the `request_id`
+    /// map (`set_checkpoint_scores`). A `request_id` absent from the map is a
+    /// stale reply (its target was aborted/reset before the score returned)
+    /// and is dropped: there is no node to stamp it on, and pushing its colors
+    /// would be the off-display push this inversion removes. Stamping emits
+    /// `ScoresChanged`; the render projector re-derives the displayed colors
+    /// from whichever node is displayed. The raw REU → game-points map applies
+    /// here too, so composition scores never display raw REU.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_composition_scores(&mut self) {
         let replies = self.runner_client.poll_composition_scores();
@@ -954,16 +886,20 @@ impl App {
             return;
         }
         for (rid, report) in replies {
+            let Some(ckpt_id) = self.score_targets.get(&rid).copied() else {
+                continue;
+            };
             let raw = report.weighted_total(self.store.term_weights());
             let game = rosetta_raw_to_game(raw);
-            if let Some(ckpt_id) = self.score_targets.get(&rid).copied() {
-                self.store.set_checkpoint_scores(ckpt_id, Some(raw), Some(game));
-                let _ = self.score_targets.remove(&rid);
-            }
-            let weighted = report.weighted_per_residue(self.store.term_weights());
-            let mut per_entity = std::collections::HashMap::new();
-            accumulate_per_residue(&mut per_entity, &weighted);
-            self.push_per_residue_to_viso(per_entity);
+            // Install the alignment key before stamping the breakdown.
+            self.store.set_term_names(report.term_names);
+            let breakdown = crate::scores::StoredBreakdown {
+                whole_pose_terms: report.whole_pose_terms,
+                per_residue_terms: report.per_residue_terms,
+            };
+            self.store
+                .set_checkpoint_scores(ckpt_id, Some(raw), Some(game), Some(breakdown));
+            let _ = self.score_targets.remove(&rid);
         }
     }
 
@@ -2172,33 +2108,68 @@ impl App {
     /// Order:
     /// 1. drain pending plugin updates (apply to `Session`; emits
     ///    `SessionUpdate`s through the funnel).
-    /// 2. drain the `SessionUpdate` stream in one go.
-    /// 3. route the batch: runner projector fan-out and render
-    ///    projector publish (both no-op on empty batches).
-    /// 4. poll plugin scores (refresh head scores; emits `ScoresChanged`).
-    /// 5. engine update (camera animation, mesh upload, etc.).
-    /// 6. visualization overlay (bands / pull).
-    /// 7. InSession gate (one-shot, on first score; raises full populate).
-    /// 8. GUI consumer projects the batch (+ one-shot full populate) into
+    /// 2. apply this tick's score replies (blocking until the first score,
+    ///    async thereafter) so their `ScoresChanged` joins this tick's batch.
+    /// 3. drain the `SessionUpdate` stream in one go.
+    /// 4. route the batch: runner projector fan-out and render projector
+    ///    publish + per-residue color re-derive (both no-op on empty batches;
+    ///    the render projector also runs on a score-only batch).
+    /// 5. fire the next steady-state async rescore (gated on a geometry
+    ///    change; reply applies on a later tick's step 2).
+    /// 6. engine update (camera animation, mesh upload, etc.).
+    /// 7. visualization overlay (bands / pull).
+    /// 8. InSession gate (one-shot, on first score; raises full populate).
+    /// 9. GUI consumer projects the batch (+ one-shot full populate) into
     ///    the frontend so the next `serialize_frontend_dirty` carries the
     ///    latest snapshot.
     pub fn tick(&mut self, dt: f32) {
         // 1. Plugin updates.
         self.apply_backend_updates();
 
-        // 2-3. Drain the SessionUpdate stream once and route to both
+        // 2. Apply this tick's score replies BEFORE the drain so their
+        //    `ScoresChanged` lands in this tick's `changes` batch. That makes
+        //    the render projector re-derive the per-residue colors the same
+        //    frame the score arrives (and, on the first score, the same frame
+        //    the geometry publishes), instead of a tick late. The async
+        //    request that triggers the NEXT rescore stays AFTER the drain
+        //    (it gates on this tick's geometry change). Captured here, before
+        //    applying, is whether a score already existed: the bootstrap
+        //    blocking poll flips that true mid-tick, and the async request
+        //    below must not also fire on the bootstrap tick.
+        #[cfg(not(target_arch = "wasm32"))]
+        let had_initial_score = self.has_initial_score();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !had_initial_score {
+                // No score yet: blocking poll each tick until the first one
+                // lands, so the InSession gate flips promptly. Brief, one-time
+                // per load.
+                self.poll_plugin_scores();
+            } else {
+                // Steady state: apply whatever async whole-assembly and
+                // composition replies have arrived. Each stamps the session
+                // and emits `ScoresChanged`, drained just below.
+                self.poll_async_scores();
+                self.poll_composition_scores();
+            }
+        }
+
+        // 3-4. Drain the SessionUpdate stream once and route to both
         //      projectors. The tick is the sole drain. Handlers used to call
         //      `pump_scene_changes` per-event, but that race-conditioned
         //      against the render projector reading the same update queue, so
         //      the per-handler pumps were removed.
         let changes = self.store.take_updates();
-        // A ScoresChanged update signals the GUI score widget and a
-        // SelectionChanged update signals the selection mirror + viso
-        // highlight, but neither is a scene mutation: the render projector
-        // and the rescore trigger below must treat a score-only /
-        // selection-only batch as empty. Republishing geometry on such a
+        // `render_changes` counts only the scene-mutating updates: an
+        // assembly republish keys off these, and the steady-state async
+        // rescore (step 5) gates on them. A ScoresChanged / SelectionChanged
+        // / FocusChanged / view / bubble / puzzle update is not a scene
+        // mutation, so it is excluded here: republishing geometry on such a
         // reply is wasted work (and forces a spurious full rebuild on a
-        // topology tick); re-querying scores in response would loop.
+        // topology tick), and re-querying scores in response would loop. The
+        // render projector still runs on a score-only batch (see
+        // `has_scores_changed` below) to re-derive colors, but it self-filters
+        // and does not republish geometry there.
         let render_changes = changes
             .iter()
             .filter(|c| {
@@ -2213,6 +2184,15 @@ impl App {
                 )
             })
             .count();
+        // Whether this tick's batch carries a score change. A steady-state
+        // rescore reply is a score-only batch (no geometry change), so it
+        // does not count toward `render_changes`; the render projector still
+        // needs to run on it to re-derive the per-residue colors from the
+        // session-owned breakdown. The projector self-filters: a score-only
+        // batch pushes colors without republishing geometry.
+        let has_scores_changed = changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::ScoresChanged));
         // A selection change is not broadcast to plugins and does not
         // republish geometry; the viso highlight push is the only side
         // effect here. The matching GUI dirty (SELECTION + ACTIONS) is
@@ -2262,46 +2242,32 @@ impl App {
                 self.runner_projector
                     .consume(&changes, &self.store, orch);
             }
-            if render_changes > 0 {
+            if render_changes > 0 || has_scores_changed {
                 if let Some(engine) = self.engine.as_mut() {
                     self.render_projector.consume(&changes, &self.store, engine);
                 }
             }
         }
 
-        // 4. Plugin score poll. Scores go stale only on an assembly
-        //    change (every mutation emits a SessionUpdate, including
-        //    those from non-scoring plugins), and the query runs off the
-        //    render thread so a slow scorer never stalls rendering. Until
-        //    the first score lands the poll is synchronous so the
-        //    InSession gate flips promptly.
+        // 5. Fire the NEXT steady-state async rescore. Scores go stale only on
+        //    an assembly change (every mutation emits a SessionUpdate,
+        //    including those from non-scoring plugins), so this gates on this
+        //    tick's geometry change. Fire-and-forget against the worker's
+        //    already-built live pose (no per-frame pose rebuild); the reply
+        //    applies on a later tick's step-2 drain. With exactly one edit
+        //    open the live pose IS that edit's composition, so its reply
+        //    attributes to the edit; per-edit exactness for any other case
+        //    lands at commit via the commit-stamp. Skipped on the bootstrap
+        //    tick (the blocking poll in step 2 already covered it, and
+        //    `had_initial_score` was false then).
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !self.has_initial_score() {
-                // No score yet: blocking poll each tick until the first
-                // one lands. Brief, one-time per load.
-                self.poll_plugin_scores();
-            } else {
-                // Steady state: fire only on an assembly change, never
-                // block the render thread; apply replies as they arrive.
-                // Always the cheap whole-assembly query against the worker's
-                // already-built live pose (no per-frame pose rebuild). With
-                // exactly one edit open the live pose IS that edit's
-                // composition, so its reply attributes to the edit; per-edit
-                // exactness for any other case lands at commit via the
-                // commit-stamp.
-                if render_changes > 0 {
-                    self.request_scores();
-                }
-                self.poll_async_scores();
-                // Drain composition replies: now only commit-time checkpoint
-                // stamps, fired at commit regardless of whether an edit is
-                // still open.
-                self.poll_composition_scores();
+            if had_initial_score && render_changes > 0 {
+                self.request_scores();
             }
         }
 
-        // 5. Engine update + 6. visualization overlay.
+        // 6. Engine update + 7. visualization overlay.
         #[cfg(not(target_arch = "wasm32"))]
         let pull = self.runner_client.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
@@ -2311,7 +2277,7 @@ impl App {
             update_all_visualizations(engine, pull);
         }
 
-        // 7. State-machine: flip into InSession the first time the plugin
+        // 8. State-machine: flip into InSession the first time the plugin
         //    score lands for the just-loaded session. This is the only
         //    phase that routes the frontend to the in-puzzle UI.
         if self.awaiting_initial_score && self.has_initial_score() {
@@ -2328,7 +2294,7 @@ impl App {
             log::info!("Initial plugin score received — app_state=InSession");
         }
 
-        // 8. Frontend projection: the GUI consumer derives its dirty set
+        // 9. Frontend projection: the GUI consumer derives its dirty set
         //    entirely from this tick's `changes` batch, plus the one-shot
         //    `needs_full_populate` signal (session birth). The signal is
         //    consumed (taken + cleared) only when the engine is present and
@@ -2963,7 +2929,7 @@ mod selection_tests {
                 "e",
             )
             .expect("promote");
-        app.store.set_head_scores(Some(10.0), Some(100.0));
+        app.store.set_head_scores(Some(10.0), Some(100.0), None);
         let parent = app.store.history().checkpoints().head();
         assert_eq!(
             app.store.history().checkpoint(parent).unwrap().raw_score,
@@ -2988,7 +2954,7 @@ mod selection_tests {
         // Drive the composition-score write the poll path performs: stamp
         // the open edit by its request_id.
         let game = ((-42.0_f64 + 800.0) * 10.0).max(0.0);
-        app.store.set_edit_scores(rid, Some(42.0), Some(game));
+        app.store.set_edit_scores(rid, Some(42.0), Some(game), None);
 
         // Mid-action: the committed parent is untouched; the composition
         // node carries the streamed score.

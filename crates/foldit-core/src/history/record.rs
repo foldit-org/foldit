@@ -73,6 +73,7 @@ impl History {
                 kind,
                 raw_score: None,
                 game_score: None,
+                breakdown: None,
                 filter_status: FilterStatus::NotEvaluated,
             },
         );
@@ -129,6 +130,11 @@ impl History {
             timestamp: now,
             raw_score: edit.raw_score,
             game_score: edit.game_score,
+            // The open edit IS the transient composition node; its breakdown
+            // transfers onto the checkpoint minted at commit, symmetric with
+            // its scalar scores, so the committed node owns the per-residue
+            // source the projector re-derives colors from.
+            breakdown: edit.breakdown,
             filter_status: edit.filter_status,
             exclude_from_best: false,
         });
@@ -214,6 +220,7 @@ impl History {
             timestamp: now,
             raw_score,
             game_score,
+            breakdown: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });
@@ -345,6 +352,7 @@ impl History {
             timestamp: now,
             raw_score: None,
             game_score: None,
+            breakdown: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });
@@ -391,6 +399,7 @@ impl History {
             timestamp: now,
             raw_score: None,
             game_score: None,
+            breakdown: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });

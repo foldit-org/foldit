@@ -157,6 +157,14 @@ pub struct Session {
     /// init. [`Self::reset`] leaves it untouched (the `title` pattern): a
     /// reload re-sets it via the same init seam, so it carries across swaps.
     term_weights: std::collections::HashMap<String, f32>,
+    /// Score-term name list (the alignment key for every stored breakdown's
+    /// `whole_pose_terms` and each residue's `terms`). Session-lifetime
+    /// ambient state, like [`Self::term_weights`]: it changes only when a
+    /// score report lands (the App re-sets it from each report, idempotent),
+    /// and [`Self::reset`] leaves it untouched so the next session's first
+    /// score overwrites it. Lives once on the session rather than being
+    /// duplicated on every checkpoint's breakdown.
+    term_names: Vec<String>,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -188,6 +196,7 @@ impl Session {
             view_options: VisoOptions::default(),
             active_preset: None,
             term_weights: std::collections::HashMap::new(),
+            term_names: Vec::new(),
             pending_updates: Vec::new(),
         }
     }
@@ -484,8 +493,14 @@ impl Session {
     /// [`SessionUpdate::ScoresChanged`] when a value was actually written
     /// (the GUI score-widget channel). Plugins compute their own scores
     /// and never observe this signal.
-    pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
-        if self.history.set_head_scores(raw_score, game_score) {
+    pub fn set_head_scores(
+        &mut self,
+        raw_score: Option<f64>,
+        game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
+    ) {
+        self.debug_assert_breakdown_alignment(breakdown.as_ref());
+        if self.history.set_head_scores(raw_score, game_score, breakdown) {
             self.apply(SessionUpdate::ScoresChanged);
         }
     }
@@ -499,8 +514,13 @@ impl Session {
         request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        if self.history.set_edit_scores(request_id, raw_score, game_score) {
+        self.debug_assert_breakdown_alignment(breakdown.as_ref());
+        if self
+            .history
+            .set_edit_scores(request_id, raw_score, game_score, breakdown)
+        {
             self.apply(SessionUpdate::ScoresChanged);
         }
     }
@@ -514,9 +534,41 @@ impl Session {
         id: CheckpointId,
         raw_score: Option<f64>,
         game_score: Option<f64>,
+        breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        if self.history.set_checkpoint_scores(id, raw_score, game_score) {
+        self.debug_assert_breakdown_alignment(breakdown.as_ref());
+        if self
+            .history
+            .set_checkpoint_scores(id, raw_score, game_score, breakdown)
+        {
             self.apply(SessionUpdate::ScoresChanged);
+        }
+    }
+
+    /// Debug-only alignment invariant: a stored breakdown's `whole_pose_terms`
+    /// and every residue's `terms` must match the session `term_names`
+    /// length. The render projector zips the breakdown against `term_names`
+    /// when re-deriving colors; a length mismatch would silently drop the
+    /// tail or misalign, so it is caught at every write site under test /
+    /// debug builds. Callers set `term_names` from the same report before
+    /// stamping the breakdown, so this holds by construction.
+    fn debug_assert_breakdown_alignment(
+        &self,
+        breakdown: Option<&crate::scores::StoredBreakdown>,
+    ) {
+        if let Some(b) = breakdown {
+            debug_assert_eq!(
+                b.whole_pose_terms.len(),
+                self.term_names.len(),
+                "stored whole_pose_terms must align to session term_names",
+            );
+            for rts in &b.per_residue_terms {
+                debug_assert_eq!(
+                    rts.terms.len(),
+                    self.term_names.len(),
+                    "stored per-residue terms must align to session term_names",
+                );
+            }
         }
     }
 
@@ -526,6 +578,16 @@ impl Session {
     #[must_use]
     pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
         self.history.current_composition_scores()
+    }
+
+    /// The RAW per-term breakdown of the current composition node (first
+    /// open pending edit if any, else the committed head). The render
+    /// projector re-derives the displayed per-residue colors from it ×
+    /// [`Self::term_weights`] (zipping [`Self::term_names`]) on every
+    /// `ScoresChanged`. `None` until a score with a breakdown is stamped.
+    #[must_use]
+    pub fn current_composition_breakdown(&self) -> Option<&crate::scores::StoredBreakdown> {
+        self.history.current_composition_breakdown()
     }
 
     /// The request ids of every open edit, in insertion order.
@@ -931,6 +993,22 @@ impl Session {
     /// because [`Self::reset`] leaves `term_weights` untouched.
     pub fn set_term_weights(&mut self, weights: std::collections::HashMap<String, f32>) {
         self.term_weights = weights;
+    }
+
+    /// The score-term name list (alignment key for every stored breakdown).
+    /// Empty until the first score report lands.
+    #[must_use]
+    pub fn term_names(&self) -> &[String] {
+        &self.term_names
+    }
+
+    /// Install the score-term name list. Silent (no `SessionUpdate`): it
+    /// rides the `ScoresChanged` that the same score write emits, and on its
+    /// own carries no displayable change. Re-set from each report (idempotent
+    /// in steady state); survives reloads because [`Self::reset`] leaves it
+    /// untouched, like `term_weights`.
+    pub fn set_term_names(&mut self, names: Vec<String>) {
+        self.term_names = names;
     }
 
     // ── Reset ─────────────────────────────────────────────────────────

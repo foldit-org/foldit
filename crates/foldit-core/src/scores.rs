@@ -32,10 +32,63 @@ pub(crate) struct ScoreReport {
 /// A single residue's RAW per-term energies, addressed by
 /// `(entity_id, residue_index)`. `terms` is aligned to
 /// [`ScoreReport::term_names`].
+#[derive(Debug, Clone)]
 pub(crate) struct ResidueTermScores {
     pub entity_id: u64,
     pub residue_index: u32,
     pub terms: Vec<f32>,
+}
+
+/// The RAW (unweighted) per-term breakdown retained on a history node
+/// (a [`crate::history::Checkpoint`] or in-flight `PendingEdit`) as the
+/// session-owned source of truth for per-residue coloring. Mirrors the
+/// energy half of a [`ScoreReport`] minus `term_names`: the alignment key
+/// lives once on the [`crate::session::Session`] (its `term_names`),
+/// shared by every stored breakdown, rather than being duplicated on each
+/// node. The render projector re-derives the displayed per-residue colors
+/// from the current composition node's breakdown × the session weights on
+/// every `ScoresChanged`.
+///
+/// Cross-platform like the rest of this module: stamped only on the native
+/// score path today, but the type and its weighting helper build on every
+/// target (the breakdown is simply `None` on every node on wasm).
+#[derive(Debug, Clone)]
+pub(crate) struct StoredBreakdown {
+    /// Raw (unweighted) whole-pose energy per term, aligned to the
+    /// session's `term_names`.
+    pub whole_pose_terms: Vec<f32>,
+    /// Raw (unweighted) per-residue energies, each `terms` aligned to the
+    /// session's `term_names`.
+    pub per_residue_terms: Vec<ResidueTermScores>,
+}
+
+impl StoredBreakdown {
+    /// Core-weighted per-residue scalars, identical in shape and value to
+    /// [`ScoreReport::weighted_per_residue`] but taking `term_names`
+    /// externally (the alignment key lives on the `Session`, not on the
+    /// stored form). One `(entity_id, residue_index, score)` per
+    /// [`ResidueTermScores`], where `score = Σ terms[i] *
+    /// weights[term_names[i]]` (missing weights `0.0`).
+    pub fn weighted_per_residue(
+        &self,
+        term_names: &[String],
+        weights: &HashMap<String, f32>,
+    ) -> Vec<(u64, u32, f64)> {
+        self.per_residue_terms
+            .iter()
+            .map(|rts| {
+                let score: f64 = term_names
+                    .iter()
+                    .zip(&rts.terms)
+                    .map(|(name, raw)| {
+                        let w = weights.get(name).copied().unwrap_or(0.0);
+                        f64::from(*raw) * f64::from(w)
+                    })
+                    .sum();
+                (rts.entity_id, rts.residue_index, score)
+            })
+            .collect()
+    }
 }
 
 impl ScoreReport {
@@ -56,8 +109,12 @@ impl ScoreReport {
 
     /// Core-weighted per-residue scalars: one `(entity_id, residue_index,
     /// score)` per [`ResidueTermScores`], where `score = Σ terms[i] *
-    /// weights[term_names[i]]` (missing weights `0.0`). Replaces the plugin's
-    /// pre-weighted `per_residue.score` for coloring.
+    /// weights[term_names[i]]` (missing weights `0.0`). The production path
+    /// now weights via [`StoredBreakdown::weighted_per_residue`] (term names
+    /// supplied externally from the session); this report-local form is
+    /// retained as the value-identity oracle that test pins the stored form's
+    /// output against, hence `#[allow(dead_code)]` for non-test builds.
+    #[allow(dead_code)]
     pub fn weighted_per_residue(&self, weights: &HashMap<String, f32>) -> Vec<(u64, u32, f64)> {
         self.per_residue_terms
             .iter()
@@ -160,6 +217,51 @@ mod tests {
         assert_eq!(entity_id, 7);
         assert_eq!(residue_index, 3);
         assert_eq!(score, 8.0);
+    }
+
+    /// Re-derivation equality: weighting a `StoredBreakdown` against an
+    /// external `term_names` produces the same per-residue scalars as
+    /// weighting the equivalent `ScoreReport` directly. This is the value-
+    /// identity proof for the session-owned breakdown swap: the render
+    /// projector re-derives colors from the stored form and must land on
+    /// the same numbers the old direct push produced from the report.
+    #[test]
+    fn stored_breakdown_weighting_matches_report() {
+        let weights: HashMap<String, f32> = [
+            ("fa_atr".to_string(), 1.0_f32),
+            ("fa_rep".to_string(), 0.55_f32),
+            ("hbond".to_string(), -0.5_f32),
+        ]
+        .into_iter()
+        .collect();
+        let term_names =
+            vec!["fa_atr".to_string(), "fa_rep".to_string(), "hbond".to_string()];
+
+        let report = ScoreReport {
+            term_names: term_names.clone(),
+            whole_pose_terms: vec![1.0, 2.0, 3.0],
+            per_residue_terms: vec![
+                ResidueTermScores {
+                    entity_id: 0,
+                    residue_index: 5,
+                    terms: vec![1.5, -2.0, 0.25],
+                },
+                ResidueTermScores {
+                    entity_id: 2,
+                    residue_index: 11,
+                    terms: vec![-3.0, 4.0, 8.0],
+                },
+            ],
+        };
+        let stored = StoredBreakdown {
+            whole_pose_terms: report.whole_pose_terms.clone(),
+            per_residue_terms: report.per_residue_terms.clone(),
+        };
+
+        assert_eq!(
+            stored.weighted_per_residue(&term_names, &weights),
+            report.weighted_per_residue(&weights),
+        );
     }
 
     /// An unweighted term (absent from the map) contributes nothing.

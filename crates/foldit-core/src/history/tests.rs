@@ -412,7 +412,7 @@ fn in_flight_score_spares_committed_parent_then_lands_on_commit() {
     let (mut h, ids) = mk_history(1);
     let e = ids[0];
     // Give the committed parent (root) a known score.
-    h.set_head_scores(Some(10.0), Some(100.0));
+    h.set_head_scores(Some(10.0), Some(100.0), None);
     let parent = h.checkpoints().head();
     assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
 
@@ -489,8 +489,8 @@ fn per_edit_scores_attribute_to_their_own_edit_not_first_wins() {
     // read side `current_composition_scores` reports the first open edit,
     // so it must reflect rid1's value, not a whole-assembly number stamped
     // onto whichever edit opened first.
-    h.set_edit_scores(rid1, Some(11.0), Some(110.0));
-    h.set_edit_scores(rid2, Some(22.0), Some(220.0));
+    h.set_edit_scores(rid1, Some(11.0), Some(110.0), None);
+    h.set_edit_scores(rid2, Some(22.0), Some(220.0), None);
     assert_eq!(h.current_composition_scores(), (Some(11.0), Some(110.0)));
 
     // Committing transfers each edit's own score onto its checkpoint; the

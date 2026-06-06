@@ -34,6 +34,12 @@ pub(crate) struct PendingEdit {
     pub(crate) raw_score: Option<f64>,
     /// Live game-points score; same lifecycle as `raw_score`.
     pub(crate) game_score: Option<f64>,
+    /// Live RAW (unweighted) per-term breakdown of the open composition,
+    /// the source of truth for per-residue coloring while the edit is open.
+    /// `None` until the scorer reports; transferred to the committed
+    /// checkpoint at commit, same lifecycle as `raw_score`. Aligned to the
+    /// session's `term_names`.
+    pub(crate) breakdown: Option<crate::scores::StoredBreakdown>,
     /// Live filter status of the open composition.
     pub(crate) filter_status: FilterStatus,
 }
