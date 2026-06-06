@@ -63,18 +63,15 @@ fn rosetta_raw_to_game(raw: f64) -> f64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn accumulate_per_residue(
     per_entity: &mut std::collections::HashMap<u32, Vec<(u32, f64)>>,
-    report: &foldit_runner::proto::plugin::ScoreReport,
+    report: &crate::scores::ScoreReport,
 ) {
     for rs in &report.per_residue {
-        let Some(rref) = rs.residue.as_ref() else {
-            continue;
-        };
         #[allow(clippy::cast_possible_truncation)]
-        let entity_id = rref.entity_id as u32;
+        let entity_id = rs.entity_id as u32;
         per_entity
             .entry(entity_id)
             .or_default()
-            .push((rref.residue_index, f64::from(rs.score)));
+            .push((rs.residue_index, f64::from(rs.score)));
     }
 }
 
@@ -813,7 +810,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_score_reports(
         &mut self,
-        reports: std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>,
+        reports: std::collections::HashMap<String, crate::scores::ScoreReport>,
     ) {
         use std::collections::HashMap;
 

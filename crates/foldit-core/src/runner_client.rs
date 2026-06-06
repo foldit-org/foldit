@@ -525,7 +525,9 @@ impl RunnerClient {
     // Forward the well-known `score` query to the orchestrator, building
     // the default dispatch context internally so the score query covers
     // the whole assembly. App owns merging the returned reports into the
-    // head checkpoint and pushing per-residue colors.
+    // head checkpoint and pushing per-residue colors. Reports cross the
+    // facade as the core-owned `crate::scores::ScoreReport`; the proto type
+    // is named only inside this module's `From` conversion below.
 
     /// Blocking score round-trip: fan the `score` query across every
     /// provider and return one report per provider that replied. Used
@@ -533,12 +535,16 @@ impl RunnerClient {
     /// load gate deterministic. Empty map when no orchestrator is wired up.
     pub(crate) fn collect_scores_blocking(
         &mut self,
-    ) -> std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>
-    {
+    ) -> std::collections::HashMap<String, crate::scores::ScoreReport> {
         use foldit_runner::orchestrator::DispatchContext;
         self.orchestrator
             .as_mut()
-            .map(|orch| orch.collect_scores(&DispatchContext::default()))
+            .map(|orch| {
+                orch.collect_scores(&DispatchContext::default())
+                    .into_iter()
+                    .map(|(id, report)| (id, report.into()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -556,11 +562,15 @@ impl RunnerClient {
     /// empty map when nothing is ready or no orchestrator exists.
     pub(crate) fn poll_score_results(
         &mut self,
-    ) -> std::collections::HashMap<String, foldit_runner::proto::plugin::ScoreReport>
-    {
+    ) -> std::collections::HashMap<String, crate::scores::ScoreReport> {
         self.orchestrator
             .as_mut()
-            .map(|orch| orch.poll_score_results())
+            .map(|orch| {
+                orch.poll_score_results()
+                    .into_iter()
+                    .map(|(id, report)| (id, report.into()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -578,12 +588,15 @@ impl RunnerClient {
     /// Drain whatever composition-score replies have arrived, each tagged
     /// with the `request_id` the host correlated it under. Non-blocking;
     /// empty when nothing is ready or no orchestrator exists.
-    pub(crate) fn poll_composition_scores(
-        &mut self,
-    ) -> Vec<(u64, foldit_runner::proto::plugin::ScoreReport)> {
+    pub(crate) fn poll_composition_scores(&mut self) -> Vec<(u64, crate::scores::ScoreReport)> {
         self.orchestrator
             .as_mut()
-            .map(|orch| orch.poll_composition_scores())
+            .map(|orch| {
+                orch.poll_composition_scores()
+                    .into_iter()
+                    .map(|(rid, report)| (rid, report.into()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -632,6 +645,31 @@ impl RunnerClient {
             }
         }
         registered
+    }
+}
+
+/// Convert the runner's proto score report into the core-owned twin at the
+/// facade boundary. Structural copy: `total` and `terms` move as-is; the
+/// per-residue list is rebuilt, dropping any entry with no residue ref
+/// (the proto field is optional). That skip preserves the historical
+/// `residue.as_ref() else continue` behavior, relocated from the consumer.
+impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreReport {
+    fn from(report: foldit_runner::proto::plugin::ScoreReport) -> Self {
+        Self {
+            total: report.total,
+            terms: report.terms,
+            per_residue: report
+                .per_residue
+                .into_iter()
+                .filter_map(|rs| {
+                    rs.residue.map(|rref| crate::scores::ResidueScore {
+                        entity_id: rref.entity_id,
+                        residue_index: rref.residue_index,
+                        score: rs.score,
+                    })
+                })
+                .collect(),
+        }
     }
 }
 

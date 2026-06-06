@@ -5,6 +5,7 @@ pub(crate) mod history;
 mod host_resources;
 pub(crate) mod runner_client;
 pub(crate) mod runner_projector;
+pub(crate) mod scores;
 pub mod puzzle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pull_drag;
