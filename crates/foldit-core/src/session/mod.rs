@@ -27,7 +27,7 @@
 //! `Session` holds no projection logic — it neither serializes
 //! assemblies nor knows about plugins or viso. `App` drains the emitted
 //! changes via [`Self::take_updates`] and routes them to the
-//! projectors (the `PluginBroadcaster` owns the Full/Delta plugin
+//! projectors (the `RunnerProjector` owns the Full/Delta plugin
 //! fan-out; the render + GUI projectors follow). Because `pending_updates`
 //! is private and `apply` is its sole pusher, "one emit per mutator" is a
 //! structural invariant, not a runtime assertion.
@@ -334,7 +334,7 @@ impl Session {
     /// (no DAG topology change).
     ///
     /// Emits one tentative [`SessionUpdate::Edit`] carrying the locked
-    /// entity's post-mutation coordinates. The plugin broadcaster skips
+    /// entity's post-mutation coordinates. The runner projector skips
     /// tentative edits (plugins don't see live frames); it completes the
     /// `SessionUpdate` stream for the render projector.
     pub fn action_update(
@@ -952,8 +952,8 @@ impl Session {
         self.active_preset = None;
         // Drop any changes emitted before the reset — they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
-        // so that change survives. The broadcaster's published snapshot is
-        // intentionally NOT cleared (it lives on `PluginDriver`): the
+        // so that change survives. The runner projector's published snapshot is
+        // intentionally NOT cleared (it lives on `RunnerProjector`): the
         // post-reset empty-assembly diff still advances the host's gen
         // counter, so plugins never see `from_gen` go backwards.
         self.pending_updates.clear();

@@ -1,8 +1,8 @@
 //! The typed change-event stream.
 //!
 //! [`SessionUpdate`] is the single event type emitted by the `Document`
-//! mutation funnel (RX6) and consumed by the three projectors: render
-//! (RX13), plugin broadcast (RX6), and GUI (live cursor in RX10). Every
+//! mutation funnel and consumed by the three projectors: render, plugin
+//! broadcast, and GUI (live cursor). Every
 //! observable mutation produces exactly one `SessionUpdate`; the
 //! projectors decide independently how (or whether) to react to each
 //! variant.

@@ -1,11 +1,11 @@
-//! Plugin driver: owns the orchestrator handle, the plugin broadcaster,
-//! and the native stream bookkeeping that drives plugin operations.
+//! Runner client: owns the orchestrator handle and the native stream
+//! bookkeeping that drives plugin operations.
 //!
-//! `PluginDriver` holds the `Orchestrator`, the [`PluginBroadcaster`]
-//! (the `SessionUpdate` stream's plugin projection), and (on native builds) the in-flight
-//! `StreamHost` state, plus the orchestrator-lifecycle handlers that
-//! touch only the orchestrator (`reset_for_new_structure`, `shutdown`).
-//! Inbound plugin traffic is drained here too: [`PluginDriver::drain_op_events`]
+//! `RunnerClient` holds the `Orchestrator` and (on native builds) the
+//! in-flight `StreamHost` state, plus the orchestrator-lifecycle handlers
+//! that touch only the orchestrator (`reset_for_new_structure`,
+//! `shutdown`).
+//! Inbound plugin traffic is drained here too: [`RunnerClient::drain_op_events`]
 //! consumes the orchestrator's raw `PluginUpdate`s and the stream table,
 //! resolving each into a core-side [`OpEvent`] keyed by the edit token so
 //! `App` applies them without naming orchestrator types or touching the
@@ -13,35 +13,27 @@
 //!
 //! `App::handle_dispatch_op` still interleaves orchestrator I/O with store
 //! mutations (it begins the edit only after the dispatch succeeds), so it
-//! stays on `App` and reaches into `self.plugin_driver` for the orchestrator
+//! stays on `App` and reaches into `self.runner_client` for the orchestrator
 //! and stream state it needs.
 
-use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
 
-use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
-
-/// Owns the orchestrator handle, the plugin broadcaster, and the
-/// native-only stream bookkeeping. `App` holds one of these and reaches
-/// into its public fields by direct path so the orchestrator, broadcaster,
-/// and stream state can be borrowed disjointly (the dispatch methods on
-/// `App` rely on this).
-pub struct PluginDriver {
-    pub orchestrator: Option<foldit_runner::Orchestrator>,
-    /// Plugin projection of the `SessionUpdate` stream: diffs its own
-    /// last-published `Assembly` against the `Session` to fan Full/Delta
-    /// broadcasts out. Disjoint from `orchestrator` so `App` can borrow
-    /// both in `pump_scene_changes`.
-    pub(crate) broadcaster: PluginBroadcaster,
+/// Owns the orchestrator handle and the native-only stream bookkeeping.
+/// `App` holds one of these and reaches into its fields by direct path so
+/// the orchestrator and stream state can be borrowed disjointly (the
+/// dispatch methods on `App` rely on this). The `SessionUpdate` stream's
+/// plugin projection lives separately in `RunnerProjector`, a peer `App`
+/// field, so the two can be borrowed disjointly across the tick seam.
+pub struct RunnerClient {
+    pub(crate) orchestrator: Option<foldit_runner::Orchestrator>,
     #[cfg(not(target_arch = "wasm32"))]
     pub stream_host: StreamHost,
 }
 
-impl PluginDriver {
+impl RunnerClient {
     pub fn new() -> Self {
         Self {
             orchestrator: None,
-            broadcaster: PluginBroadcaster::new(),
             #[cfg(not(target_arch = "wasm32"))]
             stream_host: StreamHost {
                 active_streams: std::collections::HashMap::new(),
@@ -55,6 +47,12 @@ impl PluginDriver {
     /// prior handle before plugin discovery runs.
     pub(crate) fn init_orchestrator(&mut self) {
         self.orchestrator = Some(foldit_runner::Orchestrator::new());
+    }
+
+    /// Mutable access to the orchestrator handle, so the tick seam can
+    /// borrow it disjointly from the peer `RunnerProjector` field on `App`.
+    pub(crate) fn orchestrator_mut(&mut self) -> Option<&mut foldit_runner::Orchestrator> {
+        self.orchestrator.as_mut()
     }
 
     /// Release any lock state when puzzle topology changes.
@@ -81,7 +79,7 @@ impl PluginDriver {
 // `VisoEngine` — the coordination boundary keeps those on `App`.
 
 #[cfg(not(target_arch = "wasm32"))]
-impl PluginDriver {
+impl RunnerClient {
     /// Drain the orchestrator's queued plugin traffic and resolve each
     /// raw `PluginUpdate` into a core-side [`OpEvent`] keyed by the
     /// dispatch `request_id`, performing the terminal stream cleanup as it
@@ -217,7 +215,7 @@ impl PluginDriver {
     /// arm can find it. `App` still owns the catalog lookup that produces
     /// `plugin_id` (passed in, since `App` needs it for `begin_action`) and
     /// the post-processing (`begin_action`, `apply_invoke_result`,
-    /// broadcaster pump, score poll). Returns a core-shaped
+    /// projector pump, score poll). Returns a core-shaped
     /// [`DispatchError`] that names no orchestrator type.
     pub(crate) fn dispatch_op(
         &mut self,
@@ -598,7 +596,7 @@ impl PluginDriver {
     /// normalized assembly for the caller to apply. Empty `Vec` when no
     /// orchestrator is wired up or discovery fails — both degrade the app
     /// to viewer-only rather than erroring.
-    pub(crate) fn discover_and_register(
+    pub(crate) fn bootstrap_runner(
         &mut self,
         root: &std::path::Path,
         initial_assembly: Vec<u8>,
@@ -610,24 +608,24 @@ impl PluginDriver {
             Ok(ids) => ids,
             Err(e) => {
                 log::warn!(
-                    "[PluginDriver] discover_plugins({}) failed: {e}; plugins disabled",
+                    "[RunnerClient] discover_plugins({}) failed: {e}; plugins disabled",
                     root.display()
                 );
                 return Vec::new();
             }
         };
-        log::info!("[PluginDriver] discovered plugins: {discovered:?}");
+        log::info!("[RunnerClient] discovered plugins: {discovered:?}");
         let mut registered = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
             match orch.ensure_plugin_registered(plugin_id, initial_assembly.clone())
             {
                 Ok(bytes) => {
-                    log::info!("[PluginDriver] {plugin_id} plugin ready");
+                    log::info!("[RunnerClient] {plugin_id} plugin ready");
                     registered.push((plugin_id.clone(), bytes));
                 }
                 Err(e) => {
                     log::warn!(
-                        "[PluginDriver] ensure_plugin_registered('{plugin_id}') \
+                        "[RunnerClient] ensure_plugin_registered('{plugin_id}') \
                          failed: {e}; {plugin_id} plugin disabled"
                     );
                 }
@@ -637,7 +635,7 @@ impl PluginDriver {
     }
 }
 
-/// Core-shaped dispatch request handed to [`PluginDriver::dispatch_op`].
+/// Core-shaped dispatch request handed to [`RunnerClient::dispatch_op`].
 /// Carries only molex / gui-wire types so `App` never builds the
 /// orchestrator's `DispatchContext` / `ResidueRef` / `ParamValue` shapes;
 /// the flatten and conversion happen inside `dispatch_op`.
@@ -660,7 +658,7 @@ pub(crate) struct DispatchIntent {
 }
 
 /// Core-shaped pull-drag start request handed to
-/// [`PluginDriver::start_stream`]. Carries only molex / core-native
+/// [`RunnerClient::start_stream`]. Carries only molex / core-native
 /// types; the `DispatchContext` / `ResidueRef` / `ParamValue` build all
 /// happen inside `start_stream`, so `App`'s pull-drag path names no
 /// orchestrator type. Pull-drag is always a stream (no Invoke branch).
@@ -682,7 +680,7 @@ pub(crate) struct StreamStartIntent {
 }
 
 /// Core-side reason a dispatch was refused or failed, produced by
-/// [`PluginDriver::dispatch_op`]. Deliberately carries no orchestrator
+/// [`RunnerClient::dispatch_op`]. Deliberately carries no orchestrator
 /// type: the lock refusal is reshaped into a raw entity id so `App`
 /// distinguishes a busy-entity refusal (advisory, no error log) from a
 /// genuine failure without naming any runner error.
@@ -727,7 +725,7 @@ fn map_dispatch_error(
 /// Discriminated result of a dispatch — wraps the two return shapes
 /// `dispatch_invoke` and `dispatch_start_stream` produce so
 /// `App::handle_dispatch_op` can post-process either uniformly. Lives
-/// here (rather than in `app.rs`) because [`PluginDriver::dispatch_op`]
+/// here (rather than in `app.rs`) because [`RunnerClient::dispatch_op`]
 /// is the producer and `App` is just one of two consumers.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum OpOutcome {
@@ -791,7 +789,7 @@ fn edit_scope_from_targets(
 }
 
 /// Core-side projection of inbound plugin traffic, produced by
-/// [`PluginDriver::drain_op_events`]. Each variant enumerates one of
+/// [`RunnerClient::drain_op_events`]. Each variant enumerates one of
 /// core's edit-lifecycle verbs keyed by the dispatch `request_id` (the
 /// single id `App` opened the edit under), and owns its `Assembly` so the
 /// returned batch outlives the driver borrow that produced it. `App`
@@ -815,138 +813,6 @@ pub(crate) enum OpEvent {
     /// aborts the edit open under it (gated on `is_pending`), or accounts
     /// for the terminal with nothing to abort.
     Abort { token: Option<u64>, reason: String },
-}
-
-// ── Plugin broadcaster ──────────────────────────────────────────────────
-
-/// Plugin projection of the [`SessionUpdate`] stream.
-///
-/// Holds its own last-published `Assembly` snapshot and diffs it against
-/// the authoritative [`Session`] to fan a Full/Delta `UpdateAssembly`
-/// broadcast out to peer plugins (whose Assembly mirrors must stay in
-/// sync with the host). Cross-platform: the broadcast decision is the
-/// same on native and wasm.
-///
-/// Per drain it coalesces the batch into one snapshot-diff broadcast
-/// (vs the old one-broadcast-per-mutation queue), so the orchestrator's
-/// generation advances once per drain. It ignores tentative `Edit`s:
-/// plugins never see live frames. (Score updates are off-stream
-/// entirely; canonical writes happen via `Session::set_head_scores`
-/// and never reach the broadcaster.)
-pub(crate) struct PluginBroadcaster {
-    /// The `Assembly` last serialized and broadcast. `None` before the
-    /// first broadcast (and after construction), which forces a Full.
-    /// Deliberately **not** cleared on `Session::reset`: the post-reset
-    /// empty-assembly diff still produces a Full that advances the
-    /// orchestrator's gen counter, so plugins never see `from_gen` go
-    /// backwards.
-    last_published: Option<Assembly>,
-}
-
-impl PluginBroadcaster {
-    fn new() -> Self {
-        Self {
-            last_published: None,
-        }
-    }
-
-    /// Whether a change is a non-tentative observable mutation.
-    /// Tentative edits (live per-cycle frames) are filtered out: plugins
-    /// never see live frames. Signal-only updates that aren't scene
-    /// mutations (`ScoresChanged`, `SelectionChanged`, `FocusChanged`,
-    /// `BubbleChanged`, `PuzzleChanged`) have no arm here, so they're
-    /// non-observable: plugins compute their own scores and never see the
-    /// residue selection, session focus, tutorial bubbles, or puzzle
-    /// objective.
-    fn is_observable(change: &SessionUpdate) -> bool {
-        matches!(
-            change,
-            SessionUpdate::HeadMoved
-                | SessionUpdate::PreviewAdded
-                | SessionUpdate::PreviewDiscarded
-                | SessionUpdate::Edit { tentative: false }
-        )
-    }
-}
-
-/// Project a drained batch of scene changes into at most one plugin
-/// broadcast. No-ops unless the batch carries a non-tentative observable
-/// change; otherwise diffs the held snapshot against
-/// `doc.head_assembly()` to produce a Full or coord-only Delta, fans it
-/// out through the orchestrator sink, and adopts the new snapshot.
-impl SessionUpdateConsumer<foldit_runner::Orchestrator> for PluginBroadcaster {
-    fn consume(
-        &mut self,
-        changes: &[SessionUpdate],
-        doc: &Session,
-        orch: &mut foldit_runner::Orchestrator,
-    ) {
-        if !changes.iter().any(Self::is_observable) {
-            // Tentative-only / empty batch: nothing the plugins should
-            // see.
-            return;
-        }
-        let new = doc.head_assembly();
-        let Some(payload) = encode_payload(self.last_published.as_ref(), &new) else {
-            // Serialize failure (currently impossible for in-memory
-            // assemblies). Skip this drain and keep the prior snapshot so
-            // the next drain diffs from the last payload plugins actually
-            // received; STALE_GEN recovery covers the gap meanwhile.
-            return;
-        };
-        orch.broadcast_to_plugins(&payload);
-        self.last_published = Some(new);
-    }
-}
-
-/// Encode the broadcast for one drain: a coord-only `Delta` when `prior`
-/// and `new` share topology, otherwise a `Full`. Returns `None` only when
-/// the Full serialize fails (currently impossible for in-memory
-/// assemblies), at which point the caller skips the broadcast.
-///
-/// Mirrors the old `Session::queue_assembly_update_broadcast` fallback
-/// chain: a delta-serialize failure (a topology edit slipping past the
-/// coord-only check) also falls through to a Full.
-fn encode_payload(
-    prior: Option<&Assembly>,
-    new: &Assembly,
-) -> Option<foldit_runner::orchestrator::BroadcastPayload> {
-    use foldit_runner::orchestrator::BroadcastPayload;
-    if let Some(prior) = prior {
-        if let Some(edits) = assembly_diff(prior, new) {
-            if let Ok(bytes) = molex::ops::wire::delta::serialize_edits(&edits) {
-                return Some(BroadcastPayload::Delta(bytes));
-            }
-            // Delta serialize rejected the edits — fall through to Full.
-        }
-    }
-    molex::ops::wire::serialize_assembly(new)
-        .ok()
-        .map(BroadcastPayload::Full)
-}
-
-/// Whole-assembly diff, via [`molex::MoleculeEntity::diff`]. Returns
-/// `Some(edits)` (possibly empty when nothing moved) when `prior` and `new`
-/// carry the same entity-id set in the same order, so every entity is
-/// pairwise-diffable; returns `None` when an entity was added, removed, or
-/// reordered, or when any per-entity change isn't representable as an edit
-/// (a residue insert/delete) — at which point the caller broadcasts a full
-/// snapshot. Coord moves ride the delta as `SetEntityCoords`, mutations as
-/// `MutateResidue`.
-fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {
-    let prior_entities = prior.entities();
-    let new_entities = new.entities();
-    if prior_entities.len() != new_entities.len() {
-        return None;
-    }
-    let mut edits = Vec::new();
-    for (p, n) in prior_entities.iter().zip(new_entities.iter()) {
-        if p.id() != n.id() {
-            return None;
-        }
-        edits.extend(p.diff(n).ok()?);
-    }
-    Some(edits)
 }
 
 /// Owns the in-flight stream bookkeeping that only exists on native
@@ -985,146 +851,6 @@ pub(crate) struct ActiveStreamEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Session, EntityOrigin};
-    use foldit_runner::orchestrator::BroadcastPayload;
-    use molex::entity::molecule::atom::Atom;
-    use molex::entity::molecule::bulk::BulkEntity;
-    use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
-    use molex::{Element, MoleculeEntity, MoleculeType};
-
-    fn mk_bulk(id: EntityId, pos: glam::Vec3) -> MoleculeEntity {
-        let atom = Atom {
-            position: pos,
-            occupancy: 1.0,
-            b_factor: 0.0,
-            element: Element::O,
-            name: *b"O   ",
-            formal_charge: 0,
-        };
-        MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
-    }
-
-    fn two_ids() -> (EntityId, EntityId) {
-        let mut alloc = EntityIdAllocator::new();
-        (alloc.allocate(), alloc.allocate())
-    }
-
-    // ── encode_payload: the Full vs Delta decision ──
-
-    #[test]
-    fn encode_payload_no_prior_is_full() {
-        let (a, _) = two_ids();
-        let new = Assembly::new(vec![mk_bulk(a, glam::Vec3::ZERO)]);
-        assert!(matches!(
-            encode_payload(None, &new),
-            Some(BroadcastPayload::Full(_))
-        ));
-    }
-
-    #[test]
-    fn encode_payload_coord_only_is_delta() {
-        let (a, _) = two_ids();
-        let prior = Assembly::new(vec![mk_bulk(a, glam::Vec3::ZERO)]);
-        let new = Assembly::new(vec![mk_bulk(a, glam::Vec3::new(1.0, 2.0, 3.0))]);
-        let payload = encode_payload(Some(&prior), &new);
-        let Some(BroadcastPayload::Delta(bytes)) = payload else {
-            panic!("expected Delta, got {payload:?}");
-        };
-        let edits = molex::ops::wire::delta::deserialize_edits(&bytes).expect("delta decodes");
-        assert!(matches!(
-            edits.as_slice(),
-            [AssemblyEdit::SetEntityCoords { .. }]
-        ));
-    }
-
-    #[test]
-    fn encode_payload_topology_change_is_full() {
-        let (a, b) = two_ids();
-        let prior = Assembly::new(vec![mk_bulk(a, glam::Vec3::ZERO)]);
-        // A second entity → topology change → coord delta refuses → Full.
-        let new = Assembly::new(vec![
-            mk_bulk(a, glam::Vec3::ZERO),
-            mk_bulk(b, glam::Vec3::ZERO),
-        ]);
-        assert!(matches!(
-            encode_payload(Some(&prior), &new),
-            Some(BroadcastPayload::Full(_))
-        ));
-    }
-
-    #[test]
-    fn encode_payload_coord_delta_round_trips_through_apply_edits() {
-        let (a, _) = two_ids();
-        let prior = Assembly::new(vec![mk_bulk(a, glam::Vec3::ZERO)]);
-        let new = Assembly::new(vec![mk_bulk(a, glam::Vec3::new(4.0, 5.0, 6.0))]);
-        let Some(BroadcastPayload::Delta(bytes)) = encode_payload(Some(&prior), &new) else {
-            panic!("expected Delta");
-        };
-        let edits = molex::ops::wire::delta::deserialize_edits(&bytes).expect("decode");
-        let mut replay = prior.clone();
-        replay.apply_edits(&edits).expect("apply_edits");
-        assert_eq!(
-            replay.entities()[0].positions(),
-            new.entities()[0].positions(),
-        );
-    }
-
-    // ── is_observable: tentative edits are filtered ──
-
-    #[test]
-    fn is_observable_filters_tentative() {
-        assert!(PluginBroadcaster::is_observable(&SessionUpdate::PreviewAdded));
-        assert!(PluginBroadcaster::is_observable(&SessionUpdate::PreviewDiscarded));
-        assert!(PluginBroadcaster::is_observable(&SessionUpdate::Edit {
-            tentative: false,
-        }));
-        assert!(!PluginBroadcaster::is_observable(&SessionUpdate::Edit {
-            tentative: true,
-        }));
-    }
-
-    // ── broadcast: gating + snapshot bookkeeping end-to-end ──
-
-    #[test]
-    fn broadcast_ignores_tentative_only_batch() {
-        let changes = vec![SessionUpdate::Edit { tentative: true }];
-        let doc = Session::new();
-        let mut orch = foldit_runner::Orchestrator::new();
-        let mut bc = PluginBroadcaster::new();
-        bc.consume(&changes, &doc, &mut orch);
-        assert_eq!(orch.broadcast_gen(), 0, "tentative-only batch broadcasts nothing");
-        assert!(bc.last_published.is_none());
-    }
-
-    #[test]
-    fn broadcast_ignores_empty_batch() {
-        let doc = Session::new();
-        let mut orch = foldit_runner::Orchestrator::new();
-        let mut bc = PluginBroadcaster::new();
-        bc.consume(&[], &doc, &mut orch);
-        assert_eq!(orch.broadcast_gen(), 0);
-    }
-
-    #[test]
-    fn broadcast_observable_batch_advances_gen_and_adopts_snapshot() {
-        let mut doc = Session::new();
-        let _ = doc.insert_preview(
-            mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO),
-            "p".to_string(),
-            EntityOrigin::Loaded,
-        );
-        let changes = doc.take_updates(); // [PreviewAdded]
-        let mut orch = foldit_runner::Orchestrator::new();
-        let mut bc = PluginBroadcaster::new();
-        bc.consume(&changes, &doc, &mut orch);
-        assert_eq!(orch.broadcast_gen(), 1, "observable batch broadcasts once");
-        assert!(bc.last_published.is_some(), "broadcaster adopts the new snapshot");
-    }
-
-    /// `insert_preview` overwrites the entity's id, so any valid id works.
-    fn mk_bulk_dummy_id() -> EntityId {
-        EntityIdAllocator::new().allocate()
-    }
 
     // ── map_dispatch_error: runner refusal → core shape ──
 

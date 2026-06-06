@@ -2,7 +2,7 @@
 //!
 //! `GuiProjector` is the state half of the GUI consumer: a single
 //! history-version debounce cursor. Its `consume` method — the projection
-//! that mirrors `Session` / `VisoEngine` / `PluginDriver` state into
+//! that mirrors `Session` / `VisoEngine` / `RunnerClient` state into
 //! `FrontendState` — lives in [`crate::app`] next to the projection
 //! helpers it calls (`head_score`, `project_history`, `bubble_to_payload`).
 //! The scoring-mode display policy, tutorial-bubble flow, and puzzle

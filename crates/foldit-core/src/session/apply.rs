@@ -8,7 +8,7 @@
 //! mutator" is a structural invariant rather than a runtime check.
 //!
 //! `App` drains the queue once per tick via [`Session::take_updates`]
-//! and routes the batch to the projectors (the `PluginBroadcaster` today;
+//! and routes the batch to the projectors (the `RunnerProjector` today;
 //! the render + GUI projectors in later sessions). `Session` itself holds
 //! no projection logic.
 

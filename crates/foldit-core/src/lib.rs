@@ -3,7 +3,8 @@ pub(crate) mod session;
 pub(crate) mod gui_projector;
 pub(crate) mod history;
 mod host_resources;
-pub(crate) mod plugin_driver;
+pub(crate) mod runner_client;
+pub(crate) mod runner_projector;
 pub mod puzzle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pull_drag;

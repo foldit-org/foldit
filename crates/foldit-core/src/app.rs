@@ -1,8 +1,8 @@
 //! Foldit application state — host-agnostic.
 //!
-//! `App` owns the `Session`, `PluginDriver` (which carries the
-//! orchestrator + scene-broadcaster), the two projectors
-//! (`RenderProjector`, `GuiProjector`), and the cross-cutting
+//! `App` owns the `Session`, `RunnerClient` (which carries the
+//! orchestrator), the three projectors (`RunnerProjector`,
+//! `RenderProjector`, `GuiProjector`), and the cross-cutting
 //! bookkeeping (puzzle metadata, viso engine handle, dirty-flags,
 //! history-version trackers). Both the desktop (`foldit-desktop`) and
 //! web (`foldit-web`) builds wrap this in their host-specific lifecycle:
@@ -30,9 +30,10 @@ use crate::gui_projector::GuiProjector;
 use crate::history::{
     CheckpointId, CheckpointKind, FilterStatus as HistoryFilterStatus, History,
 };
-use crate::plugin_driver::PluginDriver;
+use crate::runner_client::RunnerClient;
+use crate::runner_projector::RunnerProjector;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::plugin_driver::{
+use crate::runner_client::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamStartIntent,
 };
 use crate::render_projector::{self, RenderProjector};
@@ -310,7 +311,11 @@ pub struct App {
     engine: Option<VisoEngine>,
     keybindings: KeyBindings,
     store: Session,
-    plugin_driver: PluginDriver,
+    runner_client: RunnerClient,
+    /// Plugin projection of the `SessionUpdate` stream. A peer field to
+    /// `runner_client` (not nested inside it) so the tick seam can borrow
+    /// the orchestrator handle and this projector disjointly.
+    runner_projector: RunnerProjector,
     render_projector: RenderProjector,
     gui_projector: GuiProjector,
     /// Host-provided filesystem / resource access. The only path through
@@ -376,7 +381,7 @@ fn next_focus(current: Focus, focusable: &[EntityId]) -> Focus {
 }
 
 /// App-residue inputs the GUI projection needs beyond the `Session`,
-/// `VisoEngine`, and `PluginDriver`. Named explicitly (not `&App`) so the
+/// `VisoEngine`, and `RunnerClient`. Named explicitly (not `&App`) so the
 /// projection's real dependencies are visible at the call site rather than
 /// hidden behind a god-object borrow.
 pub(crate) struct GuiContext<'a> {
@@ -386,7 +391,7 @@ pub(crate) struct GuiContext<'a> {
 }
 
 impl GuiProjector {
-    /// Project the live `Session` / `VisoEngine` / `PluginDriver` state into
+    /// Project the live `Session` / `VisoEngine` / `RunnerClient` state into
     /// `frontend` — the third consumer of the `SessionUpdate` batch,
     /// alongside the render and plugin projectors.
     ///
@@ -410,7 +415,7 @@ impl GuiProjector {
         full_populate: bool,
         session: &Session,
         engine: &VisoEngine,
-        driver: &PluginDriver,
+        driver: &RunnerClient,
         ctx: &GuiContext<'_>,
         frontend: &mut FrontendState,
     ) {
@@ -619,7 +624,8 @@ impl App {
                 kb
             },
             store: Session::new(),
-            plugin_driver: PluginDriver::new(),
+            runner_client: RunnerClient::new(),
+            runner_projector: RunnerProjector::new(),
             render_projector: RenderProjector::new(),
             gui_projector: GuiProjector::new(),
             host,
@@ -683,7 +689,7 @@ impl App {
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let events = self.plugin_driver.drain_op_events();
+            let events = self.runner_client.drain_op_events();
             if events.is_empty() {
                 return;
             }
@@ -752,7 +758,7 @@ impl App {
     /// by `apply_score_reports` when a report actually applies.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_plugin_scores(&mut self) {
-        if self.plugin_driver.orchestrator.is_none() {
+        if self.runner_client.orchestrator.is_none() {
             return;
         }
         self.refresh_scores();
@@ -777,7 +783,7 @@ impl App {
         // flip deterministic. Once a score exists the caller switches to
         // `request_scores` + `poll_async_scores` so the render thread
         // never blocks on the worker.
-        let reports = self.plugin_driver.collect_scores_blocking();
+        let reports = self.runner_client.collect_scores_blocking();
         self.apply_score_reports(reports);
     }
 
@@ -788,14 +794,14 @@ impl App {
     /// against a slow scorer.
     #[cfg(not(target_arch = "wasm32"))]
     fn request_scores(&mut self) {
-        self.plugin_driver.request_scores();
+        self.runner_client.request_scores();
     }
 
     /// Drain whatever async `score` replies have arrived and apply them.
     /// Non-blocking; no-op when nothing is ready.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_async_scores(&mut self) {
-        let reports = self.plugin_driver.poll_score_results();
+        let reports = self.runner_client.poll_score_results();
         self.apply_score_reports(reports);
     }
 
@@ -919,7 +925,7 @@ impl App {
     /// still open (so the idle whole-assembly path is not the one running).
     #[cfg(not(target_arch = "wasm32"))]
     fn score_committed_checkpoint(&mut self, ckpt_id: CheckpointId) {
-        let Some(rid) = self.plugin_driver.alloc_request_id() else {
+        let Some(rid) = self.runner_client.alloc_request_id() else {
             return;
         };
         let Some(assembly) = self.store.checkpoint_assembly(ckpt_id) else {
@@ -929,7 +935,7 @@ impl App {
             log::warn!("[App] commit-stamp serialize failed for checkpoint {ckpt_id:?}");
             return;
         };
-        self.plugin_driver.score_composition(bytes, rid);
+        self.runner_client.score_composition(bytes, rid);
         let _ = self.score_targets.insert(rid, ckpt_id);
     }
 
@@ -941,7 +947,7 @@ impl App {
     /// raw REU.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_composition_scores(&mut self) {
-        let replies = self.plugin_driver.poll_composition_scores();
+        let replies = self.runner_client.poll_composition_scores();
         if replies.is_empty() {
             return;
         }
@@ -970,7 +976,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn try_hotkey_dispatch(&mut self, key_str: &str) -> bool {
         let op_id = self
-            .plugin_driver
+            .runner_client
             .hotkey_to_op(key_str)
             .map(|(_plugin_id, op_id)| op_id);
         let Some(op_id) = op_id else { return false };
@@ -1017,7 +1023,7 @@ impl App {
                 // selection (which is ambient); the only selection
                 // clearer is the empty-background click.
                 #[cfg(not(target_arch = "wasm32"))]
-                self.plugin_driver.cancel_all_active_streams();
+                self.runner_client.cancel_all_active_streams();
                 self.cancel_operations();
                 return true;
             }
@@ -1104,7 +1110,7 @@ impl App {
                         .engine
                         .as_ref()
                         .is_some_and(viso::VisoEngine::mouse_pressed)
-                        && !self.plugin_driver.has_active_pull_drag()
+                        && !self.runner_client.has_active_pull_drag()
                         && self.pending_pull_origin.is_some() =>
                 {
                     // The pull intent was locked at button-down; the move
@@ -1129,14 +1135,14 @@ impl App {
                     }
                 }
                 ViewportInput::PointerMove { x, y, .. }
-                    if self.plugin_driver.has_active_pull_drag() =>
+                    if self.runner_client.has_active_pull_drag() =>
                 {
                     self.update_pull_drag(*x, *y);
                     self.finalize_viewport_input();
                     return;
                 }
                 ViewportInput::PointerUp { .. }
-                    if self.plugin_driver.has_active_pull_drag() =>
+                    if self.runner_client.has_active_pull_drag() =>
                 {
                     self.end_pull_drag();
                     self.finalize_viewport_input();
@@ -1147,7 +1153,7 @@ impl App {
         }
 
         // Hotkey resolved in the `Key` arm below via a disjoint field
-        // borrow (`self.plugin_driver`, not `self.engine`); the actual
+        // borrow (`self.runner_client`, not `self.engine`); the actual
         // dispatch is deferred to after the match so the `engine`
         // borrow is released before `handle_dispatch_op` takes
         // `&mut self`.
@@ -1273,13 +1279,13 @@ impl App {
                             if !self.keybindings.dispatch(other, engine) {
                                 // No viso built-in claims this key — resolve it
                                 // against the plugin hotkey catalog. Disjoint
-                                // field borrow (`self.plugin_driver`) so it
+                                // field borrow (`self.runner_client`) so it
                                 // coexists with the live `engine` borrow;
                                 // dispatch is deferred to after the match.
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
                                     pending_hotkey_op = self
-                                        .plugin_driver
+                                        .runner_client
                                         .hotkey_to_op(other)
                                         .map(|(_plugin_id, op_id)| op_id);
                                     if pending_hotkey_op.is_none() {
@@ -1300,7 +1306,7 @@ impl App {
 
         // Update drag/pull/band visualizations after input
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.pull_drag_pull_info();
+        let pull = self.runner_client.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, pull);
@@ -1319,7 +1325,7 @@ impl App {
             // untouched (the only selection clearer is the empty-click
             // path in `apply_click_to_selection`).
             #[cfg(not(target_arch = "wasm32"))]
-            self.plugin_driver.cancel_all_active_streams();
+            self.runner_client.cancel_all_active_streams();
             self.cancel_operations();
         }
 
@@ -1344,7 +1350,7 @@ impl App {
     /// with the live pull-drag state held in the plugin driver.
     #[cfg(not(target_arch = "wasm32"))]
     fn finalize_viewport_input(&mut self) {
-        let pull = self.plugin_driver.pull_drag_pull_info();
+        let pull = self.runner_client.pull_drag_pull_info();
         if let Some(engine) = self.engine.as_mut() {
             update_all_visualizations(engine, pull);
         }
@@ -1408,7 +1414,7 @@ impl App {
             atom_name: route.atom_name.clone(),
         };
         let (rid, plugin_id) =
-            match self.plugin_driver.start_stream(intent, |id| store.entity_type(id)) {
+            match self.runner_client.start_stream(intent, |id| store.entity_type(id)) {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
@@ -1443,7 +1449,7 @@ impl App {
             }
         }
 
-        self.plugin_driver.set_pull_drag(crate::pull_drag::PullDrag {
+        self.runner_client.set_pull_drag(crate::pull_drag::PullDrag {
             request_id: rid,
             plugin_id,
             pull_info,
@@ -1458,7 +1464,7 @@ impl App {
     /// the cone tip with the cursor.
     #[cfg(not(target_arch = "wasm32"))]
     fn update_pull_drag(&mut self, x: f32, y: f32) {
-        let Some(drag) = self.plugin_driver.pull_drag_mut() else {
+        let Some(drag) = self.runner_client.pull_drag_mut() else {
             return;
         };
         drag.pull_info.screen_target = (x, y);
@@ -1477,7 +1483,7 @@ impl App {
         };
         let target = engine.screen_to_world_at_depth(glam::Vec2::new(x, y), atom_pos);
 
-        self.plugin_driver.update_stream(request_id, &plugin_id, target);
+        self.runner_client.update_stream(request_id, &plugin_id, target);
     }
 
     /// Pointer-up (or any cancel signal): tear down the drag state
@@ -1487,10 +1493,10 @@ impl App {
     /// becomes a permanent undo entry.
     #[cfg(not(target_arch = "wasm32"))]
     fn end_pull_drag(&mut self) {
-        let Some(drag) = self.plugin_driver.take_pull_drag() else {
+        let Some(drag) = self.runner_client.take_pull_drag() else {
             return;
         };
-        self.plugin_driver.end_stream(drag.request_id, &drag.plugin_id);
+        self.runner_client.end_stream(drag.request_id, &drag.plugin_id);
     }
 
     /// Dispatch a plugin op by op-id. Resolves the op against the
@@ -1519,7 +1525,7 @@ impl App {
                 Focus::All => None,
             };
 
-            let Some(orch) = self.plugin_driver.orchestrator.as_mut() else {
+            let Some(orch) = self.runner_client.orchestrator.as_mut() else {
                 log::warn!(
                     "handle_dispatch_op({:?}): orchestrator not initialized",
                     op.op_id
@@ -1538,7 +1544,7 @@ impl App {
             let plugin_id = cached.plugin_id.clone();
 
             // Drop the orchestrator borrow before reaching back into
-            // `self.plugin_driver` for the catalog label + dispatch.
+            // `self.runner_client` for the catalog label + dispatch.
             let _ = orch;
 
             // Resolve the display label from the manifest catalog. Falls
@@ -1546,7 +1552,7 @@ impl App {
             // (the dispatcher still routes; the history entry just shows
             // the op id).
             let display = self
-                .plugin_driver
+                .runner_client
                 .op_display(&plugin_id, &op.op_id)
                 .unwrap_or_else(|| op.op_id.clone());
             // Hand the driver a core-shaped intent: the selection flatten,
@@ -1559,11 +1565,11 @@ impl App {
                 params: op.params,
             };
             // Hoist a shared borrow of the store so the lookup closure
-            // can capture it alongside the upcoming `&mut self.plugin_driver`
+            // can capture it alongside the upcoming `&mut self.runner_client`
             // call (disjoint field paths).
             let store = &self.store;
             let dispatch_outcome =
-                self.plugin_driver
+                self.runner_client
                     .dispatch_op(intent, plugin_id.clone(), |id| {
                         store.entity_type(id)
                     });
@@ -1617,7 +1623,7 @@ impl App {
             match dispatch_outcome {
                 Ok(OpOutcome::Stream { .. }) => {
                     // The stream table entry (inserted by
-                    // `PluginDriver::dispatch_op`) and the edit are keyed
+                    // `RunnerClient::dispatch_op`) and the edit are keyed
                     // by the same dispatch id; the terminal arm commits /
                     // aborts via that id. Nothing to reconcile here.
                 }
@@ -1843,7 +1849,7 @@ impl App {
         // session title (captured before `reset`, which leaves it intact).
         let title = self.store.title().to_string();
         self.store.reset();
-        self.plugin_driver.reset_for_new_structure();
+        self.runner_client.reset_for_new_structure();
         // Topology swap: `Session::reset` already cleared the selection
         // (entity ids from the outgoing assembly can collide numerically
         // with the incoming ones without referring to the same entities).
@@ -2122,7 +2128,7 @@ impl App {
         // Pre-snapshot pull info under an immutable borrow so the
         // subsequent `&mut engine` doesn't conflict.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.pull_drag_pull_info();
+        let pull = self.runner_client.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         let Some(engine) = &mut self.engine else {
@@ -2164,7 +2170,7 @@ impl App {
     /// 1. drain pending plugin updates (apply to `Session`; emits
     ///    `SessionUpdate`s through the funnel).
     /// 2. drain the `SessionUpdate` stream in one go.
-    /// 3. route the batch: plugin broadcaster fan-out and render
+    /// 3. route the batch: runner projector fan-out and render
     ///    projector publish (both no-op on empty batches).
     /// 4. poll plugin scores (refresh head scores; emits `ScoresChanged`).
     /// 5. engine update (camera animation, mesh upload, etc.).
@@ -2247,11 +2253,10 @@ impl App {
         // dirty (TEXT_BUBBLE / PUZZLE) is derived from the batch by the GUI
         // consumer below, so there are no tick arms for them anymore.
         if !changes.is_empty() {
-            // The broadcaster self-filters score-only batches (scores are
+            // The projector self-filters score-only batches (scores are
             // not an observable mutation for plugins); a no-op call is cheap.
-            if let Some(orch) = self.plugin_driver.orchestrator.as_mut() {
-                self.plugin_driver
-                    .broadcaster
+            if let Some(orch) = self.runner_client.orchestrator_mut() {
+                self.runner_projector
                     .consume(&changes, &self.store, orch);
             }
             if render_changes > 0 {
@@ -2295,7 +2300,7 @@ impl App {
 
         // 5. Engine update + 6. visualization overlay.
         #[cfg(not(target_arch = "wasm32"))]
-        let pull = self.plugin_driver.pull_drag_pull_info();
+        let pull = self.runner_client.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
         let pull: Option<viso::PullInfo> = None;
         if let Some(engine) = self.engine.as_mut() {
@@ -2337,7 +2342,7 @@ impl App {
                 full_populate,
                 &self.store,
                 engine,
-                &self.plugin_driver,
+                &self.runner_client,
                 &ctx,
                 &mut self.frontend,
             );
@@ -2403,7 +2408,7 @@ impl App {
                 // plugin driver owns. A fresh orchestrator restarts
                 // request ids at 1, so drop any stale composition targets
                 // before a new edit can reuse an old id.
-                self.plugin_driver.init_orchestrator();
+                self.runner_client.init_orchestrator();
                 #[cfg(not(target_arch = "wasm32"))]
                 self.score_targets.clear();
                 self.bootstrap_plugins();
@@ -2417,7 +2422,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to load structure '{}': {}", path, e);
-                self.plugin_driver.init_orchestrator();
+                self.runner_client.init_orchestrator();
                 #[cfg(not(target_arch = "wasm32"))]
                 self.score_targets.clear();
             }
@@ -2484,8 +2489,8 @@ impl App {
         };
 
         let registered = self
-            .plugin_driver
-            .discover_and_register(&plugins_root, initial_assembly);
+            .runner_client
+            .bootstrap_runner(&plugins_root, initial_assembly);
 
         // Apply each registered plugin's post-Init normalization into the
         // store. Only rosetta returns a non-empty normalized assembly
@@ -2549,7 +2554,7 @@ impl App {
         // Host-internal action: no dispatch happened, so draw the edit's
         // request_id straight from the orchestrator (the single id
         // authority).
-        let Some(request_id) = self.plugin_driver.alloc_request_id() else {
+        let Some(request_id) = self.runner_client.alloc_request_id() else {
             log::warn!(
                 "[App] {plugin_id} post-Init: no orchestrator to allocate a \
                  request id; skipping normalization apply"
@@ -2591,7 +2596,7 @@ impl App {
 
     /// Shut down backends and scene processor.
     pub fn shutdown(&mut self) {
-        self.plugin_driver.shutdown();
+        self.runner_client.shutdown();
         if let Some(engine) = &mut self.engine {
             engine.shutdown();
         }
@@ -2656,7 +2661,7 @@ impl App {
 impl foldit_gui::Dispatcher for App {
     /// Webview signaled it's ready — mark every section of the owned
     /// `FrontendState` dirty so the next `serialize_frontend_dirty`
-    /// emits a full snapshot. App owns the frontend mirror (RX13), so
+    /// emits a full snapshot. App owns the frontend mirror, so
     /// this lives here rather than on the host.
     fn on_ready(&mut self) {
         self.frontend.mark_all_dirty();

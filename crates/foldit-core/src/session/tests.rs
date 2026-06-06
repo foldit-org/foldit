@@ -170,7 +170,7 @@ fn live_membership_lists_committed_then_preview() {
 
 #[test]
 fn undone_entity_drops_from_membership_though_metadata_lingers() {
-    // The point of P2: membership is derived from the live head
+    // Membership is derived from the live head
     // checkpoint, so navigating back past an entity's checkpoint drops
     // it from ids/count/iter — even though its side-table metadata is
     // never GC'd. The old metadata-keyed implementation got this wrong.
@@ -231,7 +231,7 @@ fn reset_clears_history_metadata_and_transient() {
 //
 // These assert the *funnel*: each mutator emits exactly the expected
 // `SessionUpdate` (or none). The Full/Delta projection of those changes is
-// the `PluginBroadcaster`'s job and is tested in `plugin_driver`.
+// the `RunnerProjector`'s job and is tested in `runner_projector`.
 
 /// Drive an entity through promote_preview → drain so the change queue
 /// is at a known-empty starting point.
@@ -333,7 +333,7 @@ fn begin_action_emits_nothing() {
 
 #[test]
 fn action_update_emits_tentative_edit() {
-    // SessionUpdate is signal-only (RX13): payload coords are gone — the
+    // SessionUpdate is signal-only: payload coords are gone — the
     // RenderProjector rebuilds from `Session::head_assembly`. The test
     // asserts the funnel shape (one tentative Edit) and that the
     // post-mutation coords are reachable through the document; the

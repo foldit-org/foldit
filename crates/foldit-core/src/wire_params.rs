@@ -8,7 +8,7 @@
 //! macro below.
 //!
 //! Also hosts [`param_spec_to_wire`], the `ParamSpec` projection
-//! [`crate::plugin_driver::PluginDriver::actions_catalog`] uses when it
+//! [`crate::runner_client::RunnerClient::actions_catalog`] uses when it
 //! forwards each catalog entry into the GUI's `ActionInfo` shape.
 
 use foldit_gui::state::{
