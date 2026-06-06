@@ -148,6 +148,15 @@ pub struct Session {
     /// any preset) or at startup. Ambient session state; [`Self::reset`]
     /// clears it.
     active_preset: Option<String>,
+    /// Score-term weight map (`term_name -> weight`) core multiplies the
+    /// plugin's raw per-term energies by to produce the weighted total +
+    /// per-residue scalars. Session-lifetime ambient state, not
+    /// history-versioned and never on the `SessionUpdate` stream: it changes
+    /// only at load, before the first score, so no consumer needs a change
+    /// signal. Default empty; the App loads `ref2015_cart` into it once at
+    /// init. [`Self::reset`] leaves it untouched (the `title` pattern): a
+    /// reload re-sets it via the same init seam, so it carries across swaps.
+    term_weights: std::collections::HashMap<String, f32>,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -178,6 +187,7 @@ impl Session {
             puzzle: None,
             view_options: VisoOptions::default(),
             active_preset: None,
+            term_weights: std::collections::HashMap::new(),
             pending_updates: Vec::new(),
         }
     }
@@ -906,6 +916,23 @@ impl Session {
         }
     }
 
+    // ── Score-term weights ────────────────────────────────────────────
+
+    /// The active score-term weight map core multiplies raw per-term
+    /// energies by. Empty until the App loads the default at init.
+    #[must_use]
+    pub fn term_weights(&self) -> &std::collections::HashMap<String, f32> {
+        &self.term_weights
+    }
+
+    /// Install the score-term weight map. Silent (no `SessionUpdate`): the
+    /// weights change only at load, before the first score, so no consumer
+    /// needs a change signal. Called once at App init; survives reloads
+    /// because [`Self::reset`] leaves `term_weights` untouched.
+    pub fn set_term_weights(&mut self, weights: std::collections::HashMap<String, f32>) {
+        self.term_weights = weights;
+    }
+
     // ── Reset ─────────────────────────────────────────────────────────
 
     /// Drop the entire history graph, clear metadata and transient.
@@ -937,6 +964,8 @@ impl Session {
         // reset's own `HeadMoved` below stands in for the topology swap.
         // `title` is left untouched: the following load's `start` overwrites
         // it, and nothing reads it between the reset and that overwrite.
+        // `term_weights` is likewise left untouched: the load re-sets it via
+        // the App-init seam, so it carries across the topology swap.
         self.puzzle = None;
         // View options + active preset are ambient session state; a topology
         // swap resets both to defaults (view options reset per session, not

@@ -57,22 +57,37 @@ fn rosetta_raw_to_game(raw: f64) -> f64 {
     ((-raw + SCORE_OFFSET) * SCORE_SCALE).max(SCORE_MINIMUM)
 }
 
-/// Accumulate one report's per-residue scores into the
+/// Accumulate one report's core-weighted per-residue scores into the
 /// `entity_id -> Vec<(residue_index, score)>` map (later writers stack on
-/// earlier ones). Shared by the whole-assembly and composition paths.
+/// earlier ones). Takes the `(entity_id, residue_index, weighted_score)`
+/// list [`ScoreReport::weighted_per_residue`] produces, so the per-residue
+/// scalars are core-weighted (raw terms × session weights), not the
+/// plugin's pre-weighted values. Shared by the whole-assembly and
+/// composition paths.
 #[cfg(not(target_arch = "wasm32"))]
 fn accumulate_per_residue(
     per_entity: &mut std::collections::HashMap<u32, Vec<(u32, f64)>>,
-    report: &crate::scores::ScoreReport,
+    weighted: &[(u64, u32, f64)],
 ) {
-    for rs in &report.per_residue {
+    for &(entity_id, residue_index, score) in weighted {
         #[allow(clippy::cast_possible_truncation)]
-        let entity_id = rs.entity_id as u32;
+        let entity_id = entity_id as u32;
         per_entity
             .entry(entity_id)
             .or_default()
-            .push((rs.residue_index, f64::from(rs.score)));
+            .push((residue_index, score));
     }
+}
+
+/// Dev-only value-identity check: the core-weighted total must reproduce
+/// the plugin's pre-weighted `total` within a loose relative epsilon. f32
+/// accumulation order differs from the plugin's, so exact equality would
+/// false-trip; the `max(1.0)` floor keeps a near-zero total from demanding
+/// absurd absolute precision. Used only inside `debug_assert!`.
+#[cfg(not(target_arch = "wasm32"))]
+fn core_total_matches(core: f64, plugin: f32) -> bool {
+    let plugin = f64::from(plugin);
+    (core - plugin).abs() <= 1e-3 * plugin.abs().max(1.0)
 }
 
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
@@ -825,8 +840,15 @@ impl App {
         // merge strategy choice).
         let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
         for (plugin_id, report) in &reports {
+            let weighted_total = report.weighted_total(self.store.term_weights());
+            debug_assert!(
+                core_total_matches(weighted_total, report.total),
+                "core-weighted total {weighted_total} diverged from plugin total \
+                 {} for {plugin_id}",
+                report.total
+            );
             if total.is_none() {
-                total = Some(f64::from(report.total));
+                total = Some(weighted_total);
             }
             log::info!(
                 "[App] score from {plugin_id}: total={} terms={} per_residue={}",
@@ -834,7 +856,8 @@ impl App {
                 report.terms.len(),
                 report.per_residue.len()
             );
-            accumulate_per_residue(&mut per_entity, report);
+            let weighted = report.weighted_per_residue(self.store.term_weights());
+            accumulate_per_residue(&mut per_entity, &weighted);
         }
         if let Some(raw) = total {
             // Whole-assembly score of the worker's live pose. With exactly
@@ -949,14 +972,20 @@ impl App {
             return;
         }
         for (rid, report) in replies {
-            let raw = f64::from(report.total);
+            let raw = report.weighted_total(self.store.term_weights());
+            debug_assert!(
+                core_total_matches(raw, report.total),
+                "core-weighted composition total {raw} diverged from plugin total {}",
+                report.total
+            );
             let game = rosetta_raw_to_game(raw);
             if let Some(ckpt_id) = self.score_targets.get(&rid).copied() {
                 self.store.set_checkpoint_scores(ckpt_id, Some(raw), Some(game));
                 let _ = self.score_targets.remove(&rid);
             }
+            let weighted = report.weighted_per_residue(self.store.term_weights());
             let mut per_entity = std::collections::HashMap::new();
-            accumulate_per_residue(&mut per_entity, &report);
+            accumulate_per_residue(&mut per_entity, &weighted);
             self.push_per_residue_to_viso(per_entity);
         }
     }
@@ -2456,6 +2485,26 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn bootstrap_plugins(&mut self) {
         self.set_loading_state(LoadingState::Initializing);
+
+        // Load the default score-term weights once, before the first score.
+        // `reset` leaves `term_weights` untouched, so a single load here
+        // carries across reloads; the empty-check makes a re-bootstrap a
+        // no-op. On failure, log and proceed degraded (every weight then
+        // resolves to 0.0, so scores read 0 until a valid map lands -- the
+        // app stays up rather than crashing on a missing asset).
+        if self.store.term_weights().is_empty() {
+            match crate::scores::load_default_term_weights() {
+                Ok(weights) => {
+                    log::info!(
+                        "[App] loaded {} default score-term weights",
+                        weights.len()
+                    );
+                    self.store.set_term_weights(weights);
+                }
+                Err(e) => log::error!("[App] failed to load default score-term weights: {e}"),
+            }
+        }
+
         let Some(plugins_root) = locate_plugins_root() else {
             log::warn!(
                 "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
