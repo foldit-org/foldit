@@ -33,9 +33,9 @@ pub(crate) use types::{
 /// plugin projection lives separately in `RunnerProjector`, a peer `App`
 /// field, so the two can be borrowed disjointly across the tick seam.
 pub struct RunnerClient {
-    pub(crate) orchestrator: Option<foldit_runner::Orchestrator>,
+    orchestrator: Option<foldit_runner::Orchestrator>,
     #[cfg(not(target_arch = "wasm32"))]
-    pub stream_host: StreamHost,
+    stream_host: StreamHost,
 }
 
 impl RunnerClient {
@@ -61,6 +61,25 @@ impl RunnerClient {
     /// borrow it disjointly from the peer `RunnerProjector` field on `App`.
     pub(crate) fn orchestrator_mut(&mut self) -> Option<&mut foldit_runner::Orchestrator> {
         self.orchestrator.as_mut()
+    }
+
+    /// Whether an orchestrator handle is installed. The score-poll gate uses
+    /// this to skip the round-trip before any structure has loaded, without
+    /// reaching into the orchestrator field.
+    pub(crate) fn has_orchestrator(&self) -> bool {
+        self.orchestrator.is_some()
+    }
+
+    /// Resolve an op-id to its owning plugin id via the orchestrator's
+    /// plugin registry. Returns `None` when no orchestrator is installed or
+    /// the op-id is unknown to the registry. Encapsulates the registry lookup
+    /// so the dispatch path names no orchestrator type.
+    pub(crate) fn resolve_op_plugin_id(&self, op_id: &str) -> Option<String> {
+        self.orchestrator
+            .as_ref()?
+            .plugin_registry()
+            .get_op(op_id)
+            .map(|op| op.plugin_id.clone())
     }
 
     /// Release any lock state when puzzle topology changes.

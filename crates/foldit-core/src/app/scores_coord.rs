@@ -17,7 +17,7 @@ impl App {
     /// by `apply_score_reports` when a report actually applies.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn poll_plugin_scores(&mut self) {
-        if self.runner_client.orchestrator.is_none() {
+        if !self.runner_client.has_orchestrator() {
             return;
         }
         self.refresh_scores();

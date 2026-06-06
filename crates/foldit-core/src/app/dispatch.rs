@@ -109,27 +109,18 @@ impl App {
                 Focus::All => None,
             };
 
-            let Some(orch) = self.runner_client.orchestrator.as_mut() else {
+            // Resolve the op-id to its owning plugin via the registry behind
+            // an accessor (names no orchestrator type); `plugin_id` is needed
+            // below for `begin_action`. A miss here means either no
+            // orchestrator is installed or the op-id isn't registered (a stale
+            // GUI cache or misrouted message) -- either way the op can't run.
+            let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
                 log::warn!(
-                    "handle_dispatch_op({:?}): orchestrator not initialized",
+                    "handle_dispatch_op({:?}): op not resolvable (no orchestrator or op-id not in registry)",
                     op.op_id
                 );
                 return;
             };
-
-            let Some(cached) = orch.plugin_registry().get_op(&op.op_id).cloned() else {
-                log::warn!("handle_dispatch_op: op-id {:?} not in registry", op.op_id);
-                return;
-            };
-
-            // `plugin_id` is needed below for `begin_action`; it's a plain
-            // `String` field off `cached`, so reading it here names no
-            // orchestrator type.
-            let plugin_id = cached.plugin_id.clone();
-
-            // Drop the orchestrator borrow before reaching back into
-            // `self.runner_client` for the catalog label + dispatch.
-            let _ = orch;
 
             // Resolve the display label from the manifest catalog. Falls
             // back to the op id when the op isn't surfaced as a button
