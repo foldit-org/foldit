@@ -649,27 +649,14 @@ impl RunnerClient {
 }
 
 /// Convert the runner's proto score report into the core-owned twin at the
-/// facade boundary. Structural copy: `total` / `terms` and the raw
-/// `term_names` / `whole_pose_terms` move as-is; the two residue lists are
-/// rebuilt, dropping any entry with no residue ref (the proto field is
-/// optional). That skip preserves the historical `residue.as_ref() else
-/// continue` behavior, relocated from the consumer.
+/// facade boundary. Structural copy: the raw `term_names` / `whole_pose_terms`
+/// move as-is; `per_residue_terms` is rebuilt, dropping any entry with no
+/// residue ref (the proto field is optional). That skip preserves the
+/// historical `residue.as_ref() else continue` behavior, relocated from the
+/// consumer.
 impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreReport {
     fn from(report: foldit_runner::proto::plugin::ScoreReport) -> Self {
         Self {
-            total: report.total,
-            terms: report.terms,
-            per_residue: report
-                .per_residue
-                .into_iter()
-                .filter_map(|rs| {
-                    rs.residue.map(|rref| crate::scores::ResidueScore {
-                        entity_id: rref.entity_id,
-                        residue_index: rref.residue_index,
-                        score: rs.score,
-                    })
-                })
-                .collect(),
             term_names: report.term_names,
             whole_pose_terms: report.whole_pose_terms,
             per_residue_terms: report

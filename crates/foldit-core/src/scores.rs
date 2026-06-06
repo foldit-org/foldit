@@ -1,16 +1,13 @@
-//! Core-owned score types. Mirror what a plugin score report carries
-//! today: a whole-report total, a per-term breakdown, and a flat list of
-//! per-residue scores. The runner facade converts the wire/proto report
-//! into these at the `RunnerClient` boundary so the rest of the core never
-//! names the runner's proto types.
+//! Core-owned score types. Mirror what a plugin score report carries: the
+//! RAW (unweighted) per-term energies (whole-pose and per-residue), the
+//! term-name alignment key, and nothing else. The runner facade converts
+//! the wire/proto report into these at the `RunnerClient` boundary so the
+//! rest of the core never names the runner's proto types.
 //!
-//! Core owns the weighting: alongside the plugin's pre-weighted `total` /
-//! `per_residue.score`, the report carries the RAW (unweighted) per-term
-//! energies (whole-pose and per-residue). Core multiplies those by a
+//! Core owns the weighting: it multiplies the raw per-term energies by a
 //! session-held weight map ([`Session::term_weights`]) to produce the
-//! weighted total and per-residue scalars itself. The pre-weighted fields
-//! stay for now (a later phase retires them); they back the value-identity
-//! anchor and the log line.
+//! weighted total and per-residue scalars itself, which are what the app
+//! displays and colors by.
 //!
 //! Cross-platform: the blocking score path is reachable on wasm, so these
 //! types, their conversion, and the weighting methods must build on every
@@ -18,14 +15,10 @@
 
 use std::collections::HashMap;
 
-/// One plugin's score for the assembly (or a scored composition): the
-/// pre-weighted total, the per-term breakdown, the pre-weighted per-residue
-/// scores, and the RAW (unweighted) per-term energies that core weights
-/// itself.
+/// One plugin's score for the assembly (or a scored composition): the RAW
+/// (unweighted) per-term energies that core weights itself, plus the
+/// term-name alignment key.
 pub(crate) struct ScoreReport {
-    pub total: f32,
-    pub terms: HashMap<String, f32>,
-    pub per_residue: Vec<ResidueScore>,
     /// Names of the raw terms, the alignment key for `whole_pose_terms` and
     /// each `ResidueTermScores::terms`. Same order, same length.
     pub term_names: Vec<String>,
@@ -34,18 +27,6 @@ pub(crate) struct ScoreReport {
     /// Raw (unweighted) per-residue energies, each `terms` aligned to
     /// `term_names`.
     pub per_residue_terms: Vec<ResidueTermScores>,
-}
-
-/// A single residue's pre-weighted score, addressed by
-/// `(entity_id, residue_index)`. Retained alongside the raw
-/// `per_residue_terms` that core now weights itself; the fields are read
-/// only by the value-identity anchor (a later phase retires the pre-weighted
-/// per-residue path entirely), so the non-test build sees them as unread.
-#[allow(dead_code)]
-pub(crate) struct ResidueScore {
-    pub entity_id: u64,
-    pub residue_index: u32,
-    pub score: f32,
 }
 
 /// A single residue's RAW per-term energies, addressed by
@@ -149,9 +130,9 @@ pub(crate) fn load_default_term_weights() -> Result<HashMap<String, f32>, String
 mod tests {
     use super::*;
 
-    /// Value-identity anchor: a report whose pre-weighted fields 1/3 are
-    /// consistent with the raw fields 5/6 under a chosen weight set must
-    /// reproduce those pre-weighted values through core weighting.
+    /// Weighting anchor: core multiplies the raw per-term energies by the
+    /// weight set to produce the displayed whole-pose total and per-residue
+    /// scalars.
     #[test]
     fn weighting_matches_preweighted_fields() {
         let weights: HashMap<String, f32> =
@@ -159,16 +140,9 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        // whole pose: 10*0.5 + 20*1.0 = 25.0, matching field-1 `total`.
-        // per residue: 4*0.5 + 6*1.0 = 8.0, matching field-3 score.
+        // whole pose: 10*0.5 + 20*1.0 = 25.0.
+        // per residue: 4*0.5 + 6*1.0 = 8.0.
         let report = ScoreReport {
-            total: 25.0,
-            terms: HashMap::new(),
-            per_residue: vec![ResidueScore {
-                entity_id: 7,
-                residue_index: 3,
-                score: 8.0,
-            }],
             term_names: vec!["a".to_string(), "b".to_string()],
             whole_pose_terms: vec![10.0, 20.0],
             per_residue_terms: vec![ResidueTermScores {
@@ -178,15 +152,13 @@ mod tests {
             }],
         };
 
-        assert_eq!(report.weighted_total(&weights), f64::from(report.total));
         assert_eq!(report.weighted_total(&weights), 25.0);
 
         let per_residue = report.weighted_per_residue(&weights);
         assert_eq!(per_residue.len(), 1);
         let (entity_id, residue_index, score) = per_residue[0];
-        assert_eq!(entity_id, report.per_residue[0].entity_id);
-        assert_eq!(residue_index, report.per_residue[0].residue_index);
-        assert_eq!(score, f64::from(report.per_residue[0].score));
+        assert_eq!(entity_id, 7);
+        assert_eq!(residue_index, 3);
         assert_eq!(score, 8.0);
     }
 
@@ -196,9 +168,6 @@ mod tests {
         let weights: HashMap<String, f32> =
             [("a".to_string(), 2.0_f32)].into_iter().collect();
         let report = ScoreReport {
-            total: 0.0,
-            terms: HashMap::new(),
-            per_residue: Vec::new(),
             term_names: vec!["a".to_string(), "unknown".to_string()],
             whole_pose_terms: vec![3.0, 100.0],
             per_residue_terms: Vec::new(),

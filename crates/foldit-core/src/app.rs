@@ -79,17 +79,6 @@ fn accumulate_per_residue(
     }
 }
 
-/// Dev-only value-identity check: the core-weighted total must reproduce
-/// the plugin's pre-weighted `total` within a loose relative epsilon. f32
-/// accumulation order differs from the plugin's, so exact equality would
-/// false-trip; the `max(1.0)` floor keeps a near-zero total from demanding
-/// absurd absolute precision. Used only inside `debug_assert!`.
-#[cfg(not(target_arch = "wasm32"))]
-fn core_total_matches(core: f64, plugin: f32) -> bool {
-    let plugin = f64::from(plugin);
-    (core - plugin).abs() <= 1e-3 * plugin.abs().max(1.0)
-}
-
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
@@ -841,20 +830,13 @@ impl App {
         let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
         for (plugin_id, report) in &reports {
             let weighted_total = report.weighted_total(self.store.term_weights());
-            debug_assert!(
-                core_total_matches(weighted_total, report.total),
-                "core-weighted total {weighted_total} diverged from plugin total \
-                 {} for {plugin_id}",
-                report.total
-            );
             if total.is_none() {
                 total = Some(weighted_total);
             }
             log::info!(
-                "[App] score from {plugin_id}: total={} terms={} per_residue={}",
-                report.total,
-                report.terms.len(),
-                report.per_residue.len()
+                "[App] score from {plugin_id}: total={weighted_total} terms={} per_residue={}",
+                report.term_names.len(),
+                report.per_residue_terms.len()
             );
             let weighted = report.weighted_per_residue(self.store.term_weights());
             accumulate_per_residue(&mut per_entity, &weighted);
@@ -973,11 +955,6 @@ impl App {
         }
         for (rid, report) in replies {
             let raw = report.weighted_total(self.store.term_weights());
-            debug_assert!(
-                core_total_matches(raw, report.total),
-                "core-weighted composition total {raw} diverged from plugin total {}",
-                report.total
-            );
             let game = rosetta_raw_to_game(raw);
             if let Some(ckpt_id) = self.score_targets.get(&rid).copied() {
                 self.store.set_checkpoint_scores(ckpt_id, Some(raw), Some(game));
