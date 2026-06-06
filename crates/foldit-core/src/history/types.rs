@@ -1,4 +1,4 @@
-//! Domain enums for the history module — action vocabulary, scoring
+//! Domain enums for the history module - action vocabulary, scoring
 //! filter status. Pure data, no behavior beyond a small helper on
 //! `CheckpointKind`.
 
@@ -21,7 +21,7 @@ use super::EntitySnapshotId;
 /// (load, add / remove entity, per-lane revert, preview promotion).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckpointKind {
-    /// Puzzle / file load — the root checkpoint.
+    /// Puzzle / file load - the root checkpoint.
     Loaded { source: PathBuf },
     /// Promoted a transient preview (e.g., a streamed ML result).
     PromotedPreview { entity: EntityId },
@@ -38,7 +38,7 @@ pub enum CheckpointKind {
     /// so the history projection doesn't have to look the plugin up later
     /// (and so the label survives plugin reload / removal). The touched
     /// entity set is recorded on the checkpoint's `entity_heads` (and, for
-    /// an in-flight edit, on the pending edit's lanes), not on this kind —
+    /// an in-flight edit, on the pending edit's lanes), not on this kind -
     /// a single op may span several entities.
     PluginOp {
         plugin_id: String,

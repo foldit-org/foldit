@@ -22,7 +22,7 @@ use crate::history::{
 use super::{EntityMetadata, EntityOrigin, Puzzle, Session, SessionError, SessionUpdate};
 
 impl Session {
-    // ── Action lifecycle (G6: typed mutation intent) ──────────────────
+    // ── Action lifecycle (typed mutation intent) ──────────────────
 
     /// Begin a streaming action over `entities` under the caller-supplied
     /// `request_id` (allocated by the orchestrator, the single id
@@ -269,7 +269,7 @@ impl Session {
         }
     }
 
-    // ── Preview API — transient, never in history ─────────────────────
+    // ── Preview API - transient, never in history ─────────────────────
 
     /// Insert a new preview entity. Allocates a fresh id, sets the
     /// entity's id to it, and stores it in `transient` plus
@@ -338,7 +338,7 @@ impl Session {
                 // Restore the transient entry on failure so the caller
                 // can retry. We can't recover the original payload
                 // because `add_entity` consumed it on the error path
-                // before failing — but the only failure modes are
+                // before failing - but the only failure modes are
                 // ActiveActionInProgress and EntityAlreadyExists, both
                 // of which are caller-fixable; rebuilding the payload
                 // from a re-snapshotted entity is a section-4 concern.
@@ -351,9 +351,9 @@ impl Session {
     /// so it lands in history with an `AddEntity` checkpoint. Returns the
     /// committed [`EntityId`].
     ///
-    /// Ambient (water / ion / solvent) and zero-residue entities — the
+    /// Ambient (water / ion / solvent) and zero-residue entities - the
     /// het-residue stubs the parser emits for cofactors / waters in
-    /// structure files — are kept as previews (transient) so viso still
+    /// structure files - are kept as previews (transient) so viso still
     /// renders them, but they DO NOT push a history checkpoint. They aren't
     /// undoable from the user's perspective; pushing one `AddEntity` per
     /// stub clutters the history (`1bfe` produced 3 root-level dots: one
@@ -396,7 +396,7 @@ impl Session {
     /// Overwrite the ongoing action's tentative payload from a streaming
     /// assembly. `action_update` fans the closure across every lane the edit
     /// locked, and each lane is rewritten only when the incoming assembly
-    /// carries a matching entity id — so a single-entity edit rewrites its one
+    /// carries a matching entity id - so a single-entity edit rewrites its one
     /// lane and a multi-entity edit (post-Init normalization) rewrites each of
     /// its lanes that the stream touched. Score fields are propagated when the
     /// plugin embedded a total; per-residue / game scoring stay on their own
@@ -502,7 +502,7 @@ impl Session {
     //
     // Ambient session focus (not history-versioned). Mutating it emits
     // exactly one [`SessionUpdate::FocusChanged`], and only when the value
-    // actually changes — an idempotent re-focus is silent.
+    // actually changes - an idempotent re-focus is silent.
 
     /// Set the session focus. Emits exactly one
     /// [`SessionUpdate::FocusChanged`] when the value changes; an
@@ -563,7 +563,7 @@ impl Session {
     /// saturates at the sequence length (one past the last bubble; the GUI
     /// then shows no bubble); back saturates at 0. Emits
     /// [`SessionUpdate::BubbleChanged`] only when the cursor actually moves
-    /// — a step at either clamp is silent.
+    /// - a step at either clamp is silent.
     pub fn advance_bubble(&mut self, back: bool) {
         let Some(puzzle) = self.puzzle.as_mut() else {
             return;
@@ -597,7 +597,7 @@ impl Session {
     // something actually changes.
 
     /// Set the active view options (a manual edit). Clears the active preset
-    /// — manually-set options no longer match any named preset. Emits
+    /// - manually-set options no longer match any named preset. Emits
     /// [`SessionUpdate::ViewOptionsChanged`] when the options or the active
     /// preset actually change; an idempotent set emits nothing.
     pub fn set_view_options(&mut self, options: VisoOptions) {
@@ -687,7 +687,7 @@ impl Session {
             self.view_options != VisoOptions::default() || self.active_preset.is_some();
         self.view_options = VisoOptions::default();
         self.active_preset = None;
-        // Drop any changes emitted before the reset — they describe state
+        // Drop any changes emitted before the reset - they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
         // so that change survives. The runner projector's published snapshot is
         // intentionally NOT cleared (it lives on `RunnerProjector`): the

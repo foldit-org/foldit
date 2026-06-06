@@ -11,9 +11,9 @@ pub enum EntityOrigin {
 
 /// Per-entity metadata that rides alongside the entity payload.
 ///
-/// Visibility is **not** here — that lives on viso's
+/// Visibility is **not** here - that lives on viso's
 /// `EntityAnnotations`. The previous `is_preview: bool` flag is also
-/// gone — presence in [`super::Session::transient`] is the preview signal.
+/// gone - presence in [`super::Session::transient`] is the preview signal.
 #[derive(Debug, Clone)]
 pub struct EntityMetadata {
     /// Display name.

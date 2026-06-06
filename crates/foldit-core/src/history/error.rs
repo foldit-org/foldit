@@ -1,4 +1,4 @@
-//! `HistoryError` — typed refusals from the mutation surface, plus
+//! `HistoryError` - typed refusals from the mutation surface, plus
 //! the `BestKind` enum that names which "best" cursor a recompute
 //! affected.
 
@@ -49,7 +49,7 @@ pub enum HistoryError {
     /// Branch was required because there is more than one child.
     #[error("branch hint required: head has multiple children")]
     AmbiguousBranch,
-    /// `commit_action` / `update_action` mismatch — the active entity
+    /// `commit_action` / `update_action` mismatch - the active entity
     /// isn't the one the caller addressed. (Today only fires on
     /// internal misuse; reserved for the section-3 surface.)
     #[error("entity mismatch (expected {}, got {})", expected.raw(), got.raw())]
@@ -57,7 +57,7 @@ pub enum HistoryError {
         expected: EntityId,
         got: EntityId,
     },
-    /// Tentative target — head-pointer moves are not allowed onto a
+    /// Tentative target - head-pointer moves are not allowed onto a
     /// tentative checkpoint from outside its own action.
     #[error("cannot jump onto a tentative checkpoint")]
     TentativeNotJumpable,

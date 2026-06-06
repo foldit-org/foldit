@@ -1,4 +1,4 @@
-//! `assert_invariant` — debug-only cross-DAG sanity check (G8). The
+//! `assert_invariant` - debug-only cross-DAG sanity check. The
 //! release build replaces this with a no-op (the caller wraps every
 //! invocation in `if cfg!(debug_assertions)`).
 
@@ -9,7 +9,7 @@ use molex::entity::molecule::id::EntityId;
 use super::{EntitySnapshotId, History};
 
 impl History {
-    // ── Cross-DAG invariant (G8) ──────────────────────────────────────
+    // ── Cross-DAG invariant ──────────────────────────────────────
 
     /// Walk both DAGs and assert the cross-DAG invariant. Called at the
     /// tail of every public DAG-bearing mutation under
@@ -75,7 +75,7 @@ impl History {
         // 3. Per-request tentative coherence: every tentative snapshot is
         //    the head of exactly one lane and is named by exactly one
         //    pending edit, and vice versa (bijection). (No checkpoint is
-        //    ever tentative — a begin mints none — which the absence of
+        //    ever tentative - a begin mints none - which the absence of
         //    the field now makes structural.)
         let mut tentative_lane_heads: HashSet<(EntityId, EntitySnapshotId)> = HashSet::new();
         for (eid, lane) in &self.lanes {

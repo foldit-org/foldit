@@ -100,7 +100,7 @@ pub(crate) fn route_atom_pick(
         _ => return None,
     };
     let atom = protein.atoms.get(atom_idx as usize)?;
-    // Hydrogen reject — element field is the authoritative check; the
+    // Hydrogen reject - element field is the authoritative check; the
     // atom_name prefix gate in the cartoon-pick path is a fallback for
     // when we don't have the Atom in hand.
     if atom.element == Element::H {

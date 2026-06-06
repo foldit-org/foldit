@@ -84,7 +84,7 @@ impl App {
             }
             AppCommand::History { .. } | AppCommand::AdvanceBubble { .. } => {
                 // Handled in the early-return block above. The match is
-                // exhaustive over `AppCommand` (G10): a new variant
+                // exhaustive over `AppCommand`: a new variant
                 // without a handler is a compile error.
             }
         }
@@ -92,7 +92,7 @@ impl App {
 
     /// Free-form file load (Scientist mode). Ingest entities, set
     /// metadata, then tick + fit the camera (tick is how the render
-    /// projector republishes — the `SessionUpdate` stream carries `PreviewAdded`s and
+    /// projector republishes - the `SessionUpdate` stream carries `PreviewAdded`s and
     /// `HeadMoved`s from `load_entity_into_history`).
     fn handle_load_structure(&mut self, path: String) {
         self.set_loading_state(LoadingState::LoadingSession);
@@ -212,7 +212,7 @@ impl App {
                     }
                 }
 
-                // Topology swap rides the `SessionUpdate` stream — tick's render
+                // Topology swap rides the `SessionUpdate` stream - tick's render
                 // projector picks `replace_assembly` because the id set
                 // differs from the last publish (post-reset = empty).
                 self.tick(0.0);

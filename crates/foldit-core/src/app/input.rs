@@ -143,7 +143,7 @@ impl App {
             for id in &preview_ids {
                 self.store.remove_preview(*id);
             }
-            // PreviewDiscarded rides the `SessionUpdate` stream — the next tick's render
+            // PreviewDiscarded rides the `SessionUpdate` stream - the next tick's render
             // projector republishes and the GUI consumer derives SCENE +
             // ACTIONS dirty from the same batch.
             log::info!("Removed {} in-progress preview entities", preview_ids.len());
@@ -179,7 +179,7 @@ impl App {
                 {
                     // The pull intent was locked at button-down; the move
                     // only supplies the drag endpoint. Take the route so
-                    // this gesture makes at most one start attempt — a
+                    // this gesture makes at most one start attempt - a
                     // failed stream start falls through to camera for the
                     // rest of the drag rather than retrying mid-gesture.
                     let route = self
@@ -227,7 +227,7 @@ impl App {
         // the rest of the match and used again by
         // `update_all_visualizations` after it. Defer past that last
         // engine use, mirroring the `pending_hotkey_op` deferral. ESC is
-        // cancel-only — it never touches the selection — so the deferred
+        // cancel-only - it never touches the selection - so the deferred
         // block is unconditional and needs no live state read.
         let mut pending_escape = false;
 
@@ -262,7 +262,7 @@ impl App {
                 // cursor was just fed to (x, y), so resolving the route
                 // here captures what is under the press; a later move
                 // can only supply the drag endpoint, never re-pick the
-                // target. Left button only — right/middle are camera.
+                // target. Left button only - right/middle are camera.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     self.pending_pull_origin = if button == 0 {
@@ -341,7 +341,7 @@ impl App {
                         }
                         other => {
                             if !self.keybindings.dispatch(other, engine) {
-                                // No viso built-in claims this key — resolve it
+                                // No viso built-in claims this key - resolve it
                                 // against the plugin hotkey catalog. Disjoint
                                 // field borrow (`self.runner_client`) so it
                                 // coexists with the live `engine` borrow;
@@ -375,7 +375,7 @@ impl App {
         let pull: Option<viso::PullInfo> = None;
         update_all_visualizations(engine, pull);
 
-        // `engine`'s last use was above — `&mut self` is free again, so
+        // `engine`'s last use was above - `&mut self` is free again, so
         // the deferred actions below can run. Apply any pending click (a
         // left-release that classified as a click) to the selection; the
         // empty-background case clears it, a residue hit selects.
@@ -394,7 +394,7 @@ impl App {
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same
-        // sink a button click uses (item 78); built-ins already won by
+        // sink a button click uses; built-ins already won by
         // `handle_key_press` being checked first.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(op_id) = pending_hotkey_op {
@@ -489,7 +489,7 @@ impl App {
                 }
             };
 
-        // History side-effect — same shape as button-driven dispatch
+        // History side-effect - same shape as button-driven dispatch
         // so the drag's eventual commit_action lands as a regular
         // PluginOp entry. Failure is non-fatal (commit_action becomes
         // a no-op on an idle store).
@@ -644,7 +644,7 @@ impl App {
     /// is a raw `u32`; look it up against the store's existing ids
     /// instead of minting a new one through the allocator (which would
     /// silently advance and break the next genuine allocation).
-    /// Entries that don't match any live entity are dropped — panels
+    /// Entries that don't match any live entity are dropped - panels
     /// can race a structure swap, and a stale id should clear silently
     /// rather than fail loudly. An empty `entries` list clears the
     /// selection entirely. Per-entity residue lists are collected into
@@ -680,7 +680,7 @@ pub(in crate::app) fn update_all_visualizations(engine: &mut VisoEngine, pull: O
 }
 
 /// Get the trajectory path from command-line arguments. CLI/host
-/// utility — read once on a hotkey + reused by `LoadTrajectory`.
+/// utility - read once on a hotkey + reused by `LoadTrajectory`.
 fn trajectory_path_from_args() -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.windows(2).find_map(|w| {

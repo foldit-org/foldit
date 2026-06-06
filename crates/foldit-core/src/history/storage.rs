@@ -2,7 +2,7 @@
 //!
 //! These are the data structures the rest of the module mutates.
 //! Pure structs + small accessors; the actual mutation logic lives
-//! in `super::record` and gets routed through `record` (G3).
+//! in `super::record` and gets routed through `record`.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -42,7 +42,7 @@ impl Default for HistoryBudget {
 pub struct EntitySnapshot {
     /// Parent on this lane. `None` only for the lane root.
     pub parent: Option<EntitySnapshotId>,
-    /// Children — branches diverging from this snapshot.
+    /// Children - branches diverging from this snapshot.
     pub children: SmallVec<[EntitySnapshotId; 2]>,
     /// Entity payload at this point.
     pub payload: Arc<MoleculeEntity>,
@@ -97,7 +97,7 @@ impl EntityHistory {
         self.snapshots.len()
     }
 
-    /// Whether this lane is empty (never true once seeded — root always
+    /// Whether this lane is empty (never true once seeded - root always
     /// present until the lane is dropped).
     #[must_use]
     pub fn is_empty(&self) -> bool {

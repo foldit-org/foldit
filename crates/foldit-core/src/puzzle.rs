@@ -149,7 +149,7 @@ pub struct PuzzleData {
 /// - installed binaries (`<prefix>/bin/foldit` shipped with sibling
 ///   `<prefix>/bin/assets/`) → finds the sibling.
 ///
-/// Returns an `Err` if no ancestor carries `assets/levels` — better
+/// Returns an `Err` if no ancestor carries `assets/levels` - better
 /// than a CWD-dependent silent miss, since the caller can surface the
 /// problem with the actual exe path.
 pub fn levels_root() -> Result<PathBuf, String> {
@@ -173,7 +173,7 @@ pub fn levels_root() -> Result<PathBuf, String> {
 ///
 /// Looks up `<levels_root>/{puzzle_id:010}/puzzle.toml` (see
 /// [`levels_root`]) and resolves the structure from
-/// `[puzzle.structure]` — either via `path` (file reference) or
+/// `[puzzle.structure]` - either via `path` (file reference) or
 /// `data` (base64-encoded inline BinaryCIF).
 pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     let puzzle_dir = levels_root()?.join(format!("{:010}", puzzle_id));

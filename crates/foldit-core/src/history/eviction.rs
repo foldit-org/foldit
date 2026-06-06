@@ -15,7 +15,7 @@ impl History {
     /// Drop every checkpoint that isn't an ancestor of the current
     /// `head`, and every snapshot that isn't an ancestor of its lane's
     /// `head`. Called after a push mutation so the resulting history
-    /// is a single linear chain — the redo path that existed before
+    /// is a single linear chain - the redo path that existed before
     /// the push is now gone (classic editor-undo semantics).
     pub(super) fn prune_to_head_path(&mut self) {
         // Checkpoints: build the ancestor set, evict the rest.
@@ -41,9 +41,9 @@ impl History {
         // Snapshots: only evict the ones whose `checkpoint_refs` hit
         // zero during the sweep above (i.e., the only checkpoints
         // referencing them were the redo-branch ones we just pruned).
-        // Snapshots still referenced by older ancestor checkpoints —
+        // Snapshots still referenced by older ancestor checkpoints -
         // for example, a `LaneUndo` checkpoint legitimately pointing
-        // back at an old snapshot — stay live; pruning them
+        // back at an old snapshot - stay live; pruning them
         // unconditionally would dangle that ancestor's
         // `entity_heads` reference and break the cross-DAG invariant.
         let lane_ids: Vec<EntityId> = self.lanes.keys().copied().collect();

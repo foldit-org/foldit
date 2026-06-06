@@ -47,21 +47,21 @@ macro_rules! mirror_enum {
     (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }) => {
         match $arg { $($arms)* }
     };
-    // `Variant { fields.. }` — struct-shaped.
+    // `Variant { fields.. }` - struct-shaped.
     (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
         $variant:ident { $($field:ident),+ $(,)? } $(, $($rest:tt)+)?) => {
         mirror_enum!(@build $From, $To, $arg,
             { $($arms)* $From::$variant { $($field),+ } => $To::$variant { $($field),+ }, }
             $($($rest)+)?)
     };
-    // `Variant(bindings..)` — tuple-shaped.
+    // `Variant(bindings..)` - tuple-shaped.
     (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
         $variant:ident ( $($bind:ident),+ $(,)? ) $(, $($rest:tt)+)?) => {
         mirror_enum!(@build $From, $To, $arg,
             { $($arms)* $From::$variant ( $($bind),+ ) => $To::$variant ( $($bind),+ ), }
             $($($rest)+)?)
     };
-    // `Variant` — unit.
+    // `Variant` - unit.
     (@build $From:ident, $To:ident, $arg:ident, { $($arms:tt)* }
         $variant:ident $(, $($rest:tt)+)?) => {
         mirror_enum!(@build $From, $To, $arg,

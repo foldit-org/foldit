@@ -1,4 +1,4 @@
-//! Foldit application state — host-agnostic.
+//! Foldit application state - host-agnostic.
 //!
 //! `App` owns the `Session`, `RunnerClient` (which carries the
 //! orchestrator), the three projectors (`RunnerProjector`,
@@ -36,7 +36,7 @@ use self::input::update_all_visualizations;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::load::locate_plugins_root;
 
-/// Main application state — thin glue connecting the render engine,
+/// Main application state - thin glue connecting the render engine,
 /// plugin driver, document, and the two projectors. `App` also owns the
 /// host-bound [`FrontendState`] mirror (so the load state-machine and
 /// the GUI projection both live on the same side of the host seam) and
@@ -56,7 +56,7 @@ pub struct App {
     /// Host-provided filesystem / resource access. The only path through
     /// which foldit-core touches the filesystem outside puzzle loading.
     pub(in crate::app) host: Box<dyn crate::HostResources>,
-    /// Frontend mirror — written by the GUI consumer
+    /// Frontend mirror - written by the GUI consumer
     /// ([`GuiProjector::consume`]) at the end of each tick and drained by
     /// the host via [`Self::serialize_frontend_dirty`].
     pub(in crate::app) frontend: FrontendState,
@@ -387,7 +387,7 @@ impl App {
             // populate (every section once) rather than flooding the
             // transmit layer's dirty bits directly.
             self.needs_full_populate = true;
-            log::info!("Initial plugin score received — app_state=InSession");
+            log::info!("Initial plugin score received - app_state=InSession");
         }
 
         // 9. Frontend projection: the GUI consumer derives its dirty set
@@ -420,7 +420,7 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl foldit_gui::Dispatcher for App {
-    /// Webview signaled it's ready — mark every section of the owned
+    /// Webview signaled it's ready - mark every section of the owned
     /// `FrontendState` dirty so the next `serialize_frontend_dirty`
     /// emits a full snapshot. App owns the frontend mirror, so
     /// this lives here rather than on the host.

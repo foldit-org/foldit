@@ -36,7 +36,7 @@ fn mk_bulk(id: EntityId) -> MoleculeEntity {
 }
 
 /// Construct a protein with `n_residues` residues. Each residue
-/// has the four backbone atoms (N, CA, C, O) — required by the
+/// has the four backbone atoms (N, CA, C, O) - required by the
 /// `ProteinEntity` constructor's canonicalization, which silently
 /// drops residues that lack a complete backbone.
 fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
@@ -173,7 +173,7 @@ fn live_membership_lists_committed_then_preview() {
 fn undone_entity_drops_from_membership_though_metadata_lingers() {
     // Membership is derived from the live head
     // checkpoint, so navigating back past an entity's checkpoint drops
-    // it from ids/count/iter — even though its side-table metadata is
+    // it from ids/count/iter - even though its side-table metadata is
     // never GC'd. The old metadata-keyed implementation got this wrong.
     let mut store = Session::new();
     let x = store.insert_preview(
@@ -275,7 +275,7 @@ fn insert_preview_emits_preview_added() {
         matches!(changes.as_slice(), [SessionUpdate::PreviewAdded]),
         "got {changes:?}",
     );
-    // Drain is destructive — second take returns empty.
+    // Drain is destructive - second take returns empty.
     assert!(store.take_updates().is_empty());
 }
 
@@ -334,7 +334,7 @@ fn begin_action_emits_nothing() {
 
 #[test]
 fn action_update_emits_tentative_edit() {
-    // SessionUpdate is signal-only: payload coords are gone — the
+    // SessionUpdate is signal-only: payload coords are gone - the
     // RenderProjector rebuilds from `Session::head_assembly`. The test
     // asserts the funnel shape (one tentative Edit) and that the
     // post-mutation coords are reachable through the document; the

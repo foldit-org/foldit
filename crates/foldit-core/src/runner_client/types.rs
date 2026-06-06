@@ -43,7 +43,7 @@ pub(crate) struct StreamStartIntent {
     /// The pull op-id (one of `pull_drag::OP_PULL_*`); resolved against
     /// the registry inside `start_stream` for the plugin id + dispatch.
     pub op_id: &'static str,
-    /// The picked entity (already a molex id — no runner-id wrapping).
+    /// The picked entity (already a molex id - no runner-id wrapping).
     /// Becomes both the `DispatchContext` focus and the single
     /// `ResidueRef`'s entity.
     pub focused_entity: molex::EntityId,
@@ -78,7 +78,7 @@ pub(crate) enum DispatchError {
     Failed(String),
 }
 
-/// Discriminated result of a dispatch — wraps the two return shapes
+/// Discriminated result of a dispatch - wraps the two return shapes
 /// `dispatch_invoke` and `dispatch_start_stream` produce so
 /// `App::handle_dispatch_op` can post-process either uniformly. Lives
 /// here (rather than in `app.rs`) because [`RunnerClient::dispatch_op`]
@@ -97,7 +97,7 @@ pub(crate) enum OpOutcome {
         scope: EditScope,
     },
     /// Stream dispatch succeeded; the `DispatchHandle` is already stored
-    /// in `StreamHost::active_streams` under `request_id` — the same id
+    /// in `StreamHost::active_streams` under `request_id` - the same id
     /// the caller opens its edit under, so there is nothing left to
     /// reconcile here. The matching terminal arm in
     /// `apply_backend_updates` performs the cleanup. `scope` is the entity

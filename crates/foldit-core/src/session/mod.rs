@@ -1,30 +1,30 @@
 //! Authoritative document atop the two-layer [`History`].
 //!
 //! `Session` owns:
-//! - [`History`] — the full per-entity timelines + checkpoint graph.
-//! - `transient: IndexMap<EntityId, Arc<MoleculeEntity>>` — preview /
+//! - [`History`] - the full per-entity timelines + checkpoint graph.
+//! - `transient: IndexMap<EntityId, Arc<MoleculeEntity>>` - preview /
 //!   scene-resident entities that are visible in [`Self::head_assembly`]
 //!   but absent from every checkpoint. Presence in this map *is* the
 //!   preview signal; the old [`EntityMetadata::is_preview`] flag is
-//!   gone (G6).
-//! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` — per-entity
+//!   gone.
+//! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` - per-entity
 //!   metadata (name, origin).
 //!   `Arc`-shared so unchanged entries stay aliased across history
 //!   operations (no metadata serialization on every mutation).
 //!
-//! Mutation intent is in the type signature (G6): three explicit
-//! categories — history-bearing actions, metadata-only edits, and
-//! one-shot transient previews — with no neutral default. Adding a new
+//! Mutation intent is in the type signature: three explicit
+//! categories - history-bearing actions, metadata-only edits, and
+//! one-shot transient previews - with no neutral default. Adding a new
 //! mutation requires choosing one.
 //!
 //! There is no `mutate(closure)`-style API. Every checkpoint-bearing
 //! event funnels through `History::record` via a thin shim
-//! here; the single-root invariant from G3 is preserved end to end.
+//! here; the single-root invariant is preserved end to end.
 //!
 //! **Emit invariant.** Every public mutator is a shim: it performs its
 //! state change, then emits exactly one [`SessionUpdate`] (or none, where
 //! the change is unobservable) through the [`Self::apply`] funnel. The
-//! `Session` holds no projection logic — it neither serializes
+//! `Session` holds no projection logic - it neither serializes
 //! assemblies nor knows about plugins or viso. `App` drains the emitted
 //! changes via [`Self::take_updates`] and routes them to the
 //! projectors (the `RunnerProjector` owns the Full/Delta plugin
@@ -79,7 +79,7 @@ pub enum SessionError {
 /// `start_energy` / `completion_energy` are the objective energies handed
 /// to the GUI (the same numbers, in the same units, that the puzzle TOML
 /// supplies). `bubbles` / `current_bubble` carry the tutorial sequence and
-/// its cursor; they move together — a puzzle with a tutorial sequence is
+/// its cursor; they move together - a puzzle with a tutorial sequence is
 /// `bubbles: Some(seq)` + `current_bubble: Some(0)`, and a puzzle with no
 /// sequence is both `None`.
 #[derive(Debug)]
@@ -110,7 +110,7 @@ pub struct Session {
     history: History,
     /// Ambient residue selection, keyed by entity. A first-class scene
     /// field beside `history`, but *not* history-versioned: undo / redo /
-    /// jump leave it untouched. Empty inner sets are never stored —
+    /// jump leave it untouched. Empty inner sets are never stored -
     /// removing the last residue on an entity removes the entity entry,
     /// so iterating yields only entities that currently have at least one
     /// selected residue. [`Self::reset`] clears it on a topology swap.
@@ -126,7 +126,7 @@ pub struct Session {
     /// load, the puzzle name on a puzzle load. Plain session state derived
     /// from the load source; never empty in practice (a structure with no
     /// derivable name gets `"Unknown"` at create time). [`Self::reset`]
-    /// leaves it untouched — the following load's create seam
+    /// leaves it untouched - the following load's create seam
     /// ([`Self::start`]) overwrites it.
     title: String,
     /// Puzzle-shaped session state. `None` is the default free-form
@@ -351,7 +351,7 @@ impl Session {
     /// edit when an action is in flight, else the committed head checkpoint),
     /// projected through the active scoring mode. Following the composition
     /// node keeps the displayed score on an in-flight action's streamed score
-    /// without ever reading the committed parent (G1: derive, don't store).
+    /// without ever reading the committed parent (derive, don't store).
     pub(crate) fn display_score(&self) -> Option<f64> {
         let (raw, game) = self.current_composition_scores();
         // A loaded puzzle displays the foldit game score; the free-form

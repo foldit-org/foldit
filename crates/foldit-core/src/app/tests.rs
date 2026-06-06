@@ -46,7 +46,7 @@ mod selection_tests {
         app.store.select_residue(ids[0], 7);
         assert!(!app.store.selection_is_empty());
         // Empty entries: clear (`clear_selection` always runs first; no
-        // entry loop body) — independent of whether the empty store
+        // entry loop body) - independent of whether the empty store
         // could even resolve a raw id.
         app.handle_set_selection(Vec::new());
         assert!(app.store.selection_is_empty());
@@ -245,7 +245,7 @@ mod selection_tests {
         store.commit_action(rid).expect("commit");
 
         // Exactly one new checkpoint, and BOTH entities carry the moved
-        // coordinates — not just the first.
+        // coordinates - not just the first.
         assert_eq!(store.history().checkpoints().len(), ckpts_before + 1);
         let head = store.head_assembly();
         for e in [e1, e2] {

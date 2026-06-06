@@ -108,7 +108,7 @@ impl RunnerClient {
     /// `(plugin_id, post_init_bytes)` pair for every plugin that
     /// registered successfully; the post-Init bytes carry each plugin's
     /// normalized assembly for the caller to apply. Empty `Vec` when no
-    /// orchestrator is wired up or discovery fails — both degrade the app
+    /// orchestrator is wired up or discovery fails - both degrade the app
     /// to viewer-only rather than erroring.
     pub(crate) fn bootstrap_runner(
         &mut self,

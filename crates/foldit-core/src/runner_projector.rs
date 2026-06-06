@@ -110,7 +110,7 @@ fn encode_payload(
             if let Ok(bytes) = molex::ops::wire::delta::serialize_edits(&edits) {
                 return Some(BroadcastPayload::Delta(bytes));
             }
-            // Delta serialize rejected the edits — fall through to Full.
+            // Delta serialize rejected the edits - fall through to Full.
         }
     }
     molex::ops::wire::serialize_assembly(new)
@@ -123,7 +123,7 @@ fn encode_payload(
 /// carry the same entity-id set in the same order, so every entity is
 /// pairwise-diffable; returns `None` when an entity was added, removed, or
 /// reordered, or when any per-entity change isn't representable as an edit
-/// (a residue insert/delete) — at which point the caller broadcasts a full
+/// (a residue insert/delete) - at which point the caller broadcasts a full
 /// snapshot. Coord moves ride the delta as `SetEntityCoords`, mutations as
 /// `MutateResidue`.
 fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {

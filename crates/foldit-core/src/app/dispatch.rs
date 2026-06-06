@@ -11,7 +11,7 @@ use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, Op
 #[cfg(not(target_arch = "wasm32"))]
 use viso::Focus;
 
-/// Outcome of a [`HistoryCommand`] dispatch — drives the per-frame
+/// Outcome of a [`HistoryCommand`] dispatch - drives the per-frame
 /// follow-up the dispatcher must run (republish to viso, mark dirty,
 /// or nothing at all).
 enum HistoryOutcome {
@@ -155,9 +155,9 @@ impl App {
             // whole resolved set (a whole-pose op moves every entity, so a
             // single-entity edit would drop every other entity's result and
             // commit a geometrically inconsistent pose). Filter to entities
-            // with a committed lane — `begin_action` forks each lane from its
+            // with a committed lane - `begin_action` forks each lane from its
             // current head, and transient stubs (ambient / zero-residue) have
-            // none — mirroring the post-Init normalization path.
+            // none - mirroring the post-Init normalization path.
             let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
                 Ok(OpOutcome::Stream { scope, .. })
                 | Ok(OpOutcome::Invoke { scope, .. }) => {
@@ -240,8 +240,8 @@ impl App {
     /// Resolve a dispatch's [`EditScope`] into the concrete set of lanes the
     /// edit opens over. A whole-pose op (`AllEntities`) spans every committed
     /// entity; an entity-scoped op spans its resolved set. Either way the
-    /// result is filtered to entities that hold a committed lane — the only
-    /// ones `begin_action` can fork a tentative from — matching the post-Init
+    /// result is filtered to entities that hold a committed lane - the only
+    /// ones `begin_action` can fork a tentative from - matching the post-Init
     /// normalization path's lane filter. Transient stubs (ambient /
     /// zero-residue entities) drop out silently.
     #[cfg(not(target_arch = "wasm32"))]
@@ -317,10 +317,10 @@ impl App {
     /// Dispatch a [`HistoryCommand`] from the GUI to the matching
     /// `Session` method. Refusals are logged; the GUI surface
     /// shows the result by virtue of the head not moving (no separate
-    /// toast / error channel — `HistoryError::EntityLocked` only
+    /// toast / error channel - `HistoryError::EntityLocked` only
     /// fires while the user's own action is still running, where the
     /// running indicator is the natural feedback). The match is
-    /// exhaustive (G10): adding a variant without a handler is a
+    /// exhaustive: adding a variant without a handler is a
     /// compile error.
     pub(in crate::app) fn run_history_command(&mut self, cmd: HistoryCommand) {
         if self.engine.is_none() {

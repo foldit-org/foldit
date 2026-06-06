@@ -7,7 +7,7 @@ use molex::entity::molecule::atom::Atom;
 use proptest::prelude::*;
 use slotmap::{Key, KeyData};
 
-/// One-atom Bulk entity — cheap to construct, exercises every path
+/// One-atom Bulk entity - cheap to construct, exercises every path
 /// through `History` without realistic protein data.
 fn mk_entity(id: EntityId) -> MoleculeEntity {
     let atom = Atom {
@@ -143,7 +143,7 @@ fn push_after_undo_drops_redo_path() {
 
     // Undo again, then PUSH a new edit. Linear semantics: c2 must
     // be evicted (it was on the redo path that the new push
-    // replaces), and c1 must have exactly one child — the new
+    // replaces), and c1 must have exactly one child - the new
     // checkpoint.
     h.undo().unwrap();
     let c2b = h
@@ -254,8 +254,8 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
 
     // Refcount safety is the load-bearing post-condition: every
     // snapshot any live checkpoint references is itself alive. The
-    // cross-DAG invariant (G8) has already enforced this on every
-    // push — we just assert it once more from outside for
+    // cross-DAG invariant has already enforced this on every
+    // push - we just assert it once more from outside for
     // belt-and-braces.
     for (_, ckpt) in h.checkpoints().iter() {
         for (eid, sid) in &ckpt.entity_heads {
@@ -295,7 +295,7 @@ fn snapshot_eviction_refuses_when_referenced() {
     // Lane should have at minimum: root + current head; checkpoint
     // refs prevent dropping intermediate snapshots until their
     // checkpoints are evicted. Since checkpoint budget is huge,
-    // none are. So the lane is over budget — that's fine; eviction
+    // none are. So the lane is over budget - that's fine; eviction
     // simply *refuses* when the only candidates are referenced.
     assert!(
         h.lane(e).unwrap().len() >= 4,
@@ -586,7 +586,7 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let e1 = ids[0];
     let e2 = ids[1];
 
-    // Two pushes on e1, one on e2 — three checkpoints + root.
+    // Two pushes on e1, one on e2 - three checkpoints + root.
     let _ = h
         .record_entity_update(
             e1,
@@ -705,7 +705,7 @@ fn wire_id_round_trip_via_serde_string() {
     let head = h.checkpoints().head();
     let wire = WireId::new(head);
     let json = serde_json::to_string(&wire).unwrap();
-    // Encoded as a JSON string, not a JSON number — that's the
+    // Encoded as a JSON string, not a JSON number - that's the
     // whole point of WireId.
     assert!(json.starts_with('"') && json.ends_with('"'), "expected string, got {json}");
     let back: WireId<CheckpointId> = serde_json::from_str(&json).unwrap();
@@ -732,7 +732,7 @@ fn wire_id_round_trip_preserves_version_for_reused_slots() {
     assert_eq!(back.into_inner().data().as_ffi(), raw_high);
 }
 
-// ── Cross-DAG invariant proptest (G8) ─────────────────────────────
+// ── Cross-DAG invariant proptest ─────────────────────────────
 //
 // Note: the History::record root *already* asserts the
 // invariant on every public event when debug_assertions are on

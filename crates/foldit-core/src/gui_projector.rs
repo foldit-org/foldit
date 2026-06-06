@@ -1,9 +1,9 @@
 //! GUI projection state for the third `SessionUpdate` consumer.
 //!
 //! `GuiProjector` is the state half of the GUI consumer: a single
-//! history-version debounce cursor. Its `consume` method — the projection
+//! history-version debounce cursor. Its `consume` method - the projection
 //! that mirrors `Session` / `VisoEngine` / `RunnerClient` state into
-//! `FrontendState` — lives here, alongside the projection
+//! `FrontendState` - lives here, alongside the projection
 //! helpers it calls ([`Session::display_score`](crate::session::Session::display_score),
 //! `project_history`, `bubble_to_payload`).
 //! The scoring-mode display policy, tutorial-bubble flow, and puzzle
@@ -50,7 +50,7 @@ impl GuiProjector {
 /// consumer can debounce/skip redundant reprojections.
 pub(crate) struct HistorySyncCursor {
     /// Last `History::topology_version()` pushed. `None` forces an
-    /// initial push (G5: no `u64::MAX` sentinel).
+    /// initial push (no `u64::MAX` sentinel).
     pub(crate) last_topology: Option<u64>,
     /// Last `History::live_version()` pushed; mid-action score updates only.
     pub(crate) last_live: Option<u64>,
@@ -182,26 +182,26 @@ fn current_bubble_payload(puzzle: Option<&Puzzle>) -> Option<TextBubblePayload> 
 /// projection's real dependencies are visible at the call site rather than
 /// hidden behind a god-object borrow.
 pub(crate) struct GuiContext<'a> {
-    /// Host resource access — the view-preset directory listing for the
+    /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
     pub(crate) host: &'a dyn crate::HostResources,
 }
 
 impl GuiProjector {
     /// Project the live `Session` / `VisoEngine` / `RunnerClient` state into
-    /// `frontend` — the third consumer of the `SessionUpdate` batch,
+    /// `frontend` - the third consumer of the `SessionUpdate` batch,
     /// alongside the render and plugin projectors.
     ///
     /// Unlike those two it reads several subsystems (the GUI mirrors score,
     /// selection, scene, history, puzzle, bubble, focus, view, loading), so
     /// it does not implement the two-input `SessionUpdateConsumer<Sink>`
     /// trait: that signature can express only one read input (`session`).
-    /// Naming the extra inputs here — `engine`, `driver`, `ctx` — is what
+    /// Naming the extra inputs here - `engine`, `driver`, `ctx` - is what
     /// keeps this honest and out of the `&App` fake-abstraction trap.
     ///
     /// Per-section dirtiness is derived entirely from the drained `updates`
-    /// batch — each `SessionUpdate` variant maps to the GUI sections it
-    /// invalidates — plus a one-shot `full_populate` flag the tick raises on
+    /// batch - each `SessionUpdate` variant maps to the GUI sections it
+    /// invalidates - plus a one-shot `full_populate` flag the tick raises on
     /// session birth (the Loading → InSession flip and every reload) to push
     /// every section once. There is no longer an App-side dirty residue: the
     /// mutations that used to raise flags at their App sites now produce the
@@ -216,7 +216,7 @@ impl GuiProjector {
         ctx: &GuiContext<'_>,
         frontend: &mut FrontendState,
     ) {
-        // FPS and selected count change every frame — always push them.
+        // FPS and selected count change every frame - always push them.
         frontend.set_fps(engine.fps());
         frontend.ui.selected_count = session.selection_total_count();
 
@@ -309,7 +309,7 @@ impl GuiProjector {
             frontend.view.options =
                 serde_json::to_value(session.view_options()).unwrap_or_default();
 
-            // Schema is static — only set once
+            // Schema is static - only set once
             if frontend.view.options_schema.is_null() {
                 frontend.view.options_schema =
                     serde_json::to_value(viso::options::VisoOptions::json_schema())

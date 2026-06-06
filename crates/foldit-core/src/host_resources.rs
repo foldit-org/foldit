@@ -7,7 +7,7 @@
 //! so the same App code compiles and runs in both environments.
 //!
 //! puzzle.rs's `std::fs` calls (file-format parsing) remain direct for
-//! now — file-format loaders are a separate concern from host resource
+//! now - file-format loaders are a separate concern from host resource
 //! plumbing.
 
 use std::io;
@@ -23,7 +23,7 @@ pub trait HostResources {
     /// Directory containing viso view-preset TOML files. foldit-core passes
     /// this to [`viso::options::VisoOptions::list_presets`] and to
     /// `engine.load_preset(name, dir)`. `None` means presets are unavailable
-    /// (e.g., on web, where viso's path-based preset API doesn't apply —
+    /// (e.g., on web, where viso's path-based preset API doesn't apply -
     /// foldit-core skips list/load when `None`).
     fn view_presets_dir(&self) -> Option<&Path>;
 

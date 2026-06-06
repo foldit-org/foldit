@@ -85,7 +85,7 @@ pub enum SessionUpdate {
 /// Generic over `Sink` because the sinks are heterogeneous (viso's
 /// engine, the plugin orchestrator, ...). This is a contract, not a
 /// dispatch table: `App` calls [`Self::consume`] explicitly on each
-/// consumer in tick order. There is no `Vec<dyn>` and no registry — the
+/// consumer in tick order. There is no `Vec<dyn>` and no registry - the
 /// trait exists so every consumer shares one shape (drained batch +
 /// authoritative session + own sink), not so they can be erased behind a
 /// trait object.

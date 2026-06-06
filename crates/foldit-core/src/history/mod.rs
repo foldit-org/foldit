@@ -2,12 +2,12 @@
 //!
 //! Two cooperating DAGs.
 //!
-//! 1. **Entity timelines** ("swim lanes") — each [`EntityId`] has its own
+//! 1. **Entity timelines** ("swim lanes") - each [`EntityId`] has its own
 //!    [`EntityHistory`], a slotmap of [`EntitySnapshot`]s linked by
 //!    parent/children. Snapshots own the entity payload (an
 //!    `Arc<MoleculeEntity>`).
 //!
-//! 2. **Checkpoint graph** (the unified "river") — a slotmap of
+//! 2. **Checkpoint graph** (the unified "river") - a slotmap of
 //!    [`Checkpoint`]s linked by parent/children. Each checkpoint carries an
 //!    `IndexMap<EntityId, EntitySnapshotId>` plus per-checkpoint state
 //!    (score, filter status). It does **not** own snapshot payloads.
@@ -25,7 +25,7 @@
 //! do not change DAG topology and do not go through the root.
 //!
 //! **Lock layering.** `History` enforces only the structural *action
-//! lock* — one open tentative per lane, and a frozen committed graph head
+//! lock* - one open tentative per lane, and a frozen committed graph head
 //! (no navigation / immediate-commit mutation) while any action is in
 //! flight. Multi-client locking (the case where the runner is
 //! server-side and clients are remote) is owned by the runner's
@@ -83,9 +83,9 @@ pub struct History {
     /// dispatch lands, but the map and per-lane keying support fan-out).
     /// Replaces the old ambient single-action flag.
     pub(super) pending: IndexMap<u64, PendingEdit>,
-    /// Bumped on push / move / evict — full reproject on the wire.
+    /// Bumped on push / move / evict - full reproject on the wire.
     pub(super) topology_version: u64,
-    /// Bumped on tentative in-place byte mutation — small live-update
+    /// Bumped on tentative in-place byte mutation - small live-update
     /// payload on the wire.
     pub(super) live_version: u64,
 }
@@ -94,7 +94,7 @@ pub struct History {
 ///
 /// Every checkpoint-bearing event is one of these variants. Public
 /// methods are thin shims that build a variant and delegate. New
-/// operations land here, not on a sibling root (G3).
+/// operations land here, not on a sibling root.
 #[derive(Debug, Clone)]
 enum HistoryEvent {
     Begin {
@@ -258,14 +258,14 @@ impl History {
         self.pending.contains_key(&request_id)
     }
 
-    /// Topology version — bumped on push / move / evict. Triggers full
+    /// Topology version - bumped on push / move / evict. Triggers full
     /// reproject on the wire.
     #[must_use]
     pub fn topology_version(&self) -> u64 {
         self.topology_version
     }
 
-    /// Live version — bumped on per-cycle in-place mutation. Triggers
+    /// Live version - bumped on per-cycle in-place mutation. Triggers
     /// the small live-update payload on the wire.
     #[must_use]
     pub fn live_version(&self) -> u64 {
@@ -284,7 +284,7 @@ impl History {
         self.lanes.get(&entity)?.snapshot(id)
     }
 
-    // ── Public surface — thin shims over record ───────────────────────
+    // ── Public surface - thin shims over record ───────────────────────
 
     /// Begin a streaming action over `entities` under the caller-supplied
     /// `request_id` (allocated by the orchestrator, the single id
@@ -344,11 +344,11 @@ impl History {
             let lane = self
                 .lanes
                 .get_mut(entity)
-                .expect("pending lane must exist (G8)");
+                .expect("pending lane must exist");
             let snap = lane
                 .snapshots
                 .get_mut(*snap_id)
-                .expect("tentative snapshot must exist (G8)");
+                .expect("tentative snapshot must exist");
             let payload = Arc::make_mut(&mut snap.payload);
             mutate(payload);
         }
@@ -573,11 +573,11 @@ impl History {
         Some(out)
     }
 
-    /// Atomic non-streaming entity update — used by RFD3-final / MPNN
+    /// Atomic non-streaming entity update - used by RFD3-final / MPNN
     /// results, manual moves, etc. Pushes one snapshot + one checkpoint
     /// with `tentative = false` immediately. Refused while `Active`.
     /// Optional `raw_score` / `game_score` are stamped on the new
-    /// checkpoint (G7: caller carries both; projection picks at read).
+    /// checkpoint (caller carries both; projection picks at read).
     pub fn record_entity_update(
         &mut self,
         entity: EntityId,
@@ -616,7 +616,7 @@ impl History {
 
     /// Move `entity`'s lane head to a child of the current lane head;
     /// `branch` picks among multiple children. Pushes a `LaneUndo`
-    /// checkpoint (the kind covers redo too — both directions move the
+    /// checkpoint (the kind covers redo too - both directions move the
     /// lane head along the lane DAG).
     pub fn lane_redo(
         &mut self,
@@ -687,7 +687,7 @@ impl History {
         }
     }
 
-    // ── Curation (no DAG topology change — direct field writes) ───────
+    // ── Curation (no DAG topology change - direct field writes) ───────
 
     /// Pin a checkpoint as user-marked best.
     pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), HistoryError> {
@@ -728,7 +728,7 @@ impl History {
     }
 
     /// Stamp `raw_score` / `game_score` on the current head checkpoint
-    /// in place. Bumps `live_version` only — DAG topology unchanged, no
+    /// in place. Bumps `live_version` only - DAG topology unchanged, no
     /// new checkpoint, no new snapshot. Idempotent on `(None, None)`.
     ///
     /// This is the right call for cycle-zero scoring during session init
@@ -751,7 +751,7 @@ impl History {
             .checkpoints
             .checkpoints
             .get_mut(head_id)
-            .expect("head checkpoint must exist (G8)");
+            .expect("head checkpoint must exist");
         if let Some(s) = raw_score {
             ckpt.raw_score = Some(s);
         }
@@ -795,17 +795,17 @@ impl History {
             .expect("first_pending_entity called with empty pending map")
     }
 
-    // ── Private root: every DAG-bearing event funnels here (G3) ──────
+    // ── Private root: every DAG-bearing event funnels here ──────
 
     /// The single root through which every checkpoint- or lane-DAG-
     /// bearing event passes. Validates the action-lock
     /// preconditions, performs the mutation, updates `checkpoint_refs`,
     /// runs eviction, bumps `topology_version`, and asserts the cross-
-    /// DAG invariant (G8).
+    /// DAG invariant.
     ///
     /// New events land here as a new [`HistoryEvent`] variant. A
     /// sibling root would carry state this function doesn't know about
-    /// and is therefore illegal (G3).
+    /// and is therefore illegal.
     fn record(&mut self, event: HistoryEvent) -> Result<HistoryEventOutcome, HistoryError> {
         // ── Action-lock pre-check ─────────────────────────────────────
         // Reframed off the pending-edit map. While any action is open

@@ -1,4 +1,4 @@
-//! `PendingEdit` — one in-flight action's open composition.
+//! `PendingEdit` - one in-flight action's open composition.
 //!
 //! Replaces the old ambient single-action flag. Each in-flight action is
 //! keyed by a `request_id` in `History::pending`; the value is a

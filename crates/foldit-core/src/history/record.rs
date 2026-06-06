@@ -1,6 +1,6 @@
 //! `record` dispatch arms (the `do_*` methods) plus the small
-//! mutation helpers they share. Lives behind the `record` root
-//! (G3): callers go through the public methods on `History` (in
+//! mutation helpers they share. Lives behind the `record` root:
+//! callers go through the public methods on `History` (in
 //! `mod.rs`), which build a `HistoryEvent` variant and route it
 //! into `record`, which then delegates to one of these arms.
 
@@ -92,7 +92,7 @@ impl History {
         let now = SystemTime::now();
 
         // Recover the action label from the (first) held lane's tentative
-        // snapshot — `do_begin` stamped it there. The committed checkpoint
+        // snapshot - `do_begin` stamped it there. The committed checkpoint
         // carries it so the history panel shows the action's name.
         let label = edit
             .lanes
@@ -104,7 +104,7 @@ impl History {
 
         // Flip each held lane's tentative snapshot to committed.
         for (entity, snap_id) in &edit.lanes {
-            let lane = self.lanes.get_mut(entity).expect("pending lane (G8)");
+            let lane = self.lanes.get_mut(entity).expect("pending lane");
             lane.snapshots[*snap_id].tentative = false;
         }
 
@@ -163,11 +163,11 @@ impl History {
         // remove (a begin mints none) and the committed graph head never
         // moved, so nothing else unwinds.
         for (entity, snap_id) in &edit.lanes {
-            let lane = self.lanes.get_mut(entity).expect("pending lane (G8)");
+            let lane = self.lanes.get_mut(entity).expect("pending lane");
             let removed = lane
                 .snapshots
                 .remove(*snap_id)
-                .expect("pending snap (G8)");
+                .expect("pending snap");
             let parent_snap = removed.parent.expect("tentative is never lane root");
             if let Some(parent) = lane.snapshots.get_mut(parent_snap) {
                 parent.children.retain(|c| c != snap_id);
@@ -481,7 +481,7 @@ impl History {
     /// then `remove`s it from the slotmap. The parent may already have
     /// been evicted in the same sweep (e.g., `prune_to_head_path`
     /// iterating an unsorted victim list); a missing parent is silently
-    /// ignored — there's no live `children` list to update.
+    /// ignored - there's no live `children` list to update.
     pub(super) fn detach_checkpoint(&mut self, id: CheckpointId) {
         let parent_id = self
             .checkpoints

@@ -2,7 +2,7 @@
 //!
 //! These methods own the plugin-side bookkeeping of dispatch (orchestrator
 //! I/O + `StreamHost` table maintenance) and never touch `Session` or
-//! `VisoEngine` — the coordination boundary keeps those on `App`. The
+//! `VisoEngine` - the coordination boundary keeps those on `App`. The
 //! pull-drag dispatch group lives here too, alongside the inbound-event
 //! drain and the runner-error reshaping.
 
@@ -314,7 +314,7 @@ impl RunnerClient {
 
     /// Thin pass-through that asks the orchestrator to cancel a running
     /// pull stream. The terminal commit still flows through
-    /// `drain_op_events` on the plugin's `Cancelled` reply — this only
+    /// `drain_op_events` on the plugin's `Cancelled` reply - this only
     /// sends the cancel. No-op (logged) when no orchestrator exists.
     pub(crate) fn end_stream(&self, rid: u64, plugin_id: &str) {
         let Some(orch) = self.orchestrator.as_ref() else {
@@ -327,7 +327,7 @@ impl RunnerClient {
 
     /// Allocate a dispatch `request_id` from the orchestrator (the single
     /// id authority) for a host-internal action that opens an edit without
-    /// going through dispatch — e.g. seeding a post-Init normalized
+    /// going through dispatch - e.g. seeding a post-Init normalized
     /// assembly. `None` when no orchestrator is wired up.
     pub(crate) fn alloc_request_id(&mut self) -> Option<u64> {
         self.orchestrator.as_mut().map(|orch| orch.alloc_request_id())
