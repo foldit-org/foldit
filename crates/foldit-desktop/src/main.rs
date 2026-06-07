@@ -24,6 +24,7 @@ mod host;
 #[cfg(any(not(debug_assertions), test))]
 mod plugin_assets;
 mod tee_logger;
+mod webview_assets;
 mod window;
 
 use foldit_core::app::App;

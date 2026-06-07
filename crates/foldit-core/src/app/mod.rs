@@ -25,7 +25,7 @@ use crate::runner_projector::RunnerProjector;
 use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 
 mod dispatch;
-mod input;
+pub(crate) mod input;
 mod load;
 #[cfg(not(target_arch = "wasm32"))]
 mod scores_coord;
@@ -44,10 +44,10 @@ pub use self::load::locate_plugins_root;
 /// the host seam) and the `LoadingState` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
 pub struct App {
-    pub(in crate::app) engine: Option<VisoEngine>,
+    pub(crate) engine: Option<VisoEngine>,
     pub(in crate::app) keybindings: KeyBindings,
-    pub(in crate::app) store: Session,
-    pub(in crate::app) runner_client: RunnerClient,
+    pub(crate) store: Session,
+    pub(crate) runner_client: RunnerClient,
     /// Plugin projection of the `SessionUpdate` stream. A peer field to
     /// `runner_client` (not nested inside it) so the tick seam can borrow
     /// the orchestrator handle and this projector disjointly.
@@ -96,7 +96,7 @@ pub struct App {
     /// pointer-move takes the route to open the stream; `PointerUp` clears
     /// it.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
+    pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
 
 impl App {
