@@ -3,9 +3,19 @@ name = "foldit-web"
 version = "0.1.0"
 edition = "2021"
 description = "Web (wasm32) entry crate: wasm-bindgen surface + canvas-mounted viso"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
 
 [dependencies]
 # Workspace crates

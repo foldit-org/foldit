@@ -41,7 +41,7 @@ impl App {
                 // the emitted `ViewOptionsChanged`.
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
                     Ok(opts) => self.store.set_view_options(opts),
-                    Err(e) => log::error!("Failed to deserialize view options: {}", e),
+                    Err(e) => log::error!("Failed to deserialize view options: {e}"),
                 }
             }
             AppCommand::LoadViewPreset { name } => {
@@ -98,7 +98,7 @@ impl App {
         self.set_loading_state(LoadingState::LoadingSession);
         match crate::puzzle::load_file_as_entities(&path) {
             Ok((entities, name)) => {
-                log::info!("Loaded structure via IPC: {}", name);
+                log::info!("Loaded structure via IPC: {name}");
                 for entity in entities {
                     let _ = self.store.load_entity_into_history(entity, name.clone());
                 }
@@ -109,7 +109,7 @@ impl App {
                 // PUZZLE dirty. A scientist→scientist reload where
                 // `clear_puzzle` is a no-op emits nothing, so the puzzle
                 // panel's title refresh rides the full populate below.
-                self.store.start(name.clone(), None);
+                self.store.start(name, None);
 
                 // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, publishes
                 // via the render projector, and runs engine.update(0.0)
@@ -120,7 +120,7 @@ impl App {
                 }
             }
             Err(e) => {
-                log::error!("Failed to load structure '{}': {}", path, e);
+                log::error!("Failed to load structure '{path}': {e}");
             }
         }
         // A reload does not re-arm the Loading → InSession gate (that fires
@@ -137,7 +137,7 @@ impl App {
         self.set_loading_state(LoadingState::LoadingSession);
         // Entity display name for the loaded molecules: the outgoing
         // session title (captured before `reset`, which leaves it intact).
-        let title = self.store.title().to_string();
+        let title = self.store.title().to_owned();
         self.store.reset();
         self.runner_client.reset_for_new_structure();
         // Topology swap: `Session::reset` already cleared the selection
@@ -240,7 +240,7 @@ impl App {
                 // invoked for "rosetta" with the new assembly.
                 let _ = puzzle_id;
             }
-            Err(e) => log::error!("Failed to load puzzle {}: {}", puzzle_id, e),
+            Err(e) => log::error!("Failed to load puzzle {puzzle_id}: {e}"),
         }
         // PUZZLE rides the `start` emit drained by the inner `tick(0.0)`
         // above (its PUZZLE arm also pushes the current bubble), and the
@@ -255,7 +255,7 @@ impl App {
 
     /// Step the tutorial-bubble cursor on the session. The cursor lives on
     /// `Session` now; this forwards and the emitted `BubbleChanged` is
-    /// turned into TEXT_BUBBLE dirty by the tick, which re-pushes the new
+    /// turned into `TEXT_BUBBLE` dirty by the tick, which re-pushes the new
     /// head. Forward saturates one past the end (the GUI then clears);
     /// back saturates at 0.
     fn advance_bubble(&mut self, back: bool) {
@@ -313,7 +313,7 @@ impl App {
                     engine.fit_camera_to_focus();
                 }
 
-                log::info!("Loaded structure: {}", name);
+                log::info!("Loaded structure: {name}");
 
                 // Install a fresh orchestrator BEFORE `bootstrap_plugins`
                 // so discovery + registration run against the handle the
@@ -333,7 +333,7 @@ impl App {
                 self.tick(0.0);
             }
             Err(e) => {
-                log::error!("Failed to load structure '{}': {}", path, e);
+                log::error!("Failed to load structure '{path}': {e}");
                 self.runner_client.init_orchestrator();
                 #[cfg(not(target_arch = "wasm32"))]
                 self.score_targets.clear();
@@ -548,6 +548,7 @@ impl App {
 /// plugin discovery in that case -- the desktop app degrades to viewer-
 /// only mode rather than failing the load.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
     if let Some(env) = std::env::var_os("FOLDIT_PLUGINS_ROOT") {
         let p = std::path::PathBuf::from(env);

@@ -19,7 +19,7 @@ use super::EntitySnapshotId;
 /// `(plugin_id, op_id)` identity without naming any plugin or enumerating
 /// plugin internals. The remaining variants are host structural events
 /// (load, add / remove entity, per-lane revert, preview promotion).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointKind {
     /// Puzzle / file load - the root checkpoint.
     Loaded { source: PathBuf },
@@ -52,13 +52,13 @@ impl CheckpointKind {
     /// `Loaded` carries no entity; `PluginOp` may span several and so
     /// reports its touched set through `entity_heads` rather than here.
     #[must_use]
-    pub fn entity(&self) -> Option<EntityId> {
+    pub const fn entity(&self) -> Option<EntityId> {
         match self {
-            CheckpointKind::Loaded { .. } | CheckpointKind::PluginOp { .. } => None,
-            CheckpointKind::PromotedPreview { entity, .. }
-            | CheckpointKind::AddEntity { entity, .. }
-            | CheckpointKind::RemoveEntity { entity, .. }
-            | CheckpointKind::LaneUndo { entity, .. } => Some(*entity),
+            Self::Loaded { .. } | Self::PluginOp { .. } => None,
+            Self::PromotedPreview { entity, .. }
+            | Self::AddEntity { entity, .. }
+            | Self::RemoveEntity { entity, .. }
+            | Self::LaneUndo { entity, .. } => Some(*entity),
         }
     }
 }

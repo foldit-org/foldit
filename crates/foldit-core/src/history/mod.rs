@@ -73,7 +73,7 @@ pub use error::HistoryError;
 /// single event funnel.
 #[derive(Debug, Clone)]
 pub struct History {
-    /// Per-entity swim lanes. IndexMap so insertion order is the
+    /// Per-entity swim lanes. `IndexMap` so insertion order is the
     /// canonical entity order across the assembly.
     pub(super) lanes: IndexMap<EntityId, EntityHistory>,
     /// Unified checkpoint graph + cursors.
@@ -231,7 +231,7 @@ impl History {
 
     /// Read access to the checkpoint graph.
     #[must_use]
-    pub fn checkpoints(&self) -> &CheckpointGraph {
+    pub const fn checkpoints(&self) -> &CheckpointGraph {
         &self.checkpoints
     }
 
@@ -241,7 +241,7 @@ impl History {
         self.lanes.get(&entity)
     }
 
-    /// Iterate (entity_id, lane) pairs in canonical order.
+    /// Iterate (`entity_id`, lane) pairs in canonical order.
     pub fn lanes(&self) -> impl Iterator<Item = (EntityId, &EntityHistory)> {
         self.lanes.iter().map(|(eid, lane)| (*eid, lane))
     }
@@ -261,14 +261,14 @@ impl History {
     /// Topology version - bumped on push / move / evict. Triggers full
     /// reproject on the wire.
     #[must_use]
-    pub fn topology_version(&self) -> u64 {
+    pub const fn topology_version(&self) -> u64 {
         self.topology_version
     }
 
     /// Live version - bumped on per-cycle in-place mutation. Triggers
     /// the small live-update payload on the wire.
     #[must_use]
-    pub fn live_version(&self) -> u64 {
+    pub const fn live_version(&self) -> u64 {
         self.live_version
     }
 
@@ -692,7 +692,7 @@ impl History {
 
     /// Replace the eviction budget.
     #[cfg(test)]
-    pub fn set_budget(&mut self, budget: HistoryBudget) {
+    pub const fn set_budget(&mut self, budget: HistoryBudget) {
         self.checkpoints.budget = budget;
     }
 
@@ -703,7 +703,7 @@ impl History {
     /// This is the right call for cycle-zero scoring during session init
     /// (Rosetta streams a score before the user takes any action). It
     /// avoids the pre-fix behavior where every init cycle pushed a fresh
-    /// checkpoint on top of root + AddEntity. Returns `true` when a value
+    /// checkpoint on top of root + `AddEntity`. Returns `true` when a value
     /// was actually written (so the caller can emit a score-changed signal
     /// only on a real change); `false` on the `(None, None)` no-op.
     pub fn set_head_scores(

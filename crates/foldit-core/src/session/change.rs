@@ -89,7 +89,7 @@ pub enum SessionUpdate {
 /// trait exists so every consumer shares one shape (drained batch +
 /// authoritative session + own sink), not so they can be erased behind a
 /// trait object.
-pub(crate) trait SessionUpdateConsumer<Sink> {
+pub trait SessionUpdateConsumer<Sink> {
     /// React to the drained `updates` batch by re-deriving payload from
     /// `session` and writing it to `sink`.
     fn consume(&mut self, updates: &[SessionUpdate], session: &Session, sink: &mut Sink);

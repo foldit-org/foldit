@@ -58,7 +58,7 @@ impl App {
         false
     }
 
-    /// Dispatch a keybinding by physical-key string ("KeyR", "KeyT",
+    /// Dispatch a keybinding by physical-key string ("`KeyR`", "`KeyT`",
     /// "Tab", ...). Hosts convert their native keycode to this string
     /// before calling (winit: `format!("{key:?}")`; web: DOM `code`).
     /// On a viso built-in miss, falls through to the plugin hotkey

@@ -51,7 +51,7 @@ use crate::history::{CheckpointId, History, HistoryError};
 mod apply;
 mod change;
 pub use change::SessionUpdate;
-pub(crate) use change::SessionUpdateConsumer;
+pub use change::SessionUpdateConsumer;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 mod mutators;
@@ -193,7 +193,7 @@ impl Session {
             history: History::new(std::iter::empty(), PathBuf::new()),
             selection: BTreeMap::new(),
             focus: Focus::default(),
-            title: "Unknown".to_string(),
+            title: "Unknown".to_owned(),
             puzzle: None,
             view_options: VisoOptions::default(),
             active_preset: None,
@@ -243,7 +243,7 @@ impl Session {
 
     /// Read access to the history graph.
     #[must_use]
-    pub fn history(&self) -> &History {
+    pub const fn history(&self) -> &History {
         &self.history
     }
 
@@ -263,7 +263,7 @@ impl Session {
                 }
             }
         }
-        self.transient.get(&id).map(|arc| arc.as_ref())
+        self.transient.get(&id).map(std::convert::AsRef::as_ref)
     }
 
     /// The structural kind of a live entity, or `None` if no entity with
@@ -396,7 +396,7 @@ impl Session {
     /// are never present (see the invariant above), so every entry
     /// carries at least one residue.
     #[must_use]
-    pub fn selection(&self) -> &BTreeMap<EntityId, BTreeSet<u32>> {
+    pub const fn selection(&self) -> &BTreeMap<EntityId, BTreeSet<u32>> {
         &self.selection
     }
 
@@ -432,14 +432,14 @@ impl Session {
     /// per-entity set sizes).
     #[must_use]
     pub fn selection_total_count(&self) -> usize {
-        self.selection.values().map(|set| set.len()).sum()
+        self.selection.values().map(std::collections::BTreeSet::len).sum()
     }
 
     // ── Focus read ────────────────────────────────────────────────────
 
     /// The current session focus.
     #[must_use]
-    pub fn focus(&self) -> Focus {
+    pub const fn focus(&self) -> Focus {
         self.focus
     }
 
@@ -457,7 +457,7 @@ impl Session {
 
     /// The loaded puzzle, or `None` in the default free-form session.
     #[must_use]
-    pub fn puzzle(&self) -> Option<&Puzzle> {
+    pub const fn puzzle(&self) -> Option<&Puzzle> {
         self.puzzle.as_ref()
     }
 
@@ -465,7 +465,7 @@ impl Session {
 
     /// The active view options.
     #[must_use]
-    pub fn view_options(&self) -> &VisoOptions {
+    pub const fn view_options(&self) -> &VisoOptions {
         &self.view_options
     }
 
@@ -481,7 +481,7 @@ impl Session {
     /// The active score-term weight map core multiplies raw per-term
     /// energies by. Empty until the App loads the default at init.
     #[must_use]
-    pub fn term_weights(&self) -> &std::collections::HashMap<String, f32> {
+    pub const fn term_weights(&self) -> &std::collections::HashMap<String, f32> {
         &self.term_weights
     }
 

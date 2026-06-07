@@ -42,7 +42,7 @@ pub struct PuzzleMeta {
 pub struct StructureRef {
     /// Path to a structure file (relative to puzzle dir). Mutually exclusive with `data`.
     pub path: Option<String>,
-    /// Base64-encoded BinaryCIF data, inline. Mutually exclusive with `path`.
+    /// Base64-encoded `BinaryCIF` data, inline. Mutually exclusive with `path`.
     pub data: Option<String>,
     pub format: String,
     /// DSSP-style secondary structure annotation (e.g. "EEE" for 3 sheet residues).
@@ -174,9 +174,9 @@ pub fn levels_root() -> Result<PathBuf, String> {
 /// Looks up `<levels_root>/{puzzle_id:010}/puzzle.toml` (see
 /// [`levels_root`]) and resolves the structure from
 /// `[puzzle.structure]` - either via `path` (file reference) or
-/// `data` (base64-encoded inline BinaryCIF).
+/// `data` (base64-encoded inline `BinaryCIF`).
 pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
-    let puzzle_dir = levels_root()?.join(format!("{:010}", puzzle_id));
+    let puzzle_dir = levels_root()?.join(format!("{puzzle_id:010}"));
     let mut puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
     let structure = &puzzle.puzzle.structure;
 
@@ -201,24 +201,24 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
 
             let raw = base64::engine::general_purpose::STANDARD
                 .decode(data_b64)
-                .map_err(|e| format!("Failed to decode base64 structure data: {}", e))?;
+                .map_err(|e| format!("Failed to decode base64 structure data: {e}"))?;
 
             match structure.format.as_str() {
                 "bcif" => {
                     use molex::adapters::bcif::bcif_to_entities;
                     bcif_to_entities(&raw)
-                        .map_err(|e| format!("Failed to parse inline BinaryCIF: {:?}", e))?
+                        .map_err(|e| format!("Failed to parse inline BinaryCIF: {e:?}"))?
                 }
                 other => return Err(format!(
-                    "Inline structure data not supported for format '{}'", other
+                    "Inline structure data not supported for format '{other}'"
                 )),
             }
         }
         (Some(_), Some(_)) => return Err(
-            "puzzle.structure: 'path' and 'data' are mutually exclusive".to_string()
+            "puzzle.structure: 'path' and 'data' are mutually exclusive".to_owned()
         ),
         (None, None) => return Err(
-            "puzzle.structure: either 'path' or 'data' must be specified".to_string()
+            "puzzle.structure: either 'path' or 'data' must be specified".to_owned()
         ),
     };
 
@@ -252,8 +252,7 @@ pub fn load_file_as_entities(
     let name = p
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("Unknown")
-        .to_string();
+        .unwrap_or("Unknown").to_owned();
 
     let entities = load_entities_from_file(p)?;
     Ok((entities, name))
@@ -267,14 +266,14 @@ fn is_pdb_id(s: &str) -> bool {
 /// Resolve a PDB ID or path to an actual file path, downloading if necessary.
 pub fn resolve_structure_path(input: &str) -> Result<String, String> {
     if Path::new(input).exists() {
-        return Ok(input.to_string());
+        return Ok(input.to_owned());
     }
 
     if is_pdb_id(input) {
         return resolve_pdb_id(input);
     }
 
-    Err(format!("File not found: {}", input))
+    Err(format!("File not found: {input}"))
 }
 
 /// Native: download a PDB by id from RCSB, cache to `assets/models/`, return the path.
@@ -282,7 +281,7 @@ pub fn resolve_structure_path(input: &str) -> Result<String, String> {
 fn resolve_pdb_id(input: &str) -> Result<String, String> {
     let pdb_id = input.to_lowercase();
     let models_dir = Path::new("assets/models");
-    let local_path = models_dir.join(format!("{}.cif", pdb_id));
+    let local_path = models_dir.join(format!("{pdb_id}.cif"));
 
     if local_path.exists() {
         log::info!("Found local copy: {}", local_path.display());
@@ -291,14 +290,14 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
 
     if !models_dir.exists() {
         std::fs::create_dir_all(models_dir)
-            .map_err(|e| format!("Failed to create models directory: {}", e))?;
+            .map_err(|e| format!("Failed to create models directory: {e}"))?;
     }
 
-    let url = format!("https://files.rcsb.org/download/{}.cif", pdb_id);
+    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif");
     log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
 
     let response = reqwest::blocking::get(&url)
-        .map_err(|e| format!("Failed to download {}: {}", pdb_id, e))?;
+        .map_err(|e| format!("Failed to download {pdb_id}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -310,10 +309,10 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
 
     let content = response
         .text()
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to read response: {e}"))?;
 
     std::fs::write(&local_path, &content)
-        .map_err(|e| format!("Failed to save CIF file: {}", e))?;
+        .map_err(|e| format!("Failed to save CIF file: {e}"))?;
 
     log::info!("Downloaded to {}", local_path.display());
     Ok(local_path.to_string_lossy().to_string())
@@ -339,7 +338,7 @@ pub fn load_entities_from_file(
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase())
+        .map(str::to_lowercase)
         .unwrap_or_default();
 
     match ext.as_str() {
@@ -372,10 +371,10 @@ mod tests {
         let dir = levels_dir();
         let mut entries: Vec<_> = std::fs::read_dir(&dir)
             .expect("assets/levels directory should exist")
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .collect();
-        entries.sort_by_key(|e| e.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
 
         assert_eq!(entries.len(), 40, "expected 40 puzzle directories");
 

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// One plugin's score for the assembly (or a scored composition): the RAW
 /// (unweighted) per-term energies that core weights itself, plus the
 /// term-name alignment key.
-pub(crate) struct ScoreReport {
+pub struct ScoreReport {
     /// Names of the raw terms, the alignment key for `whole_pose_terms` and
     /// each `ResidueTermScores::terms`. Same order, same length.
     pub term_names: Vec<String>,
@@ -33,7 +33,7 @@ pub(crate) struct ScoreReport {
 /// `(entity_id, residue_index)`. `terms` is aligned to
 /// [`ScoreReport::term_names`].
 #[derive(Debug, Clone)]
-pub(crate) struct ResidueTermScores {
+pub struct ResidueTermScores {
     pub entity_id: u64,
     pub residue_index: u32,
     pub terms: Vec<f32>,
@@ -53,7 +53,7 @@ pub(crate) struct ResidueTermScores {
 /// score path today, but the type and its weighting helper build on every
 /// target (the breakdown is simply `None` on every node on wasm).
 #[derive(Debug, Clone)]
-pub(crate) struct StoredBreakdown {
+pub struct StoredBreakdown {
     /// Raw (unweighted) whole-pose energy per term, aligned to the
     /// session's `term_names`.
     pub whole_pose_terms: Vec<f32>,
@@ -143,7 +143,7 @@ impl ScoreReport {
 /// to both whole-assembly and composition scores so neither ever displays
 /// raw REU.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn rosetta_raw_to_game(raw: f64) -> f64 {
+pub fn rosetta_raw_to_game(raw: f64) -> f64 {
     const SCORE_OFFSET: f64 = 800.0;
     const SCORE_SCALE: f64 = 10.0;
     const SCORE_MINIMUM: f64 = 0.0;
@@ -155,7 +155,7 @@ pub(crate) fn rosetta_raw_to_game(raw: f64) -> f64 {
 /// parses as `f32` (the `term value` rows). Blank lines, `#` comments,
 /// `METHOD_WEIGHTS …` rows (more than two tokens), and bare flags
 /// (`INCLUDE_INTRA_RES_PROTEIN`, `NO_HB_ENV_DEP`; one token) are skipped.
-pub(crate) fn parse_wts(src: &str) -> HashMap<String, f32> {
+pub fn parse_wts(src: &str) -> HashMap<String, f32> {
     let mut weights = HashMap::new();
     for line in src.lines() {
         let line = line.trim();
@@ -167,7 +167,7 @@ pub(crate) fn parse_wts(src: &str) -> HashMap<String, f32> {
             continue;
         }
         if let Ok(value) = tokens[1].parse::<f32>() {
-            weights.insert(tokens[0].to_string(), value);
+            weights.insert(tokens[0].to_owned(), value);
         }
     }
     weights
@@ -179,7 +179,7 @@ pub(crate) fn parse_wts(src: &str) -> HashMap<String, f32> {
 /// dev, and installed binary layouts). Returns an `Err` string the caller
 /// can log if no ancestor carries the asset or the file is unreadable.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn load_default_term_weights() -> Result<HashMap<String, f32>, String> {
+pub fn load_default_term_weights() -> Result<HashMap<String, f32>, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe lookup failed: {e}"))?;
     let mut dir = exe.parent();
@@ -209,14 +209,14 @@ mod tests {
     #[test]
     fn weighting_matches_preweighted_fields() {
         let weights: HashMap<String, f32> =
-            [("a".to_string(), 0.5_f32), ("b".to_string(), 1.0_f32)]
+            [("a".to_owned(), 0.5_f32), ("b".to_owned(), 1.0_f32)]
                 .into_iter()
                 .collect();
 
         // whole pose: 10*0.5 + 20*1.0 = 25.0.
         // per residue: 4*0.5 + 6*1.0 = 8.0.
         let report = ScoreReport {
-            term_names: vec!["a".to_string(), "b".to_string()],
+            term_names: vec!["a".to_owned(), "b".to_owned()],
             whole_pose_terms: vec![10.0, 20.0],
             per_residue_terms: vec![ResidueTermScores {
                 entity_id: 7,
@@ -244,14 +244,14 @@ mod tests {
     #[test]
     fn stored_breakdown_weighting_matches_report() {
         let weights: HashMap<String, f32> = [
-            ("fa_atr".to_string(), 1.0_f32),
-            ("fa_rep".to_string(), 0.55_f32),
-            ("hbond".to_string(), -0.5_f32),
+            ("fa_atr".to_owned(), 1.0_f32),
+            ("fa_rep".to_owned(), 0.55_f32),
+            ("hbond".to_owned(), -0.5_f32),
         ]
         .into_iter()
         .collect();
         let term_names =
-            vec!["fa_atr".to_string(), "fa_rep".to_string(), "hbond".to_string()];
+            vec!["fa_atr".to_owned(), "fa_rep".to_owned(), "hbond".to_owned()];
 
         let report = ScoreReport {
             term_names: term_names.clone(),
@@ -284,9 +284,9 @@ mod tests {
     #[test]
     fn missing_weight_is_zero() {
         let weights: HashMap<String, f32> =
-            [("a".to_string(), 2.0_f32)].into_iter().collect();
+            [("a".to_owned(), 2.0_f32)].into_iter().collect();
         let report = ScoreReport {
-            term_names: vec!["a".to_string(), "unknown".to_string()],
+            term_names: vec!["a".to_owned(), "unknown".to_owned()],
             whole_pose_terms: vec![3.0, 100.0],
             per_residue_terms: Vec::new(),
         };

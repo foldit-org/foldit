@@ -108,7 +108,7 @@ mod selection_tests {
         // known score on it (the committed parent).
         let id = app
             .store
-            .insert_preview(mk_bulk(), "e".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "e".to_owned(), EntityOrigin::Loaded);
         app.store
             .promote_preview(
                 id,
@@ -131,9 +131,9 @@ mod selection_tests {
             .begin_action(
                 [id],
                 CheckpointKind::PluginOp {
-                    plugin_id: "rosetta".to_string(),
-                    op_id: "wiggle".to_string(),
-                    display: "wiggle".to_string(),
+                    plugin_id: "rosetta".to_owned(),
+                    op_id: "wiggle".to_owned(),
+                    display: "wiggle".to_owned(),
                 },
                 "w",
                 rid,
@@ -186,11 +186,11 @@ mod selection_tests {
 
         let mut store = Session::new();
         // Two committed entities.
-        let e1 = store.insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+        let e1 = store.insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
         store
             .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
             .expect("promote a");
-        let e2 = store.insert_preview(mk_bulk(), "b".to_string(), EntityOrigin::Loaded);
+        let e2 = store.insert_preview(mk_bulk(), "b".to_owned(), EntityOrigin::Loaded);
         store
             .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
             .expect("promote b");
@@ -230,9 +230,9 @@ mod selection_tests {
             .begin_action(
                 target_entities,
                 CheckpointKind::PluginOp {
-                    plugin_id: "rosetta".to_string(),
-                    op_id: "_init_normalize".to_string(),
-                    display: "Init".to_string(),
+                    plugin_id: "rosetta".to_owned(),
+                    op_id: "_init_normalize".to_owned(),
+                    display: "Init".to_owned(),
                 },
                 "Init",
                 rid,
@@ -276,13 +276,13 @@ mod selection_tests {
         // Two committed entities.
         let e1 = app
             .store
-            .insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
         app.store
             .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
             .expect("promote a");
         let e2 = app
             .store
-            .insert_preview(mk_bulk(), "b".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "b".to_owned(), EntityOrigin::Loaded);
         app.store
             .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
             .expect("promote b");
@@ -290,7 +290,7 @@ mod selection_tests {
         // must be filtered out of a whole-pose edit's lane set.
         let e_transient = app
             .store
-            .insert_preview(mk_bulk(), "c".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "c".to_owned(), EntityOrigin::Loaded);
 
         // AllEntities resolves to exactly the two committed lanes.
         let mut lanes = app.lanes_for_scope(&EditScope::AllEntities);
@@ -318,9 +318,9 @@ mod selection_tests {
             .begin_action(
                 lanes,
                 CheckpointKind::PluginOp {
-                    plugin_id: "rosetta".to_string(),
-                    op_id: "wiggle".to_string(),
-                    display: "Wiggle".to_string(),
+                    plugin_id: "rosetta".to_owned(),
+                    op_id: "wiggle".to_owned(),
+                    display: "Wiggle".to_owned(),
                 },
                 "Wiggle",
                 rid,
@@ -355,13 +355,13 @@ mod selection_tests {
         let mut app = fresh_app();
         let e1 = app
             .store
-            .insert_preview(mk_bulk(), "a".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
         app.store
             .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
             .expect("promote a");
         let e_transient = app
             .store
-            .insert_preview(mk_bulk(), "t".to_string(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "t".to_owned(), EntityOrigin::Loaded);
 
         // The resolved set names a committed entity and a transient one;
         // only the committed lane survives the filter.

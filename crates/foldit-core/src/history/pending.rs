@@ -21,7 +21,7 @@ use super::{CheckpointKind, EntitySnapshotId, FilterStatus};
 
 /// One in-flight action's open composition.
 #[derive(Debug, Clone)]
-pub(crate) struct PendingEdit {
+pub struct PendingEdit {
     /// The lane(s) this edit holds open, each pinned to its tentative
     /// snapshot. One entry in the single-entity case; the `SmallVec`
     /// capacity anticipates multi-lane fan-out without a heap alloc.

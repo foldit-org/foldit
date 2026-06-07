@@ -25,7 +25,7 @@ pub struct EntityMetadata {
 impl EntityMetadata {
     /// Build a minimal metadata record.
     #[must_use]
-    pub fn new(name: String, origin: EntityOrigin) -> Self {
+    pub const fn new(name: String, origin: EntityOrigin) -> Self {
         Self { name, origin }
     }
 }

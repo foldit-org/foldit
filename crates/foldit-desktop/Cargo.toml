@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2021"
 description = "Desktop binary (wry + winit + wgpu)"
 default-run = "foldit"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
 
 [[bin]]
 name = "foldit"
 path = "src/main.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
 # Workspace crates

@@ -16,9 +16,9 @@ use winit::window::{Window, WindowId};
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
 /// `App` owns the [`foldit_gui::FrontendState`] mirror and the
-/// Loading → InPuzzle state-machine now (RX13); the runner is purely
+/// Loading → `InPuzzle` state-machine now (RX13); the runner is purely
 /// the wry/winit + dev-server shell.
-pub(crate) struct AppRunner {
+pub struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
     webview: Option<wry::WebView>,
@@ -31,7 +31,7 @@ pub(crate) struct AppRunner {
     init_pending: bool,
     /// Timeout for webview readiness — load anyway if webview takes too long
     init_deadline: Option<Instant>,
-    /// Shared log buffer from tee_logger (drained each frame into frontend state)
+    /// Shared log buffer from `tee_logger` (drained each frame into frontend state)
     log_buffer: crate::tee_logger::LogBuffer,
     #[cfg(debug_assertions)]
     dev_server: Option<std::process::Child>,
@@ -62,9 +62,8 @@ impl AppRunner {
     /// Drain IPC messages from the webview and dispatch them.
     fn process_ipc_messages(&mut self) {
         use foldit_gui::Dispatcher;
-        let rx = match &self.ipc_rx {
-            Some(rx) => rx,
-            None => return,
+        let Some(rx) = &self.ipc_rx else {
+            return;
         };
         let messages: Vec<IpcMessage> = rx.try_iter().collect();
         for msg in messages {
@@ -102,6 +101,13 @@ impl AppRunner {
             Ok(v) => (true, v.clone()),
             Err(msg) => (false, serde_json::Value::String(msg.clone())),
         };
+        // Serializing a `&str` to a JSON string is infallible, so the
+        // unwrap cannot fire (the only error sources in `to_string` are
+        // custom Serialize impls and non-string map keys).
+        #[allow(
+            clippy::unwrap_used,
+            reason = "serde_json::to_string over a &str is infallible"
+        )]
         let script = format!(
             "if(window.__onResponse)window.__onResponse({},{},{})",
             serde_json::to_string(wish_id).unwrap(),
@@ -111,7 +117,7 @@ impl AppRunner {
         let _ = webview.evaluate_script(&script);
     }
 
-    /// Ship any dirty sections of the App-owned FrontendState to the
+    /// Ship any dirty sections of the App-owned `FrontendState` to the
     /// webview. `App::tick` already populated the frontend on this
     /// frame; the host only does the log-mirror handoff and the IPC
     /// transport.
@@ -135,8 +141,7 @@ impl AppRunner {
         };
         if let Some(ref webview) = self.webview {
             let script = format!(
-                "if(window.__onStateUpdate)window.__onStateUpdate({})",
-                payload
+                "if(window.__onStateUpdate)window.__onStateUpdate({payload})"
             );
             let _ = webview.evaluate_script(&script);
         }
@@ -159,16 +164,13 @@ impl AppRunner {
     /// elsewhere -- a single-family probe loses to that.
     #[cfg(debug_assertions)]
     fn dev_server_port_bound() -> bool {
-        use std::net::TcpStream;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
         use std::time::Duration;
         let timeout = Duration::from_millis(200);
-        TcpStream::connect_timeout(&"[::1]:5173".parse().unwrap(), timeout)
-            .is_ok()
-            || TcpStream::connect_timeout(
-                &"127.0.0.1:5173".parse().unwrap(),
-                timeout,
-            )
-            .is_ok()
+        let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 5173));
+        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 5173));
+        TcpStream::connect_timeout(&v6, timeout).is_ok()
+            || TcpStream::connect_timeout(&v4, timeout).is_ok()
     }
 
     /// SIGKILL whatever is bound to port 5173 (and its process group). Used to
@@ -194,12 +196,12 @@ impl AppRunner {
                 .ok()
                 .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i32>().ok());
             if let Some(pgid) = pgid {
-                log::warn!("Killing orphan dev server process group pgid={}", pgid);
+                log::warn!("Killing orphan dev server process group pgid={pgid}");
                 let _ = Command::new("kill")
-                    .args(["-KILL", "--", &format!("-{}", pgid)])
+                    .args(["-KILL", "--", &format!("-{pgid}")])
                     .status();
             } else {
-                log::warn!("Killing orphan dev server pid={}", pid);
+                log::warn!("Killing orphan dev server pid={pid}");
                 let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
             }
         }
@@ -277,6 +279,10 @@ impl AppRunner {
     /// reason about whose vite we inherited.
     #[cfg(debug_assertions)]
     fn ensure_dev_server(&mut self) {
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::Duration;
+
         if Self::dev_server_port_bound() {
             log::warn!(
                 "Port 5173 already bound -- evicting before spawning a fresh \
@@ -285,8 +291,6 @@ impl AppRunner {
             );
             Self::kill_orphan_on_port_5173();
 
-            use std::thread;
-            use std::time::Duration;
             for _ in 0..50 {
                 if !Self::dev_server_port_bound() {
                     break;
@@ -302,8 +306,6 @@ impl AppRunner {
                 return;
             }
         }
-
-        use std::process::{Command, Stdio};
 
         // Resolve the frontend dir absolutely. Don't trust the
         // process cwd -- `cargo run` from anywhere other than the
@@ -353,12 +355,12 @@ impl AppRunner {
         let child = match result {
             Ok(c) => c,
             Err(e) => {
-                log::error!("Failed to spawn Vite dev server: {}", e);
+                log::error!("Failed to spawn Vite dev server: {e}");
                 return;
             }
         };
         let pid = child.id();
-        log::info!("Vite dev server spawned (pid: {})", pid);
+        log::info!("Vite dev server spawned (pid: {pid})");
         // Register the dev server's pgid with the cleanup module so
         // SIGINT/SIGTERM tear it down alongside ML workers. Drop /
         // explicit kill_dev_server unregisters it.
@@ -372,8 +374,6 @@ impl AppRunner {
         // <1s" once it's actually started, and any longer pause
         // means pnpm/vite hung on something visible (now that
         // stdout/stderr are inherited).
-        use std::thread;
-        use std::time::Duration;
         let total_ticks = 150; // 150 * 200ms = 30s
         for i in 0..total_ticks {
             if Self::dev_server_port_bound() {
@@ -395,7 +395,7 @@ impl AppRunner {
     fn kill_dev_server(&mut self) {
         if let Some(ref mut child) = self.dev_server {
             let pid = child.id();
-            log::info!("Killing dev server (pid: {})...", pid);
+            log::info!("Killing dev server (pid: {pid})...");
             #[cfg(windows)]
             {
                 let _ = std::process::Command::new("taskkill")
@@ -410,7 +410,7 @@ impl AppRunner {
                 // The child was spawned with process_group(0) so its pid IS
                 // the pgid. Negative pid tells kill(1) to signal the group.
                 let _ = std::process::Command::new("kill")
-                    .args(["-9", "--", &format!("-{}", pid)])
+                    .args(["-9", "--", &format!("-{pid}")])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -507,7 +507,7 @@ impl AppRunner {
                 })
                 .with_ipc_handler({
                     let ipc_tx = ipc_tx.clone();
-                    move |req| Self::handle_ipc(&ipc_tx, req)
+                    move |req| Self::handle_ipc(&ipc_tx, &req)
                 })
                 .with_bounds(wry::Rect {
                     position: PhysicalPosition::new(0, 0).into(),
@@ -550,7 +550,7 @@ impl AppRunner {
     }
 
     /// Shared IPC initialization script injected into the webview.
-    const INIT_SCRIPT: &str = r#"
+    const INIT_SCRIPT: &str = r"
         window.isWebview = true;
         (function() {
             const orig = { log: console.log, warn: console.warn, error: console.error };
@@ -575,22 +575,22 @@ impl AppRunner {
                 forward('error', ['[UnhandledRejection] ' + e.reason]);
             });
         })();
-    "#;
+    ";
 
     /// Shared IPC handler for webview messages.
     ///
     /// `console` is handled inline as a desktop-only logging side effect.
     /// Everything else delegates to `foldit_gui::bridge::decode::from_json`.
-    fn handle_ipc(ipc_tx: &std::sync::mpsc::Sender<IpcMessage>, req: wry::http::Request<String>) {
+    fn handle_ipc(ipc_tx: &std::sync::mpsc::Sender<IpcMessage>, req: &wry::http::Request<String>) {
         let body = req.body();
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
             if val.get("cmd").and_then(|v| v.as_str()) == Some("console") {
                 let level = val.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                 let msg = val.get("msg").and_then(|v| v.as_str()).unwrap_or("");
                 match level {
-                    "error" => log::error!("[JS] {}", msg),
-                    "warn" => log::warn!("[JS] {}", msg),
-                    _ => log::info!("[JS] {}", msg),
+                    "error" => log::error!("[JS] {msg}"),
+                    "warn" => log::warn!("[JS] {msg}"),
+                    _ => log::info!("[JS] {msg}"),
                 }
                 return;
             }
@@ -599,7 +599,7 @@ impl AppRunner {
             Some(msg) => {
                 let _ = ipc_tx.send(msg);
             }
-            None => log::debug!("Unrecognized IPC body: {}", body),
+            None => log::debug!("Unrecognized IPC body: {body}"),
         }
     }
 
@@ -620,8 +620,8 @@ impl AppRunner {
                 .with_initialization_script(Self::INIT_SCRIPT)
                 .with_url("http://localhost:5173")
                 .with_ipc_handler({
-                    let ipc_tx = ipc_tx.clone();
-                    move |req| Self::handle_ipc(&ipc_tx, req)
+                    let ipc_tx = ipc_tx;
+                    move |req| Self::handle_ipc(&ipc_tx, &req)
                 })
                 .with_bounds(wry::Rect {
                     position: PhysicalPosition::new(0, 0).into(),
@@ -634,7 +634,7 @@ impl AppRunner {
                     Some(wv)
                 }
                 Err(e) => {
-                    log::error!("Failed to create wry webview: {}", e);
+                    log::error!("Failed to create wry webview: {e}");
                     None
                 }
             }
@@ -646,7 +646,7 @@ impl AppRunner {
     /// Per-frame update: process IPC, drive `App::tick`, render, push
     /// dirty frontend bytes to the webview. `App` owns the drive loop
     /// (`SessionUpdate` drain, score poll, engine update, visualization update,
-    /// state-machine, populate_frontend) — the host just sequences the
+    /// state-machine, `populate_frontend`) — the host just sequences the
     /// IPC / surface / render side around it.
     fn tick_frame(&mut self) {
         let now = Instant::now();
@@ -716,6 +716,10 @@ impl AppRunner {
 }
 
 impl ApplicationHandler for AppRunner {
+    #[allow(
+        clippy::expect_used,
+        reason = "window creation is binary startup; failure is unrecoverable and should abort loudly"
+    )]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             // Create window.
@@ -776,6 +780,10 @@ impl ApplicationHandler for AppRunner {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "winit delivers cursor positions and scroll deltas as f64; the renderer consumes f32 screen coordinates, where this precision reduction is intended and harmless"
+    )]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
@@ -871,7 +879,11 @@ impl Drop for AppRunner {
 }
 
 /// Run the application event loop. This function never returns.
-pub(crate) fn run(
+#[allow(
+    clippy::expect_used,
+    reason = "event-loop setup is binary startup; failure is unrecoverable and should abort loudly"
+)]
+pub fn run(
     app: App,
     log_buffer: crate::tee_logger::LogBuffer,
 ) -> ! {
@@ -895,9 +907,9 @@ pub(crate) fn run(
 /// `VisoEngine`, apply desktop-only tweaks (default view preset, render
 /// scale based on DPI), and hand the engine to `App`.
 ///
-/// Must run BEFORE the wry WebView is attached as a child of the window —
+/// Must run BEFORE the wry `WebView` is attached as a child of the window —
 /// on macOS, `wgpu::Instance::create_surface` calls `setLayer:` on the
-/// contentView, replacing it with a CAMetalLayer; if the WKWebView is
+/// contentView, replacing it with a `CAMetalLayer`; if the `WKWebView` is
 /// already a subview at that point its backing layer never recovers.
 /// (Apple Forums 124688, wry#1335.) Matches wry/examples/wgpu.rs ordering.
 fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
@@ -913,7 +925,7 @@ fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
     let context = match pollster::block_on(viso::RenderContext::new(window, (size.width, size.height))) {
         Ok(ctx) => ctx,
         Err(e) => {
-            log::error!("Failed to initialize GPU render context: {:?}", e);
+            log::error!("Failed to initialize GPU render context: {e:?}");
             return;
         }
     };
@@ -921,7 +933,7 @@ fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
     let mut engine = match viso::VisoEngine::new(context, viso::options::VisoOptions::default()) {
         Ok(e) => e,
         Err(e) => {
-            log::error!("Failed to initialize engine: {:?}", e);
+            log::error!("Failed to initialize engine: {e:?}");
             return;
         }
     };

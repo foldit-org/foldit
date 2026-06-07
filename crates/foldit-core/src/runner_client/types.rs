@@ -14,7 +14,7 @@ use molex::Assembly;
 ///
 /// [`RunnerClient::dispatch_op`]: super::RunnerClient::dispatch_op
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct DispatchIntent {
+pub struct DispatchIntent {
     /// The authoritative in-core selection (molex `EntityId`, same type as
     /// `App.selection`), flattened to per-residue refs at dispatch time.
     pub selection: std::collections::BTreeMap<
@@ -39,7 +39,7 @@ pub(crate) struct DispatchIntent {
 ///
 /// [`RunnerClient::start_stream`]: super::RunnerClient::start_stream
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct StreamStartIntent {
+pub struct StreamStartIntent {
     /// The pull op-id (one of `pull_drag::OP_PULL_*`); resolved against
     /// the registry inside `start_stream` for the plugin id + dispatch.
     pub op_id: &'static str,
@@ -64,7 +64,7 @@ pub(crate) struct StreamStartIntent {
 /// [`RunnerClient::dispatch_op`]: super::RunnerClient::dispatch_op
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
-pub(crate) enum DispatchError {
+pub enum DispatchError {
     /// A required entity was already locked by another op; carries the raw
     /// id of the locked entity.
     EntityLocked { entity: u64 },
@@ -86,7 +86,7 @@ pub(crate) enum DispatchError {
 ///
 /// [`RunnerClient::dispatch_op`]: super::RunnerClient::dispatch_op
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) enum OpOutcome {
+pub enum OpOutcome {
     /// Synchronous invoke completed. `request_id` is the dispatch id the
     /// caller keys its edit on; `bytes` is the plugin's reply, fed into
     /// `apply_invoke_result`; `scope` is the entity set the op locked, so
@@ -111,7 +111,7 @@ pub(crate) enum OpOutcome {
 /// neutral core-owned scope: it names only `molex::EntityId`, so `App`
 /// never sees the runner's `LockTargets` / `DispatchHandle`.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) enum EditScope {
+pub enum EditScope {
     /// A whole-pose / global op: the edit opens over the whole document.
     AllEntities,
     /// The op resolved to this specific entity set (focus / selection,
@@ -123,7 +123,7 @@ pub(crate) enum EditScope {
 /// [`EditScope`]: a `global_held` handle is whole-pose, otherwise the
 /// handle's locked entity set.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn edit_scope_from_handle(
+pub fn edit_scope_from_handle(
     handle: &foldit_runner::orchestrator::DispatchHandle,
 ) -> EditScope {
     if handle.global_held {
@@ -138,7 +138,7 @@ pub(crate) fn edit_scope_from_handle(
 ///
 /// [`LockTargets`]: foldit_runner::orchestrator::LockTargets
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn edit_scope_from_targets(
+pub fn edit_scope_from_targets(
     targets: foldit_runner::orchestrator::LockTargets,
 ) -> EditScope {
     use foldit_runner::orchestrator::LockTargets;
@@ -157,7 +157,7 @@ pub(crate) fn edit_scope_from_targets(
 ///
 /// [`RunnerClient::drain_op_events`]: super::RunnerClient::drain_op_events
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) enum OpEvent {
+pub enum OpEvent {
     /// Mid-stream tentative frame, keyed by the dispatch `request_id`.
     /// `App` applies it into the edit open under that id, or no-ops when
     /// none is open.
@@ -181,8 +181,8 @@ pub(crate) enum OpEvent {
 /// builds: the plugin stream handle table plus the live pull-drag
 /// state. Grouped so App's stream lifecycle touches one field.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct StreamHost {
-    /// In-flight stream handles keyed by request_id. Populated by
+pub struct StreamHost {
+    /// In-flight stream handles keyed by `request_id`. Populated by
     /// `handle_dispatch_op` on `StartStream`; the matching
     /// `release_dispatch_locks` runs in `drain_op_events` when the
     /// stream's terminal `PluginUpdate` arrives. The stored
@@ -197,7 +197,7 @@ pub(crate) struct StreamHost {
     /// stream id also lives in `active_streams` so Final/Error
     /// handling flows through the unified stream-cleanup path; this
     /// field carries the extra viso-side bookkeeping needed for
-    /// pointer-move (PullInfo + op id).
+    /// pointer-move (`PullInfo` + op id).
     pub(crate) pull_drag: Option<crate::pull_drag::PullDrag>,
 }
 
@@ -205,7 +205,7 @@ pub(crate) struct StreamHost {
 /// `cancel_operations` can release locks and dispatch cancel against
 /// the right plugin worker without re-querying the orchestrator.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct ActiveStreamEntry {
+pub struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
 }

@@ -26,7 +26,7 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 /// plugins never see live frames. (Score updates are off-stream
 /// entirely; canonical writes happen via `Session::set_head_scores`
 /// and never reach the projector.)
-pub(crate) struct RunnerProjector {
+pub struct RunnerProjector {
     /// The `Assembly` last serialized and broadcast. `None` before the
     /// first broadcast (and after construction), which forces a Full.
     /// Deliberately **not** cleared on `Session::reset`: the post-reset
@@ -37,7 +37,7 @@ pub(crate) struct RunnerProjector {
 }
 
 impl RunnerProjector {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             last_published: None,
         }
@@ -51,7 +51,7 @@ impl RunnerProjector {
     /// non-observable: plugins compute their own scores and never see the
     /// residue selection, session focus, tutorial bubbles, or puzzle
     /// objective.
-    fn is_observable(change: &SessionUpdate) -> bool {
+    const fn is_observable(change: &SessionUpdate) -> bool {
         matches!(
             change,
             SessionUpdate::HeadMoved
@@ -221,7 +221,7 @@ mod tests {
             panic!("expected Delta");
         };
         let edits = molex::ops::wire::delta::deserialize_edits(&bytes).expect("decode");
-        let mut replay = prior.clone();
+        let mut replay = prior;
         replay.apply_edits(&edits).expect("apply_edits");
         assert_eq!(
             replay.entities()[0].positions(),
@@ -270,7 +270,7 @@ mod tests {
         let mut doc = Session::new();
         let _ = doc.insert_preview(
             mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO),
-            "p".to_string(),
+            "p".to_owned(),
             EntityOrigin::Loaded,
         );
         let changes = doc.take_updates(); // [PreviewAdded]

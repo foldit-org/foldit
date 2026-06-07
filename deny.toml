@@ -1,0 +1,45 @@
+[advisories]
+unmaintained = "workspace"
+ignore = [
+    # gtk3 is a transitive dep of wry via webkit2gtk; not under our control
+    { id = "RUSTSEC-2024-0415", reason = "transitive dep of wry, awaiting upstream migration to gtk4" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    # BSD Zero Clause (recvmsg, transitive via interprocess -> foldit-runner)
+    "0BSD",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+# The foldit workspace members are proprietary with no SPDX identifier and
+# no `publish` flag (they're never published). cargo-deny treats members
+# without a license as private; ignoring private members skips them.
+[licenses.private]
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"  # warn not deny since we pull viso/molex from git
+allow-git = [
+    "https://github.com/foldit-org/viso",
+    "https://github.com/petridecus/molex",
+]

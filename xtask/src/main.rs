@@ -1,10 +1,18 @@
+// xtask is a developer-facing CLI / build tool: writing build progress and
+// results straight to stdout / stderr is its primary job, not a debug leak.
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "xtask is a CLI build tool; console output is its intended interface"
+)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::process::Command;
 
 fn rosetta_interactive_path() -> String {
-    "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_string()
+    "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_owned()
 }
 
 /// Canonicalize to an absolute path, stripping Windows' `\\?\` verbatim
@@ -15,16 +23,16 @@ fn canonical_clean(path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
     let canonical = std::fs::canonicalize(path)?;
     let s = canonical.to_string_lossy();
     let cleaned = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{}", rest)
+        format!(r"\\{rest}")
     } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest.to_string()
+        rest.to_owned()
     } else {
         return Ok(canonical);
     };
     Ok(std::path::PathBuf::from(cleaned))
 }
 
-fn rosetta_lib_name() -> &'static str {
+const fn rosetta_lib_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         "rosetta_interactive.dll"
@@ -41,7 +49,7 @@ fn rosetta_lib_name() -> &'static str {
 
 /// Platform-canonical file name for the python-host cdylib. The worker
 /// dlopens this by filename next to its own executable.
-fn python_host_lib_name() -> &'static str {
+const fn python_host_lib_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         "foldit_python_host.dll"
@@ -261,13 +269,13 @@ fn build_molex() -> Result<()> {
     // env (pixi.toml's `molex-local` feature). `pixi reinstall <pkg>`
     // re-runs maturin to recompile the extension from the local crate.
     for env in ["dummy", "foundry", "esmfold", "simplefold"] {
-        println!("  Reinstalling molex into the {} environment...", env);
+        println!("  Reinstalling molex into the {env} environment...");
         let status = Command::new("pixi")
             .args(["reinstall", "-e", env, "molex"])
             .current_dir("crates/foldit-runner")
             .status()?;
         if !status.success() {
-            anyhow::bail!("Failed to reinstall molex in the {} environment", env);
+            anyhow::bail!("Failed to reinstall molex in the {env} environment");
         }
     }
     println!("molex rebuilt and reinstalled in all plugin environments.");
@@ -276,13 +284,12 @@ fn build_molex() -> Result<()> {
 
 fn build_rosetta_interactive(clean: bool) -> Result<()> {
     let rosetta_path = rosetta_interactive_path();
-    let cmake_dir = format!("{}/source/cmake_4", rosetta_path);
+    let cmake_dir = format!("{rosetta_path}/source/cmake_4");
 
     if !Path::new(&cmake_dir).exists() {
         anyhow::bail!(
-            "Rosetta cmake directory not found at {}. \
-             Make sure the rosetta-interactive submodule is initialized.",
-            cmake_dir
+            "Rosetta cmake directory not found at {cmake_dir}. \
+             Make sure the rosetta-interactive submodule is initialized."
         );
     }
 
@@ -322,12 +329,12 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     }
 
     // `cargo build --target <t>` nests artifacts under target/<t>/release.
-    let molex_release_dir = match molex_target {
-        Some(target) => format!("crates/molex/target/{}/release", target),
-        None => "crates/molex/target/release".to_string(),
-    };
+    let molex_release_dir = molex_target.map_or_else(
+        || "crates/molex/target/release".to_owned(),
+        |target| format!("crates/molex/target/{target}/release"),
+    );
     let molex_include = canonical_clean("crates/molex/include")?;
-    let molex_lib = canonical_clean(format!("{}/libmolex.a", molex_release_dir))?;
+    let molex_lib = canonical_clean(format!("{molex_release_dir}/libmolex.a"))?;
     let proto_dir = canonical_clean("crates/foldit-runner/proto")?;
 
     // Delegate the cmake configure + build (and the make.py /
@@ -362,7 +369,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     } else {
         "build.sh"
     };
-    println!("Running {} in {}...", build_script, rosetta_path);
+    println!("Running {build_script} in {rosetta_path}...");
     let status = cmd
         .env("MOLEX_INCLUDE_DIR", molex_include.as_os_str())
         .env("MOLEX_STATIC_LIB", molex_lib.as_os_str())
@@ -370,7 +377,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
         .current_dir(&rosetta_path)
         .status()?;
     if !status.success() {
-        anyhow::bail!("rosetta-interactive {} failed", build_script);
+        anyhow::bail!("rosetta-interactive {build_script} failed");
     }
 
     // Copy the dylib into the plugin directory. That's the single
@@ -379,30 +386,30 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     // plugin-vtable contract is the only surface.
     let lib_src = format!("{}/release/bin/{}", cmake_dir, rosetta_lib_name());
     if !Path::new(&lib_src).exists() {
-        anyhow::bail!("Built library not found at {}", lib_src);
+        anyhow::bail!("Built library not found at {lib_src}");
     }
 
     let plugin_dir = "crates/foldit-runner/plugins/rosetta";
     let lib_dst_plugin = format!("{}/{}", plugin_dir, rosetta_lib_name());
     std::fs::create_dir_all(plugin_dir)?;
     std::fs::copy(&lib_src, &lib_dst_plugin)?;
-    println!("Copied {} -> {}", lib_src, lib_dst_plugin);
+    println!("Copied {lib_src} -> {lib_dst_plugin}");
 
     // Copy compact database into the plugin's own assets dir, alongside
     // the dylib. Bridge `find_rosetta_database` walks up from the plugin
     // dir looking for `assets/database/`, so this is exactly where it
     // wants to find it.
-    let db_src = format!("{}/cmp-database/database", cmake_dir);
+    let db_src = format!("{cmake_dir}/cmp-database/database");
     if Path::new(&db_src).exists() {
-        let db_dst = format!("{}/assets/database", plugin_dir);
+        let db_dst = format!("{plugin_dir}/assets/database");
         if Path::new(&db_dst).exists() {
             std::fs::remove_dir_all(&db_dst)?;
         }
-        std::fs::create_dir_all(format!("{}/assets", plugin_dir))?;
+        std::fs::create_dir_all(format!("{plugin_dir}/assets"))?;
         copy_dir(&db_src, &db_dst)?;
-        println!("Copied compact database -> {}", db_dst);
+        println!("Copied compact database -> {db_dst}");
     } else {
-        println!("Warning: Compact database not found at {}", db_src);
+        println!("Warning: Compact database not found at {db_src}");
         println!(
             "  Run 'python3 make_database.py' in {}/source/cmake_4/ first",
             rosetta_interactive_path()
@@ -459,7 +466,7 @@ fn bundle() -> Result<()> {
     let host_files = [
         format!("foldit{exe_ext}"),
         format!("foldit-worker{exe_ext}"),
-        python_host_lib_name().to_string(),
+        python_host_lib_name().to_owned(),
     ];
     for name in &host_files {
         let src = format!("target/release/{name}");
@@ -512,10 +519,10 @@ fn bundle() -> Result<()> {
 fn copy_rosetta_plugin() -> Result<()> {
     let rosetta_plugin_src = "crates/foldit-runner/plugins/rosetta";
     let rosetta_lib = rosetta_lib_name();
-    let lib_src = format!("{}/{}", rosetta_plugin_src, rosetta_lib);
+    let lib_src = format!("{rosetta_plugin_src}/{rosetta_lib}");
 
     if !Path::new(&lib_src).exists() {
-        println!("Warning: Rosetta plugin dylib not found at {}", lib_src);
+        println!("Warning: Rosetta plugin dylib not found at {lib_src}");
         println!("  Run 'cargo xtask build-rosetta-interactive' first");
         return Ok(());
     }
@@ -525,20 +532,19 @@ fn copy_rosetta_plugin() -> Result<()> {
     std::fs::create_dir_all(rosetta_plugin_dst)?;
 
     std::fs::copy(
-        format!("{}/plugin.toml", rosetta_plugin_src),
-        format!("{}/plugin.toml", rosetta_plugin_dst),
+        format!("{rosetta_plugin_src}/plugin.toml"),
+        format!("{rosetta_plugin_dst}/plugin.toml"),
     )?;
-    std::fs::copy(&lib_src, format!("{}/{}", rosetta_plugin_dst, rosetta_lib))?;
+    std::fs::copy(&lib_src, format!("{rosetta_plugin_dst}/{rosetta_lib}"))?;
 
     // assets/ holds both the compact rosetta database (runtime) and the
     // button icons referenced by plugin.toml.
-    let assets_src = format!("{}/assets", rosetta_plugin_src);
+    let assets_src = format!("{rosetta_plugin_src}/assets");
     if Path::new(&assets_src).exists() {
-        copy_dir(&assets_src, &format!("{}/assets", rosetta_plugin_dst))?;
+        copy_dir(&assets_src, &format!("{rosetta_plugin_dst}/assets"))?;
     } else {
         println!(
-            "Warning: Rosetta assets not found at {} (icons + database)",
-            assets_src
+            "Warning: Rosetta assets not found at {assets_src} (icons + database)"
         );
         println!("  Run 'cargo xtask build-rosetta-interactive' first");
     }
@@ -568,11 +574,11 @@ fn build_gui() -> Result<()> {
         anyhow::bail!("Failed to build GUI");
     }
 
-    let dist_dir = format!("{}/dist", gui_src_dir);
+    let dist_dir = format!("{gui_src_dir}/dist");
     let gui_dir = "assets/gui";
 
     if !Path::new(&dist_dir).exists() {
-        anyhow::bail!("GUI dist directory not found at {}", dist_dir);
+        anyhow::bail!("GUI dist directory not found at {dist_dir}");
     }
 
     // Remove old assets/gui if it exists
@@ -582,7 +588,7 @@ fn build_gui() -> Result<()> {
     std::fs::create_dir_all(gui_dir)?;
 
     copy_dir(&dist_dir, gui_dir)?;
-    println!("GUI built and copied to {}", gui_dir);
+    println!("GUI built and copied to {gui_dir}");
     Ok(())
 }
 
@@ -591,7 +597,7 @@ fn copy_dir(src: &str, dst: &str) -> Result<()> {
     {
         let status = Command::new("cp").args(["-r", src, dst]).status()?;
         if !status.success() {
-            anyhow::bail!("Failed to copy {} to {}", src, dst);
+            anyhow::bail!("Failed to copy {src} to {dst}");
         }
     }
     #[cfg(windows)]

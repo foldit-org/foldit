@@ -29,13 +29,13 @@ use crate::session::{Puzzle, Session, SessionUpdate};
 
 /// State for the GUI consumer (see `GuiProjector::consume` below): the
 /// history-version debounce cursor.
-pub(crate) struct GuiProjector {
+pub struct GuiProjector {
     /// Debounce cursor for the history channel (topology + live).
     pub(crate) history_sync: HistorySyncCursor,
 }
 
 impl GuiProjector {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             history_sync: HistorySyncCursor {
                 last_topology: None,
@@ -48,7 +48,7 @@ impl GuiProjector {
 
 /// Tracks the last history versions pushed to the frontend so the GUI
 /// consumer can debounce/skip redundant reprojections.
-pub(crate) struct HistorySyncCursor {
+pub struct HistorySyncCursor {
     /// Last `History::topology_version()` pushed. `None` forces an
     /// initial push (no `u64::MAX` sentinel).
     pub(crate) last_topology: Option<u64>,
@@ -60,8 +60,7 @@ pub(crate) struct HistorySyncCursor {
 
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0)
+        .map_or(0.0, |d| d.as_millis() as f64)
 }
 
 /// Convert a parsed [`crate::puzzle::Bubble`] into the GUI-bound IPC
@@ -70,7 +69,7 @@ fn timestamp_ms(t: web_time::SystemTime) -> f64 {
 /// `alt_button`, with `goto` left `None` since clicks close locally.
 fn bubble_to_payload(b: &crate::puzzle::Bubble) -> TextBubblePayload {
     let mut buttons = vec![TextBubbleButton {
-        text: b.button.clone().unwrap_or_else(|| "Next".to_string()),
+        text: b.button.clone().unwrap_or_else(|| "Next".to_owned()),
         goto: None,
     }];
     if let Some(alt) = b.alt_button.as_ref() {
@@ -87,7 +86,7 @@ fn bubble_to_payload(b: &crate::puzzle::Bubble) -> TextBubblePayload {
     }
 }
 
-fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
+const fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
     match k {
         CheckpointKind::Loaded { .. } => CheckpointKindTag::Load,
         CheckpointKind::PromotedPreview { .. } => CheckpointKindTag::PromotedPreview,
@@ -98,7 +97,7 @@ fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
     }
 }
 
-fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
+const fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
     match s {
         HistoryFilterStatus::Pass => FilterStatus::Pass,
         HistoryFilterStatus::Fail(_) => FilterStatus::Fail,
@@ -109,7 +108,7 @@ fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
 /// Project the backend `History` into the wire payload consumed by
 /// the `HistoryPanel`. Also called at-site from `App::run_history_command`
 /// for curation changes that don't bump `topology_version`.
-pub(crate) fn project_history(store: &Session) -> HistorySection {
+pub fn project_history(store: &Session) -> HistorySection {
     let history = store.history();
     let cps = history.checkpoints();
     let head_id = cps.head();
@@ -181,7 +180,7 @@ fn current_bubble_payload(puzzle: Option<&Puzzle>) -> Option<TextBubblePayload> 
 /// `VisoEngine`, and `RunnerClient`. Named explicitly (not `&App`) so the
 /// projection's real dependencies are visible at the call site rather than
 /// hidden behind a god-object borrow.
-pub(crate) struct GuiContext<'a> {
+pub struct GuiContext<'a> {
     /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
     pub(crate) host: &'a dyn crate::HostResources,
@@ -202,7 +201,7 @@ impl GuiProjector {
     /// Per-section dirtiness is derived entirely from the drained `updates`
     /// batch - each `SessionUpdate` variant maps to the GUI sections it
     /// invalidates - plus a one-shot `full_populate` flag the tick raises on
-    /// session birth (the Loading → InSession flip and every reload) to push
+    /// session birth (the Loading → `InSession` flip and every reload) to push
     /// every section once. There is no longer an App-side dirty residue: the
     /// mutations that used to raise flags at their App sites now produce the
     /// covering `SessionUpdate` variants, and those variants are mapped here.
@@ -259,13 +258,13 @@ impl GuiProjector {
             match session.puzzle() {
                 Some(p) => frontend.set_puzzle_game(
                     p.id,
-                    session.title().to_string(),
+                    session.title().to_owned(),
                     p.start_energy,
                     p.completion_energy,
                 ),
                 // The free-form session has no objective; the title is the
                 // file-derived structure name.
-                None => frontend.set_puzzle_scientist(session.title().to_string()),
+                None => frontend.set_puzzle_scientist(session.title().to_owned()),
             }
             // Bubble push on puzzle swap: render the cursor's current
             // bubble (always index 0 right after a puzzle load, since the
@@ -360,7 +359,7 @@ impl GuiProjector {
                 scene_entities.push(foldit_gui::SceneEntityInfo {
                     entity_id: entity.id().raw(),
                     label: entity.label(),
-                    molecule_type: mol_str.to_string(),
+                    molecule_type: mol_str.to_owned(),
                     atom_count: entity.atom_count(),
                     residue_count: entity.residue_count(),
                 });
@@ -394,7 +393,7 @@ impl GuiProjector {
             let now = Instant::now();
             let debounced = cursor
                 .last_live_push_at
-                .map_or(false, |t| now.duration_since(t).as_millis() < 50);
+                .is_some_and(|t| now.duration_since(t).as_millis() < 50);
             if !debounced {
                 if let Some(update) = project_history_live(session.history()) {
                     frontend.set_history_live(update);

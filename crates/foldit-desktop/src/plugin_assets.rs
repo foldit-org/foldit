@@ -53,13 +53,11 @@ pub fn serve(request_path: &str, plugins_root: &Path) -> AssetResponse {
     }
     let asset_path = plugins_root.join(rel);
 
-    let canonical_asset = match asset_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return AssetResponse::NotFound,
+    let Ok(canonical_asset) = asset_path.canonicalize() else {
+        return AssetResponse::NotFound;
     };
-    let canonical_root = match plugins_root.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return AssetResponse::NotFound,
+    let Ok(canonical_root) = plugins_root.canonicalize() else {
+        return AssetResponse::NotFound;
     };
     if !canonical_asset.starts_with(&canonical_root) {
         return AssetResponse::NotFound;
@@ -68,15 +66,13 @@ pub fn serve(request_path: &str, plugins_root: &Path) -> AssetResponse {
     let ext = canonical_asset
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
+        .map(str::to_ascii_lowercase);
     let Some(mime) = ext.as_deref().and_then(plugin_asset_mime) else {
         return AssetResponse::NotFound;
     };
 
-    match std::fs::read(&canonical_asset) {
-        Ok(bytes) => AssetResponse::Ok { bytes, mime },
-        Err(_) => AssetResponse::NotFound,
-    }
+    std::fs::read(&canonical_asset)
+        .map_or(AssetResponse::NotFound, |bytes| AssetResponse::Ok { bytes, mime })
 }
 
 /// Static-asset MIME whitelist. Any extension absent from this table
@@ -99,11 +95,23 @@ fn plugin_asset_mime(ext: &str) -> Option<&'static str> {
 /// Resolve the plugins root using the same order foldit-core uses for
 /// discovery. Held in a `OnceLock` next to the webview so the closure
 /// captures a cheap clone.
+///
+/// Its sole caller, `create_webview_release`, is `#[cfg(not(debug_assertions))]`,
+/// so under a `test` build (where this module still compiles) it has no
+/// caller and looks dead; the release build exercises it.
+#[cfg_attr(test, allow(dead_code))]
 pub fn resolve_plugins_root() -> Option<PathBuf> {
     foldit_core::locate_plugins_root()
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::needless_pass_by_value,
+    reason = "test setup/assertions panic loudly on failure by design, and by-value args keep the helpers terse"
+)]
 mod tests {
     use super::*;
     use std::fs;

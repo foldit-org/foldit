@@ -70,7 +70,7 @@ macro_rules! mirror_enum {
     };
 }
 
-pub(crate) fn param_spec_to_wire(
+pub fn param_spec_to_wire(
     spec: RunnerParamSpec,
 ) -> foldit_gui::state::ParamSpec {
     foldit_gui::state::ParamSpec {
@@ -99,7 +99,7 @@ mirror_enum! {
     /// Convert a wire-side `ParamValue` (deserialized from an `OpDispatch`
     /// envelope) into the orchestrator-native form the dispatch calls
     /// expect. Inverse of [`param_value_to_wire`].
-    pub(crate) fn param_value_from_wire(v: WireParamValue) -> ParamValue {
+    pub fn param_value_from_wire(v: WireParamValue) -> ParamValue {
         Int(x), Float(x), Bool(x), String(x), Vec3(x)
     }
 }
@@ -124,7 +124,7 @@ mod tests {
             ParamValue::Int(7),
             ParamValue::Float(0.25),
             ParamValue::Bool(true),
-            ParamValue::String("alpha".to_string()),
+            ParamValue::String("alpha".to_owned()),
             ParamValue::Vec3([1.0, -2.0, 3.5]),
         ];
         for native in cases {

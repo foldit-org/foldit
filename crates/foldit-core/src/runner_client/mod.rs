@@ -22,7 +22,7 @@ mod scores;
 mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use types::{
+pub use types::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamHost, StreamStartIntent,
 };
 
@@ -59,14 +59,14 @@ impl RunnerClient {
 
     /// Mutable access to the orchestrator handle, so the tick seam can
     /// borrow it disjointly from the peer `RunnerProjector` field on `App`.
-    pub(crate) fn orchestrator_mut(&mut self) -> Option<&mut foldit_runner::Orchestrator> {
+    pub(crate) const fn orchestrator_mut(&mut self) -> Option<&mut foldit_runner::Orchestrator> {
         self.orchestrator.as_mut()
     }
 
     /// Whether an orchestrator handle is installed. The score-poll gate uses
     /// this to skip the round-trip before any structure has loaded, without
     /// reaching into the orchestrator field.
-    pub(crate) fn has_orchestrator(&self) -> bool {
+    pub(crate) const fn has_orchestrator(&self) -> bool {
         self.orchestrator.is_some()
     }
 

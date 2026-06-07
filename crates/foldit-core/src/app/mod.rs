@@ -70,7 +70,7 @@ pub struct App {
     /// old field.
     pub(in crate::app) awaiting_initial_score: bool,
     /// One-shot "push every GUI section once" signal. Raised on session
-    /// birth (the Loading → InSession flip for the initial load, and at the
+    /// birth (the Loading → `InSession` flip for the initial load, and at the
     /// end of each reload path) and consumed + cleared by `tick` on the next
     /// GUI-consumer pass, which projects a full `DirtyFlags::all()` populate.
     /// The incremental sections during a load still flow through the ordinary
@@ -99,6 +99,7 @@ pub struct App {
 }
 
 impl App {
+    #[must_use]
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
         Self {
             engine: None,
@@ -108,8 +109,8 @@ impl App {
                 // Tab/Backquote focus bindings on this instance so viso no
                 // longer owns focus. The core key paths intercept these keys
                 // before any dispatch and drive `Session::set_focus` instead.
-                kb.insert("Tab".to_string(), Box::new(|_: &mut VisoEngine| {}));
-                kb.insert("Backquote".to_string(), Box::new(|_: &mut VisoEngine| {}));
+                kb.insert("Tab".to_owned(), Box::new(|_: &mut VisoEngine| {}));
+                kb.insert("Backquote".to_owned(), Box::new(|_: &mut VisoEngine| {}));
                 kb
             },
             store: Session::new(),
@@ -131,7 +132,7 @@ impl App {
 
     /// True once the Rosetta backend has delivered its first score
     /// update for the current session. Read by [`Self::tick`] to gate
-    /// the Loading → InSession transition.
+    /// the Loading → `InSession` transition.
     fn has_initial_score(&self) -> bool {
         self.store.display_score().is_some()
     }
@@ -168,7 +169,7 @@ impl App {
     pub fn render(&mut self) {
         if let Some(engine) = &mut self.engine {
             if let Err(e) = engine.render() {
-                log::error!("Render error: {:?}", e);
+                log::error!("Render error: {e:?}");
             }
         }
     }
@@ -214,7 +215,7 @@ impl App {
     ///    change; reply applies on a later tick's step 2).
     /// 6. engine update (camera animation, mesh upload, etc.).
     /// 7. visualization overlay (bands / pull).
-    /// 8. InSession gate (one-shot, on first score; raises full populate).
+    /// 8. `InSession` gate (one-shot, on first score; raises full populate).
     /// 9. GUI consumer projects the batch (+ one-shot full populate) into
     ///    the frontend so the next `serialize_frontend_dirty` carries the
     ///    latest snapshot.
@@ -236,17 +237,17 @@ impl App {
         let had_initial_score = self.has_initial_score();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !had_initial_score {
-                // No score yet: blocking poll each tick until the first one
-                // lands, so the InSession gate flips promptly. Brief, one-time
-                // per load.
-                self.poll_plugin_scores();
-            } else {
+            if had_initial_score {
                 // Steady state: apply whatever async whole-assembly and
                 // composition replies have arrived. Each stamps the session
                 // and emits `ScoresChanged`, drained just below.
                 self.poll_async_scores();
                 self.poll_composition_scores();
+            } else {
+                // No score yet: blocking poll each tick until the first one
+                // lands, so the InSession gate flips promptly. Brief, one-time
+                // per load.
+                self.poll_plugin_scores();
             }
         }
 
@@ -380,9 +381,9 @@ impl App {
             self.set_loading_state(LoadingState::InSession);
             self.awaiting_initial_score = false;
             self.frontend.set_puzzle_loaded(true);
-            self.frontend.set_score_title(self.store.title().to_string());
+            self.frontend.set_score_title(self.store.title().to_owned());
             self.frontend
-                .set_puzzle_scientist(self.store.title().to_string());
+                .set_puzzle_scientist(self.store.title().to_owned());
             // Session birth: the GUI consumer below does a one-shot full
             // populate (every section once) rather than flooding the
             // transmit layer's dirty bits directly.
@@ -455,11 +456,11 @@ impl foldit_gui::Dispatcher for App {
                 let filepath = payload
                     .get("filepath")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "missing 'filepath'".to_string())?;
+                    .ok_or_else(|| "missing 'filepath'".to_owned())?;
                 let bytes = self
                     .host
                     .read_file(filepath)
-                    .map_err(|e| format!("read {}: {}", filepath, e))?;
+                    .map_err(|e| format!("read {filepath}: {e}"))?;
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 Ok(serde_json::json!({ "encoding": "base64", "content": b64 }))
@@ -469,7 +470,7 @@ impl foldit_gui::Dispatcher for App {
                 // for hotkey ids. Until that surface lands, return empty so
                 // HelpMenuPanel rejects gracefully instead of timing out.
                 let hotkey = payload.get("hotkey").and_then(|v| v.as_str()).unwrap_or("");
-                Err(format!("hotkey lookup not implemented (hotkey={})", hotkey))
+                Err(format!("hotkey lookup not implemented (hotkey={hotkey})"))
             }
             RequestKind::ServerRequest => {
                 // Stub: server requests (news, etc.) require an HTTP client
@@ -479,8 +480,7 @@ impl foldit_gui::Dispatcher for App {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 Err(format!(
-                    "server request not implemented (endpoint={})",
-                    endpoint
+                    "server request not implemented (endpoint={endpoint})"
                 ))
             }
         }

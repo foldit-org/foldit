@@ -1,6 +1,6 @@
 //! Eviction + linear-undo prune + best-cursor recompute. All three
 //! are History-internal policies that run from `record` (prune
-//! after push, evict at the tail of every dispatch, recompute_best
+//! after push, evict at the tail of every dispatch, `recompute_best`
 //! on commit).
 
 use std::collections::HashSet;
@@ -186,7 +186,7 @@ impl History {
     pub(super) fn recompute_best(&mut self) {
         let mut best: Option<(CheckpointId, f64)> = None;
         let mut best_counts: Option<(CheckpointId, f64)> = None;
-        for (id, ckpt) in self.checkpoints.checkpoints.iter() {
+        for (id, ckpt) in &self.checkpoints.checkpoints {
             if ckpt.exclude_from_best {
                 continue;
             }

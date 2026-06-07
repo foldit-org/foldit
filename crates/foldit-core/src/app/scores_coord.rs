@@ -3,15 +3,15 @@ use crate::history::CheckpointId;
 
 impl App {
     /// Query every plugin's `score` op, merge totals into the head
-    /// checkpoint (bumping `live_version` for the GuiProjector to pick
+    /// checkpoint (bumping `live_version` for the `GuiProjector` to pick
     /// up), and push per-residue scores directly to viso for
     /// color-by-score display modes. Off the `SessionUpdate` stream
-    /// entirely: scores have two consumers (the GuiProjector via
+    /// entirely: scores have two consumers (the `GuiProjector` via
     /// `HistorySyncCursor` and viso via a direct overlay push) and
     /// neither needs to ride the `SessionUpdate` stream.
     ///
     /// Synchronous (blocking) score poll. `tick` calls this each frame
-    /// only until the first score lands, so the InSession gate
+    /// only until the first score lands, so the `InSession` gate
     /// flips promptly; once a score exists `tick` switches to the async
     /// path (`request_scores` + `poll_async_scores`). Dirty flags are set
     /// by `apply_score_reports` when a report actually applies.

@@ -45,9 +45,9 @@ fn arc_entity(id: EntityId) -> Arc<MoleculeEntity> {
 /// the pending edit's lanes), so callers pass the entity separately.
 fn plugin_op(op_id: &str) -> CheckpointKind {
     CheckpointKind::PluginOp {
-        plugin_id: "rosetta".to_string(),
-        op_id: op_id.to_string(),
-        display: op_id.to_string(),
+        plugin_id: "rosetta".to_owned(),
+        op_id: op_id.to_owned(),
+        display: op_id.to_owned(),
     }
 }
 
@@ -616,7 +616,7 @@ fn add_entity_introduces_lane_and_pushes_checkpoint() {
     // Walk the allocator past existing ids to mint a fresh one
     // that's distinct from `ids[0]`.
     let mut new_id = alloc.allocate();
-    while ids.iter().any(|i| *i == new_id) {
+    while ids.contains(&new_id) {
         new_id = alloc.allocate();
     }
 
@@ -735,7 +735,7 @@ fn invariant_holds(h: &History) -> Result<(), String> {
         .checkpoints
         .checkpoints
         .get(h.checkpoints.head)
-        .ok_or_else(|| "head checkpoint is dead".to_string())?;
+        .ok_or_else(|| "head checkpoint is dead".to_owned())?;
     // Point 1, relaxed for the open-action model: the lane head is either
     // the committed snapshot, or a tentative snapshot whose parent is it.
     for (eid, committed_snap) in &head_ckpt.entity_heads {
@@ -822,7 +822,7 @@ proptest! {
                     r
                 }
                 Op::Abort => {
-                    let r = h.abort_action(rid.unwrap_or(u64::MAX)).map(|_| ());
+                    let r = h.abort_action(rid.unwrap_or(u64::MAX)).map(|()| ());
                     if r.is_ok() {
                         rid = None;
                     }

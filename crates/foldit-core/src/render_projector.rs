@@ -20,7 +20,7 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 /// **deliberately** not reset on `Session::reset`: a fresh post-reset
 /// publish still advances it, and viso never sees the generation go
 /// backwards.
-pub(crate) struct RenderProjector {
+pub struct RenderProjector {
     /// Monotonic counter stamped onto every published `Assembly`.
     /// Incremented on every `project` that actually publishes. Without
     /// a fresh generation per publish, viso's `poll_assembly` gate
@@ -39,7 +39,7 @@ pub(crate) struct RenderProjector {
 }
 
 impl RenderProjector {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             publish_seq: 0,
             last_published_ids: BTreeSet::new(),
@@ -181,15 +181,13 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
 /// viso-free. The `All` arm reports `doc.count()` (live committed +
 /// preview membership) rather than the metadata side table, which is
 /// never GC'd and so over-reports the live entity count.
-pub(crate) fn focus_description(doc: &Session, focus: &viso::Focus) -> String {
+pub fn focus_description(doc: &Session, focus: &viso::Focus) -> String {
     match focus {
         viso::Focus::All => {
             let count = doc.count();
             format!("All ({count} entities)")
         }
         viso::Focus::Entity(id) => doc
-            .metadata(*id)
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| format!("Entity {}", id.raw())),
+            .metadata(*id).map_or_else(|| format!("Entity {}", id.raw()), |m| m.name.clone()),
     }
 }

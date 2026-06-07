@@ -25,6 +25,13 @@
 //! Outside of wasm, this crate compiles as a thin rlib so workspace-wide
 //! `cargo check` succeeds on the host without invoking wasm-bindgen.
 
+// Many transitive deps (base64, bitflags, thiserror, wit-bindgen, and the
+// windows/foreign-types families pulled in by wgpu/winit) resolve at two
+// major versions in the tree; the duplication is not controllable here.
+#![allow(
+    clippy::multiple_crate_versions,
+    reason = "duplicate dep versions come from transitive deps, not controllable here"
+)]
 #![cfg(target_arch = "wasm32")]
 
 mod host;

@@ -31,7 +31,7 @@ impl RunnerClient {
         let updates = self
             .orchestrator
             .as_mut()
-            .map(|orch| orch.drain_plugin_updates())
+            .map(foldit_runner::Orchestrator::drain_plugin_updates)
             .unwrap_or_default();
         let mut events = Vec::with_capacity(updates.len());
         for update in updates {
@@ -265,7 +265,7 @@ impl RunnerClient {
                 intent.op_id
             )));
         };
-        let plugin_id = cached.plugin_id.clone();
+        let plugin_id = cached.plugin_id;
 
         let ctx = DispatchContext {
             focused_entity_id: Some(intent.focused_entity),
@@ -330,11 +330,11 @@ impl RunnerClient {
     /// going through dispatch - e.g. seeding a post-Init normalized
     /// assembly. `None` when no orchestrator is wired up.
     pub(crate) fn alloc_request_id(&mut self) -> Option<u64> {
-        self.orchestrator.as_mut().map(|orch| orch.alloc_request_id())
+        self.orchestrator.as_mut().map(foldit_runner::Orchestrator::alloc_request_id)
     }
 
     /// Whether a pull-drag is currently live (the three input guards).
-    pub(crate) fn has_active_pull_drag(&self) -> bool {
+    pub(crate) const fn has_active_pull_drag(&self) -> bool {
         self.stream_host.pull_drag.is_some()
     }
 
@@ -349,7 +349,7 @@ impl RunnerClient {
 
     /// Mutable handle to the live drag (pointer-move updates its
     /// `screen_target` and reads its rid / plugin id).
-    pub(crate) fn pull_drag_mut(&mut self) -> Option<&mut crate::pull_drag::PullDrag> {
+    pub(crate) const fn pull_drag_mut(&mut self) -> Option<&mut crate::pull_drag::PullDrag> {
         self.stream_host.pull_drag.as_mut()
     }
 
@@ -359,7 +359,7 @@ impl RunnerClient {
     }
 
     /// Take + clear the live drag state on pointer-up / cancel.
-    pub(crate) fn take_pull_drag(&mut self) -> Option<crate::pull_drag::PullDrag> {
+    pub(crate) const fn take_pull_drag(&mut self) -> Option<crate::pull_drag::PullDrag> {
         self.stream_host.pull_drag.take()
     }
 }
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn other_dispatch_error_maps_to_failed() {
         use foldit_runner::orchestrator::OpDispatchError;
-        let runner_err = OpDispatchError::UnknownOp("nope".to_string());
+        let runner_err = OpDispatchError::UnknownOp("nope".to_owned());
         assert!(matches!(
             map_dispatch_error(runner_err),
             DispatchError::Failed(_)

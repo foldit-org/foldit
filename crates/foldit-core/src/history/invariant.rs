@@ -49,7 +49,7 @@ impl History {
         //    checkpoint_refs > 0.
         let mut expected_refs: indexmap::IndexMap<(EntityId, EntitySnapshotId), u32> =
             indexmap::IndexMap::new();
-        for (_, ckpt) in self.checkpoints.checkpoints.iter() {
+        for (_, ckpt) in &self.checkpoints.checkpoints {
             for (eid, sid) in &ckpt.entity_heads {
                 *expected_refs.entry((*eid, *sid)).or_default() += 1;
             }
@@ -79,7 +79,7 @@ impl History {
         //    the field now makes structural.)
         let mut tentative_lane_heads: HashSet<(EntityId, EntitySnapshotId)> = HashSet::new();
         for (eid, lane) in &self.lanes {
-            for (sid, snap) in lane.snapshots.iter() {
+            for (sid, snap) in &lane.snapshots {
                 if snap.tentative {
                     assert_eq!(
                         lane.head, sid,

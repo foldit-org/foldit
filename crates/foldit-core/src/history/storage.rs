@@ -70,13 +70,13 @@ pub struct EntityHistory {
 impl EntityHistory {
     /// The current head snapshot id.
     #[must_use]
-    pub fn head(&self) -> EntitySnapshotId {
+    pub const fn head(&self) -> EntitySnapshotId {
         self.head
     }
 
     /// The root snapshot id.
     #[must_use]
-    pub fn root(&self) -> EntitySnapshotId {
+    pub const fn root(&self) -> EntitySnapshotId {
         self.root
     }
 
@@ -112,7 +112,7 @@ pub struct Checkpoint {
     pub parent: Option<CheckpointId>,
     /// Branch children.
     pub children: SmallVec<[CheckpointId; 2]>,
-    /// Tuple of pointers into the entity timelines. IndexMap order is the
+    /// Tuple of pointers into the entity timelines. `IndexMap` order is the
     /// canonical entity order; preserved across pushes / lane undo /
     /// jump.
     pub entity_heads: IndexMap<EntityId, EntitySnapshotId>,
@@ -153,13 +153,13 @@ pub struct CheckpointGraph {
 impl CheckpointGraph {
     /// Current head id.
     #[must_use]
-    pub fn head(&self) -> CheckpointId {
+    pub const fn head(&self) -> CheckpointId {
         self.head
     }
 
     /// Root id.
     #[must_use]
-    pub fn root(&self) -> CheckpointId {
+    pub const fn root(&self) -> CheckpointId {
         self.root
     }
 
@@ -176,13 +176,13 @@ impl CheckpointGraph {
 
     /// Best-by-raw cursor (`None` until scoring populates it).
     #[must_use]
-    pub fn best(&self) -> Option<CheckpointId> {
+    pub const fn best(&self) -> Option<CheckpointId> {
         self.best
     }
 
     /// Best-that-counts cursor (`None` until scoring populates it).
     #[must_use]
-    pub fn best_that_counts(&self) -> Option<CheckpointId> {
+    pub const fn best_that_counts(&self) -> Option<CheckpointId> {
         self.best_that_counts
     }
 

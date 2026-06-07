@@ -35,16 +35,16 @@ use viso::{AtomRef, PullInfo};
 use crate::session::Session;
 
 /// Op id for the residue-anchored cart-pull (backbone pull).
-pub(crate) const OP_PULL_BACKBONE: &str = "ActionLocalMinimizePull";
+pub const OP_PULL_BACKBONE: &str = "ActionLocalMinimizePull";
 /// Op id for the atom-anchored sidechain pull.
-pub(crate) const OP_PULL_SIDECHAIN: &str = "ActionPullSidechain";
+pub const OP_PULL_SIDECHAIN: &str = "ActionPullSidechain";
 
 /// Resolved pull-route decision. The two variants map 1:1 to the two op
 /// ids registered with the rosetta bridge; param shape differs (backbone
 /// needs the residue only, sidechain needs residue + atom name) so the
 /// caller dispatches accordingly.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct PullRoute {
+pub struct PullRoute {
     /// Which op-id to dispatch (one of [`OP_PULL_BACKBONE`] /
     /// [`OP_PULL_SIDECHAIN`]).
     pub op_id: &'static str,
@@ -58,7 +58,7 @@ pub(crate) struct PullRoute {
     /// Entity-flat 0-based residue index (matches `viso::AtomRef`).
     pub flat_residue: u32,
     /// Molex entity id of the picked entity. Used both for the
-    /// DispatchContext focus and to compute the rosetta-pose residue
+    /// `DispatchContext` focus and to compute the rosetta-pose residue
     /// from `residue_in_entity` once multi-entity routing lands.
     pub entity_id: MolexEntityId,
 }
@@ -66,7 +66,7 @@ pub(crate) struct PullRoute {
 /// Live pull-drag state. One per active drag at most (single-stream
 /// invariant). Owned by the host alongside its `active_streams` map.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct PullDrag {
+pub struct PullDrag {
     /// The stream's request id from `dispatch_start_stream`.
     pub request_id: u64,
     /// Plugin id that owns the stream (always `"rosetta"` today).
@@ -87,7 +87,7 @@ pub(crate) struct PullDrag {
 ///     PDB v3 `HA`, `H`, `HB1`, `HG21`, …)
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub(crate) fn route_atom_pick(
+pub fn route_atom_pick(
     store: &Session,
     entity_id: u32,
     atom_idx: u32,
@@ -137,7 +137,7 @@ pub(crate) fn route_atom_pick(
 /// module does not.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub(crate) fn route_residue_pick(
+pub fn route_residue_pick(
     store: &Session,
     flat_residue: u32,
     atom_name: &str,
@@ -164,7 +164,7 @@ pub(crate) fn route_residue_pick(
     })
 }
 
-/// Build the StartStream `params` map for a pull route. Backbone pulls
+/// Build the `StartStream` `params` map for a pull route. Backbone pulls
 /// carry only the 1-indexed pose residue; sidechain pulls add the
 /// `atom_name` so the bridge can resolve `name → atomno` against the
 /// live pose.
@@ -175,7 +175,7 @@ pub(crate) fn route_residue_pick(
 /// to the host; left as a v1 limitation.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub(crate) fn build_start_params(
+pub fn build_start_params(
     op_id: &str,
     residue_in_entity: u32,
     atom_name: &str,
@@ -202,7 +202,7 @@ pub(crate) fn build_start_params(
 /// land in viso's `ConstraintContext::resolve_atom_ref`.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub(crate) fn build_pull_info(
+pub fn build_pull_info(
     route: &PullRoute,
     screen_target: (f32, f32),
 ) -> PullInfo {

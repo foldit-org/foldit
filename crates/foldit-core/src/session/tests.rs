@@ -18,7 +18,7 @@ fn mk_atom() -> Atom {
     }
 }
 
-/// Some valid EntityId. `EntityId` has no public constructor so
+/// Some valid `EntityId`. `EntityId` has no public constructor so
 /// every call mints id 0 from a fresh allocator. Callers that pass
 /// this into [`Session::insert_preview`] don't observe the
 /// value because the store overwrites the entity's id immediately.
@@ -76,9 +76,9 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
 /// is passed to `begin_action` separately.
 fn wiggle() -> CheckpointKind {
     CheckpointKind::PluginOp {
-        plugin_id: "rosetta".to_string(),
-        op_id: "wiggle".to_string(),
-        display: "wiggle".to_string(),
+        plugin_id: "rosetta".to_owned(),
+        op_id: "wiggle".to_owned(),
+        display: "wiggle".to_owned(),
     }
 }
 
@@ -96,7 +96,7 @@ fn insert_preview_then_promote_lands_in_history() {
 
     let id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
-        "preview".to_string(),
+        "preview".to_owned(),
         EntityOrigin::Loaded,
     );
     // Preview is visible in head_assembly.
@@ -146,7 +146,7 @@ fn live_membership_lists_committed_then_preview() {
     // Insert + promote A: a committed entity.
     let a = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
-        "a".to_string(),
+        "a".to_owned(),
         EntityOrigin::Loaded,
     );
     store
@@ -161,7 +161,7 @@ fn live_membership_lists_committed_then_preview() {
     // Insert B and leave it as a preview.
     let b = store.insert_preview(
         mk_bulk(mk_dummy_id()),
-        "b".to_string(),
+        "b".to_owned(),
         EntityOrigin::Loaded,
     );
 
@@ -179,7 +179,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     let mut store = Session::new();
     let x = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
-        "x".to_string(),
+        "x".to_owned(),
         EntityOrigin::Loaded,
     );
     store
@@ -212,7 +212,7 @@ fn reset_clears_history_metadata_and_transient() {
     let mut store = Session::new();
     let _id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
-        "x".to_string(),
+        "x".to_owned(),
         EntityOrigin::Loaded,
     );
     assert_eq!(store.count(), 1);
@@ -235,13 +235,13 @@ fn reset_clears_history_metadata_and_transient() {
 // `SessionUpdate` (or none). The Full/Delta projection of those changes is
 // the `RunnerProjector`'s job and is tested in `runner_projector`.
 
-/// Drive an entity through promote_preview → drain so the change queue
+/// Drive an entity through `promote_preview` → drain so the change queue
 /// is at a known-empty starting point.
 fn store_with_protein(n_residues: usize) -> (Session, EntityId) {
     let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), n_residues),
-        "p".to_string(),
+        "p".to_owned(),
         EntityOrigin::Loaded,
     );
     store
@@ -268,7 +268,7 @@ fn insert_preview_emits_preview_added() {
     let mut store = Session::new();
     let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
-        "p".to_string(),
+        "p".to_owned(),
         EntityOrigin::Loaded,
     );
     let changes = store.take_updates();
@@ -285,7 +285,7 @@ fn remove_preview_emits_preview_discarded() {
     let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
-        "p".to_string(),
+        "p".to_owned(),
         EntityOrigin::Loaded,
     );
     let _ = store.take_updates();
@@ -309,7 +309,7 @@ fn promote_preview_emits_head_moved() {
     let mut store = Session::new();
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
-        "p".to_string(),
+        "p".to_owned(),
         EntityOrigin::Loaded,
     );
     let _ = store.take_updates();
@@ -463,7 +463,7 @@ fn jump_checkpoint_emits_head_moved() {
 
     let id_b = store.insert_preview(
         mk_protein(mk_dummy_id(), 3),
-        "b".to_string(),
+        "b".to_owned(),
         EntityOrigin::Loaded,
     );
     store
@@ -546,7 +546,7 @@ fn reset_clears_pending_then_emits_one_head_moved() {
     // emitting its own HeadMoved.
     let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
-        "leftover".to_string(),
+        "leftover".to_owned(),
         EntityOrigin::Loaded,
     );
 
@@ -954,7 +954,7 @@ fn start_sets_title_and_installs_puzzle() {
     // to the puzzle name and emits exactly PuzzleChanged.
     let mut store = Session::new();
 
-    store.start("apo".to_string(), None);
+    store.start("apo".to_owned(), None);
     assert_eq!(store.title(), "apo");
     assert!(store.puzzle().is_none());
     assert!(
@@ -962,7 +962,7 @@ fn start_sets_title_and_installs_puzzle() {
         "free-form start over an empty session emits nothing",
     );
 
-    store.start("Intro".to_string(), Some(mk_puzzle(0)));
+    store.start("Intro".to_owned(), Some(mk_puzzle(0)));
     assert_eq!(store.title(), "Intro");
     assert!(store.puzzle().is_some());
     assert!(
@@ -979,7 +979,7 @@ fn reset_clears_puzzle_and_leaves_title() {
     // `HeadMoved`. `title` is left untouched for the following `start` to
     // overwrite.
     let mut store = Session::new();
-    store.start("P".to_string(), Some(mk_puzzle(1)));
+    store.start("P".to_owned(), Some(mk_puzzle(1)));
     store.advance_bubble(false);
     let _ = store.take_updates();
 
@@ -1009,7 +1009,7 @@ fn set_view_options_emits_one_change_and_clears_preset() {
     assert!(store.active_preset().is_none());
 
     // Seed an active preset so the next manual set has a preset to clear.
-    store.apply_preset("warm".to_string(), mk_non_default_options());
+    store.apply_preset("warm".to_owned(), mk_non_default_options());
     let _ = store.take_updates();
     assert_eq!(store.active_preset(), Some("warm"));
 
@@ -1044,7 +1044,7 @@ fn apply_preset_emits_and_sets_both() {
     let mut store = Session::new();
     let opts = mk_non_default_options();
 
-    store.apply_preset("warm".to_string(), opts.clone());
+    store.apply_preset("warm".to_owned(), opts.clone());
     assert!(
         matches!(
             store.take_updates().as_slice(),
@@ -1060,7 +1060,7 @@ fn apply_preset_emits_and_sets_both() {
     );
 
     // Idempotent: same preset + same options -> silent.
-    store.apply_preset("warm".to_string(), opts);
+    store.apply_preset("warm".to_owned(), opts);
     assert!(
         store.take_updates().is_empty(),
         "re-applying the same preset emits nothing",
@@ -1075,7 +1075,7 @@ fn reset_restores_default_view_options() {
     // the reset emits `ViewOptionsChanged` when there was a non-default
     // state to clear.
     let mut store = Session::new();
-    store.apply_preset("warm".to_string(), mk_non_default_options());
+    store.apply_preset("warm".to_owned(), mk_non_default_options());
     let _ = store.take_updates();
     assert_ne!(store.view_options(), &viso::options::VisoOptions::default());
     assert_eq!(store.active_preset(), Some("warm"));

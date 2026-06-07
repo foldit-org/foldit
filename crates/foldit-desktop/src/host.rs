@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use foldit_core::HostResources;
 
-pub(crate) struct DesktopHost {
+pub struct DesktopHost {
     view_presets_dir: PathBuf,
     initial_structure_path: Option<String>,
 }

@@ -84,7 +84,7 @@ impl App {
         }
     }
     /// Dispatch a plugin op by op-id. Resolves the op against the
-    /// orchestrator's `PluginRegistry` to pick Invoke vs Start_stream;
+    /// orchestrator's `PluginRegistry` to pick Invoke vs `Start_stream`;
     /// builds a `DispatchContext` from the GUI-provided focus and the
     /// authoritative in-core `App.selection`. Op-ids unknown to the
     /// registry are logged and dropped (the catalog couldn't have
@@ -105,7 +105,7 @@ impl App {
             // read into the intent below. Raw gui-wire id (u32 widened to
             // u64), the shape `DispatchIntent` expects.
             let focused_entity_id: Option<u64> = match self.store.focus() {
-                Focus::Entity(eid) => Some(eid.raw() as u64),
+                Focus::Entity(eid) => Some(u64::from(eid.raw())),
                 Focus::All => None,
             };
 
@@ -159,15 +159,14 @@ impl App {
             // current head, and transient stubs (ambient / zero-residue) have
             // none - mirroring the post-Init normalization path.
             let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { scope, .. })
-                | Ok(OpOutcome::Invoke { scope, .. }) => {
+                Ok(OpOutcome::Stream { scope, .. } | OpOutcome::Invoke { scope, .. }) => {
                     Some(self.lanes_for_scope(scope))
                 }
                 Err(_) => None,
             };
             let dispatch_id = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { request_id, .. })
-                | Ok(OpOutcome::Invoke { request_id, .. }) => Some(*request_id),
+                Ok(OpOutcome::Stream { request_id, .. } | OpOutcome::Invoke { request_id, ..
+}) => Some(*request_id),
                 Err(_) => None,
             };
 
@@ -295,7 +294,7 @@ impl App {
     }
     // ── History navigation (Undo / Redo / Jump / Pin) ──
 
-    /// Common tail for undo / redo / jump_checkpoint: clear cached
+    /// Common tail for undo / redo / `jump_checkpoint`: clear cached
     /// per-residue scores (the values were computed against the
     /// *previous* head and become meaningless on a head move; v1 just
     /// blanks them so the structure renders neutral instead of "gray",
@@ -331,22 +330,16 @@ impl App {
                 .store
                 .jump_checkpoint(id.into_inner())
                 .map(|_| HistoryOutcome::HeadMoved),
-            HistoryCommand::Undo => self.store.undo().map(|opt| match opt {
-                Some(_) => HistoryOutcome::HeadMoved,
-                None => {
-                    log::info!("Undo: already at root");
-                    HistoryOutcome::Noop
-                }
+            HistoryCommand::Undo => self.store.undo().map(|opt| if opt.is_some() { HistoryOutcome::HeadMoved } else {
+                log::info!("Undo: already at root");
+                HistoryOutcome::Noop
             }),
             HistoryCommand::Redo { branch } => {
                 self.store
-                    .redo(branch.map(|w| w.into_inner()))
-                    .map(|opt| match opt {
-                        Some(_) => HistoryOutcome::HeadMoved,
-                        None => {
-                            log::info!("Redo: nowhere forward to go");
-                            HistoryOutcome::Noop
-                        }
+                    .redo(branch.map(foldit_gui::WireId::into_inner))
+                    .map(|opt| if opt.is_some() { HistoryOutcome::HeadMoved } else {
+                        log::info!("Redo: nowhere forward to go");
+                        HistoryOutcome::Noop
                     })
             }
             HistoryCommand::LaneUndo { entity, target } => self
@@ -355,20 +348,20 @@ impl App {
                 .map(|_| HistoryOutcome::HeadMoved),
             HistoryCommand::LaneRedo { entity, branch } => self
                 .store
-                .lane_redo(entity, branch.map(|w| w.into_inner()))
+                .lane_redo(entity, branch.map(foldit_gui::WireId::into_inner))
                 .map(|_| HistoryOutcome::HeadMoved),
             HistoryCommand::PinCheckpoint { id } => self
                 .store
                 .pin_checkpoint(id.into_inner())
-                .map(|_| HistoryOutcome::Curated),
+                .map(|()| HistoryOutcome::Curated),
             HistoryCommand::UnpinCheckpoint { id } => self
                 .store
                 .unpin_checkpoint(id.into_inner())
-                .map(|_| HistoryOutcome::Curated),
+                .map(|()| HistoryOutcome::Curated),
             HistoryCommand::SetExcludeFromBest { id, exclude } => self
                 .store
                 .set_exclude_from_best(id.into_inner(), exclude)
-                .map(|_| HistoryOutcome::Curated),
+                .map(|()| HistoryOutcome::Curated),
             HistoryCommand::AbortAction => {
                 // "Discard the running action." Targeting a single edit
                 // no-ops once two edits run concurrently, so discard every
