@@ -44,17 +44,14 @@ pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 wgpu = "26"
 
-# Direct mmCIF parsing for atom names and residue info
-pdbtbx = "0.12"
-
 # Utilities
 log = "0.4"
 env_logger = "0.11"
-env_filter = "0.1"
+env_filter = "1.0"
 lazy_static = "1.4"
 
 # HTTP client for downloading from RCSB
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
 
 # Embedded webview
 wry = { version = "0.50", features = ["transparent"] }

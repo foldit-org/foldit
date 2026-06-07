@@ -37,6 +37,9 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
+# multiple_crate_versions is owned by cargo-deny (deny.toml [bans].skip), which
+# supports per-crate exceptions with reasons; clippy's version is all-or-nothing.
+multiple_crate_versions = "allow"
 # Restriction lints (opt-in, not covered by the groups above)
 unwrap_used = "warn"
 expect_used = "warn"

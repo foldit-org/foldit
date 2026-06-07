@@ -195,9 +195,7 @@ impl RunnerClient {
             .collect();
 
         let ctx = DispatchContext {
-            focused_entity_id: intent
-                .focused_entity_id
-                .map(|raw| molex::EntityId::from_raw(raw as u32)),
+            focused_entity_id: intent.focused_entity_id,
             selection,
         };
         let params: std::collections::HashMap<
@@ -241,7 +239,7 @@ impl RunnerClient {
 
     /// Pull-drag dispatch: take the core-shaped [`StreamStartIntent`],
     /// resolve the plugin id off the registry, build the `DispatchContext`
-    /// + start params internally, call `dispatch_start_stream`, insert the
+    /// and start params internally, call `dispatch_start_stream`, insert the
     /// `ActiveStreamEntry`, and return the dispatch `request_id` plus the
     /// resolved plugin id. Pull-drag is always a stream, so there is no
     /// Invoke branch. `App` keeps the `begin_action` history side-effect
@@ -250,7 +248,7 @@ impl RunnerClient {
     /// core-shaped [`DispatchError`] that names no orchestrator type.
     pub(crate) fn start_stream(
         &mut self,
-        intent: StreamStartIntent,
+        intent: &StreamStartIntent,
         entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
     ) -> Result<(u64, String), DispatchError> {
         use foldit_runner::orchestrator::{DispatchContext, ResidueRef};

@@ -53,9 +53,8 @@ impl History {
                 None => continue,
             };
             let lane_root = self.lanes[&eid].root;
-            let lane = match self.lanes.get_mut(&eid) {
-                Some(l) => l,
-                None => continue,
+            let Some(lane) = self.lanes.get_mut(&eid) else {
+                continue;
             };
             let snap_victims: Vec<EntitySnapshotId> = lane
                 .snapshots

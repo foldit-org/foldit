@@ -70,22 +70,20 @@ impl RenderProjector {
             return;
         }
         // entity_id -> Vec<(residue_index, score)>.
-        let mut per_entity: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
+        let mut per_entity: HashMap<molex::EntityId, Vec<(u32, f64)>> = HashMap::new();
         for (entity_id, residue_index, score) in weighted {
-            #[allow(clippy::cast_possible_truncation)]
-            let entity_id = entity_id as u32;
             per_entity
                 .entry(entity_id)
                 .or_default()
                 .push((residue_index, score));
         }
-        // Build (raw_entity_id -> residue_count) once from the head assembly
+        // Build (entity_id -> residue_count) once from the head assembly
         // so each entity's score vector is sized to its full residue count.
         let head = doc.head_assembly();
-        let residue_counts: HashMap<u32, usize> = head
+        let residue_counts: HashMap<molex::EntityId, usize> = head
             .entities()
             .iter()
-            .map(|e| (e.id().raw(), e.residue_count()))
+            .map(|e| (e.id(), e.residue_count()))
             .collect();
         for (entity_id, mut entries) in per_entity {
             let Some(&residue_count) = residue_counts.get(&entity_id) else {
@@ -104,14 +102,18 @@ impl RenderProjector {
                     scores[i] = val;
                 }
             }
-            engine.set_per_residue_scores(entity_id, Some(scores));
+            engine.set_per_residue_scores(entity_id.raw(), Some(scores));
         }
     }
 }
 
-/// Consume a drained `SessionUpdate` batch and drive viso. Two
-/// independent reactions, self-filtered by what the batch carries:
+/// Consume a drained `SessionUpdate` batch and drive viso. Five
+/// independent reactions, each self-filtered by what the batch carries:
 ///
+/// - A `SelectionChanged` sources the highlight from the authoritative
+///   `Session` selection.
+/// - A `FocusChanged` pushes viso's camera-framing mirror and reframes.
+/// - A `ViewOptionsChanged` applies the session-owned view options.
 /// - A geometry change (`Edit` / `HeadMoved` / preview add/discard)
 ///   republishes the current head assembly, picking `replace_assembly`
 ///   only when the entity-id *set* changed since the last publish (an id
@@ -120,9 +122,10 @@ impl RenderProjector {
 /// - A `ScoresChanged` re-derives the per-residue colors from the
 ///   session-owned breakdown ([`Self::project_scores`]).
 ///
-/// A batch may carry both (a first-op tick), one, or neither. No-ops when
-/// it carries neither (no wasted assembly builds, generation bumps, or
-/// color pushes).
+/// The selection / focus / view reactions run before the geometry /
+/// scores reactions. A batch may carry any subset. No-ops on a batch
+/// carrying none of them (e.g. a `BubbleChanged` / `PuzzleChanged`-only
+/// batch): no wasted assembly builds, generation bumps, or pushes.
 impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
     fn consume(
         &mut self,
@@ -130,6 +133,27 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         doc: &Session,
         engine: &mut viso::VisoEngine,
     ) {
+        // A selection change: source the highlight from the authoritative
+        // `Session` selection.
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::SelectionChanged))
+        {
+            engine.set_selection(doc.selection());
+        }
+        // A focus change: push viso's camera-framing mirror, then reframe.
+        if changes.iter().any(|c| matches!(c, SessionUpdate::FocusChanged)) {
+            engine.set_focus(doc.focus());
+            engine.fit_camera_to_focus();
+        }
+        // A view-options change: the session is the source of truth.
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
+        {
+            engine.set_options(doc.view_options().clone());
+        }
+
         // A geometry change republishes the head assembly; a `ScoresChanged`
         // re-derives the per-residue colors. A batch can carry both (a
         // first-op tick: topology republish + the score that arrived the same
@@ -181,13 +205,13 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
 /// viso-free. The `All` arm reports `doc.count()` (live committed +
 /// preview membership) rather than the metadata side table, which is
 /// never GC'd and so over-reports the live entity count.
-pub fn focus_description(doc: &Session, focus: &viso::Focus) -> String {
+pub fn focus_description(doc: &Session, focus: viso::Focus) -> String {
     match focus {
         viso::Focus::All => {
             let count = doc.count();
             format!("All ({count} entities)")
         }
         viso::Focus::Entity(id) => doc
-            .metadata(*id).map_or_else(|| format!("Entity {}", id.raw()), |m| m.name.clone()),
+            .metadata(id).map_or_else(|| format!("Entity {}", id.raw()), |m| m.name.clone()),
     }
 }

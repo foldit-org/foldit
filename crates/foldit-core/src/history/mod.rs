@@ -241,11 +241,6 @@ impl History {
         self.lanes.get(&entity)
     }
 
-    /// Iterate (`entity_id`, lane) pairs in canonical order.
-    pub fn lanes(&self) -> impl Iterator<Item = (EntityId, &EntityHistory)> {
-        self.lanes.iter().map(|(eid, lane)| (*eid, lane))
-    }
-
     /// Whether any action is in flight.
     #[must_use]
     pub fn has_pending(&self) -> bool {
@@ -478,12 +473,13 @@ impl History {
     /// attributed score, so the first one is a meaningful display value.
     #[must_use]
     pub fn current_composition_scores(&self) -> (Option<f64>, Option<f64>) {
-        if let Some(edit) = self.pending.values().next() {
-            (edit.raw_score, edit.game_score)
-        } else {
-            let head = &self.checkpoints.checkpoints[self.checkpoints.head];
-            (head.raw_score, head.game_score)
-        }
+        self.pending.values().next().map_or_else(
+            || {
+                let head = &self.checkpoints.checkpoints[self.checkpoints.head];
+                (head.raw_score, head.game_score)
+            },
+            |edit| (edit.raw_score, edit.game_score),
+        )
     }
 
     /// The RAW per-term breakdown of the current composition node: the
@@ -494,12 +490,13 @@ impl History {
     /// breakdown has been stamped on that node.
     #[must_use]
     pub fn current_composition_breakdown(&self) -> Option<&crate::scores::StoredBreakdown> {
-        if let Some(edit) = self.pending.values().next() {
-            edit.breakdown.as_ref()
-        } else {
-            let head = &self.checkpoints.checkpoints[self.checkpoints.head];
-            head.breakdown.as_ref()
-        }
+        self.pending.values().next().map_or_else(
+            || {
+                let head = &self.checkpoints.checkpoints[self.checkpoints.head];
+                head.breakdown.as_ref()
+            },
+            |edit| edit.breakdown.as_ref(),
+        )
     }
 
     /// The request ids of every open edit, in insertion order. Used by the
@@ -833,7 +830,7 @@ impl History {
                 kind,
                 label,
                 request_id,
-            } => self.do_begin(entities, kind, label, request_id)?,
+            } => self.do_begin(&entities, kind, &label, request_id)?,
             HistoryEvent::Commit { request_id } => self.do_commit(request_id)?,
             HistoryEvent::Abort { request_id } => self.do_abort(request_id)?,
             HistoryEvent::RecordEntityUpdate {

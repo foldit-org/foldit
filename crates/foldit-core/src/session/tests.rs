@@ -58,9 +58,11 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
             });
         }
         let end = atoms.len();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let label_seq_id = i as i32 + 1;
         residues.push(Residue {
             name: *b"ALA",
-            label_seq_id: i as i32 + 1,
+            label_seq_id,
             auth_seq_id: None,
             auth_comp_id: None,
             ins_code: None,

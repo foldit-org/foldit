@@ -113,7 +113,7 @@ impl RunnerClient {
     pub(crate) fn bootstrap_runner(
         &mut self,
         root: &std::path::Path,
-        initial_assembly: Vec<u8>,
+        initial_assembly: &[u8],
     ) -> Vec<(String, Vec<u8>)> {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
@@ -131,7 +131,7 @@ impl RunnerClient {
         log::info!("[RunnerClient] discovered plugins: {discovered:?}");
         let mut registered = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
-            match orch.ensure_plugin_registered(plugin_id, initial_assembly.clone())
+            match orch.ensure_plugin_registered(plugin_id, initial_assembly.to_owned())
             {
                 Ok(bytes) => {
                     log::info!("[RunnerClient] {plugin_id} plugin ready");

@@ -23,16 +23,16 @@ impl History {
 
     pub(super) fn do_begin(
         &mut self,
-        entities: SmallVec<[EntityId; 1]>,
+        entities: &SmallVec<[EntityId; 1]>,
         kind: CheckpointKind,
-        label: Cow<'static, str>,
+        label: &str,
         request_id: u64,
     ) -> Result<HistoryEventOutcome, HistoryError> {
         // The lane-not-busy precondition is enforced by the caller-side
         // pre-check; validate lane existence for every named entity up
         // front so a missing lane fails before any tentative is pushed
         // (the begin is all-or-nothing across its lanes).
-        for entity in &entities {
+        for entity in entities {
             if !self.lanes.contains_key(entity) {
                 return Err(HistoryError::UnknownEntity { entity: *entity });
             }
@@ -46,7 +46,7 @@ impl History {
         // is composed at commit from the committed head, so a committed node
         // never references another action's open tentative.
         let mut lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = SmallVec::new();
-        for entity in &entities {
+        for entity in entities {
             let lane = self.lanes.get_mut(entity).expect("checked above");
             let parent = lane.head;
             let payload = Arc::clone(&lane.snapshots[parent].payload);
@@ -54,7 +54,7 @@ impl History {
                 parent: Some(parent),
                 children: SmallVec::new(),
                 payload,
-                label: label.clone(),
+                label: Cow::Owned(label.to_owned()),
                 timestamp: now,
                 tentative: true,
                 checkpoint_refs: 0,
@@ -252,7 +252,7 @@ impl History {
         }
         lane.head = target;
 
-        self.push_lane_undo_checkpoint(entity, target)
+        Ok(self.push_lane_undo_checkpoint(entity, target))
     }
 
     pub(super) fn do_lane_redo(
@@ -279,7 +279,7 @@ impl History {
         }
         lane.head = target;
 
-        self.push_lane_undo_checkpoint(entity, target)
+        Ok(self.push_lane_undo_checkpoint(entity, target))
     }
 
     pub(super) fn do_undo(&mut self) -> Result<HistoryEventOutcome, HistoryError> {
@@ -383,7 +383,7 @@ impl History {
         &mut self,
         entity: EntityId,
         target: EntitySnapshotId,
-    ) -> Result<HistoryEventOutcome, HistoryError> {
+    ) -> HistoryEventOutcome {
         let now = SystemTime::now();
         let parent_ckpt_id = self.checkpoints.head;
         let parent_ckpt = &self.checkpoints.checkpoints[parent_ckpt_id];
@@ -410,7 +410,7 @@ impl History {
 
         self.inc_refs_for_checkpoint(new_ckpt);
 
-        Ok(HistoryEventOutcome::Pushed(new_ckpt))
+        HistoryEventOutcome::Pushed(new_ckpt)
     }
 
     /// Move the checkpoint head to `target` and mirror lane heads to

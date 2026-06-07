@@ -112,6 +112,12 @@ pub enum PuzzleError {
 
 // -- Load --
 
+/// Parse `<dir>/puzzle.toml` into a [`PuzzleLevel`].
+///
+/// # Errors
+///
+/// Returns [`PuzzleError::Io`] if the file cannot be read and
+/// [`PuzzleError::Parse`] if its contents are not valid puzzle TOML.
 pub fn load_puzzle(dir: &Path) -> Result<PuzzleLevel, PuzzleError> {
     let path = dir.join("puzzle.toml");
     let contents =
@@ -149,6 +155,8 @@ pub struct PuzzleData {
 /// - installed binaries (`<prefix>/bin/foldit` shipped with sibling
 ///   `<prefix>/bin/assets/`) → finds the sibling.
 ///
+/// # Errors
+///
 /// Returns an `Err` if no ancestor carries `assets/levels` - better
 /// than a CWD-dependent silent miss, since the caller can surface the
 /// problem with the actual exe path.
@@ -175,6 +183,11 @@ pub fn levels_root() -> Result<PathBuf, String> {
 /// [`levels_root`]) and resolves the structure from
 /// `[puzzle.structure]` - either via `path` (file reference) or
 /// `data` (base64-encoded inline `BinaryCIF`).
+///
+/// # Errors
+///
+/// Returns an `Err` if the levels root cannot be resolved, the puzzle
+/// TOML fails to parse, or the referenced structure cannot be loaded.
 pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     let puzzle_dir = levels_root()?.join(format!("{puzzle_id:010}"));
     let mut puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
@@ -245,6 +258,11 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
 }
 
 /// Load a file (PDB/CIF/BCIF) and return entities + name (file stem).
+///
+/// # Errors
+///
+/// Returns an `Err` if the file cannot be read or its contents cannot
+/// be parsed into entities.
 pub fn load_file_as_entities(
     path: &str,
 ) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
@@ -264,6 +282,11 @@ fn is_pdb_id(s: &str) -> bool {
 }
 
 /// Resolve a PDB ID or path to an actual file path, downloading if necessary.
+///
+/// # Errors
+///
+/// Returns an `Err` if `input` is neither an existing path nor a
+/// resolvable PDB ID, or if a required download fails.
 pub fn resolve_structure_path(input: &str) -> Result<String, String> {
     if Path::new(input).exists() {
         return Ok(input.to_owned());
@@ -332,6 +355,11 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
 }
 
 /// Load a structure file and return classified entities (auto-detecting format).
+///
+/// # Errors
+///
+/// Returns an `Err` if the file extension is unsupported or the file
+/// cannot be read or parsed.
 pub fn load_entities_from_file(
     path: &Path,
 ) -> Result<Vec<molex::MoleculeEntity>, String> {

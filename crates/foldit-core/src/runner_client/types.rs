@@ -21,9 +21,10 @@ pub struct DispatchIntent {
         molex::entity::molecule::id::EntityId,
         std::collections::BTreeSet<u32>,
     >,
-    /// The GUI-provided focus, a raw gui-wire entity id (not a runner
-    /// `EntityId`); wrapped into the runner id inside `dispatch_op`.
-    pub focused_entity_id: Option<u64>,
+    /// The focused entity, a molex `EntityId` sourced from the session
+    /// focus; passed straight through into the orchestrator's
+    /// `DispatchContext`, no wrapping needed.
+    pub focused_entity_id: Option<molex::EntityId>,
     /// The op to dispatch; resolved against the registry for Invoke vs Stream.
     pub op_id: String,
     /// Op params in gui-wire form, converted to the orchestrator's native

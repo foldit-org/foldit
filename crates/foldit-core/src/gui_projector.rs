@@ -38,9 +38,9 @@ impl GuiProjector {
     pub(crate) const fn new() -> Self {
         Self {
             history_sync: HistorySyncCursor {
-                last_topology: None,
-                last_live: None,
-                last_live_push_at: None,
+                topology: None,
+                live: None,
+                live_push_at: None,
             },
         }
     }
@@ -51,11 +51,11 @@ impl GuiProjector {
 pub struct HistorySyncCursor {
     /// Last `History::topology_version()` pushed. `None` forces an
     /// initial push (no `u64::MAX` sentinel).
-    pub(crate) last_topology: Option<u64>,
+    pub(crate) topology: Option<u64>,
     /// Last `History::live_version()` pushed; mid-action score updates only.
-    pub(crate) last_live: Option<u64>,
+    pub(crate) live: Option<u64>,
     /// Wall-clock of the last live push. Gates the 50ms (20Hz) debounce.
-    pub(crate) last_live_push_at: Option<Instant>,
+    pub(crate) live_push_at: Option<Instant>,
 }
 
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
@@ -176,14 +176,16 @@ fn current_bubble_payload(puzzle: Option<&Puzzle>) -> Option<TextBubblePayload> 
     puzzle.bubbles.as_ref()?.get(cursor).map(bubble_to_payload)
 }
 
-/// App-residue inputs the GUI projection needs beyond the `Session`,
-/// `VisoEngine`, and `RunnerClient`. Named explicitly (not `&App`) so the
-/// projection's real dependencies are visible at the call site rather than
-/// hidden behind a god-object borrow.
-pub struct GuiContext<'a> {
+/// The disjoint borrows the GUI projection reads. Named explicitly (not
+/// `&App`) so the projection's real dependencies are visible at the call
+/// site rather than hidden behind a god-object borrow.
+pub struct GuiSources<'a> {
+    pub session: &'a Session,
+    pub engine: &'a VisoEngine,
+    pub driver: &'a RunnerClient,
     /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
-    pub(crate) host: &'a dyn crate::HostResources,
+    pub host: &'a dyn crate::HostResources,
 }
 
 impl GuiProjector {
@@ -195,7 +197,7 @@ impl GuiProjector {
     /// selection, scene, history, puzzle, bubble, focus, view, loading), so
     /// it does not implement the two-input `SessionUpdateConsumer<Sink>`
     /// trait: that signature can express only one read input (`session`).
-    /// Naming the extra inputs here - `engine`, `driver`, `ctx` - is what
+    /// Naming the extra inputs here - the `GuiSources` borrows - is what
     /// keeps this honest and out of the `&App` fake-abstraction trap.
     ///
     /// Per-section dirtiness is derived entirely from the drained `updates`
@@ -209,41 +211,14 @@ impl GuiProjector {
         &mut self,
         updates: &[SessionUpdate],
         full_populate: bool,
-        session: &Session,
-        engine: &VisoEngine,
-        driver: &RunnerClient,
-        ctx: &GuiContext<'_>,
+        src: &GuiSources<'_>,
         frontend: &mut FrontendState,
     ) {
         // FPS and selected count change every frame - always push them.
-        frontend.set_fps(engine.fps());
-        frontend.ui.selected_count = session.selection_total_count();
+        frontend.set_fps(src.engine.fps());
+        frontend.ui.selected_count = src.session.selection_total_count();
 
-        let mut dirty = if full_populate {
-            DirtyFlags::all()
-        } else {
-            DirtyFlags::empty()
-        };
-        for update in updates {
-            dirty |= match update {
-                SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
-                SessionUpdate::Edit { tentative: true } => DirtyFlags::SCENE,
-                SessionUpdate::Edit { tentative: false } => {
-                    DirtyFlags::SCENE | DirtyFlags::ACTIONS
-                }
-                SessionUpdate::HeadMoved => {
-                    DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS
-                }
-                SessionUpdate::PreviewAdded | SessionUpdate::PreviewDiscarded => {
-                    DirtyFlags::SCENE | DirtyFlags::ACTIONS
-                }
-                SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
-                SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
-                SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
-                SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
-                SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
-            };
-        }
+        let dirty = compute_dirty(updates, full_populate);
 
         if dirty.is_empty() {
             return;
@@ -253,153 +228,215 @@ impl GuiProjector {
         // and then the score check below can latch victory in the same frame
         // without being overwritten.
         if dirty.contains(DirtyFlags::PUZZLE) {
-            // The puzzle panel's title is the standalone session title,
-            // which on a puzzle load equals the puzzle name.
-            match session.puzzle() {
-                Some(p) => frontend.set_puzzle_game(
-                    p.id,
-                    session.title().to_owned(),
-                    p.start_energy,
-                    p.completion_energy,
-                ),
-                // The free-form session has no objective; the title is the
-                // file-derived structure name.
-                None => frontend.set_puzzle_scientist(session.title().to_owned()),
-            }
-            // Bubble push on puzzle swap: render the cursor's current
-            // bubble (always index 0 right after a puzzle load, since the
-            // cursor starts there). Subsequent AdvanceBubble actions
-            // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
-            frontend.set_text_bubble(current_bubble_payload(session.puzzle()));
+            project_puzzle(src.session, frontend);
         }
         if dirty.contains(DirtyFlags::TEXT_BUBBLE) {
-            frontend.set_text_bubble(current_bubble_payload(session.puzzle()));
+            frontend.set_text_bubble(current_bubble_payload(src.session.puzzle()));
         }
         if dirty.contains(DirtyFlags::SCORE) {
-            if let Some(score) = session.display_score() {
-                frontend.set_score(score, false);
-                // Victory check: with a puzzle loaded, latch it complete the
-                // first time the score crosses the toml completion energy.
-                // Higher game score = better fold (game-score formula
-                // negates), so the comparison is `>=`.
-                if let Some(p) = session.puzzle() {
-                    if p.completion_energy > 0.0 && score >= p.completion_energy {
-                        frontend.mark_puzzle_complete();
-                    }
-                }
-            }
+            project_score(src.session, frontend);
         }
         if dirty.contains(DirtyFlags::ACTIONS) {
-            // Availability depends on focus + selection + lock state.
-            // Source focus from the authoritative session (same as the
-            // SCENE arm below), then hand the driver the selection + an
-            // entity-type closure.
-            let focus = match session.focus() {
-                Focus::Entity(eid) => Some(eid),
-                Focus::All => None,
-            };
-            let actions =
-                driver.actions_catalog(focus, session.selection(), |id| session.entity_type(id));
-            frontend.set_actions(actions);
+            project_actions(src.session, src.driver, frontend);
         }
         if dirty.contains(DirtyFlags::VIEW) {
-            // Source of truth is the session, not the engine: the engine is
-            // a follower that the tick re-applies on `ViewOptionsChanged`.
-            frontend.view.options =
-                serde_json::to_value(session.view_options()).unwrap_or_default();
-
-            // Schema is static - only set once
-            if frontend.view.options_schema.is_null() {
-                frontend.view.options_schema =
-                    serde_json::to_value(viso::options::VisoOptions::json_schema())
-                        .unwrap_or_default();
-            }
-
-            // The presets *list* is a disk/library read (App/host), not
-            // session state, so it stays here.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                frontend.view.available_presets = ctx
-                    .host
-                    .view_presets_dir()
-                    .map(viso::options::VisoOptions::list_presets)
-                    .unwrap_or_default();
-            }
-            frontend.view.active_preset = session.active_preset().map(String::from);
+            project_view(src.session, src.host, frontend);
         }
         if dirty.contains(DirtyFlags::SELECTION) {
-            let entries: Vec<foldit_gui::EntitySelection> = session
-                .selection()
-                .iter()
-                .map(|(eid, residues)| foldit_gui::EntitySelection {
-                    entity_id: eid.raw(),
-                    residues: residues.iter().copied().collect(),
-                })
-                .collect();
-            frontend.set_selection(entries);
+            project_selection(src.session, frontend);
         }
         if dirty.contains(DirtyFlags::SCENE) {
-            use molex::MoleculeType;
-            let mut scene_entities = Vec::new();
-            for (eid, _meta) in session.iter() {
-                let Some(entity) = session.entity(eid) else {
-                    continue;
-                };
-                let mol_str = match entity.molecule_type() {
-                    MoleculeType::Protein => "protein",
-                    MoleculeType::DNA => "dna",
-                    MoleculeType::RNA => "rna",
-                    MoleculeType::Ligand => "ligand",
-                    MoleculeType::Ion => "ion",
-                    MoleculeType::Water => "water",
-                    MoleculeType::Lipid => "lipid",
-                    MoleculeType::Cofactor => "cofactor",
-                    MoleculeType::Solvent => "solvent",
-                };
-                scene_entities.push(foldit_gui::SceneEntityInfo {
-                    entity_id: entity.id().raw(),
-                    label: entity.label(),
-                    molecule_type: mol_str.to_owned(),
-                    atom_count: entity.atom_count(),
-                    residue_count: entity.residue_count(),
-                });
-            }
-            frontend.set_scene_entities(scene_entities);
-            let focused = match session.focus() {
-                Focus::Entity(eid) => Some(eid.raw()),
-                Focus::All => None,
-            };
-            frontend.set_focused_entity(focused);
+            project_scene(src.session, frontend);
         }
 
-        // History push (two-channel):
-        //   - topology bump → full `HistorySection`
-        //   - live bump only → small `HistoryLiveUpdate` patch, with a
-        //     50ms (20Hz) debounce so per-cycle Rosetta scores don't
-        //     saturate the IPC. The final cycle on commit always lands
-        //     because committing also bumps `topology_version`.
-        let topology = session.history().topology_version();
-        let live = session.history().live_version();
-        let cursor = &mut self.history_sync;
-        let topology_changed = cursor.last_topology != Some(topology);
-        let live_changed = cursor.last_live != Some(live);
+        sync_history(&mut self.history_sync, src.session, frontend);
+    }
+}
 
-        if topology_changed {
-            frontend.set_history(project_history(session));
-            cursor.last_topology = Some(topology);
-            cursor.last_live = Some(live);
-            cursor.last_live_push_at = Some(Instant::now());
-        } else if live_changed {
-            let now = Instant::now();
-            let debounced = cursor
-                .last_live_push_at
-                .is_some_and(|t| now.duration_since(t).as_millis() < 50);
-            if !debounced {
-                if let Some(update) = project_history_live(session.history()) {
-                    frontend.set_history_live(update);
-                    cursor.last_live = Some(live);
-                    cursor.last_live_push_at = Some(now);
-                }
+/// Derive the dirty section set for this batch: the one-shot `full_populate`
+/// seed plus the per-variant fold mapping each `SessionUpdate` to the GUI
+/// sections it invalidates.
+fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
+    let mut dirty = if full_populate {
+        DirtyFlags::all()
+    } else {
+        DirtyFlags::empty()
+    };
+    for update in updates {
+        dirty |= match update {
+            SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
+            SessionUpdate::Edit { tentative: true } => DirtyFlags::SCENE,
+            SessionUpdate::Edit { tentative: false }
+            | SessionUpdate::PreviewAdded
+            | SessionUpdate::PreviewDiscarded
+            | SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
+            SessionUpdate::HeadMoved => DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS,
+            SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
+            SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
+            SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
+            SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
+        };
+    }
+    dirty
+}
+
+/// Project the `PUZZLE` section: the puzzle-panel title/objective plus the
+/// puzzle-swap bubble push.
+fn project_puzzle(session: &Session, frontend: &mut FrontendState) {
+    // The puzzle panel's title is the standalone session title,
+    // which on a puzzle load equals the puzzle name.
+    match session.puzzle() {
+        Some(p) => frontend.set_puzzle_game(
+            p.id,
+            session.title().to_owned(),
+            p.start_energy,
+            p.completion_energy,
+        ),
+        // The free-form session has no objective; the title is the
+        // file-derived structure name.
+        None => frontend.set_puzzle_scientist(session.title().to_owned()),
+    }
+    // Bubble push on puzzle swap: render the cursor's current
+    // bubble (always index 0 right after a puzzle load, since the
+    // cursor starts there). Subsequent AdvanceBubble actions
+    // re-push via the DirtyFlags::TEXT_BUBBLE arm below.
+    frontend.set_text_bubble(current_bubble_payload(session.puzzle()));
+}
+
+/// Project the `SCORE` section: the display score plus the puzzle victory
+/// latch.
+fn project_score(session: &Session, frontend: &mut FrontendState) {
+    if let Some(score) = session.display_score() {
+        frontend.set_score(score, false);
+        // Victory check: with a puzzle loaded, latch it complete the
+        // first time the score crosses the toml completion energy.
+        // Higher game score = better fold (game-score formula
+        // negates), so the comparison is `>=`.
+        if let Some(p) = session.puzzle() {
+            if p.completion_energy > 0.0 && score >= p.completion_energy {
+                frontend.mark_puzzle_complete();
+            }
+        }
+    }
+}
+
+/// Project the `ACTIONS` section: the focus- + selection-aware op catalog.
+fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut FrontendState) {
+    // Availability depends on focus + selection + lock state.
+    // Source focus from the authoritative session (same as the
+    // SCENE arm below), then hand the driver the selection + an
+    // entity-type closure.
+    let focus = match session.focus() {
+        Focus::Entity(eid) => Some(eid),
+        Focus::All => None,
+    };
+    let actions =
+        driver.actions_catalog(focus, session.selection(), |id| session.entity_type(id));
+    frontend.set_actions(actions);
+}
+
+/// Project the `VIEW` section: view options, the static schema, and the
+/// host-sourced preset list.
+fn project_view(session: &Session, host: &dyn crate::HostResources, frontend: &mut FrontendState) {
+    // Source of truth is the session, not the engine: the engine is
+    // a follower that the tick re-applies on `ViewOptionsChanged`.
+    frontend.view.options = serde_json::to_value(session.view_options()).unwrap_or_default();
+
+    // Schema is static - only set once
+    if frontend.view.options_schema.is_null() {
+        frontend.view.options_schema =
+            serde_json::to_value(viso::options::VisoOptions::json_schema()).unwrap_or_default();
+    }
+
+    // The presets *list* is a disk/library read (App/host), not
+    // session state, so it stays here.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        frontend.view.available_presets = host
+            .view_presets_dir()
+            .map(viso::options::VisoOptions::list_presets)
+            .unwrap_or_default();
+    }
+    frontend.view.active_preset = session.active_preset().map(String::from);
+}
+
+/// Project the `SELECTION` section: the per-entity residue selection.
+fn project_selection(session: &Session, frontend: &mut FrontendState) {
+    let entries: Vec<foldit_gui::EntitySelection> = session
+        .selection()
+        .iter()
+        .map(|(eid, residues)| foldit_gui::EntitySelection {
+            entity_id: eid.raw(),
+            residues: residues.iter().copied().collect(),
+        })
+        .collect();
+    frontend.set_selection(entries);
+}
+
+/// Project the `SCENE` section: the per-entity scene listing plus the
+/// focused-entity highlight.
+fn project_scene(session: &Session, frontend: &mut FrontendState) {
+    use molex::MoleculeType;
+    let mut scene_entities = Vec::new();
+    for (eid, _meta) in session.iter() {
+        let Some(entity) = session.entity(eid) else {
+            continue;
+        };
+        let mol_str = match entity.molecule_type() {
+            MoleculeType::Protein => "protein",
+            MoleculeType::DNA => "dna",
+            MoleculeType::RNA => "rna",
+            MoleculeType::Ligand => "ligand",
+            MoleculeType::Ion => "ion",
+            MoleculeType::Water => "water",
+            MoleculeType::Lipid => "lipid",
+            MoleculeType::Cofactor => "cofactor",
+            MoleculeType::Solvent => "solvent",
+        };
+        scene_entities.push(foldit_gui::SceneEntityInfo {
+            entity_id: entity.id().raw(),
+            label: entity.label(),
+            molecule_type: mol_str.to_owned(),
+            atom_count: entity.atom_count(),
+            residue_count: entity.residue_count(),
+        });
+    }
+    frontend.set_scene_entities(scene_entities);
+    let focused = match session.focus() {
+        Focus::Entity(eid) => Some(eid.raw()),
+        Focus::All => None,
+    };
+    frontend.set_focused_entity(focused);
+}
+
+/// Push the two-channel history update through the debounce cursor.
+///
+///   - topology bump → full `HistorySection`
+///   - live bump only → small `HistoryLiveUpdate` patch, with a
+///     50ms (20Hz) debounce so per-cycle Rosetta scores don't
+///     saturate the IPC. The final cycle on commit always lands
+///     because committing also bumps `topology_version`.
+fn sync_history(cursor: &mut HistorySyncCursor, session: &Session, frontend: &mut FrontendState) {
+    let topology = session.history().topology_version();
+    let live = session.history().live_version();
+    let topology_changed = cursor.topology != Some(topology);
+    let live_changed = cursor.live != Some(live);
+
+    if topology_changed {
+        frontend.set_history(project_history(session));
+        cursor.topology = Some(topology);
+        cursor.live = Some(live);
+        cursor.live_push_at = Some(Instant::now());
+    } else if live_changed {
+        let now = Instant::now();
+        let debounced = cursor
+            .live_push_at
+            .is_some_and(|t| now.duration_since(t).as_millis() < 50);
+        if !debounced {
+            if let Some(update) = project_history_live(session.history()) {
+                frontend.set_history_live(update);
+                cursor.live = Some(live);
+                cursor.live_push_at = Some(now);
             }
         }
     }

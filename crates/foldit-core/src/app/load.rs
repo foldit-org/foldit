@@ -15,7 +15,7 @@ impl App {
 
         // History-side commands take &mut self (no engine borrow held).
         if let AppCommand::History { cmd } = command {
-            self.run_history_command(cmd);
+            self.run_history_command(&cmd);
             return;
         }
 
@@ -33,7 +33,7 @@ impl App {
         // need to release the borrow before `self.tick(0.0)`, which is
         // how the render projector republishes after a load).
         match command {
-            AppCommand::LoadStructure { path } => self.handle_load_structure(path),
+            AppCommand::LoadStructure { path } => self.handle_load_structure(&path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
             AppCommand::SetViewOptions { options } => {
                 // The session is the source of truth: store the options and
@@ -94,13 +94,13 @@ impl App {
     /// metadata, then tick + fit the camera (tick is how the render
     /// projector republishes - the `SessionUpdate` stream carries `PreviewAdded`s and
     /// `HeadMoved`s from `load_entity_into_history`).
-    fn handle_load_structure(&mut self, path: String) {
+    fn handle_load_structure(&mut self, path: &str) {
         self.set_loading_state(LoadingState::LoadingSession);
-        match crate::puzzle::load_file_as_entities(&path) {
+        match crate::puzzle::load_file_as_entities(path) {
             Ok((entities, name)) => {
                 log::info!("Loaded structure via IPC: {name}");
                 for entity in entities {
-                    let _ = self.store.load_entity_into_history(entity, name.clone());
+                    let _ = self.store.load_entity_into_history(entity, &name);
                 }
                 // Free-form load: set the title and drop any puzzle
                 // objective + tutorial bubbles through the create seam.
@@ -199,14 +199,18 @@ impl App {
 
                 let ss_override = puzzle_data.ss_override;
                 let cam = &puzzle_data.camera;
+                // GPU camera is f32; puzzle coords are f64.
+                #[allow(clippy::cast_possible_truncation)]
                 let cam_eye =
                     glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
+                // GPU camera is f32; puzzle coords are f64.
+                #[allow(clippy::cast_possible_truncation)]
                 let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
                 let mut ids: Vec<EntityId> = Vec::new();
                 for entity in puzzle_data.entities {
                     if let Some(id) =
-                        self.store.load_entity_into_history(entity, title.clone())
+                        self.store.load_entity_into_history(entity, &title)
                     {
                         ids.push(id);
                     }
@@ -296,7 +300,7 @@ impl App {
         match crate::puzzle::load_file_as_entities(&path) {
             Ok((entities, name)) => {
                 for entity in entities {
-                    let _ = self.store.load_entity_into_history(entity, name.clone());
+                    let _ = self.store.load_entity_into_history(entity, &name);
                 }
                 // Free-form initial load: set the title and ensure the
                 // free-form (no-puzzle) session through the create seam. The
@@ -422,7 +426,7 @@ impl App {
 
         let registered = self
             .runner_client
-            .bootstrap_runner(&plugins_root, initial_assembly);
+            .bootstrap_runner(&plugins_root, &initial_assembly);
 
         // Apply each registered plugin's post-Init normalization into the
         // store. Only rosetta returns a non-empty normalized assembly

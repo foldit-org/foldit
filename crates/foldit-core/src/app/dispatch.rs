@@ -102,10 +102,10 @@ impl App {
             // (which the hotkey paths leave as None). This makes every
             // dispatch path -- button or hotkey -- carry the live focus to
             // the worker, paired with the authoritative `App.selection`
-            // read into the intent below. Raw gui-wire id (u32 widened to
-            // u64), the shape `DispatchIntent` expects.
-            let focused_entity_id: Option<u64> = match self.store.focus() {
-                Focus::Entity(eid) => Some(u64::from(eid.raw())),
+            // read into the intent below. The molex `EntityId` passes
+            // straight through, the shape `DispatchIntent` expects.
+            let focused_entity_id: Option<molex::EntityId> = match self.store.focus() {
+                Focus::Entity(eid) => Some(eid),
                 Focus::All => None,
             };
 
@@ -321,11 +321,11 @@ impl App {
     /// running indicator is the natural feedback). The match is
     /// exhaustive: adding a variant without a handler is a
     /// compile error.
-    pub(in crate::app) fn run_history_command(&mut self, cmd: HistoryCommand) {
+    pub(in crate::app) fn run_history_command(&mut self, cmd: &HistoryCommand) {
         if self.engine.is_none() {
             return;
         }
-        let result: Result<HistoryOutcome, SessionError> = match cmd {
+        let result: Result<HistoryOutcome, SessionError> = match *cmd {
             HistoryCommand::JumpCheckpoint { id } => self
                 .store
                 .jump_checkpoint(id.into_inner())

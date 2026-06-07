@@ -99,10 +99,17 @@ impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreRep
                 .per_residue_terms
                 .into_iter()
                 .filter_map(|rts| {
-                    rts.residue.map(|rref| crate::scores::ResidueTermScores {
-                        entity_id: rref.entity_id,
-                        residue_index: rref.residue_index,
-                        terms: rts.terms,
+                    rts.residue.map(|rref| {
+                        // proto entity ids are uint64 on the wire;
+                        // molex::EntityId is u32.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let entity_id =
+                            molex::EntityId::from_raw(rref.entity_id as u32);
+                        crate::scores::ResidueTermScores {
+                            entity_id,
+                            residue_index: rref.residue_index,
+                            terms: rts.terms,
+                        }
                     })
                 })
                 .collect(),

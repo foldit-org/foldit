@@ -86,22 +86,10 @@ impl EntityHistory {
         self.snapshots.get(id)
     }
 
-    /// Iterate all snapshots on this lane.
-    pub fn iter(&self) -> impl Iterator<Item = (EntitySnapshotId, &EntitySnapshot)> {
-        self.snapshots.iter()
-    }
-
     /// Number of live snapshots on this lane.
     #[must_use]
     pub fn len(&self) -> usize {
         self.snapshots.len()
-    }
-
-    /// Whether this lane is empty (never true once seeded - root always
-    /// present until the lane is dropped).
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
     }
 }
 

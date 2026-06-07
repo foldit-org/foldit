@@ -361,7 +361,7 @@ impl Session {
     pub(crate) fn load_entity_into_history(
         &mut self,
         entity: molex::MoleculeEntity,
-        name: String,
+        name: &str,
     ) -> Option<EntityId> {
         use molex::MoleculeType;
         let mol_type = entity.molecule_type();
@@ -370,7 +370,7 @@ impl Session {
             MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent
         );
         let zero_residue = entity.residue_count() == 0;
-        let id = self.insert_preview(entity, name.clone(), EntityOrigin::Loaded);
+        let id = self.insert_preview(entity, name.to_owned(), EntityOrigin::Loaded);
         if is_ambient || zero_residue {
             // Leave it transient: visible in viso, absent from history.
             return Some(id);
@@ -597,7 +597,7 @@ impl Session {
     // something actually changes.
 
     /// Set the active view options (a manual edit). Clears the active preset
-    /// - manually-set options no longer match any named preset. Emits
+    /// (manually-set options no longer match any named preset). Emits
     /// [`SessionUpdate::ViewOptionsChanged`] when the options or the active
     /// preset actually change; an idempotent set emits nothing.
     pub fn set_view_options(&mut self, options: VisoOptions) {

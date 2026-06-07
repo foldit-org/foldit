@@ -18,6 +18,10 @@ use std::path::Path;
 pub trait HostResources {
     /// Read an arbitrary asset file by host-resolvable path. Used by the
     /// `ReadResourceFile` action handler and any other ad-hoc resource read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the path cannot be resolved or read.
     fn read_file(&self, path: &str) -> io::Result<Vec<u8>>;
 
     /// Directory containing viso view-preset TOML files. foldit-core passes

@@ -66,6 +66,12 @@ lint:
         if not primary:
             continue
         f = primary['file_name']
+        # Only report on root-owned crates. Patched path deps (viso, molex)
+        # get dragged in by the [patch] blocks and, being local sources, are
+        # not lint-capped, so rustc lints like dead_code leak through here.
+        # They own their own gates (their own workspaces); skip them.
+        if f.startswith('crates/') and not f.split('/')[1].startswith('foldit-'):
+            continue
         key = (f, primary.get('line_start'), rule)
         if key in seen:
             continue

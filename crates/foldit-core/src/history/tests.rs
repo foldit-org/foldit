@@ -822,7 +822,7 @@ proptest! {
                     r
                 }
                 Op::Abort => {
-                    let r = h.abort_action(rid.unwrap_or(u64::MAX)).map(|()| ());
+                    let r = h.abort_action(rid.unwrap_or(u64::MAX));
                     if r.is_ok() {
                         rid = None;
                     }

@@ -34,7 +34,7 @@ pub struct ScoreReport {
 /// [`ScoreReport::term_names`].
 #[derive(Debug, Clone)]
 pub struct ResidueTermScores {
-    pub entity_id: u64,
+    pub entity_id: molex::EntityId,
     pub residue_index: u32,
     pub terms: Vec<f32>,
 }
@@ -73,7 +73,7 @@ impl StoredBreakdown {
         &self,
         term_names: &[String],
         weights: &HashMap<String, f32>,
-    ) -> Vec<(u64, u32, f64)> {
+    ) -> Vec<(molex::EntityId, u32, f64)> {
         self.per_residue_terms
             .iter()
             .map(|rts| {
@@ -115,7 +115,10 @@ impl ScoreReport {
     /// retained as the value-identity oracle that test pins the stored form's
     /// output against, hence `#[allow(dead_code)]` for non-test builds.
     #[allow(dead_code)]
-    pub fn weighted_per_residue(&self, weights: &HashMap<String, f32>) -> Vec<(u64, u32, f64)> {
+    pub fn weighted_per_residue(
+        &self,
+        weights: &HashMap<String, f32>,
+    ) -> Vec<(molex::EntityId, u32, f64)> {
         self.per_residue_terms
             .iter()
             .map(|rts| {
@@ -219,7 +222,7 @@ mod tests {
             term_names: vec!["a".to_owned(), "b".to_owned()],
             whole_pose_terms: vec![10.0, 20.0],
             per_residue_terms: vec![ResidueTermScores {
-                entity_id: 7,
+                entity_id: molex::EntityId::from_raw(7),
                 residue_index: 3,
                 terms: vec![4.0, 6.0],
             }],
@@ -230,7 +233,7 @@ mod tests {
         let per_residue = report.weighted_per_residue(&weights);
         assert_eq!(per_residue.len(), 1);
         let (entity_id, residue_index, score) = per_residue[0];
-        assert_eq!(entity_id, 7);
+        assert_eq!(entity_id, molex::EntityId::from_raw(7));
         assert_eq!(residue_index, 3);
         assert_eq!(score, 8.0);
     }
@@ -258,12 +261,12 @@ mod tests {
             whole_pose_terms: vec![1.0, 2.0, 3.0],
             per_residue_terms: vec![
                 ResidueTermScores {
-                    entity_id: 0,
+                    entity_id: molex::EntityId::from_raw(0),
                     residue_index: 5,
                     terms: vec![1.5, -2.0, 0.25],
                 },
                 ResidueTermScores {
-                    entity_id: 2,
+                    entity_id: molex::EntityId::from_raw(2),
                     residue_index: 11,
                     terms: vec![-3.0, 4.0, 8.0],
                 },
@@ -284,7 +287,7 @@ mod tests {
     #[test]
     fn missing_weight_is_zero() {
         let weights: HashMap<String, f32> =
-            [("a".to_owned(), 2.0_f32)].into_iter().collect();
+            std::iter::once(("a".to_owned(), 2.0_f32)).collect();
         let report = ScoreReport {
             term_names: vec!["a".to_owned(), "unknown".to_owned()],
             whole_pose_terms: vec![3.0, 100.0],

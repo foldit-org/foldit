@@ -1,13 +1,16 @@
 use molex::entity::molecule::id::EntityId;
-use viso::{classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus, VisoEngine};
+use viso::{
+    classify_click_for_selection, ClickEvent, ClickSelectionAction, Focus, KeyBindings, VisoEngine,
+};
 
 use crate::app::App;
 use crate::render_projector;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::runner_client::StreamStartIntent;
+use crate::runner_client::RunnerClient;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::runner_client::StreamStartIntent;
 use crate::session::Session;
 
 /// Advance focus one step through `focusable`, wrapping back to
@@ -113,7 +116,7 @@ impl App {
             self.store.set_focus(next);
             log::info!(
                 "Focus: {}",
-                render_projector::focus_description(&self.store, &self.store.focus())
+                render_projector::focus_description(&self.store, self.store.focus())
             );
             return true;
         }
@@ -152,6 +155,14 @@ impl App {
 
     // ── Viewport input (from webview) ──
 
+    /// Route a viewport input event from the webview into viso and the
+    /// pull-drag system.
+    ///
+    /// # Panics
+    ///
+    /// Panics if internal pull-drag state is inconsistent (a resolved
+    /// pull origin is expected to be present once a guard has confirmed
+    /// it); this indicates a logic bug, not bad input.
     pub fn handle_viewport_input(&mut self, input: foldit_gui::ViewportInput) {
         use foldit_gui::ViewportInput;
 
@@ -167,53 +178,8 @@ impl App {
         // where the cursor has since wandered. `mouse_pressed()` is viso's
         // own press bit, set by the preceding PointerDown.
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            match &input {
-                ViewportInput::PointerMove { x, y, .. }
-                    if self
-                        .engine
-                        .as_ref()
-                        .is_some_and(viso::VisoEngine::mouse_pressed)
-                        && !self.runner_client.has_active_pull_drag()
-                        && self.pending_pull_origin.is_some() =>
-                {
-                    // The pull intent was locked at button-down; the move
-                    // only supplies the drag endpoint. Take the route so
-                    // this gesture makes at most one start attempt - a
-                    // failed stream start falls through to camera for the
-                    // rest of the drag rather than retrying mid-gesture.
-                    let route = self
-                        .pending_pull_origin
-                        .take()
-                        .expect("guard guarantees Some");
-                    if self.begin_pull_drag_from_route(route, *x, *y) {
-                        // viso recorded the press; drop its mouse
-                        // state so the now-suppressed pointer-up
-                        // can't fire a stray click → selection.
-                        if let Some(engine) = self.engine.as_mut() {
-                            engine.release_mouse_state();
-                        }
-                        self.update_pull_drag(*x, *y);
-                        self.finalize_viewport_input();
-                        return;
-                    }
-                }
-                ViewportInput::PointerMove { x, y, .. }
-                    if self.runner_client.has_active_pull_drag() =>
-                {
-                    self.update_pull_drag(*x, *y);
-                    self.finalize_viewport_input();
-                    return;
-                }
-                ViewportInput::PointerUp { .. }
-                    if self.runner_client.has_active_pull_drag() =>
-                {
-                    self.end_pull_drag();
-                    self.finalize_viewport_input();
-                    return;
-                }
-                _ => {}
-            }
+        if self.try_pull_drag_interception(&input) {
+            return;
         }
 
         // Hotkey resolved in the `Key` arm below via a disjoint field
@@ -248,11 +214,8 @@ impl App {
                 shift,
                 ..
             } => {
-                let viso_button = match button {
-                    0 => viso::MouseButton::Left,
-                    2 => viso::MouseButton::Right,
-                    1 => viso::MouseButton::Middle,
-                    _ => return,
+                let Some(viso_button) = decode_mouse_button(button) else {
+                    return;
                 };
                 engine.feed_modifiers(shift);
                 engine.set_cursor_pos(x, y);
@@ -279,11 +242,8 @@ impl App {
                 shift,
                 ..
             } => {
-                let viso_button = match button {
-                    0 => viso::MouseButton::Left,
-                    2 => viso::MouseButton::Right,
-                    1 => viso::MouseButton::Middle,
-                    _ => return,
+                let Some(viso_button) = decode_mouse_button(button) else {
+                    return;
                 };
                 engine.feed_modifiers(shift);
                 engine.set_cursor_pos(x, y);
@@ -307,59 +267,18 @@ impl App {
             }
             ViewportInput::Key { code, pressed } => {
                 if pressed {
-                    // foldit-specific overrides land first; viso's
-                    // generic table picks up the rest.
-                    match code.as_str() {
-                        // Drop viso's R-binding for turntable auto-rotate;
-                        // we don't expose a rotate keybinding in foldit.
-                        "KeyR" => {}
-                        "KeyT" => {
-                            if engine.has_trajectory() {
-                                engine.toggle_trajectory();
-                            } else if let Some(path) = trajectory_path_from_args() {
-                                engine.load_trajectory(std::path::Path::new(&path));
-                            }
-                        }
-                        "Escape" => {
-                            // ESC cancels the in-flight action only; it
-                            // never clears the selection. Resolved in the
-                            // deferred block below, past the last `engine`
-                            // use. Mirrors the `handle_keybinding` ESC arm.
-                            pending_escape = true;
-                        }
-                        // Focus is foldit-core session state: mutate the
-                        // session here (disjoint `self.store` borrow). The
-                        // tick's `FocusChanged` reaction pushes viso's camera
-                        // mirror, reframes, and raises the projector dirty.
-                        "Tab" => {
-                            let next =
-                                next_focus(self.store.focus(), &engine.focusable_entities());
-                            self.store.set_focus(next);
-                        }
-                        "Backquote" => {
-                            self.store.set_focus(Focus::All);
-                        }
-                        other => {
-                            if !self.keybindings.dispatch(other, engine) {
-                                // No viso built-in claims this key - resolve it
-                                // against the plugin hotkey catalog. Disjoint
-                                // field borrow (`self.runner_client`) so it
-                                // coexists with the live `engine` borrow;
-                                // dispatch is deferred to after the match.
-                                #[cfg(not(target_arch = "wasm32"))]
-                                {
-                                    pending_hotkey_op = self
-                                        .runner_client
-                                        .hotkey_to_op(other)
-                                        .map(|(_plugin_id, op_id)| op_id);
-                                    if pending_hotkey_op.is_none() {
-                                        log::debug!("Unhandled key code from frontend: {other}");
-                                    }
-                                }
-                                #[cfg(target_arch = "wasm32")]
-                                log::debug!("Unhandled key code from frontend: {other}");
-                            }
-                        }
+                    let out = handle_viewport_key(
+                        &code,
+                        engine,
+                        &self.keybindings,
+                        &mut self.store,
+                        #[cfg(not(target_arch = "wasm32"))]
+                        &self.runner_client,
+                    );
+                    pending_escape = out.escape;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        pending_hotkey_op = out.hotkey_op;
                     }
                 }
             }
@@ -376,9 +295,29 @@ impl App {
         update_all_visualizations(engine, pull);
 
         // `engine`'s last use was above - `&mut self` is free again, so
-        // the deferred actions below can run. Apply any pending click (a
-        // left-release that classified as a click) to the selection; the
-        // empty-background case clears it, a residue hit selects.
+        // the deferred actions can run.
+        self.apply_deferred_viewport_actions(
+            pending_click,
+            pending_escape,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_hotkey_op,
+        );
+    }
+
+    /// Apply the viewport-input actions deferred past the `engine` borrow:
+    /// a classified click (a left-release that picked a residue / empty
+    /// background) updates the selection; ESC cancels the in-flight op;
+    /// and a resolved plugin hotkey op dispatches. Run after the trailing
+    /// visualization update so `&mut self` is free.
+    fn apply_deferred_viewport_actions(
+        &mut self,
+        pending_click: Option<ClickEvent>,
+        pending_escape: bool,
+        #[cfg(not(target_arch = "wasm32"))] pending_hotkey_op: Option<String>,
+    ) {
+        // Apply any pending click (a left-release that classified as a
+        // click) to the selection; the empty-background case clears it, a
+        // residue hit selects.
         if let Some(click) = pending_click {
             self.apply_click_to_selection(&click);
         }
@@ -405,6 +344,61 @@ impl App {
                 params: std::collections::HashMap::new(),
             });
         }
+    }
+
+    /// Pull-drag interception, run ahead of viso's regular input routing so
+    /// an active drag suppresses camera rotation/pan. Handles the three
+    /// gesture phases (pull-start on the first held move after a resolved
+    /// down-target, an active drag's move, and the active drag's release),
+    /// each finalizing the viewport and reporting the gesture consumed.
+    /// Returns `true` when it claimed the input (the caller then returns
+    /// early), `false` on fall-through to the regular routing below.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_pull_drag_interception(&mut self, input: &foldit_gui::ViewportInput) -> bool {
+        use foldit_gui::ViewportInput;
+        match input {
+            ViewportInput::PointerMove { x, y, .. }
+                if self
+                    .engine
+                    .as_ref()
+                    .is_some_and(viso::VisoEngine::mouse_pressed)
+                    && !self.runner_client.has_active_pull_drag()
+                    && self.pending_pull_origin.is_some() =>
+            {
+                // The pull intent was locked at button-down; the move
+                // only supplies the drag endpoint. Take the route so
+                // this gesture makes at most one start attempt - a
+                // failed stream start falls through to camera for the
+                // rest of the drag rather than retrying mid-gesture.
+                let route = self
+                    .pending_pull_origin
+                    .take()
+                    .expect("guard guarantees Some");
+                if self.begin_pull_drag_from_route(&route, *x, *y) {
+                    // viso recorded the press; drop its mouse
+                    // state so the now-suppressed pointer-up
+                    // can't fire a stray click → selection.
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.release_mouse_state();
+                    }
+                    self.update_pull_drag(*x, *y);
+                    self.finalize_viewport_input();
+                    return true;
+                }
+            }
+            ViewportInput::PointerMove { x, y, .. } if self.runner_client.has_active_pull_drag() => {
+                self.update_pull_drag(*x, *y);
+                self.finalize_viewport_input();
+                return true;
+            }
+            ViewportInput::PointerUp { .. } if self.runner_client.has_active_pull_drag() => {
+                self.end_pull_drag();
+                self.finalize_viewport_input();
+                return true;
+            }
+            _ => {}
+        }
+        false
     }
 
     /// Called after the pull-drag interception path. Mirrors the
@@ -464,11 +458,11 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn begin_pull_drag_from_route(
         &mut self,
-        route: crate::pull_drag::PullRoute,
+        route: &crate::pull_drag::PullRoute,
         x: f32,
         y: f32,
     ) -> bool {
-        let pull_info = crate::pull_drag::build_pull_info(&route, (x, y));
+        let pull_info = crate::pull_drag::build_pull_info(route, (x, y));
 
         let store = &self.store;
         let intent = StreamStartIntent {
@@ -478,7 +472,7 @@ impl App {
             atom_name: route.atom_name.clone(),
         };
         let (rid, plugin_id) =
-            match self.runner_client.start_stream(intent, |id| store.entity_type(id)) {
+            match self.runner_client.start_stream(&intent, |id| store.entity_type(id)) {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!(
@@ -565,13 +559,11 @@ impl App {
     // ── Native input (when webview is not ready) ──
 
     pub fn handle_native_mouse_input(&mut self, button: viso::MouseButton, pressed: bool) {
-        let pending_click = if let Some(engine) = &mut self.engine {
+        let pending_click = self.engine.as_mut().and_then(|engine| {
             let click = engine.feed_pointer_button(button, pressed);
             update_all_visualizations(engine, None);
             click
-        } else {
-            None
-        };
+        });
         if let Some(click) = pending_click {
             self.apply_click_to_selection(&click);
         }
@@ -677,6 +669,100 @@ impl App {
 pub(in crate::app) fn update_all_visualizations(engine: &mut VisoEngine, pull: Option<viso::PullInfo>) {
     engine.update_bands(vec![]);
     engine.update_pull(pull);
+}
+
+/// Decode a webview pointer-button index (DOM `MouseEvent.button`) into the
+/// viso button. `None` for any other index, which the caller treats as an
+/// ignored gesture.
+const fn decode_mouse_button(button: u8) -> Option<viso::MouseButton> {
+    match button {
+        0 => Some(viso::MouseButton::Left),
+        2 => Some(viso::MouseButton::Right),
+        1 => Some(viso::MouseButton::Middle),
+        _ => None,
+    }
+}
+
+/// Deferred results of a viewport `Key` press that must be applied after the
+/// `engine` borrow ends: ESC cancel and (native) a resolved plugin hotkey op.
+struct KeyOutcome {
+    escape: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    hotkey_op: Option<String>,
+}
+
+/// Handle a viewport `Key`-down `code`, mutating viso (`engine`) and the
+/// session focus (`store`) in place. Foldit-specific overrides land first;
+/// viso's generic table picks up the rest. A free function taking explicit
+/// disjoint borrows because the parent calls it while holding a live
+/// `&mut self.engine` borrow - a `&mut self` method would alias it. The
+/// deferred actions (ESC cancel, hotkey dispatch) come back in `KeyOutcome`
+/// since they need `&mut self` past the engine borrow.
+fn handle_viewport_key(
+    code: &str,
+    engine: &mut VisoEngine,
+    keybindings: &KeyBindings,
+    store: &mut Session,
+    #[cfg(not(target_arch = "wasm32"))] runner_client: &RunnerClient,
+) -> KeyOutcome {
+    let mut outcome = KeyOutcome {
+        escape: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        hotkey_op: None,
+    };
+    // foldit-specific overrides land first; viso's
+    // generic table picks up the rest.
+    match code {
+        // Drop viso's R-binding for turntable auto-rotate;
+        // we don't expose a rotate keybinding in foldit.
+        "KeyR" => {}
+        "KeyT" => {
+            if engine.has_trajectory() {
+                engine.toggle_trajectory();
+            } else if let Some(path) = trajectory_path_from_args() {
+                engine.load_trajectory(std::path::Path::new(&path));
+            }
+        }
+        "Escape" => {
+            // ESC cancels the in-flight action only; it
+            // never clears the selection. Resolved in the
+            // deferred block below, past the last `engine`
+            // use. Mirrors the `handle_keybinding` ESC arm.
+            outcome.escape = true;
+        }
+        // Focus is foldit-core session state: mutate the
+        // session here (disjoint `self.store` borrow). The
+        // tick's `FocusChanged` reaction pushes viso's camera
+        // mirror, reframes, and raises the projector dirty.
+        "Tab" => {
+            let next = next_focus(store.focus(), &engine.focusable_entities());
+            store.set_focus(next);
+        }
+        "Backquote" => {
+            store.set_focus(Focus::All);
+        }
+        other => {
+            if !keybindings.dispatch(other, engine) {
+                // No viso built-in claims this key - resolve it
+                // against the plugin hotkey catalog. Disjoint
+                // field borrow (`self.runner_client`) so it
+                // coexists with the live `engine` borrow;
+                // dispatch is deferred to after the match.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    outcome.hotkey_op = runner_client
+                        .hotkey_to_op(other)
+                        .map(|(_plugin_id, op_id)| op_id);
+                    if outcome.hotkey_op.is_none() {
+                        log::debug!("Unhandled key code from frontend: {other}");
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                log::debug!("Unhandled key code from frontend: {other}");
+            }
+        }
+    }
+    outcome
 }
 
 /// Get the trajectory path from command-line arguments. CLI/host

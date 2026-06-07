@@ -1,3 +1,18 @@
+[graph]
+# Scope duplicate-version analysis to the native desktop build (macOS, the
+# platform actually built/tested today). Without a target list, cargo-deny
+# unions ALL targets and counts Windows/Android/UEFI/Redox alternatives as
+# "duplicates" (~60 false positives). wasm32 is intentionally omitted: reqwest
+# uses the browser fetch API there (not native-tls), but cargo-deny can't model
+# that gating and would conjure a phantom native-tls->openssl->foreign-types
+# duplicate that compiles on no real target. When CI starts building another
+# platform (Windows/Linux), add its triple here and re-run `cargo deny check
+# bans` — it will enumerate exactly which new skips to curate.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
 [advisories]
 unmaintained = "workspace"
 ignore = [
@@ -33,8 +48,42 @@ ignore = true
 registries = []
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "warn"
+# Genuinely-stuck duplicate versions: a dep-of-a-dep pins an older copy we can't
+# move without a major upstream migration. New (accidental) duplicates outside
+# this list now FAIL the check. Re-audit an entry when its named anchor is bumped.
+skip = [
+    # macOS windowing: winit 0.30 (stable) is on the objc2-0.2 generation while
+    # wry 0.50 is on objc2-0.6; they can't share until winit ships a stable
+    # objc2-0.6 release (only 0.31-beta exists today).
+    { crate = "bitflags@1.3.2", reason = "core-graphics 0.23 <- winit 0.30 (objc2-0.2 gen); wry stack is objc2-0.6" },
+    { crate = "block2@0.5.1", reason = "winit 0.30 objc2-0.2 generation vs wry 0.50 objc2-0.6" },
+    { crate = "core-foundation@0.9.4", reason = "winit 0.30 / core-graphics 0.23 (objc2-0.2 gen); wry stack is objc2-0.6" },
+    { crate = "core-graphics-types@0.1.3", reason = "core-graphics 0.23 <- winit 0.30 (objc2-0.2 gen)" },
+    { crate = "objc2@0.5.2", reason = "winit 0.30 pins objc2-0.2; wry 0.50 on objc2-0.6, no release aligns them" },
+    { crate = "objc2-app-kit@0.2.2", reason = "winit 0.30 (objc2-0.2) vs wry 0.50 (objc2-0.6)" },
+    { crate = "objc2-foundation@0.2.2", reason = "winit 0.30 (objc2-0.2) vs wry 0.50 (objc2-0.6)" },
+    # viso graphics backend: wgpu/naga 26 pin these; latest wgpu is 29. Unifying
+    # needs a multi-major wgpu migration, out of scope for dependency dedup.
+    { crate = "hashbrown@0.15.5", reason = "wgpu/naga 26 pin hashbrown 0.15; rest of tree on 0.17. Clears with a wgpu 26->29 migration" },
+    { crate = "rustc-hash@1.1.0", reason = "wgpu-core/naga 26 pin rustc-hash 1.x; viso code already on 2.x. Clears with wgpu 26->29" },
+    # iceoryx2 0.4 (runner shared-memory IPC) is 5 versions behind latest 0.9 and
+    # anchors these via ouroboros + its bindgen 0.69 build-dep. A 0.4->0.9 bump is
+    # a major migration of a load-bearing dep, out of scope for dependency dedup.
+    { crate = "heck@0.4.1", reason = "ouroboros_macro <- iceoryx2-cal 0.4 (0.4 vs 0.9 latest); needs a major iceoryx2 bump" },
+    { crate = "itertools@0.12.1", reason = "bindgen 0.69 build-dep of iceoryx2-pal-posix 0.4; clears with an iceoryx2/bindgen bump" },
+    { crate = "rustix@0.38.44", reason = "which 4.4 <- bindgen 0.69 (iceoryx2 build-dep); tempfile uses rustix 1.x" },
+    # toml 0.8 anchored by iceoryx2 0.4 + our crates; toml 0.9 comes from cbindgen
+    # 0.29 (build-dep). Bumping our crates alone won't unify while iceoryx2 holds 0.8.
+    { crate = "toml@0.8.23", reason = "iceoryx2 0.4 + our crates on 0.8; cbindgen 0.29 build-dep on 0.9. Bumping ours alone won't unify" },
+    { crate = "serde_spanned@0.6.9", reason = "rides toml 0.8 (see toml)" },
+    { crate = "toml_datetime@0.6.11", reason = "rides toml 0.8 (see toml)" },
+    { crate = "winnow@0.7.15", reason = "toml_edit 0.22 / toml 0.8; the 0.9 stack uses winnow 1.x (see toml)" },
+    # getrandom mid-ecosystem-transition: 0.3 via rand 0.9 (viso + proptest), 0.4
+    # via tempfile. Converges upstream; no first-party action unifies it now.
+    { crate = "getrandom@0.3.4", reason = "0.3 via rand 0.9 (viso/proptest), 0.4 via tempfile; ecosystem transition, no first-party fix" },
+]
 
 [sources]
 unknown-registry = "deny"

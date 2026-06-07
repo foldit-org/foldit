@@ -16,7 +16,7 @@
 use foldit_gui::{FrontendState, LoadingState};
 use viso::{KeyBindings, VisoEngine};
 
-use crate::gui_projector::{GuiContext, GuiProjector};
+use crate::gui_projector::{GuiProjector, GuiSources};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointId;
 use crate::render_projector::RenderProjector;
@@ -37,11 +37,12 @@ use self::input::update_all_visualizations;
 pub use self::load::locate_plugins_root;
 
 /// Main application state - thin glue connecting the render engine,
-/// plugin driver, document, and the two projectors. `App` also owns the
-/// host-bound [`FrontendState`] mirror (so the load state-machine and
-/// the GUI projection both live on the same side of the host seam) and
-/// the `LoadingState` machine that drives the startup phases up to the
-/// first-score `InSession` flip.
+/// plugin driver, document, and the two projectors.
+///
+/// `App` also owns the host-bound [`FrontendState`] mirror (so the load
+/// state-machine and the GUI projection both live on the same side of
+/// the host seam) and the `LoadingState` machine that drives the startup
+/// phases up to the first-score `InSession` flip.
 pub struct App {
     pub(in crate::app) engine: Option<VisoEngine>,
     pub(in crate::app) keybindings: KeyBindings,
@@ -64,7 +65,7 @@ pub struct App {
     /// startup phases and flips it to `InSession` at the first-score gate
     /// (`awaiting_initial_score` + `has_initial_score()`). Mirrored
     /// verbatim to the frontend via [`FrontendState::set_app_state`].
-    pub(in crate::app) app_state: LoadingState,
+    pub(in crate::app) lifecycle: LoadingState,
     /// Set after `load_initial_structure` returns; cleared in `tick`
     /// once the first plugin score lands. Mirrors the desktop runner's
     /// old field.
@@ -120,7 +121,7 @@ impl App {
             gui_projector: GuiProjector::new(),
             host,
             frontend: FrontendState::new(),
-            app_state: LoadingState::Initializing,
+            lifecycle: LoadingState::Initializing,
             awaiting_initial_score: false,
             needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -142,8 +143,8 @@ impl App {
     /// the value actually changes, so re-setting the same phase is a
     /// no-op on the wire.
     pub(in crate::app) fn set_loading_state(&mut self, state: LoadingState) {
-        self.app_state = state;
-        self.frontend.set_app_state(self.app_state);
+        self.lifecycle = state;
+        self.frontend.set_app_state(self.lifecycle);
     }
 
     // ── Engine-only delegation ──
@@ -193,7 +194,7 @@ impl App {
 
     // The GUI projection now lives on `GuiProjector` as the third
     // `SessionUpdate` consumer; see `impl GuiProjector` below. The tick
-    // builds a `GuiContext` and calls `gui_projector.consume(...)` at the
+    // builds a `GuiSources` and calls `gui_projector.consume(...)` at the
     // end-of-tick route. There is no `populate_frontend` method anymore:
     // its body moved verbatim onto the consumer, reading named inputs
     // instead of `&mut self`.
@@ -264,9 +265,8 @@ impl App {
         // mutation, so it is excluded here: republishing geometry on such a
         // reply is wasted work (and forces a spurious full rebuild on a
         // topology tick), and re-querying scores in response would loop. The
-        // render projector still runs on a score-only batch (see
-        // `has_scores_changed` below) to re-derive colors, but it self-filters
-        // and does not republish geometry there.
+        // render projector still runs on a score-only batch to re-derive
+        // colors, but it self-filters and does not republish geometry there.
         let render_changes = changes
             .iter()
             .filter(|c| {
@@ -281,54 +281,6 @@ impl App {
                 )
             })
             .count();
-        // Whether this tick's batch carries a score change. A steady-state
-        // rescore reply is a score-only batch (no geometry change), so it
-        // does not count toward `render_changes`; the render projector still
-        // needs to run on it to re-derive the per-residue colors from the
-        // session-owned breakdown. The projector self-filters: a score-only
-        // batch pushes colors without republishing geometry.
-        let has_scores_changed = changes
-            .iter()
-            .any(|c| matches!(c, SessionUpdate::ScoresChanged));
-        // A selection change is not broadcast to plugins and does not
-        // republish geometry; the viso highlight push is the only side
-        // effect here. The matching GUI dirty (SELECTION + ACTIONS) is
-        // derived from this same batch by the GUI consumer below. Source
-        // the highlight from the authoritative `Session` selection (disjoint
-        // borrows: `&mut self.engine` + `&self.store`).
-        if changes
-            .iter()
-            .any(|c| matches!(c, SessionUpdate::SelectionChanged))
-        {
-            if let Some(engine) = self.engine.as_mut() {
-                engine.set_selection(self.store.selection());
-            }
-        }
-        // A focus change is likewise not broadcast and not a geometry
-        // change. Push viso's camera-framing mirror (no reframe), then drive
-        // the reframe on the host's cadence. The matching GUI dirty (SCENE +
-        // UI + ACTIONS) is derived from this same batch by the GUI consumer.
-        if changes
-            .iter()
-            .any(|c| matches!(c, SessionUpdate::FocusChanged))
-        {
-            if let Some(engine) = self.engine.as_mut() {
-                engine.set_focus(self.store.focus());
-                engine.fit_camera_to_focus();
-            }
-        }
-        // A view-options change is not broadcast and not a geometry change.
-        // The session is the source of truth; apply the options to the engine
-        // here. The matching GUI dirty (VIEW) is derived from this same batch
-        // by the GUI consumer below.
-        if changes
-            .iter()
-            .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
-        {
-            if let Some(engine) = self.engine.as_mut() {
-                engine.set_options(self.store.view_options().clone());
-            }
-        }
         // BubbleChanged / PuzzleChanged have no viso side effect; their GUI
         // dirty (TEXT_BUBBLE / PUZZLE) is derived from the batch by the GUI
         // consumer below, so there are no tick arms for them anymore.
@@ -339,10 +291,12 @@ impl App {
                 self.runner_projector
                     .consume(&changes, &self.store, orch);
             }
-            if render_changes > 0 || has_scores_changed {
-                if let Some(engine) = self.engine.as_mut() {
-                    self.render_projector.consume(&changes, &self.store, engine);
-                }
+            // The render projector self-filters all five of its reactions
+            // (selection / focus / view-options / geometry / scores), so it
+            // runs on any non-empty batch and no-ops internally on one that
+            // carries none of them.
+            if let Some(engine) = self.engine.as_mut() {
+                self.render_projector.consume(&changes, &self.store, engine);
             }
         }
 
@@ -400,18 +354,14 @@ impl App {
         if let Some(engine) = self.engine.as_ref() {
             let full_populate = self.needs_full_populate;
             self.needs_full_populate = false;
-            let ctx = GuiContext {
+            let src = GuiSources {
+                session: &self.store,
+                engine,
+                driver: &self.runner_client,
                 host: self.host.as_ref(),
             };
-            self.gui_projector.consume(
-                &changes,
-                full_populate,
-                &self.store,
-                engine,
-                &self.runner_client,
-                &ctx,
-                &mut self.frontend,
-            );
+            self.gui_projector
+                .consume(&changes, full_populate, &src, &mut self.frontend);
         }
     }
 }
@@ -453,6 +403,7 @@ impl foldit_gui::Dispatcher for App {
         use foldit_gui::RequestKind;
         match kind {
             RequestKind::ReadResourceFile => {
+                use base64::Engine;
                 let filepath = payload
                     .get("filepath")
                     .and_then(|v| v.as_str())
@@ -461,7 +412,6 @@ impl foldit_gui::Dispatcher for App {
                     .host
                     .read_file(filepath)
                     .map_err(|e| format!("read {filepath}: {e}"))?;
-                use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 Ok(serde_json::json!({ "encoding": "base64", "content": b64 }))
             }

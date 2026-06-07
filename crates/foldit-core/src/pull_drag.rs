@@ -95,9 +95,8 @@ pub fn route_atom_pick(
     let molex_id = store
         .ids()
         .find(|id| id.raw() == entity_id)?;
-    let protein = match store.entity(molex_id)? {
-        MoleculeEntity::Protein(p) => p,
-        _ => return None,
+    let MoleculeEntity::Protein(protein) = store.entity(molex_id)? else {
+        return None;
     };
     let atom = protein.atoms.get(atom_idx as usize)?;
     // Hydrogen reject - element field is the authoritative check; the
@@ -106,7 +105,9 @@ pub fn route_atom_pick(
     if atom.element == Element::H {
         return None;
     }
-    let atom_name = trim_atom_name(&atom.name);
+    let atom_name = trim_atom_name(atom.name);
+    // residue counts << u32::MAX.
+    #[allow(clippy::cast_possible_truncation)]
     let residue_in_entity = protein
         .residues
         .iter()
@@ -184,6 +185,7 @@ pub fn build_start_params(
     // ParamValue::Int is i32; rosetta-pose residue is 1-indexed
     // core::Size on the bridge side. `as i32` is safe for any
     // realistic foldit pose (max residues ≪ i32::MAX).
+    #[allow(clippy::cast_possible_wrap)]
     let pose_residue = (residue_in_entity as i32) + 1;
     let mut params = HashMap::new();
     let _ = params.insert(String::from("residue"), ParamValue::Int(pose_residue));
@@ -197,7 +199,7 @@ pub fn build_start_params(
 }
 
 /// Build the viso `PullInfo` spec used to drive the pull-geom capsule
-/// + arrow render. The atom reference must match what viso resolves
+/// and arrow render. The atom reference must match what viso resolves
 /// on its side; for protein picks the flat residue + PDB atom name
 /// land in viso's `ConstraintContext::resolve_atom_ref`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -218,7 +220,7 @@ pub fn build_pull_info(
 /// Trim the trailing zero / space padding off a PDB atom name. Atoms
 /// in molex carry the raw 4-byte buffer; the on-wire / classifier
 /// representation drops the padding.
-fn trim_atom_name(raw: &[u8; 4]) -> String {
+fn trim_atom_name(raw: [u8; 4]) -> String {
     let end = raw
         .iter()
         .position(|b| *b == 0 || *b == b' ')
