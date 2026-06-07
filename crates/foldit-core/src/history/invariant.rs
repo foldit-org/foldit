@@ -15,6 +15,9 @@ impl History {
     /// tail of every public DAG-bearing mutation under
     /// `debug_assertions`. CI runs debug builds → bug becomes a test
     /// failure on the *next* mutation, not three weeks later.
+    // Debug-only invariant checker; a violated invariant is a bug we
+    // want to halt on immediately, alongside the assert! macros below.
+    #[allow(clippy::panic, clippy::expect_used)]
     #[cfg(debug_assertions)]
     pub(super) fn assert_invariant(&self) {
         let head_ckpt = &self.checkpoints.checkpoints[self.checkpoints.head];

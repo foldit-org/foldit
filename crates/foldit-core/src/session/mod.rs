@@ -402,13 +402,17 @@ impl Session {
 
     /// Selected residues on a specific entity, or `None` if the entity
     /// has no selection. Sets are never empty by invariant, so
-    /// `Some(_)` always carries at least one residue.
+    /// `Some(_)` always carries at least one residue. Selection query
+    /// API; currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn selected_residues_on(&self, entity: EntityId) -> Option<&BTreeSet<u32>> {
         self.selection.get(&entity)
     }
 
-    /// Point-query: is `(entity, residue_index)` selected?
+    /// Point-query: is `(entity, residue_index)` selected? Selection
+    /// query API; currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn is_residue_selected(&self, entity: EntityId, residue_index: u32) -> bool {
         self.selection
@@ -418,11 +422,15 @@ impl Session {
 
     /// Iterator over the entities that currently have at least one
     /// residue selected. Order is `BTreeMap`'s natural key order.
+    /// Selection query API; currently only exercised by tests.
+    #[allow(dead_code)]
     pub fn selected_entities(&self) -> impl Iterator<Item = EntityId> + '_ {
         self.selection.keys().copied()
     }
 
-    /// True when no residue is selected on any entity.
+    /// True when no residue is selected on any entity. Selection query
+    /// API; currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn selection_is_empty(&self) -> bool {
         self.selection.is_empty()

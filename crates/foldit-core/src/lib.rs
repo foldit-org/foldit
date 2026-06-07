@@ -1,3 +1,7 @@
+// Test code leans on unwrap/expect/panic as the idiomatic assertion
+// shape; keep those lints to production paths only.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod app;
 pub(crate) mod session;
 pub(crate) mod gui_projector;

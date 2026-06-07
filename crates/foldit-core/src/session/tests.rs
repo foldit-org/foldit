@@ -1,3 +1,4 @@
+// foldit:allow-long-file: exhaustive session unit-test module; length is intrinsic.
 use super::*;
 use crate::history::CheckpointKind;
 use molex::entity::molecule::atom::Atom;

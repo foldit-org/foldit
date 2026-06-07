@@ -1090,7 +1090,6 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "toml 0.8.23",
- "triple_buffer",
  "viso",
  "web-time",
 ]
@@ -1099,31 +1098,16 @@ dependencies = [
 name = "foldit-desktop"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "base64",
- "bytemuck",
  "env_filter",
- "env_logger",
  "foldit-core",
  "foldit-gui",
  "foldit-runner",
- "glam",
- "indexmap 2.14.0",
- "lazy_static",
  "log",
- "molex",
  "pollster",
  "proptest",
- "reqwest",
- "serde",
  "serde_json",
- "slotmap",
- "smallvec",
  "tempfile",
- "tokio",
- "toml 0.8.23",
  "viso",
- "wgpu",
  "winit",
  "wry",
 ]
@@ -1187,18 +1171,13 @@ dependencies = [
 name = "foldit-web"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "console_error_panic_hook",
  "console_log",
  "foldit-core",
  "foldit-gui",
- "foldit-runner",
  "getrandom 0.3.4",
- "glam",
  "js-sys",
  "log",
- "molex",
- "serde",
  "serde_json",
  "viso",
  "wasm-bindgen",
@@ -4986,19 +4965,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
- "tokio-macros",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]

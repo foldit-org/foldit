@@ -209,6 +209,9 @@ mod tests {
     /// Weighting anchor: core multiplies the raw per-term energies by the
     /// weight set to produce the displayed whole-pose total and per-residue
     /// scalars.
+    // Exact comparison is correct: every input is exactly representable and
+    // the products/sums land with no rounding (25.0, 8.0).
+    #[allow(clippy::float_cmp)]
     #[test]
     fn weighting_matches_preweighted_fields() {
         let weights: HashMap<String, f32> =
@@ -284,6 +287,8 @@ mod tests {
     }
 
     /// An unweighted term (absent from the map) contributes nothing.
+    // Exact comparison is correct: 3*2.0 + 100*0.0 = 6.0 with no rounding.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn missing_weight_is_zero() {
         let weights: HashMap<String, f32> =

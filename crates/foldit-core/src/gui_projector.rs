@@ -58,6 +58,9 @@ pub struct HistorySyncCursor {
     pub(crate) live_push_at: Option<Instant>,
 }
 
+// `f64` is the wire type (JS reads it as a `number`). Epoch-millis stays
+// far below f64's 2^53 exact-integer ceiling, so no precision is lost.
+#[allow(clippy::cast_precision_loss)]
 fn timestamp_ms(t: web_time::SystemTime) -> f64 {
     t.duration_since(UNIX_EPOCH)
         .map_or(0.0, |d| d.as_millis() as f64)
@@ -108,6 +111,9 @@ const fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
 /// Project the backend `History` into the wire payload consumed by
 /// the `HistoryPanel`. Also called at-site from `App::run_history_command`
 /// for curation changes that don't bump `topology_version`.
+// `topology_version` is `f64` on the wire (JS `number`); the counter
+// increments per topology change and stays far below f64's 2^53 ceiling.
+#[allow(clippy::cast_precision_loss)]
 pub fn project_history(store: &Session) -> HistorySection {
     let history = store.history();
     let cps = history.checkpoints();

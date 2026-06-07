@@ -1,3 +1,4 @@
+// foldit:allow-long-file: exhaustive history unit-test module; length is intrinsic.
 use super::*;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::EntityIdAllocator;

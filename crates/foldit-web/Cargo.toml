@@ -21,20 +21,15 @@ workspace = true
 # Workspace crates
 foldit-core = { path = "../foldit-core" }
 foldit-gui = { path = "../foldit-gui" }
-foldit-runner = { path = "../foldit-runner", default-features = false }
 
 # Render engine. We deliberately do NOT enable viso's `web` feature here:
 # its `app::web::start` would conflict with our own canvas/rAF wiring.
 # `default-features = false` strips wry/winit/pollster.
 viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
-molex = { version = "0.4.4", features = ["serde", "specta"] }
 
 # Universal
 log = "0.4"
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-anyhow = "1"
 wgpu = "26"
 
 # ── Wasm-only deps ───────────────────────────────────────────────────────────

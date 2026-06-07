@@ -21,6 +21,8 @@ use super::{
 impl History {
     // ── record dispatch arms ──────────────────────────────────────────
 
+    // `expect` resolves a lane whose presence the caller established above.
+    #[allow(clippy::expect_used)]
     pub(super) fn do_begin(
         &mut self,
         entities: &SmallVec<[EntityId; 1]>,
@@ -81,6 +83,8 @@ impl History {
         Ok(HistoryEventOutcome::Began)
     }
 
+    // `expect` resolves each pending edit's lane, live by construction.
+    #[allow(clippy::expect_used)]
     pub(super) fn do_commit(
         &mut self,
         request_id: u64,
@@ -149,6 +153,9 @@ impl History {
         Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
 
+    // `expect`s resolve the pending edit's lane/snapshot, and a tentative
+    // snapshot always has a parent (it is never a lane root).
+    #[allow(clippy::expect_used)]
     pub(super) fn do_abort(
         &mut self,
         request_id: u64,
@@ -178,6 +185,8 @@ impl History {
         Ok(HistoryEventOutcome::Aborted)
     }
 
+    // `expect` resolves a lane whose presence the caller established above.
+    #[allow(clippy::expect_used)]
     pub(super) fn do_record_entity_update(
         &mut self,
         entity: EntityId,

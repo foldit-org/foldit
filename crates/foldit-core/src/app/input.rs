@@ -354,6 +354,9 @@ impl App {
     /// Returns `true` when it claimed the input (the caller then returns
     /// early), `false` on fall-through to the regular routing below.
     #[cfg(not(target_arch = "wasm32"))]
+    // The match-arm guard checks `pending_pull_origin.is_some()`, so the
+    // `take().expect()` below is provably `Some`.
+    #[allow(clippy::expect_used)]
     fn try_pull_drag_interception(&mut self, input: &foldit_gui::ViewportInput) -> bool {
         use foldit_gui::ViewportInput;
         match input {

@@ -74,7 +74,9 @@ impl EntityHistory {
         self.head
     }
 
-    /// The root snapshot id.
+    /// The root snapshot id. Lane query API; currently only exercised
+    /// by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn root(&self) -> EntitySnapshotId {
         self.root
@@ -86,7 +88,9 @@ impl EntityHistory {
         self.snapshots.get(id)
     }
 
-    /// Number of live snapshots on this lane.
+    /// Number of live snapshots on this lane. Lane query API; currently
+    /// only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.snapshots.len()
@@ -180,13 +184,17 @@ impl CheckpointGraph {
         self.pinned.contains(&id)
     }
 
-    /// Live checkpoint count.
+    /// Live checkpoint count. Graph query API; currently only exercised
+    /// by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.checkpoints.len()
     }
 
     /// Whether the graph holds zero checkpoints (impossible once seeded).
+    /// Graph query API; currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.checkpoints.is_empty()

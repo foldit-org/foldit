@@ -26,9 +26,6 @@ indexmap = "2"
 slotmap = "1.0"
 smallvec = "1"
 
-# Lock-free per-entity coord buffering
-triple_buffer = "8"
-
 # Utilities
 log = "0.4"
 # Drop-in `std::time::{SystemTime, Instant}` replacement that works on

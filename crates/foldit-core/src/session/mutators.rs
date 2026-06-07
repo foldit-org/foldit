@@ -448,7 +448,8 @@ impl Session {
     /// Mark a single residue on `entity` as deselected. Idempotent on
     /// already-empty state. If this empties the per-entity set, the
     /// entity entry is removed from the outer map (sets are never
-    /// left empty).
+    /// left empty). Currently only exercised by tests.
+    #[allow(dead_code)]
     pub fn deselect_residue(&mut self, entity: EntityId, residue_index: u32) {
         if let Some(set) = self.selection.get_mut(&entity) {
             set.remove(&residue_index);

@@ -24,10 +24,15 @@ pub enum CheckpointKind {
     /// Puzzle / file load - the root checkpoint.
     Loaded { source: PathBuf },
     /// Promoted a transient preview (e.g., a streamed ML result).
+    /// Preview-promotion substrate is built and tested; no production
+    /// path emits this kind yet.
+    #[allow(dead_code)]
     PromotedPreview { entity: EntityId },
     /// New entity added to the assembly.
     AddEntity { entity: EntityId, kind: MoleculeType },
-    /// Entity removed from the assembly.
+    /// Entity removed from the assembly. Built and tested; no production
+    /// path emits this kind yet.
+    #[allow(dead_code)]
     RemoveEntity { entity: EntityId },
     /// Per-entity revert to an older snapshot. Lane head moves to
     /// `target`; no new snapshot pushed; this checkpoint references the
@@ -66,9 +71,12 @@ impl CheckpointKind {
 /// Filter evaluation status for a checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FilterStatus {
-    /// Every filter passed.
+    /// Every filter passed. Set once filter evaluation is wired;
+    /// eviction already protects checkpoints in this state.
+    #[allow(dead_code)]
     Pass,
-    /// One or more filters failed.
+    /// One or more filters failed. Set once filter evaluation is wired.
+    #[allow(dead_code)]
     Fail(Vec<String>),
     /// Not yet evaluated.
     #[default]

@@ -27,40 +27,20 @@ foldit-runner = { path = "../foldit-runner" }
 
 # External deps
 viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
-molex = { version = "0.4.4", features = ["serde", "specta"] }
 
-anyhow = "1.0"
-
-# Async for background ML tasks
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-
-# Core
-glam = "0.30"
-indexmap = "2"
-slotmap = "1.0"
-smallvec = "1"
+# Windowing / event loop
 winit = "0.30"
 pollster = "0.4"
-bytemuck = { version = "1.21", features = ["derive"] }
-wgpu = "26"
 
 # Utilities
 log = "0.4"
-env_logger = "0.11"
 env_filter = "1.0"
-lazy_static = "1.4"
-
-# HTTP client for downloading from RCSB
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
 
 # Embedded webview
 wry = { version = "0.50", features = ["transparent"] }
 
 # Serialization for IPC and FrontendState
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-base64 = "0.22"
 
 [dev-dependencies]
 proptest = "1"

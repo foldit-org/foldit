@@ -49,7 +49,11 @@ use smallvec::SmallVec;
 // inverting the dependency direction (foldit → foldit_gui, never
 // the reverse). Re-exported through this module for ergonomic
 // `foldit::history::CheckpointId` use sites.
-pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId, WireId};
+pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId};
+// `WireId<K>` is the generic newtype underlying both ids above; re-exported
+// for symmetry and currently referenced only by tests.
+#[allow(unused_imports)]
+pub use foldit_gui::wire::WireId;
 
 mod types;
 pub use types::{CheckpointKind, FilterStatus};
@@ -109,6 +113,9 @@ enum HistoryEvent {
     Abort {
         request_id: u64,
     },
+    // Atomic non-streaming update path; built and tested, no production
+    // caller emits it yet (see `record_entity_update`).
+    #[allow(dead_code)]
     RecordEntityUpdate {
         entity: EntityId,
         kind: CheckpointKind,
@@ -241,7 +248,8 @@ impl History {
         self.lanes.get(&entity)
     }
 
-    /// Whether any action is in flight.
+    /// Whether any action is in flight. Currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -273,7 +281,8 @@ impl History {
         self.checkpoints.checkpoint(id)
     }
 
-    /// Lookup helper.
+    /// Lookup helper. Currently only exercised by tests.
+    #[allow(dead_code)]
     #[must_use]
     pub fn snapshot(&self, entity: EntityId, id: EntitySnapshotId) -> Option<&EntitySnapshot> {
         self.lanes.get(&entity)?.snapshot(id)
@@ -317,6 +326,9 @@ impl History {
     /// DAG topology and is not routed through `record`.
     ///
     /// Returns `NoOngoingAction` if `request_id` names no in-flight action.
+    // `expect`s resolve the pending edit and its lane/snapshot, all of
+    // which the early `request_id` check above proved live.
+    #[allow(clippy::expect_used)]
     pub fn action_update(
         &mut self,
         request_id: u64,
@@ -543,6 +555,8 @@ impl History {
     /// with `tentative = false` immediately. Refused while `Active`.
     /// Optional `raw_score` / `game_score` are stamped on the new
     /// checkpoint (caller carries both; projection picks at read).
+    /// Currently only exercised by tests.
+    #[allow(dead_code)]
     pub fn record_entity_update(
         &mut self,
         entity: EntityId,
@@ -703,6 +717,8 @@ impl History {
     /// checkpoint on top of root + `AddEntity`. Returns `true` when a value
     /// was actually written (so the caller can emit a score-changed signal
     /// only on a real change); `false` on the `(None, None)` no-op.
+    // The head checkpoint id is a maintained invariant; it always resolves.
+    #[allow(clippy::expect_used)]
     pub fn set_head_scores(
         &mut self,
         raw_score: Option<f64>,
@@ -752,6 +768,8 @@ impl History {
     /// A representative locked entity to name in an `EntityLocked`
     /// refusal: the first lane of the first pending edit. Callers gate on
     /// a non-empty pending map.
+    // Callers gate on a non-empty pending map, so the chain is always `Some`.
+    #[allow(clippy::expect_used)]
     fn first_pending_entity(&self) -> EntityId {
         self.pending
             .values()

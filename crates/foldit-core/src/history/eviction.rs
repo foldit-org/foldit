@@ -17,6 +17,8 @@ impl History {
     /// `head`. Called after a push mutation so the resulting history
     /// is a single linear chain - the redo path that existed before
     /// the push is now gone (classic editor-undo semantics).
+    // `expect`s here remove ids drawn from the lane's own iteration above.
+    #[allow(clippy::expect_used)]
     pub(super) fn prune_to_head_path(&mut self) {
         // Checkpoints: build the ancestor set, evict the rest.
         let head = self.checkpoints.head;
@@ -85,6 +87,8 @@ impl History {
 
     /// Evict checkpoints and snapshots until both budgets are satisfied.
     /// Called from `record` exactly once after each event.
+    // `expect`s here resolve ids picked by the eviction pass just above.
+    #[allow(clippy::expect_used)]
     pub(super) fn evict_to_budget(&mut self) {
         // Checkpoints: oldest-first; protected: root, head-path, pinned,
         // best, best_that_counts.
