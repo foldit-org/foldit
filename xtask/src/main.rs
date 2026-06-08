@@ -88,8 +88,19 @@ enum Commands {
     Bundle,
     /// Rebuild the molex Python extension from local source
     BuildMolex,
-    /// Build the GUI (pnpm build) and copy dist to assets/gui
+    /// Build the GUI (bun run build) and copy dist to assets/gui
     BuildGui,
+    /// Build the backend host artifacts (foldit-worker + python-host dylib)
+    /// into target/<profile>/ so they sit next to the foldit-desktop exe for
+    /// `cargo run`. A plain `cargo run` rebuilds neither (the worker is a
+    /// workspace-excluded bin; the dylib is dlopened, not linked), so an ABI
+    /// bump leaves a stale dylib next to a fresh worker and plugins fail to
+    /// load. Run this after pulling/changing runner code. Defaults to release.
+    BuildHost {
+        /// Build in debug mode (default: release)
+        #[arg(long)]
+        debug: bool,
+    },
     /// Build the foldit-web cdylib + run wasm-bindgen, emit JS glue to
     /// `crates/foldit-gui/js/public/pkg/`. Requires nightly toolchain.
     BuildWeb {
@@ -97,7 +108,7 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Build the web wasm artifact AND run `pnpm build:web` to produce a
+    /// Build the web wasm artifact AND run `bun run build:web` to produce a
     /// static `dist/` ready for deployment.
     BundleWeb,
 }
@@ -120,6 +131,7 @@ fn main() -> Result<()> {
         Commands::Bundle => bundle(),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
+        Commands::BuildHost { debug } => build_host(debug),
         Commands::BuildWeb { debug } => build_web(debug),
         Commands::BundleWeb => bundle_web(),
     }
@@ -551,6 +563,43 @@ fn copy_rosetta_plugin() -> Result<()> {
     Ok(())
 }
 
+/// Build the backend host artifacts into `target/<profile>/` so they sit
+/// next to the foldit-desktop exe that `cargo run` produces. `cargo run`
+/// builds only foldit-desktop and its linked deps; the worker is a separate
+/// (workspace-excluded) bin and the python-host is a cdylib that is dlopened
+/// rather than linked, so neither is rebuilt and both go stale silently. The
+/// classic symptom is a plugin ABI-version mismatch: a fresh worker (built
+/// from current source) dlopens a months-old python-host dylib reporting an
+/// older ABI, and plugin load fails. This refreshes both in one shot.
+fn build_host(debug: bool) -> Result<()> {
+    let profile_flag: &[&str] = if debug { &[] } else { &["--release"] };
+    let profile = if debug { "debug" } else { "release" };
+    println!("Building backend host artifacts ({profile}): foldit-worker + python-host...");
+
+    println!("  Building foldit-worker binary...");
+    let mut worker_args = vec!["build", "-p", "foldit-runner", "--bin", "foldit-worker"];
+    worker_args.extend_from_slice(profile_flag);
+    let status = Command::new("cargo").args(&worker_args).status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build foldit-worker");
+    }
+
+    println!("  Building foldit-python-host dylib...");
+    let mut host_args = vec!["build", "-p", "foldit-python-host"];
+    host_args.extend_from_slice(profile_flag);
+    let status = Command::new("cargo").args(&host_args).status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build foldit-python-host");
+    }
+
+    println!(
+        "✓ Host artifacts refreshed in target/{profile}/ (next to the \
+         `cargo run{}` foldit exe).",
+        if debug { "" } else { " --release" }
+    );
+    Ok(())
+}
+
 fn build_gui() -> Result<()> {
     let gui_src_dir = "crates/foldit-gui/js";
 
@@ -581,11 +630,16 @@ fn build_gui() -> Result<()> {
         anyhow::bail!("GUI dist directory not found at {dist_dir}");
     }
 
-    // Remove old assets/gui if it exists
+    // Remove old assets/gui if it exists. We deliberately do NOT
+    // create_dir_all(gui_dir) afterwards: `copy_dir` shells out to
+    // `cp -r dist assets/gui`, and `cp` nests the source *inside* the
+    // destination when the destination already exists (yielding
+    // assets/gui/dist/index.html, which the release webview can't find
+    // -- it serves assets/gui/index.html). With gui_dir absent, `cp -r`
+    // creates it as a copy of dist's contents, which is what we want.
     if Path::new(gui_dir).exists() {
         std::fs::remove_dir_all(gui_dir)?;
     }
-    std::fs::create_dir_all(gui_dir)?;
 
     copy_dir(&dist_dir, gui_dir)?;
     println!("GUI built and copied to {gui_dir}");
