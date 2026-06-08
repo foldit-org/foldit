@@ -162,7 +162,13 @@ pub enum OpEvent {
     /// Mid-stream tentative frame, keyed by the dispatch `request_id`.
     /// `App` applies it into the edit open under that id, or no-ops when
     /// none is open.
-    Update { token: u64, assembly: Assembly },
+    Update {
+        token: u64,
+        assembly: Assembly,
+        /// Warm score of this frame's geometry, absent for non-scoring
+        /// plugins.
+        score: Option<crate::scores::ScoreReport>,
+    },
     /// Terminal success. The runner's distinct `Final` and `Cancelled`
     /// terminals collapse here because core commits either identically.
     /// `token` is the dispatch `request_id`; `App` commits the edit open
@@ -171,6 +177,9 @@ pub enum OpEvent {
     Commit {
         token: Option<u64>,
         assembly: Assembly,
+        /// Warm score of this frame's geometry, absent for non-scoring
+        /// plugins.
+        score: Option<crate::scores::ScoreReport>,
     },
     /// Terminal failure. `token` is the dispatch `request_id`; `App`
     /// aborts the edit open under it (gated on `is_pending`), or accounts

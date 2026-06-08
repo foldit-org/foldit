@@ -42,6 +42,7 @@ impl RunnerClient {
                     latest_assembly,
                     progress,
                     stage,
+                    score,
                 } => {
                     let Some(assembly) = latest_assembly else {
                         log::trace!(
@@ -56,16 +57,19 @@ impl RunnerClient {
                     events.push(OpEvent::Update {
                         token: request_id,
                         assembly,
+                        score: score.map(Into::into),
                     });
                 }
                 PluginUpdate::Cancelled {
                     request_id,
                     assembly,
+                    score,
                 } => {
                     let entities = assembly.entities().len();
                     events.push(OpEvent::Commit {
                         token: Some(request_id),
                         assembly,
+                        score: score.map(Into::into),
                     });
                     // Free the table entry / dispatch lock / pull-drag
                     // regardless of whether an edit was open.
@@ -77,12 +81,14 @@ impl RunnerClient {
                 PluginUpdate::Final {
                     request_id,
                     assembly,
+                    score,
                     ..
                 } => {
                     let entities = assembly.entities().len();
                     events.push(OpEvent::Commit {
                         token: Some(request_id),
                         assembly,
+                        score: score.map(Into::into),
                     });
                     let _ = self.release_terminal_stream(request_id);
                     log::info!(

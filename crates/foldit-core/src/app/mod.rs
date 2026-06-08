@@ -62,17 +62,13 @@ pub struct App {
     /// the host via [`Self::serialize_frontend_dirty`].
     pub(in crate::app) frontend: FrontendState,
     /// App-lifetime lifecycle phase. `App` advances this through the
-    /// startup phases and flips it to `InSession` at the first-score gate
-    /// (`awaiting_initial_score` + `has_initial_score()`). Mirrored
-    /// verbatim to the frontend via [`FrontendState::set_app_state`].
+    /// startup phases and flips it to `InSession` the moment a structure
+    /// finishes loading (see [`Self::enter_session`]). Mirrored verbatim
+    /// to the frontend via [`FrontendState::set_app_state`].
     pub(in crate::app) lifecycle: LoadingState,
-    /// Set after `load_initial_structure` returns; cleared in `tick`
-    /// once the first plugin score lands. Mirrors the desktop runner's
-    /// old field.
-    pub(in crate::app) awaiting_initial_score: bool,
     /// One-shot "push every GUI section once" signal. Raised on session
-    /// birth (the Loading → `InSession` flip for the initial load, and at the
-    /// end of each reload path) and consumed + cleared by `tick` on the next
+    /// birth (the Loading → `InSession` flip on every load path) and
+    /// consumed + cleared by `tick` on the next
     /// GUI-consumer pass, which projects a full `DirtyFlags::all()` populate.
     /// The incremental sections during a load still flow through the ordinary
     /// `SessionUpdate` batch; this catches the sections no batch variant
@@ -122,7 +118,6 @@ impl App {
             host,
             frontend: FrontendState::new(),
             lifecycle: LoadingState::Initializing,
-            awaiting_initial_score: false,
             needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
@@ -131,11 +126,32 @@ impl App {
         }
     }
 
-    /// True once the Rosetta backend has delivered its first score
-    /// update for the current session. Read by [`Self::tick`] to gate
-    /// the Loading → `InSession` transition.
-    fn has_initial_score(&self) -> bool {
-        self.store.display_score().is_some()
+    /// Flip the App into the in-session lifecycle phase the moment a
+    /// structure finishes loading, on every load path.
+    ///
+    /// - `set_loading_state(InSession)` is the routing signal the
+    ///   frontend reads; flipping it here clears the loading screen.
+    /// - The score gauge is reset to "not scored yet" so a reload never
+    ///   displays the previous structure's score. `project_score` no-ops
+    ///   when `display_score()` is `None` (and never resets `score.invalid`),
+    ///   so this is the only place the stale value is cleared. When the load
+    ///   path stamped a head score (see `score_head_now`), the one-shot full
+    ///   populate below re-derives the gauge from that stamp on the next pass.
+    /// - The score title is read from the store here because `project_score`
+    ///   does not write the title.
+    /// - `needs_full_populate` reprojects every session section (score
+    ///   panel, title, history, scene, view, selection, actions) on the
+    ///   next GUI-consumer pass.
+    ///
+    /// The first per-residue score is stamped synchronously by the load path
+    /// (via `score_head_now`) *before* this flip, so the backbone is already
+    /// colored when the scene is first shown; this method no longer requests
+    /// it.
+    pub(in crate::app) fn enter_session(&mut self) {
+        self.set_loading_state(LoadingState::InSession);
+        self.frontend.set_score(0.0, true);
+        self.frontend.set_score_title(self.store.title().to_owned());
+        self.needs_full_populate = true;
     }
 
     /// Advance the App-lifetime phase and mirror it to the frontend
@@ -206,18 +222,19 @@ impl App {
     /// Order:
     /// 1. drain pending plugin updates (apply to `Session`; emits
     ///    `SessionUpdate`s through the funnel).
-    /// 2. apply this tick's score replies (blocking until the first score,
-    ///    async thereafter) so their `ScoresChanged` joins this tick's batch.
+    /// 2. apply this tick's async score replies so their `ScoresChanged`
+    ///    joins this tick's batch.
     /// 3. drain the `SessionUpdate` stream in one go.
     /// 4. route the batch: runner projector fan-out and render projector
     ///    publish + per-residue color re-derive (both no-op on empty batches;
     ///    the render projector also runs on a score-only batch).
-    /// 5. fire the next steady-state async rescore (gated on a geometry
-    ///    change; reply applies on a later tick's step 2).
+    /// 5. fire the next async rescore (gated on a geometry change; reply
+    ///    applies on a later tick's step 2). The FIRST score per session is
+    ///    stamped synchronously by the load path (`score_head_now`) before the
+    ///    scene is shown, not by this gate.
     /// 6. engine update (camera animation, mesh upload, etc.).
     /// 7. visualization overlay (bands / pull).
-    /// 8. `InSession` gate (one-shot, on first score; raises full populate).
-    /// 9. GUI consumer projects the batch (+ one-shot full populate) into
+    /// 8. GUI consumer projects the batch (+ one-shot full populate) into
     ///    the frontend so the next `serialize_frontend_dirty` carries the
     ///    latest snapshot.
     pub fn tick(&mut self, dt: f32) {
@@ -230,26 +247,16 @@ impl App {
         //    frame the score arrives (and, on the first score, the same frame
         //    the geometry publishes), instead of a tick late. The async
         //    request that triggers the NEXT rescore stays AFTER the drain
-        //    (it gates on this tick's geometry change). Captured here, before
-        //    applying, is whether a score already existed: the bootstrap
-        //    blocking poll flips that true mid-tick, and the async request
-        //    below must not also fire on the bootstrap tick.
-        #[cfg(not(target_arch = "wasm32"))]
-        let had_initial_score = self.has_initial_score();
+        //    (it gates on this tick's geometry change). Always async: the
+        //    session goes live before the first score now, so the render
+        //    thread must never block on the worker, including pre-first-score.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if had_initial_score {
-                // Steady state: apply whatever async whole-assembly and
-                // composition replies have arrived. Each stamps the session
-                // and emits `ScoresChanged`, drained just below.
-                self.poll_async_scores();
-                self.poll_composition_scores();
-            } else {
-                // No score yet: blocking poll each tick until the first one
-                // lands, so the InSession gate flips promptly. Brief, one-time
-                // per load.
-                self.poll_plugin_scores();
-            }
+            // Apply whatever async whole-assembly and composition replies have
+            // arrived (none until the first request below lands). Each stamps
+            // the session and emits `ScoresChanged`, drained just below.
+            self.poll_async_scores();
+            self.poll_composition_scores();
         }
 
         // 3-4. Drain the SessionUpdate stream once and route to both
@@ -300,20 +307,22 @@ impl App {
             }
         }
 
-        // 5. Fire the NEXT steady-state async rescore. Scores go stale only on
-        //    an assembly change (every mutation emits a SessionUpdate,
-        //    including those from non-scoring plugins), so this gates on this
-        //    tick's geometry change. Fire-and-forget against the worker's
-        //    already-built live pose (no per-frame pose rebuild); the reply
-        //    applies on a later tick's step-2 drain. With exactly one edit
-        //    open the live pose IS that edit's composition, so its reply
-        //    attributes to the edit; per-edit exactness for any other case
-        //    lands at commit via the commit-stamp. Skipped on the bootstrap
-        //    tick (the blocking poll in step 2 already covered it, and
-        //    `had_initial_score` was false then).
+        // 5. Fire the NEXT async rescore, the AT-REST rescore only. Scores go
+        //    stale only on an assembly change (every mutation emits a
+        //    SessionUpdate, including those from non-scoring plugins), so this
+        //    gates on this tick's geometry change. It fires only when no edit is
+        //    open: while a stream runs, each frame carries its own warm score and
+        //    stamps its edit directly (in `apply_backend_updates`), so this query
+        //    is not fired - it would only re-score a trailing frame. This is also
+        //    not the first score per session: the load path stamps that
+        //    synchronously (`score_head_now`) before the scene is shown, so the
+        //    backbone is colored on the first frame without waiting on this gate.
+        //    Fire-and-forget against the worker's already-built live pose (no
+        //    per-frame pose rebuild); `request_scores` coalesces, so one
+        //    outstanding query per provider is the most in flight.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if had_initial_score && render_changes > 0 {
+            if render_changes > 0 && !self.store.has_pending() {
                 self.request_scores();
             }
         }
@@ -328,24 +337,12 @@ impl App {
             update_all_visualizations(engine, pull);
         }
 
-        // 8. State-machine: flip into InSession the first time the plugin
-        //    score lands for the just-loaded session. This is the only
-        //    phase that routes the frontend to the in-puzzle UI.
-        if self.awaiting_initial_score && self.has_initial_score() {
-            self.set_loading_state(LoadingState::InSession);
-            self.awaiting_initial_score = false;
-            self.frontend.set_puzzle_loaded(true);
-            self.frontend.set_score_title(self.store.title().to_owned());
-            self.frontend
-                .set_puzzle_scientist(self.store.title().to_owned());
-            // Session birth: the GUI consumer below does a one-shot full
-            // populate (every section once) rather than flooding the
-            // transmit layer's dirty bits directly.
-            self.needs_full_populate = true;
-            log::info!("Initial plugin score received - app_state=InSession");
-        }
+        // The InSession flip is no longer a tick-stage: every load path calls
+        // `enter_session` at its done-loading point, so the frontend routes to
+        // the in-puzzle UI the moment loading completes, with the score
+        // flowing in asynchronously via steps 2 + 5.
 
-        // 9. Frontend projection: the GUI consumer derives its dirty set
+        // 8. Frontend projection: the GUI consumer derives its dirty set
         //    entirely from this tick's `changes` batch, plus the one-shot
         //    `needs_full_populate` signal (session birth). The signal is
         //    consumed (taken + cleared) only when the engine is present and

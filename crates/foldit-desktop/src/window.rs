@@ -225,6 +225,12 @@ impl AppRunner {
                 log::info!("Deferred structure load starting (webview_ready={})", self.webview_ready);
                 self.init_pending = false;
                 self.init_deadline = None;
+                // App-lifecycle warm-up: discover + warm plugins (spawn
+                // workers, load backends, NO session) once, before the
+                // first structure load creates the sessions. Runs on the
+                // same deferred gate (webview-ready / timeout / no-webview)
+                // so it never blocks the surface-creation path.
+                self.app.warm_plugins();
                 self.app.load_initial_structure();
                 log::info!("Structure loaded, awaiting initial score");
                 // Fall through to render the first frame

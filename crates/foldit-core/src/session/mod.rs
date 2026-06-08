@@ -327,6 +327,12 @@ impl Session {
         self.history.is_pending(request_id)
     }
 
+    /// Whether any edit is currently open.
+    #[must_use]
+    pub(crate) fn has_pending(&self) -> bool {
+        self.history.has_pending()
+    }
+
     // ── Score + composition reads ─────────────────────────────────────
 
     /// Read the `(raw, game)` score of the current composition node (first

@@ -43,20 +43,53 @@ impl App {
             // so no explicit raise is needed here.
             for event in events {
                 match event {
-                    OpEvent::Update { token, assembly } => {
-                        self.store.apply_streaming_assembly(&assembly, None, token);
+                    OpEvent::Update { token, assembly, score } => {
+                        let applied =
+                            self.store.apply_streaming_assembly(&assembly, None, token);
+                        // The frame carries the warm score of its own
+                        // geometry; stamp the open edit directly from it so
+                        // the displayed score stays coupled to the frame
+                        // instead of trailing it.
+                        if applied {
+                            if let Some(report) = score {
+                                let (raw, game, breakdown) =
+                                    self.prepare_score_stamp(report);
+                                self.store.set_edit_scores(
+                                    token,
+                                    Some(raw),
+                                    Some(game),
+                                    Some(breakdown),
+                                );
+                            }
+                        }
                     }
-                    OpEvent::Commit { token, assembly } => {
+                    OpEvent::Commit { token, assembly, score } => {
                         if let Some(token) = token {
+                            // Capture sole-open-ness while the edit is still
+                            // pending: the commit below clears it.
+                            let sole = self.store.sole_pending_request_id() == Some(token);
                             if self.store.apply_streaming_assembly(&assembly, None, token) {
-                                // Stream finished: commit the tentative so
-                                // the partial result becomes a permanent
-                                // undo entry, then score the committed
-                                // union so the new checkpoint gets a
-                                // correctly-attributed score even while a
-                                // peer edit is still open.
+                                // Stream finished: commit the tentative so the
+                                // partial result becomes a permanent undo
+                                // entry. A sole open edit's terminal frame
+                                // already carries this checkpoint's score, so
+                                // stamp it directly. With a peer edit still
+                                // open the live pose is a blend, so re-score
+                                // the committed union for correct attribution.
                                 match self.store.commit_action(token) {
-                                    Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+                                    Ok(ckpt) => match score.filter(|_| sole) {
+                                        Some(report) => {
+                                            let (raw, game, breakdown) =
+                                                self.prepare_score_stamp(report);
+                                            self.store.set_checkpoint_scores(
+                                                ckpt,
+                                                Some(raw),
+                                                Some(game),
+                                                Some(breakdown),
+                                            );
+                                        }
+                                        None => self.score_committed_checkpoint(ckpt),
+                                    },
                                     Err(e) => log::warn!("commit_action failed: {e}"),
                                 }
                                 // The edit's correlation id is now spent;

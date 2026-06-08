@@ -12,25 +12,6 @@ use super::RunnerClient;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
-    /// Blocking score round-trip: fan the `score` query across every
-    /// provider and return one report per provider that replied. Used
-    /// until the first score lands, where a synchronous result keeps the
-    /// load gate deterministic. Empty map when no orchestrator is wired up.
-    pub(crate) fn collect_scores_blocking(
-        &mut self,
-    ) -> std::collections::HashMap<String, crate::scores::ScoreReport> {
-        use foldit_runner::orchestrator::DispatchContext;
-        self.orchestrator
-            .as_mut()
-            .map(|orch| {
-                orch.collect_scores(&DispatchContext::default())
-                    .into_iter()
-                    .map(|(id, report)| (id, report.into()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// Fire a non-blocking `score` query at every provider with none
     /// already in flight. Replies land on stored receivers drained by
     /// [`Self::poll_score_results`]. No-op when no orchestrator exists.
@@ -55,6 +36,19 @@ impl RunnerClient {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Score the plugin's live session pose synchronously, BLOCKING until
+    /// the first `score` provider replies, and return the core-owned report.
+    /// Passes no bytes: the `score` query covers the current session pose.
+    /// `None` when no orchestrator / provider exists or the score fails.
+    /// Used at load time to stamp the first per-residue score before the
+    /// scene is shown; not for the per-frame path.
+    pub(crate) fn score_session_blocking(&mut self) -> Option<crate::scores::ScoreReport> {
+        self.orchestrator
+            .as_mut()
+            .and_then(foldit_runner::Orchestrator::score_session_blocking)
+            .map(Into::into)
     }
 
     /// Fire a composition-score request for `request_id`, carrying the

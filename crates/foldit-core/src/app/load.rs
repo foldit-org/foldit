@@ -8,6 +8,8 @@ use crate::session::Puzzle;
 use foldit_gui::DirtyFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runner_client::{DispatchIntent, OpOutcome};
 
 impl App {
     pub fn handle_app_command(&mut self, command: foldit_gui::AppCommand) {
@@ -123,12 +125,18 @@ impl App {
                 log::error!("Failed to load structure '{path}': {e}");
             }
         }
-        // A reload does not re-arm the Loading → InSession gate (that fires
-        // once, at the initial load), so signal a one-shot full populate
-        // here: the next tick's GUI consumer pushes every section, covering
-        // the puzzle-panel title and post-load score / catalog that no batch
-        // variant carries on a reload.
-        self.needs_full_populate = true;
+        // Stamp the first per-residue score synchronously, then drain its
+        // `ScoresChanged` through the render projector with a tick(0.0) so the
+        // backbone is already colored on the first rendered frame (no gray
+        // flash). `score_head_now` no-ops when there is no scoring plugin.
+        self.score_head_now();
+        self.tick(0.0);
+        // Loading is done: flip into InSession (clears the loading screen) and
+        // raise the one-shot full populate so the next tick's GUI consumer
+        // pushes every section, covering the puzzle-panel title and the
+        // not-scored-yet gauge / catalog that no batch variant carries on a
+        // free-form load.
+        self.enter_session();
     }
 
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
@@ -237,22 +245,22 @@ impl App {
                         }
                     }
                 }
-
-                // Rosetta session init via bridge plugin's `init` +
-                // auto-`update_assembly` fan-out lands when the
-                // orchestrator's ensure_plugin_registered path is
-                // invoked for "rosetta" with the new assembly.
-                let _ = puzzle_id;
             }
             Err(e) => log::error!("Failed to load puzzle {puzzle_id}: {e}"),
         }
+        // Stamp the first per-residue score synchronously, then drain its
+        // `ScoresChanged` through the render projector with a tick(0.0) so the
+        // backbone is already colored on the first rendered frame (no gray
+        // flash). `score_head_now` no-ops when there is no scoring plugin.
+        self.score_head_now();
+        self.tick(0.0);
         // PUZZLE rides the `start` emit drained by the inner `tick(0.0)`
         // above (its PUZZLE arm also pushes the current bubble), and the
-        // topology swap re-pushes the entity list via the batch. A reload
-        // does not re-arm the Loading → InSession gate, so signal a one-shot
-        // full populate to push the post-load score / catalog the batch does
-        // not carry on a reload.
-        self.needs_full_populate = true;
+        // topology swap re-pushes the entity list via the batch. Loading is
+        // done: flip into InSession (clears the loading screen) and raise the
+        // one-shot full populate to push the not-scored-yet gauge / catalog
+        // the batch does not carry on a reload.
+        self.enter_session();
     }
 
     // ── Tutorial-bubble cursor ──
@@ -319,69 +327,69 @@ impl App {
 
                 log::info!("Loaded structure: {name}");
 
-                // Install a fresh orchestrator BEFORE `bootstrap_plugins`
-                // so discovery + registration run against the handle the
-                // plugin driver owns. A fresh orchestrator restarts
-                // request ids at 1, so drop any stale composition targets
-                // before a new edit can reuse an old id.
-                self.runner_client.init_orchestrator();
-                #[cfg(not(target_arch = "wasm32"))]
-                self.score_targets.clear();
+                // Plugins were discovered + warmed at startup
+                // (`warm_plugins`), which installed the orchestrator the
+                // plugin driver owns. This file-load step only creates the
+                // sessions against the just-loaded structure.
                 self.bootstrap_plugins();
 
                 // Republish: bootstrap may have committed rosetta's
                 // post-Init normalized assembly (full-atom pose) into
                 // the store. The HeadMoved emitted by commit_action
-                // rides the `SessionUpdate` stream; tick(0.0) flushes it and polls
-                // scores, so has_initial_score() flips synchronously.
+                // rides the `SessionUpdate` stream; this tick(0.0) flushes it
+                // so the normalized geometry is published before the
+                // synchronous first score is stamped below.
                 self.tick(0.0);
             }
             Err(e) => {
                 log::error!("Failed to load structure '{path}': {e}");
-                self.runner_client.init_orchestrator();
-                #[cfg(not(target_arch = "wasm32"))]
-                self.score_targets.clear();
+                // No session was created (parse failed before
+                // `bootstrap_plugins`), so the startup-warmed orchestrator
+                // and its workers stay as-is; nothing to reset here.
             }
         }
 
-        // The now-populated state reaches the GUI via the one-shot full
-        // populate the Loading → InSession flip raises (VIEW for the engine
-        // options, ACTIONS for the catalog, SCORE for the initial number,
-        // SCENE for the entity list). The loading screen clears via the
-        // `InSession` flip itself, not a dirty flag.
-        //
-        // Arm the Loading → InSession gate. `tick` flips `app_state` the
-        // first frame `has_initial_score()` returns true (plugins may
-        // not have replied yet by the time we return here).
-        self.awaiting_initial_score = true;
+        // Stamp the first per-residue score synchronously against the
+        // post-bootstrap (normalized) head, then drain its `ScoresChanged`
+        // through the render projector with a tick(0.0) so the backbone is
+        // already colored on the first rendered frame (no gray flash).
+        // `score_head_now` no-ops when the load failed (no session) or there
+        // is no scoring plugin.
+        self.score_head_now();
+        self.tick(0.0);
+
+        // Loading is done: flip into InSession now. The now-populated state
+        // reaches the GUI via the one-shot full populate `enter_session`
+        // raises (VIEW for the engine options, ACTIONS for the catalog, SCORE
+        // for the now-stamped gauge, SCENE for the entity list). The loading
+        // screen clears via the `InSession` flip itself, not a dirty flag.
+        self.enter_session();
     }
 
-    /// Discover plugins under the runtime plugin root and bring up the
-    /// always-on Rosetta session with the just-loaded structure as the
-    /// initial assembly. Errors are logged and dropped: a missing plugin
-    /// dir / dylib should degrade the app to viewer-only, not crash the
-    /// load.
+    /// App-lifecycle warm-up (startup, before any structure loads):
+    /// install a fresh orchestrator, load the default score-term weights,
+    /// discover plugins under the runtime plugin root, and WARM each one
+    /// (spawn its worker → backend / database / scoring load, NO session,
+    /// NO pose). The session is created later, at file-load, by
+    /// `bootstrap_plugins`.
     ///
-    /// Caller must have installed a fresh orchestrator on the plugin
-    /// driver before calling; this method drives discovery + registration
-    /// through the driver and applies any per-plugin post-Init result.
-    ///
-    /// If Rosetta's Init returns a non-empty normalized assembly (full-atom
-    /// pose with hydrogens / terminal O / etc. added), it is committed as
-    /// a follow-up `PluginOp` checkpoint and republished so that
-    /// `scene.positions` is seeded at the normalized atom count before any
-    /// user action runs. Without this, the first user op would cross an
-    /// atom-set boundary mid-action and snap.
+    /// Errors are logged and dropped: a missing plugin dir / dylib should
+    /// degrade the app to viewer-only, not crash startup.
     #[cfg(not(target_arch = "wasm32"))]
-    fn bootstrap_plugins(&mut self) {
+    pub fn warm_plugins(&mut self) {
         self.set_loading_state(LoadingState::Initializing);
+
+        // A fresh orchestrator restarts request ids at 1, so drop any
+        // stale composition targets before a new edit can reuse an old id.
+        self.runner_client.init_orchestrator();
+        self.score_targets.clear();
 
         // Load the default score-term weights once, before the first score.
         // `reset` leaves `term_weights` untouched, so a single load here
-        // carries across reloads; the empty-check makes a re-bootstrap a
-        // no-op. On failure, log and proceed degraded (every weight then
-        // resolves to 0.0, so scores read 0 until a valid map lands -- the
-        // app stays up rather than crashing on a missing asset).
+        // carries across reloads; the empty-check makes a re-warm a no-op.
+        // On failure, log and proceed degraded (every weight then resolves
+        // to 0.0, so scores read 0 until a valid map lands -- the app stays
+        // up rather than crashing on a missing asset).
         if self.store.term_weights().is_empty() {
             match crate::scores::load_default_term_weights() {
                 Ok(weights) => {
@@ -402,14 +410,35 @@ impl App {
             );
             return;
         };
-        log::info!("[App] discovering plugins under {}", plugins_root.display());
+        log::info!("[App] discovering + warming plugins under {}", plugins_root.display());
+        self.runner_client.warm_runner(&plugins_root);
+    }
 
-        // Snapshot the initial assembly under an immutable store borrow so
-        // the plugin driver can hand it to `ensure_plugin_registered` for
-        // each plugin. Registration uses this one pre-normalization
-        // snapshot for every plugin, so applying rosetta's post-Init result
-        // afterward (below) does not change what later plugins register
-        // against.
+    /// Create plugin sessions for the just-loaded structure (file-load):
+    /// snapshot the loaded assembly and run each warm plugin's `Init`
+    /// against it, then apply any per-plugin post-Init result. The
+    /// plugins were already discovered + warmed at startup by
+    /// [`Self::warm_plugins`]; this is the session step that builds the
+    /// structure inside each plugin.
+    ///
+    /// If Rosetta's Init returns a non-empty normalized assembly (full-atom
+    /// pose with hydrogens / terminal O / etc. added), it is committed as
+    /// a follow-up `PluginOp` checkpoint and republished so that
+    /// `scene.positions` is seeded at the normalized atom count before any
+    /// user action runs. Without this, the first user op would cross an
+    /// atom-set boundary mid-action and snap.
+    ///
+    /// Errors are logged and dropped: a missing plugin dir / dylib should
+    /// degrade the app to viewer-only, not crash the load. Runs while the
+    /// `LoadingSession` phase set by the caller is in effect; it does not
+    /// re-enter `Initializing`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn bootstrap_plugins(&mut self) {
+        // Snapshot the loaded assembly under an immutable store borrow so
+        // the plugin driver can hand it to `init_plugin_session` for each
+        // plugin. Session-init uses this one pre-normalization snapshot for
+        // every plugin, so applying rosetta's post-Init result afterward
+        // (below) does not change what later plugins init against.
         let initial_assembly = {
             let head_before = self.store.head_assembly();
             match molex::ops::wire::serialize_assembly(&head_before) {
@@ -417,7 +446,7 @@ impl App {
                 Err(e) => {
                     log::warn!(
                         "[App] failed to serialize initial assembly for plugin \
-                         registration: {e:?}; plugins disabled"
+                         session init: {e:?}; plugins disabled"
                     );
                     return;
                 }
@@ -426,16 +455,61 @@ impl App {
 
         let registered = self
             .runner_client
-            .bootstrap_runner(&plugins_root, &initial_assembly);
+            .init_runner_sessions(&initial_assembly);
 
-        // Apply each registered plugin's post-Init normalization into the
-        // store. Only rosetta returns a non-empty normalized assembly
-        // today; the empty-bytes guard inside `apply_post_init` makes the
-        // call a no-op for plugins that ship none, so the loop stays
-        // generic and additional normalizing plugins drop in without
+        // Apply each registered plugin's Init reply into the store. A
+        // plugin whose Init returns a non-empty assembly is adopted here
+        // (its own op-id stamped on the checkpoint); a pose-less Init
+        // returns empty bytes, which the empty-bytes guard inside
+        // `apply_post_init` no-ops, as do non-structural plugins. The loop
+        // stays generic so additional adopting plugins drop in without
         // host-side wiring changes.
         for (plugin_id, post_init_bytes) in &registered {
-            self.apply_post_init(plugin_id, post_init_bytes);
+            self.apply_post_init(plugin_id, post_init_bytes, "_init_normalize", "Init");
+        }
+
+        // After Init, give each registered plugin that declares a load-time
+        // normalize op a chance to build and adopt its canonicalized
+        // structure. A pose-less Init returns an empty assembly (handled
+        // above as a no-op), so this dispatch is what actually seeds
+        // `scene.positions` at the normalized atom count before any user
+        // action runs. Whole-structure normalize: empty selection / no
+        // focus / no params (the bridge ignores selection for normalize).
+        // The dispatch's own request_id / scope are discarded -
+        // `apply_post_init` re-derives its target entities and mints its own
+        // checkpoint. The backend lock the dispatch takes is benign at
+        // bootstrap (rosetta is the only structural plugin then).
+        for (plugin_id, _) in &registered {
+            let Some(op_id) = self.runner_client.normalize_op_for(plugin_id) else {
+                continue;
+            };
+            let intent = DispatchIntent {
+                selection: std::collections::BTreeMap::new(),
+                focused_entity_id: None,
+                op_id: op_id.clone(),
+                params: std::collections::HashMap::new(),
+            };
+            let store = &self.store;
+            let outcome = self
+                .runner_client
+                .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
+            match outcome {
+                Ok(OpOutcome::Invoke { bytes, .. }) => {
+                    self.apply_post_init(plugin_id, &bytes, &op_id, "Init");
+                }
+                Ok(OpOutcome::Stream { .. }) => {
+                    log::warn!(
+                        "[App] {plugin_id} normalize op {op_id:?} dispatched as a \
+                         stream; expected a synchronous invoke. Skipping adoption."
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[App] {plugin_id} normalize op {op_id:?} dispatch failed: \
+                         {e:?}; skipping normalization apply"
+                    );
+                }
+            }
         }
     }
 
@@ -446,7 +520,13 @@ impl App {
     /// a single multi-lane edit, so a multi-chain session no longer drops
     /// every entity past the first.
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_post_init(&mut self, plugin_id: &str, post_init_bytes: &[u8]) {
+    fn apply_post_init(
+        &mut self,
+        plugin_id: &str,
+        post_init_bytes: &[u8],
+        op_id: &str,
+        display: &str,
+    ) {
         if post_init_bytes.is_empty() {
             log::warn!(
                 "[App] {plugin_id} post-Init returned no normalized assembly; \
@@ -484,8 +564,8 @@ impl App {
         }
         let kind = CheckpointKind::PluginOp {
             plugin_id: String::from(plugin_id),
-            op_id: String::from("_init_normalize"),
-            display: String::from("Init"),
+            op_id: String::from(op_id),
+            display: String::from(display),
         };
         // Host-internal action: no dispatch happened, so draw the edit's
         // request_id straight from the orchestrator (the single id
@@ -499,7 +579,7 @@ impl App {
         };
         if let Err(e) =
             self.store
-                .begin_action(target_entities, kind, String::from("Init"), request_id)
+                .begin_action(target_entities, kind, String::from(display), request_id)
         {
             log::warn!(
                 "[App] {plugin_id} post-Init begin_action failed: {e}; \

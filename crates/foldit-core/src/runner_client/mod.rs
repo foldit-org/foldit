@@ -63,11 +63,19 @@ impl RunnerClient {
         self.orchestrator.as_mut()
     }
 
-    /// Whether an orchestrator handle is installed. The score-poll gate uses
-    /// this to skip the round-trip before any structure has loaded, without
-    /// reaching into the orchestrator field.
-    pub(crate) const fn has_orchestrator(&self) -> bool {
-        self.orchestrator.is_some()
+    /// The op-id a plugin declares in its manifest as its load-time
+    /// normalize op, if any. Read off the discovered spawn descriptor via
+    /// the orchestrator. `None` when no orchestrator is installed, the
+    /// plugin isn't discovered, or its manifest omits `normalize_op`.
+    /// Bootstrap uses this to decide whether to invoke a canonicalizing op
+    /// after Init.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn normalize_op_for(&self, plugin_id: &str) -> Option<String> {
+        self.orchestrator
+            .as_ref()?
+            .plugin_descriptor(plugin_id)?
+            .normalize_op()
+            .map(String::from)
     }
 
     /// Resolve an op-id to its owning plugin id via the orchestrator's
@@ -99,24 +107,20 @@ impl RunnerClient {
     }
 }
 
-// ── Bootstrap discover + register ───────────────────────────────────
+// ── Two-phase bring-up: warm (startup) then session-init (file-load) ──
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
-    /// Discover plugins under `root` and register each against the given
-    /// initial assembly, bringing up its worker session. Returns the
-    /// `(plugin_id, post_init_bytes)` pair for every plugin that
-    /// registered successfully; the post-Init bytes carry each plugin's
-    /// normalized assembly for the caller to apply. Empty `Vec` when no
-    /// orchestrator is wired up or discovery fails - both degrade the app
-    /// to viewer-only rather than erroring.
-    pub(crate) fn bootstrap_runner(
-        &mut self,
-        root: &std::path::Path,
-        initial_assembly: &[u8],
-    ) -> Vec<(String, Vec<u8>)> {
+    /// Phase 1 (app startup): discover plugins under `root` and WARM each
+    /// one — spawn its worker, which loads the backend / database /
+    /// scoring with NO session and NO pose. This is the app-lifecycle
+    /// warm-up, independent of any structure; the session is created
+    /// later, at file-load, by [`Self::init_runner_sessions`]. Silently
+    /// degrades to viewer-only when no orchestrator is wired up or
+    /// discovery fails, rather than erroring.
+    pub(crate) fn warm_runner(&mut self, root: &std::path::Path) {
         let Some(orch) = self.orchestrator.as_mut() else {
-            return Vec::new();
+            return;
         };
         let discovered = match orch.discover_plugins(root) {
             Ok(ids) => ids,
@@ -125,21 +129,50 @@ impl RunnerClient {
                     "[RunnerClient] discover_plugins({}) failed: {e}; plugins disabled",
                     root.display()
                 );
-                return Vec::new();
+                return;
             }
         };
         log::info!("[RunnerClient] discovered plugins: {discovered:?}");
+        for plugin_id in &discovered {
+            if let Some(descriptor) = orch.plugin_descriptor(plugin_id).cloned() {
+                match orch.warm_plugin(&descriptor) {
+                    Ok(()) => log::info!("[RunnerClient] {plugin_id} plugin warm"),
+                    Err(e) => log::warn!(
+                        "[RunnerClient] warm_plugin('{plugin_id}') failed: {e}; \
+                         {plugin_id} plugin disabled"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Phase 2 (file-load): create each warm plugin's session by running
+    /// `Init` against the given initial assembly (the structure is built
+    /// here). Returns the `(plugin_id, post_init_bytes)` pair for every
+    /// plugin whose session came up; the post-Init bytes carry each
+    /// plugin's normalized assembly for the caller to apply. Empty `Vec`
+    /// when no orchestrator is wired up — degrades to viewer-only rather
+    /// than erroring. Iterates over the already-warmed (discovered)
+    /// plugins; `init_plugin_session` is a no-op for any that already
+    /// hold a session.
+    pub(crate) fn init_runner_sessions(
+        &mut self,
+        initial_assembly: &[u8],
+    ) -> Vec<(String, Vec<u8>)> {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        let discovered = orch.discovered_plugin_ids();
         let mut registered = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
-            match orch.ensure_plugin_registered(plugin_id, initial_assembly.to_owned())
-            {
+            match orch.init_plugin_session(plugin_id, initial_assembly.to_owned()) {
                 Ok(bytes) => {
-                    log::info!("[RunnerClient] {plugin_id} plugin ready");
+                    log::info!("[RunnerClient] {plugin_id} plugin session ready");
                     registered.push((plugin_id.clone(), bytes));
                 }
                 Err(e) => {
                     log::warn!(
-                        "[RunnerClient] ensure_plugin_registered('{plugin_id}') \
+                        "[RunnerClient] init_plugin_session('{plugin_id}') \
                          failed: {e}; {plugin_id} plugin disabled"
                     );
                 }

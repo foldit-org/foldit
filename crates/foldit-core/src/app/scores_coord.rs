@@ -2,50 +2,6 @@ use crate::app::App;
 use crate::history::CheckpointId;
 
 impl App {
-    /// Query every plugin's `score` op, merge totals into the head
-    /// checkpoint (bumping `live_version` for the `GuiProjector` to pick
-    /// up), and push per-residue scores directly to viso for
-    /// color-by-score display modes. Off the `SessionUpdate` stream
-    /// entirely: scores have two consumers (the `GuiProjector` via
-    /// `HistorySyncCursor` and viso via a direct overlay push) and
-    /// neither needs to ride the `SessionUpdate` stream.
-    ///
-    /// Synchronous (blocking) score poll. `tick` calls this each frame
-    /// only until the first score lands, so the `InSession` gate
-    /// flips promptly; once a score exists `tick` switches to the async
-    /// path (`request_scores` + `poll_async_scores`). Dirty flags are set
-    /// by `apply_score_reports` when a report actually applies.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) fn poll_plugin_scores(&mut self) {
-        if !self.runner_client.has_orchestrator() {
-            return;
-        }
-        self.refresh_scores();
-    }
-
-    /// Fan out the well-known `score` query across every plugin that
-    /// registered it, merge totals into the head checkpoint, and push
-    /// per-residue scores to the render engine for color-by-score modes.
-    ///
-    /// Called once at bootstrap (flips `has_initial_score()`, opening the
-    /// loading gate) and again after every host-originated broadcast (so
-    /// post-edit rescores update both the score widget and the residue
-    /// colors).
-    ///
-    /// Today only Rosetta returns a non-trivial report. When more scorers
-    /// come online the merge becomes app-wide -- the host stays generic
-    /// either way.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn refresh_scores(&mut self) {
-        // Blocking score round-trip. Used only until the first score
-        // lands, where a synchronous result keeps the InSession
-        // flip deterministic. Once a score exists the caller switches to
-        // `request_scores` + `poll_async_scores` so the render thread
-        // never blocks on the worker.
-        let reports = self.runner_client.collect_scores_blocking();
-        self.apply_score_reports(reports);
-    }
-
     /// Fire a non-blocking `score` query at every provider with no query
     /// already in flight. The reply lands on a stored receiver drained by
     /// [`Self::poll_async_scores`]; the render thread never blocks. One
@@ -66,8 +22,8 @@ impl App {
 
     /// Weight a score report and stamp the weighted total + the RAW per-term
     /// breakdown onto the current composition node. Shared tail of the
-    /// blocking (bootstrap) and async (steady-state) score paths; no-op on an
-    /// empty report set. Stamping emits `ScoresChanged`; the render projector
+    /// async whole-assembly and composition score paths; no-op on an empty
+    /// report set. Stamping emits `ScoresChanged`; the render projector
     /// re-derives the displayed per-residue colors from the session-owned
     /// breakdown on that signal (no direct viso push here anymore).
     #[cfg(not(target_arch = "wasm32"))]
@@ -103,15 +59,7 @@ impl App {
             return;
         };
 
-        let raw = report.weighted_total(self.store.term_weights());
-        let game = crate::scores::rosetta_raw_to_game(raw);
-        // Install the alignment key before stamping the breakdown (idempotent
-        // in steady state) so the write-time alignment invariant holds.
-        self.store.set_term_names(report.term_names);
-        let breakdown = crate::scores::StoredBreakdown {
-            whole_pose_terms: report.whole_pose_terms,
-            per_residue_terms: report.per_residue_terms,
-        };
+        let (raw, game, breakdown) = self.prepare_score_stamp(report);
         // Whole-assembly score of the worker's live pose. With exactly one
         // edit open, the live pose IS that edit's composition (its tentative +
         // peers' committed heads), so the total + breakdown are the edit's →
@@ -127,6 +75,53 @@ impl App {
                 .store
                 .set_head_scores(Some(raw), Some(game), Some(breakdown)),
         }
+    }
+
+    /// Weight a report and resolve it into the `(raw, game, breakdown)` triple
+    /// the score mutators stamp. Installs the alignment key (`set_term_names`,
+    /// idempotent in steady state) before the breakdown is built so the
+    /// write-time alignment invariant holds. Shared by `apply_score_reports`
+    /// and the synchronous load-time stamp.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn prepare_score_stamp(
+        &mut self,
+        report: crate::scores::ScoreReport,
+    ) -> (f64, f64, crate::scores::StoredBreakdown) {
+        let raw = report.weighted_total(self.store.term_weights());
+        let game = crate::scores::rosetta_raw_to_game(raw);
+        self.store.set_term_names(report.term_names);
+        let breakdown = crate::scores::StoredBreakdown {
+            whole_pose_terms: report.whole_pose_terms,
+            per_residue_terms: report.per_residue_terms,
+        };
+        (raw, game, breakdown)
+    }
+
+    /// Score the live session pose synchronously and stamp the result,
+    /// BLOCKING for the worker's reply. Queries the `score` provider with no
+    /// composition argument, so it scores the plugin's current session pose,
+    /// which the preceding load-time `tick(0.0)` has already synced to the
+    /// loaded structure. Used at load time, before the scene is first shown,
+    /// so the backbone renders already-colored instead of gray-then-recolor.
+    ///
+    /// No-ops gracefully (no stamp, no hang) when there is no orchestrator /
+    /// score provider or an empty report comes back. Stamps the head exactly
+    /// like `apply_score_reports`'s no-pending-edit branch: the emitted
+    /// `ScoresChanged` lets the render projector derive the per-residue colors
+    /// on the next drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn score_head_now(&mut self) {
+        let Some(report) = self.runner_client.score_session_blocking() else {
+            return;
+        };
+        // An empty report carries nothing to stamp (degraded / non-scoring
+        // setup): leave the gauge at "not scored yet" and let the load proceed.
+        if report.term_names.is_empty() && report.per_residue_terms.is_empty() {
+            return;
+        }
+        let (raw, game, breakdown) = self.prepare_score_stamp(report);
+        self.store
+            .set_head_scores(Some(raw), Some(game), Some(breakdown));
     }
 
     /// Fire a composition score for the committed union of `ckpt_id` under a
