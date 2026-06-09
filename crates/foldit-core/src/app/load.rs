@@ -1,4 +1,4 @@
-use foldit_gui::LoadingState;
+use foldit_gui::AppPhase;
 use molex::entity::molecule::id::EntityId;
 use viso::VisoEngine;
 
@@ -8,8 +8,9 @@ use crate::session::Puzzle;
 use foldit_gui::DirtyFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
+use crate::render_projector::RenderProjector;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::runner_client::{DispatchIntent, OpOutcome};
+use crate::runner_client::DispatchIntent;
 
 impl App {
     pub fn handle_app_command(&mut self, command: foldit_gui::AppCommand) {
@@ -97,7 +98,7 @@ impl App {
     /// projector republishes - the `SessionUpdate` stream carries `PreviewAdded`s and
     /// `HeadMoved`s from `load_entity_into_history`).
     fn handle_load_structure(&mut self, path: &str) {
-        self.set_loading_state(LoadingState::LoadingSession);
+        self.set_app_phase(AppPhase::LoadingSession);
         match crate::puzzle::load_file_as_entities(path) {
             Ok((entities, name)) => {
                 log::info!("Loaded structure via IPC: {name}");
@@ -142,7 +143,7 @@ impl App {
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
     /// metadata, then tick + snap + apply the puzzle's saved pose.
     fn handle_load_puzzle(&mut self, puzzle_id: u32) {
-        self.set_loading_state(LoadingState::LoadingSession);
+        self.set_app_phase(AppPhase::LoadingSession);
         // Entity display name for the loaded molecules: the outgoing
         // session title (captured before `reset`, which leaves it intact).
         let title = self.store.title().to_owned();
@@ -273,7 +274,7 @@ impl App {
     fn advance_bubble(&mut self, back: bool) {
         self.store.advance_bubble(back);
     }
-    // ── Complex lifecycle (engine attach + initial load) ──
+    // ── Complex lifecycle (engine attach + non-blocking startup) ──
 
     /// Attach a host-built `VisoEngine` to this App. Hosts are
     /// responsible for constructing the wgpu `RenderContext` against
@@ -284,100 +285,31 @@ impl App {
         self.engine = Some(engine);
     }
 
-    /// Load the initial structure, register entities, and create the
-    /// initial Rosetta session. Runs AFTER the webview's loading screen
-    /// is visible so the user has feedback during the (potentially
-    /// slow) load. Requires `create_render_context` to have run first.
+    /// Begin app bring-up: the one host trigger that arms the non-blocking
+    /// startup state-machine `advance_startup` drives one step per frame.
+    /// Runs AFTER the webview's loading screen is visible so the user
+    /// has feedback during the (potentially slow) plugin warm + session
+    /// init. Requires `create_render_context` to have run first.
     ///
-    /// Bootstrap path comes from the host (`HostResources::initial_structure_path`);
-    /// `None` is a no-op (e.g. the web shell loads structures via a
-    /// separate flow rather than a startup path).
-    pub fn load_initial_structure(&mut self) {
-        if self.engine.is_none() {
-            log::error!("load_initial_structure called before create_render_context");
-            return;
-        }
-
-        let Some(path) = self.host.initial_structure_path() else {
-            return;
-        };
-
-        self.set_loading_state(LoadingState::LoadingSession);
-
-        // Parse entities from file
-        match crate::puzzle::load_file_as_entities(&path) {
-            Ok((entities, name)) => {
-                for entity in entities {
-                    let _ = self.store.load_entity_into_history(entity, &name);
-                }
-                // Free-form initial load: set the title and ensure the
-                // free-form (no-puzzle) session through the create seam. The
-                // scientist puzzle panel + title reach the GUI at the
-                // InSession gate's `set_puzzle_scientist` push.
-                self.store.start(name.clone(), None);
-
-                // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, hands the
-                // assembly to the render projector, and runs
-                // engine.update(0.0) so the pending Assembly is drained
-                // before fit_camera reads bounding-radius.
-                self.tick(0.0);
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.fit_camera_to_focus();
-                }
-
-                log::info!("Loaded structure: {name}");
-
-                // Plugins were discovered + warmed at startup
-                // (`warm_plugins`), which installed the orchestrator the
-                // plugin driver owns. This file-load step only creates the
-                // sessions against the just-loaded structure.
-                self.bootstrap_plugins();
-
-                // Republish: bootstrap may have committed rosetta's
-                // post-Init normalized assembly (full-atom pose) into
-                // the store. The HeadMoved emitted by commit_action
-                // rides the `SessionUpdate` stream; this tick(0.0) flushes it
-                // so the normalized geometry is published before the
-                // synchronous first score is stamped below.
-                self.tick(0.0);
-            }
-            Err(e) => {
-                log::error!("Failed to load structure '{path}': {e}");
-                // No session was created (parse failed before
-                // `bootstrap_plugins`), so the startup-warmed orchestrator
-                // and its workers stay as-is; nothing to reset here.
-            }
-        }
-
-        // Stamp the first per-residue score synchronously against the
-        // post-bootstrap (normalized) head, then drain its `ScoresChanged`
-        // through the render projector with a tick(0.0) so the backbone is
-        // already colored on the first rendered frame (no gray flash).
-        // `score_head_now` no-ops when the load failed (no session) or there
-        // is no scoring plugin.
-        self.score_head_now();
-        self.tick(0.0);
-
-        // Loading is done: flip into InSession now. The now-populated state
-        // reaches the GUI via the one-shot full populate `enter_session`
-        // raises (VIEW for the engine options, ACTIONS for the catalog, SCORE
-        // for the now-stamped gauge, SCENE for the entity list). The loading
-        // screen clears via the `InSession` flip itself, not a dirty flag.
-        self.enter_session();
-    }
-
-    /// App-lifecycle warm-up (startup, before any structure loads):
-    /// install a fresh orchestrator, load the default score-term weights,
-    /// discover plugins under the runtime plugin root, and WARM each one
-    /// (spawn its worker → backend / database / scoring load, NO session,
-    /// NO pose). The session is created later, at file-load, by
-    /// `bootstrap_plugins`.
+    /// Does the one-shot non-blocking setup (fresh orchestrator, default
+    /// score-term weights, plugin discovery + warm kick) and then branches on
+    /// the host bootstrap path
+    /// (`HostResources::initial_structure_path`):
+    /// - `None`: no structure to load; settle the user at `Landing` while
+    ///   the warms finish in the background.
+    /// - `Some(path)`: enter `LoadingSession` and stash the path for the
+    ///   `Warming` step to parse once every plugin has connected.
     ///
-    /// Errors are logged and dropped: a missing plugin dir / dylib should
-    /// degrade the app to viewer-only, not crash startup.
+    /// Never blocks: the worker round-trips (warm connect, `Init`,
+    /// normalize, first score) are all kicked here / by `advance_startup` and
+    /// polled on later frames, so the host renders the loading screen
+    /// throughout.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn warm_plugins(&mut self) {
-        self.set_loading_state(LoadingState::Initializing);
+    pub fn begin_startup(&mut self) {
+        if self.engine.is_none() {
+            log::error!("begin_startup called before create_render_context");
+            return;
+        }
 
         // A fresh orchestrator restarts request ids at 1, so drop any
         // stale composition targets before a new edit can reuse an old id.
@@ -386,7 +318,7 @@ impl App {
 
         // Load the default score-term weights once, before the first score.
         // `reset` leaves `term_weights` untouched, so a single load here
-        // carries across reloads; the empty-check makes a re-warm a no-op.
+        // carries across reloads; the empty-check makes a re-arm a no-op.
         // On failure, log and proceed degraded (every weight then resolves
         // to 0.0, so scores read 0 until a valid map lands -- the app stays
         // up rather than crashing on a missing asset).
@@ -403,42 +335,247 @@ impl App {
             }
         }
 
-        let Some(plugins_root) = locate_plugins_root() else {
+        // Discover + KICK a warm for every plugin under the runtime plugin
+        // root. The connects finish on later frames via `poll_warms`; the
+        // returned ids are the set the `Warming` step tallies completions
+        // against. A missing plugins root degrades to viewer-only (empty
+        // expected set, so the machine falls straight through to the parse).
+        let expected: std::collections::BTreeSet<String> = if let Some(root) = locate_plugins_root()
+        {
+            log::info!("[App] discovering + warming plugins under {}", root.display());
+            self.runner_client.kick_warms(&root).into_iter().collect()
+        } else {
             log::warn!(
                 "[App] no plugins root found (set FOLDIT_PLUGINS_ROOT or run \
                  from a workspace checkout); plugins disabled"
             );
-            return;
+            std::collections::BTreeSet::new()
         };
-        log::info!("[App] discovering + warming plugins under {}", plugins_root.display());
-        self.runner_client.warm_runner(&plugins_root);
+
+        match self.host.initial_structure_path() {
+            None => {
+                // No initial structure: the user lands in the menus. The
+                // warms still finish in the background so a later file-load
+                // finds the workers connected.
+                self.set_app_phase(AppPhase::Landing);
+                self.startup = StartupPhase::WarmingForLanding {
+                    expected,
+                    connected: std::collections::BTreeSet::new(),
+                };
+            }
+            Some(path) => {
+                self.set_app_phase(AppPhase::LoadingSession);
+                self.startup = StartupPhase::Warming {
+                    expected,
+                    connected: std::collections::BTreeSet::new(),
+                    path,
+                };
+            }
+        }
     }
 
-    /// Create plugin sessions for the just-loaded structure (file-load):
-    /// snapshot the loaded assembly and run each warm plugin's `Init`
-    /// against it, then apply any per-plugin post-Init result. The
-    /// plugins were already discovered + warmed at startup by
-    /// [`Self::warm_plugins`]; this is the session step that builds the
-    /// structure inside each plugin.
-    ///
-    /// If Rosetta's Init returns a non-empty normalized assembly (full-atom
-    /// pose with hydrogens / terminal O / etc. added), it is committed as
-    /// a follow-up `PluginOp` checkpoint and republished so that
-    /// `scene.positions` is seeded at the normalized atom count before any
-    /// user action runs. Without this, the first user op would cross an
-    /// atom-set boundary mid-action and snap.
-    ///
-    /// Errors are logged and dropped: a missing plugin dir / dylib should
-    /// degrade the app to viewer-only, not crash the load. Runs while the
-    /// `LoadingSession` phase set by the caller is in effect; it does not
-    /// re-enter `Initializing`.
+    /// Advance the non-blocking startup state-machine by one step. Called
+    /// near the top of [`Self::tick`], before the `SessionUpdate` drain, so a
+    /// publish a step triggers (the structure parse, a normalize commit) is
+    /// drained + projected the same frame. Each step polls for whatever
+    /// worker replies arrived since the last frame, folds them into the
+    /// in-flight accumulator, and on completeness kicks the next phase. No
+    /// step blocks. Inert in `Idle` / `Done`.
+    /// True once the startup state-machine has reached its terminal state.
+    /// The machine drives the first score itself (the post-normalize kick);
+    /// the tick's at-rest auto-rescore must hold off until then so it does
+    /// not fire a `score` query into the pose-less window between a plugin's
+    /// Init (session registered) and its normalize (pose built), which comes
+    /// back empty.
     #[cfg(not(target_arch = "wasm32"))]
-    fn bootstrap_plugins(&mut self) {
-        // Snapshot the loaded assembly under an immutable store borrow so
-        // the plugin driver can hand it to `init_plugin_session` for each
-        // plugin. Session-init uses this one pre-normalization snapshot for
-        // every plugin, so applying rosetta's post-Init result afterward
-        // (below) does not change what later plugins init against.
+    pub(in crate::app) const fn startup_settled(&self) -> bool {
+        matches!(self.startup, StartupPhase::Done)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn advance_startup(&mut self) {
+        match std::mem::replace(&mut self.startup, StartupPhase::Idle) {
+            StartupPhase::Idle => {}
+            StartupPhase::Done => self.startup = StartupPhase::Done,
+            StartupPhase::Warming {
+                expected,
+                mut connected,
+                path,
+            } => {
+                for (plugin_id, _ok) in self.runner_client.poll_warms() {
+                    connected.insert(plugin_id);
+                }
+                if connected.is_superset(&expected) {
+                    self.startup = self.warms_done_load_and_kick_inits(&path);
+                } else {
+                    self.startup = StartupPhase::Warming {
+                        expected,
+                        connected,
+                        path,
+                    };
+                }
+            }
+            StartupPhase::Initializing {
+                expected,
+                mut adopted,
+            } => {
+                for (plugin_id, init_bytes) in self.runner_client.poll_inits() {
+                    self.apply_post_init(&plugin_id, &init_bytes, "_init_normalize", "Init");
+                    adopted.insert(plugin_id);
+                }
+                if adopted.is_superset(&expected) {
+                    self.startup = self.inits_done_kick_normalizes(&adopted);
+                } else {
+                    self.startup = StartupPhase::Initializing { expected, adopted };
+                }
+            }
+            StartupPhase::Normalizing {
+                expected,
+                mut applied,
+            } => {
+                for (plugin_id, normalized_bytes) in self.runner_client.poll_normalizes() {
+                    // Adopt the normalized assembly the same way the Init
+                    // bytes are adopted: a committed `PluginOp` checkpoint
+                    // (NOT a pending edit), so the head carries the
+                    // full-atom pose before the first score stamps it. The
+                    // op-id labels the checkpoint; re-read it from the
+                    // manifest (the poll drops the dispatch's request_id /
+                    // op-id, and the manifest read is stable).
+                    let op_id = self
+                        .runner_client
+                        .normalize_op_for(&plugin_id)
+                        .unwrap_or_else(|| String::from("_init_normalize"));
+                    self.apply_post_init(&plugin_id, &normalized_bytes, &op_id, "Init");
+                    applied.insert(plugin_id);
+                }
+                if applied.is_superset(&expected) {
+                    // Normalize commits are done (committed above), so the
+                    // first score now stamps the normalized head. Kick it;
+                    // tick's at-rest gate may also fire, but `request_scores`
+                    // coalesces, so this overlap is harmless.
+                    self.startup = self.kick_first_score_then_phase();
+                } else {
+                    self.startup = StartupPhase::Normalizing { expected, applied };
+                }
+            }
+            StartupPhase::Scoring => {
+                // Watch the head-breakdown predicate: tick step-2's
+                // `poll_async_scores` stamps it; we only flip into the
+                // session once it lands. No edit is open during startup, so
+                // the breakdown reads the committed head.
+                if self.store.current_composition_breakdown().is_some() {
+                    self.enter_session_from_startup();
+                    self.startup = StartupPhase::Done;
+                } else {
+                    self.startup = StartupPhase::Scoring;
+                }
+            }
+            StartupPhase::WarmingForLanding {
+                expected,
+                mut connected,
+            } => {
+                // Keep draining `poll_warms` so the workers' deferred accepts
+                // complete even though the user is already at Landing; do not
+                // skip to Done without finishing the connects.
+                for (plugin_id, _ok) in self.runner_client.poll_warms() {
+                    connected.insert(plugin_id);
+                }
+                if connected.is_superset(&expected) {
+                    self.startup = StartupPhase::Done;
+                } else {
+                    self.startup = StartupPhase::WarmingForLanding { expected, connected };
+                }
+            }
+        }
+    }
+
+    /// Kick the first score and pick the next phase. If the kick put a query
+    /// in flight (a scorer exists), wait in `Scoring` for the head breakdown
+    /// to stamp. If nothing went in flight (no scorer queued anything), the
+    /// breakdown predicate would never flip, so enter the session immediately
+    /// rather than hang the loading screen. A scorer that replies with an
+    /// empty / degraded report and never stamps still waits in `Scoring` by
+    /// design; only the no-scorer case takes the immediate-enter path.
+    ///
+    /// The immediate-enter branch mirrors the `Scoring` arm's stamp terminal
+    /// (`enter_session` + `InSession` + `Done`) so both paths clear the
+    /// loading screen identically.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kick_first_score_then_phase(&mut self) -> StartupPhase {
+        self.request_scores();
+        if self.runner_client.has_pending_score_queries() {
+            StartupPhase::Scoring
+        } else {
+            self.enter_session_from_startup();
+            StartupPhase::Done
+        }
+    }
+
+    /// Enter the session from the startup state-machine: flip into the
+    /// session and frame the camera on the settled (post-normalize) geometry.
+    ///
+    /// The camera fit lives here rather than in `enter_session` because that
+    /// method is shared with the in-session reload handlers, which fit the
+    /// camera themselves; folding the fit in there would double-fit on
+    /// reload. By the time any with-structure startup path reaches this seam,
+    /// the normalize-adopt has published the final geometry and the tick has
+    /// synced it, so `fit_camera_to_focus` frames what is actually displayed.
+    /// The Landing (no-structure) path never reaches here.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn enter_session_from_startup(&mut self) {
+        self.enter_session();
+        self.set_app_phase(AppPhase::InSession);
+        if let Some(engine) = self.engine.as_mut() {
+            engine.fit_camera_to_focus();
+            // Force a per-residue color re-push now that viso has fully synced
+            // the final (post-normalize) geometry. The first score may have
+            // pushed before viso created the entity's scene-local state, in
+            // which case that push was silently dropped and the backbone would
+            // render gray. Disjoint field borrow: `render_projector` and `store`
+            // are separate fields from `engine`, mirroring the tick consume seam.
+            RenderProjector::reproject_scores(&self.store, engine);
+            // Re-push alone only updates the separate residue-color buffer; the
+            // cartoon tube's color is baked into the mesh at build time and the
+            // startup geometry baked gray (it published before the first score
+            // arrived). Force a full-rebuild republish now that the scores are
+            // populated so the backbone mesh re-bakes colored.
+            self.render_projector.rebake_geometry(&self.store, engine);
+        }
+    }
+
+    /// Warms complete: parse + publish the bootstrap structure
+    /// synchronously, snapshot it, and KICK each warm plugin's `Init`
+    /// against it. Returns the next phase (`Initializing` over the kicked
+    /// init set). The surrounding tick publishes the freshly parsed assembly
+    /// this frame, so no inline `tick(0.0)` is taken here.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn warms_done_load_and_kick_inits(&mut self, path: &str) -> StartupPhase {
+        match crate::puzzle::load_file_as_entities(path) {
+            Ok((entities, name)) => {
+                for entity in entities {
+                    let _ = self.store.load_entity_into_history(entity, &name);
+                }
+                // Free-form initial load: set the title and ensure the
+                // free-form (no-puzzle) session through the create seam. The
+                // scientist puzzle panel + title reach the GUI at the
+                // InSession gate's full populate.
+                self.store.start(name.clone(), None);
+                log::info!("Loaded structure: {name}");
+            }
+            Err(e) => {
+                // No session was created; the warmed orchestrator and its
+                // workers stay as-is. Skip straight to the InSession flip so
+                // the loading screen still clears (degraded, viewer-only).
+                log::error!("Failed to load structure '{path}': {e}");
+                self.enter_session_from_startup();
+                return StartupPhase::Done;
+            }
+        }
+
+        // Snapshot the just-loaded (pre-normalization) assembly and KICK each
+        // warm plugin's `Init` against it. Session-init uses this one
+        // snapshot for every plugin, so adopting rosetta's post-Init result
+        // later does not change what other plugins init against.
         let initial_assembly = {
             let head_before = self.store.head_assembly();
             match molex::ops::wire::serialize_assembly(&head_before) {
@@ -448,68 +585,67 @@ impl App {
                         "[App] failed to serialize initial assembly for plugin \
                          session init: {e:?}; plugins disabled"
                     );
-                    return;
+                    // Nothing to init against; jump to the first score so the
+                    // load still completes (viewer-only on the plugin side).
+                    return self.kick_first_score_then_phase();
                 }
             }
         };
 
-        let registered = self
+        let expected: std::collections::BTreeSet<String> = self
             .runner_client
-            .init_runner_sessions(&initial_assembly);
-
-        // Apply each registered plugin's Init reply into the store. A
-        // plugin whose Init returns a non-empty assembly is adopted here
-        // (its own op-id stamped on the checkpoint); a pose-less Init
-        // returns empty bytes, which the empty-bytes guard inside
-        // `apply_post_init` no-ops, as do non-structural plugins. The loop
-        // stays generic so additional adopting plugins drop in without
-        // host-side wiring changes.
-        for (plugin_id, post_init_bytes) in &registered {
-            self.apply_post_init(plugin_id, post_init_bytes, "_init_normalize", "Init");
+            .kick_inits(&initial_assembly)
+            .into_iter()
+            .collect();
+        if expected.is_empty() {
+            // No plugin sessions to bring up: go straight to the first score.
+            return self.kick_first_score_then_phase();
         }
+        StartupPhase::Initializing {
+            expected,
+            adopted: std::collections::BTreeSet::new(),
+        }
+    }
 
-        // After Init, give each registered plugin that declares a load-time
-        // normalize op a chance to build and adopt its canonicalized
-        // structure. A pose-less Init returns an empty assembly (handled
-        // above as a no-op), so this dispatch is what actually seeds
-        // `scene.positions` at the normalized atom count before any user
-        // action runs. Whole-structure normalize: empty selection / no
-        // focus / no params (the bridge ignores selection for normalize).
-        // The dispatch's own request_id / scope are discarded -
-        // `apply_post_init` re-derives its target entities and mints its own
-        // checkpoint. The backend lock the dispatch takes is benign at
-        // bootstrap (rosetta is the only structural plugin then).
-        for (plugin_id, _) in &registered {
+    /// Inits complete: for each adopted plugin that declares a load-time
+    /// normalize op, KICK a whole-structure normalize. Returns the next
+    /// phase (`Normalizing` over the kicked normalize set, or `Scoring` with
+    /// the first score already kicked when no plugin normalizes).
+    ///
+    /// Whole-structure normalize: empty selection / no focus / no params
+    /// (the bridge ignores selection for normalize). The dispatch's own
+    /// `request_id` / scope are discarded; `apply_post_init` re-derives its
+    /// target entities and mints its own checkpoint when the reply lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn inits_done_kick_normalizes(
+        &mut self,
+        adopted: &std::collections::BTreeSet<String>,
+    ) -> StartupPhase {
+        let mut expected = std::collections::BTreeSet::new();
+        for plugin_id in adopted {
             let Some(op_id) = self.runner_client.normalize_op_for(plugin_id) else {
                 continue;
             };
             let intent = DispatchIntent {
                 selection: std::collections::BTreeMap::new(),
                 focused_entity_id: None,
-                op_id: op_id.clone(),
+                op_id,
                 params: std::collections::HashMap::new(),
             };
             let store = &self.store;
-            let outcome = self
-                .runner_client
-                .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
-            match outcome {
-                Ok(OpOutcome::Invoke { bytes, .. }) => {
-                    self.apply_post_init(plugin_id, &bytes, &op_id, "Init");
-                }
-                Ok(OpOutcome::Stream { .. }) => {
-                    log::warn!(
-                        "[App] {plugin_id} normalize op {op_id:?} dispatched as a \
-                         stream; expected a synchronous invoke. Skipping adoption."
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[App] {plugin_id} normalize op {op_id:?} dispatch failed: \
-                         {e:?}; skipping normalization apply"
-                    );
-                }
-            }
+            self.runner_client
+                .kick_normalize(intent, plugin_id, |id| store.entity_type(id));
+            expected.insert(plugin_id.clone());
+        }
+        if expected.is_empty() {
+            // No plugin declares a normalize op: a pose-less Init already
+            // seeded the head (or there is no structural plugin), so go
+            // straight to the first score.
+            return self.kick_first_score_then_phase();
+        }
+        StartupPhase::Normalizing {
+            expected,
+            applied: std::collections::BTreeSet::new(),
         }
     }
 
@@ -617,6 +753,46 @@ impl App {
             engine.shutdown();
         }
     }
+}
+
+/// Non-blocking startup phase, advanced once per frame by
+/// [`App::advance_startup`]. The machine accumulates per-plugin worker
+/// completions across frames (the polls are stateless: each returns only
+/// what completed THIS frame) against an `expected` set, so the host
+/// renders the loading screen while bring-up proceeds.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) enum StartupPhase {
+    /// Not started; the host has not called `begin_startup` yet.
+    Idle,
+    /// Full session bring-up: warming plugins, with the bootstrap structure
+    /// path stashed for the parse once every warm has connected.
+    Warming {
+        expected: std::collections::BTreeSet<String>,
+        connected: std::collections::BTreeSet<String>,
+        path: String,
+    },
+    /// Plugin `Init` sessions in flight; accumulating adopted plugin ids.
+    Initializing {
+        expected: std::collections::BTreeSet<String>,
+        adopted: std::collections::BTreeSet<String>,
+    },
+    /// Per-plugin load-time normalize invokes in flight; accumulating
+    /// applied plugin ids.
+    Normalizing {
+        expected: std::collections::BTreeSet<String>,
+        applied: std::collections::BTreeSet<String>,
+    },
+    /// First score requested; waiting for the head breakdown to stamp.
+    Scoring,
+    /// No bootstrap structure: Landing is already shown and the warms are
+    /// finishing in the background so a later file-load finds connected
+    /// workers.
+    WarmingForLanding {
+        expected: std::collections::BTreeSet<String>,
+        connected: std::collections::BTreeSet<String>,
+    },
+    /// Bring-up complete; the machine is inert.
+    Done,
 }
 
 /// Locate the runtime plugins directory.

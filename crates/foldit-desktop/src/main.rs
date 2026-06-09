@@ -34,27 +34,31 @@ fn main() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned());
     let log_buffer = tee_logger::init(&filter);
 
-    let input = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "1bfe".to_owned());
-
     // Install signal handlers that kill ML worker process groups on
     // SIGINT/SIGTERM, preventing orphaned Python subprocesses.
     foldit_runner::install_cleanup_signal_handlers();
 
     log::info!("Foldit starting...");
 
-    let structure_path = match foldit_core::puzzle::resolve_structure_path(&input) {
-        Ok(path) => path,
-        Err(e) => {
-            log::error!("{e}");
-            std::process::exit(1);
+    // A CLI argument names the structure to load on startup; without one
+    // the App starts at the menus rather than auto-loading anything.
+    let structure_path = std::env::args().nth(1).map(|input| {
+        match foldit_core::puzzle::resolve_structure_path(&input) {
+            Ok(path) => {
+                log::info!("Loading structure from: {path}");
+                path
+            }
+            Err(e) => {
+                log::error!("{e}");
+                std::process::exit(1);
+            }
         }
-    };
+    });
+    if structure_path.is_none() {
+        log::info!("No structure argument; starting at the menus.");
+    }
 
-    log::info!("Loading structure from: {structure_path}");
-
-    let host = Box::new(host::DesktopHost::new(Some(structure_path)));
+    let host = Box::new(host::DesktopHost::new(structure_path));
     let app = App::new(host);
     window::run(app, log_buffer);
 }

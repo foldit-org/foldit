@@ -211,29 +211,27 @@ impl AppRunner {
         // Process IPC messages (needed to detect webview_ready during init)
         self.process_ipc_messages();
 
-        // Deferred structure load: wait for the webview to show the loading
-        // screen before blocking the main thread with file I/O and Rosetta
-        // session creation. The wgpu RenderContext is already initialized
-        // (in `resumed()` before webview attachment) so the engine is alive
-        // and rendering throughout this period.
+        // Deferred startup arm: wait for the webview to show the loading
+        // screen before arming bring-up. `begin_startup` is non-blocking (it
+        // only kicks the plugin warms + stashes the bootstrap path), and the
+        // per-frame `app.tick` below advances the startup state-machine one
+        // step at a time, so the loading screen keeps animating throughout.
+        // The wgpu RenderContext is already initialized (in `resumed()` before
+        // webview attachment) so the engine is alive and rendering during it.
         if self.init_pending {
             let should_init = self.webview_ready
                 || self.webview.is_none()
                 || self.init_deadline.is_some_and(|d| now > d);
 
             if should_init {
-                log::info!("Deferred structure load starting (webview_ready={})", self.webview_ready);
+                log::info!("Startup arming (webview_ready={})", self.webview_ready);
                 self.init_pending = false;
                 self.init_deadline = None;
-                // App-lifecycle warm-up: discover + warm plugins (spawn
-                // workers, load backends, NO session) once, before the
-                // first structure load creates the sessions. Runs on the
-                // same deferred gate (webview-ready / timeout / no-webview)
-                // so it never blocks the surface-creation path.
-                self.app.warm_plugins();
-                self.app.load_initial_structure();
-                log::info!("Structure loaded, awaiting initial score");
-                // Fall through to render the first frame
+                // Arm the non-blocking startup machine once. From here the
+                // per-frame `app.tick` drives the warm connect, plugin Init,
+                // normalize, and first score across frames.
+                self.app.begin_startup();
+                // Fall through to tick + render this frame.
             } else {
                 // Webview still loading — keep pumping frames so it can paint
                 if let Some(window) = &self.window {
@@ -329,10 +327,11 @@ impl ApplicationHandler for AppRunner {
                 self.ipc_rx = Some(ipc_rx);
             }
 
-            // Defer the slow part (structure load, Rosetta session) until the
-            // webview loading screen is visible. tick_frame calls
-            // load_initial_structure once webview_ready fires (or after a
-            // timeout if the webview is slow / absent).
+            // Defer startup until the webview loading screen is visible.
+            // tick_frame arms the non-blocking startup machine
+            // (`begin_startup`) once webview_ready fires (or after a timeout
+            // if the webview is slow / absent); the per-frame tick advances it
+            // from there.
             self.init_pending = true;
             self.init_deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
 

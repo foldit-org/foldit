@@ -105,6 +105,47 @@ impl RenderProjector {
             engine.set_per_residue_scores(entity_id.raw(), Some(scores));
         }
     }
+
+    /// Force a per-residue color re-push at a moment viso is known to have
+    /// fully synced the current geometry (so every entity's scene-local
+    /// state exists and the push is not silently dropped). Used at the
+    /// startup session-entry seam, where the first score may have pushed
+    /// before viso created the entity state. Re-runs the same private
+    /// projection the `ScoresChanged` path uses; no-ops internally when no
+    /// breakdown is stamped or it carries no per-residue rows.
+    pub(crate) fn reproject_scores(doc: &Session, engine: &mut viso::VisoEngine) {
+        Self::project_scores(doc, engine);
+    }
+
+    /// Force a full-rebuild republish of the current head assembly so the
+    /// cartoon mesh re-bakes with the current `annotations.scores`. The
+    /// cartoon tube's per-residue color is baked into the mesh at build time;
+    /// viso re-reads `annotations.scores` only when it submits a full-rebuild
+    /// mesh (`replace_assembly` -> `sync_now` -> `submit_full_rebuild`). At
+    /// startup the geometry publishes before the first async score arrives, so
+    /// the tube bakes gray, and the later score push fires only a color
+    /// re-push (the separate residue-color buffer) that never re-bakes the
+    /// backbone. Issuing a full rebuild AFTER the scores are present bakes the
+    /// colored tube, matching steady-state gameplay where an edit's geometry
+    /// change re-bakes the mesh as the score updates.
+    ///
+    /// Always routes to `replace_assembly` (not the membership-gated
+    /// `set_assembly`): a same-topology `set_assembly` may be a coord-only
+    /// update that does not re-bake colors, and we specifically need the full
+    /// rebuild. `last_published_ids` is refreshed so the next normal `consume`
+    /// does not read a spurious topology change.
+    pub(crate) fn rebake_geometry(&mut self, doc: &Session, engine: &mut viso::VisoEngine) {
+        let mut asm = doc.head_assembly();
+        let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
+            asm.entities().iter().map(|e| e.id()).collect();
+
+        self.publish_seq = self.publish_seq.saturating_add(1);
+        asm.set_generation(self.publish_seq);
+        let asm = std::sync::Arc::new(asm);
+
+        engine.replace_assembly(asm);
+        self.last_published_ids = new_ids;
+    }
 }
 
 /// Consume a drained `SessionUpdate` batch and drive viso. Five

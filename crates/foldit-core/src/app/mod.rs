@@ -13,7 +13,7 @@
 //! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
 //!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
 
-use foldit_gui::{FrontendState, LoadingState};
+use foldit_gui::{AppPhase, FrontendState};
 use viso::{KeyBindings, VisoEngine};
 
 use crate::gui_projector::{GuiProjector, GuiSources};
@@ -41,7 +41,7 @@ pub use self::load::locate_plugins_root;
 ///
 /// `App` also owns the host-bound [`FrontendState`] mirror (so the load
 /// state-machine and the GUI projection both live on the same side of
-/// the host seam) and the `LoadingState` machine that drives the startup
+/// the host seam) and the `AppPhase` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
 pub struct App {
     pub(crate) engine: Option<VisoEngine>,
@@ -65,7 +65,14 @@ pub struct App {
     /// startup phases and flips it to `InSession` the moment a structure
     /// finishes loading (see [`Self::enter_session`]). Mirrored verbatim
     /// to the frontend via [`FrontendState::set_app_state`].
-    pub(in crate::app) lifecycle: LoadingState,
+    pub(in crate::app) lifecycle: AppPhase,
+    /// Non-blocking startup state-machine. Armed by
+    /// [`Self::begin_startup`] (the host trigger) and advanced one step per
+    /// frame by [`Self::advance_startup`] near the top of [`Self::tick`], so
+    /// bring-up's worker round-trips (warm connect, plugin `Init`, normalize,
+    /// first score) run across frames while the host keeps rendering.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) startup: self::load::StartupPhase,
     /// One-shot "push every GUI section once" signal. Raised on session
     /// birth (the Loading → `InSession` flip on every load path) and
     /// consumed + cleared by `tick` on the next
@@ -117,7 +124,9 @@ impl App {
             gui_projector: GuiProjector::new(),
             host,
             frontend: FrontendState::new(),
-            lifecycle: LoadingState::Initializing,
+            lifecycle: AppPhase::Initializing,
+            #[cfg(not(target_arch = "wasm32"))]
+            startup: self::load::StartupPhase::Idle,
             needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
@@ -129,7 +138,7 @@ impl App {
     /// Flip the App into the in-session lifecycle phase the moment a
     /// structure finishes loading, on every load path.
     ///
-    /// - `set_loading_state(InSession)` is the routing signal the
+    /// - `set_app_phase(InSession)` is the routing signal the
     ///   frontend reads; flipping it here clears the loading screen.
     /// - The score gauge is reset to "not scored yet" so a reload never
     ///   displays the previous structure's score. `project_score` no-ops
@@ -143,12 +152,15 @@ impl App {
     ///   panel, title, history, scene, view, selection, actions) on the
     ///   next GUI-consumer pass.
     ///
-    /// The first per-residue score is stamped synchronously by the load path
-    /// (via `score_head_now`) *before* this flip, so the backbone is already
-    /// colored when the scene is first shown; this method no longer requests
-    /// it.
+    /// Who stamps the first score depends on the path. The two mid-session
+    /// reload paths stamp it synchronously (via `score_head_now`) *before*
+    /// this flip, so the backbone is already colored when the scene is first
+    /// shown. The startup path flips into the session as soon as the first
+    /// async score has stamped the head (the startup machine watches for it
+    /// before calling this), so the backbone is colored there too. Either
+    /// way, this method no longer requests the score.
     pub(in crate::app) fn enter_session(&mut self) {
-        self.set_loading_state(LoadingState::InSession);
+        self.set_app_phase(AppPhase::InSession);
         self.frontend.set_score(0.0, true);
         self.frontend.set_score_title(self.store.title().to_owned());
         self.needs_full_populate = true;
@@ -158,7 +170,7 @@ impl App {
     /// transmit gate. `set_app_state` only marks the section dirty when
     /// the value actually changes, so re-setting the same phase is a
     /// no-op on the wire.
-    pub(in crate::app) fn set_loading_state(&mut self, state: LoadingState) {
+    pub(in crate::app) fn set_app_phase(&mut self, state: AppPhase) {
         self.lifecycle = state;
         self.frontend.set_app_state(self.lifecycle);
     }
@@ -220,6 +232,9 @@ impl App {
     /// Drive one frame.
     ///
     /// Order:
+    /// 0. advance the non-blocking startup state-machine (native only): one
+    ///    bring-up step, before the drain so a publish it triggers is routed
+    ///    this frame. Inert once startup is done.
     /// 1. drain pending plugin updates (apply to `Session`; emits
     ///    `SessionUpdate`s through the funnel).
     /// 2. apply this tick's async score replies so their `ScoresChanged`
@@ -230,14 +245,22 @@ impl App {
     ///    the render projector also runs on a score-only batch).
     /// 5. fire the next async rescore (gated on a geometry change; reply
     ///    applies on a later tick's step 2). The FIRST score per session is
-    ///    stamped synchronously by the load path (`score_head_now`) before the
-    ///    scene is shown, not by this gate.
+    ///    stamped either synchronously by a reload path (`score_head_now`) or
+    ///    asynchronously by the startup machine's first-score kick, not by
+    ///    this at-rest gate.
     /// 6. engine update (camera animation, mesh upload, etc.).
     /// 7. visualization overlay (bands / pull).
     /// 8. GUI consumer projects the batch (+ one-shot full populate) into
     ///    the frontend so the next `serialize_frontend_dirty` carries the
     ///    latest snapshot.
     pub fn tick(&mut self, dt: f32) {
+        // 0. Advance the non-blocking startup state-machine. Runs before the
+        //    drain so a publish a startup step triggers (the structure parse,
+        //    a committed normalize) lands in this frame's `changes` batch and
+        //    is projected the same frame. Inert once bring-up is done.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.advance_startup();
+
         // 1. Plugin updates.
         self.apply_backend_updates();
 
@@ -313,16 +336,19 @@ impl App {
         //    gates on this tick's geometry change. It fires only when no edit is
         //    open: while a stream runs, each frame carries its own warm score and
         //    stamps its edit directly (in `apply_backend_updates`), so this query
-        //    is not fired - it would only re-score a trailing frame. This is also
-        //    not the first score per session: the load path stamps that
-        //    synchronously (`score_head_now`) before the scene is shown, so the
-        //    backbone is colored on the first frame without waiting on this gate.
+        //    is not fired - it would only re-score a trailing frame. It is
+        //    also held off until the startup machine settles: during bring-up
+        //    the machine drives the first score itself (kicked post-normalize,
+        //    once the scorer's pose is built), and firing here would race a
+        //    query into the pose-less window between a plugin's Init and its
+        //    normalize, which comes back empty. After `Done` the machine is
+        //    inert and this is the sole at-rest scorer again.
         //    Fire-and-forget against the worker's already-built live pose (no
         //    per-frame pose rebuild); `request_scores` coalesces, so one
         //    outstanding query per provider is the most in flight.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if render_changes > 0 && !self.store.has_pending() {
+            if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
                 self.request_scores();
             }
         }

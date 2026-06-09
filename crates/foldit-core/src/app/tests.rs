@@ -343,6 +343,71 @@ mod selection_tests {
         }
     }
 
+    /// An empty `score` report (no terms, no per-residue energies) must NOT
+    /// stamp a breakdown. The scorer's session goes live before its pose is
+    /// built, so an early query lands an empty report; stamping it would mint
+    /// a hollow breakdown that flips the "scored" state and leaves the
+    /// backbone gray. A report with real content stamps as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn empty_score_report_does_not_stamp_breakdown() {
+        use crate::history::CheckpointKind;
+        use crate::scores::{ResidueTermScores, ScoreReport};
+        use crate::session::EntityOrigin;
+        use std::collections::HashMap;
+
+        let mut app = fresh_app();
+        // A committed head so there is a node to stamp onto (and so the
+        // no-pending-edit branch of `apply_score_reports` runs).
+        let id = app
+            .store
+            .insert_preview(mk_bulk(), "e".to_owned(), EntityOrigin::Loaded);
+        app.store
+            .promote_preview(id, CheckpointKind::PromotedPreview { entity: id }, None, None, "e")
+            .expect("promote");
+        assert!(
+            app.store.current_composition_breakdown().is_none(),
+            "no breakdown stamped yet"
+        );
+
+        // An empty report from the pose-less window: skipped, breakdown stays
+        // None.
+        let mut empty = HashMap::new();
+        empty.insert(
+            "rosetta".to_owned(),
+            ScoreReport {
+                term_names: Vec::new(),
+                whole_pose_terms: Vec::new(),
+                per_residue_terms: Vec::new(),
+            },
+        );
+        app.apply_score_reports(empty);
+        assert!(
+            app.store.current_composition_breakdown().is_none(),
+            "empty report must not stamp a breakdown"
+        );
+
+        // A report with real content stamps the head breakdown.
+        let mut full = HashMap::new();
+        full.insert(
+            "rosetta".to_owned(),
+            ScoreReport {
+                term_names: vec!["fa_rep".to_owned()],
+                whole_pose_terms: vec![1.5],
+                per_residue_terms: vec![ResidueTermScores {
+                    entity_id: id,
+                    residue_index: 0,
+                    terms: vec![1.5],
+                }],
+            },
+        );
+        app.apply_score_reports(full);
+        assert!(
+            app.store.current_composition_breakdown().is_some(),
+            "non-empty report must stamp a breakdown"
+        );
+    }
+
     /// An entity-scoped dispatch resolves to its named set, filtered to
     /// committed lanes: a resolved id without a lane drops out rather than
     /// refusing the whole multi-lane edit (`begin_action` is all-or-nothing).

@@ -31,8 +31,8 @@ pub trait HostResources {
     /// foldit-core skips list/load when `None`).
     fn view_presets_dir(&self) -> Option<&Path>;
 
-    /// Bootstrap structure path passed to `App::load_initial_structure`.
-    /// `None` means no initial structure (e.g., web, which loads via a
-    /// separate host flow).
+    /// Bootstrap structure path read by `App::begin_startup`. `None` means
+    /// no initial structure (e.g., web, which loads via a separate host
+    /// flow), and the App settles at `Landing`.
     fn initial_structure_path(&self) -> Option<String>;
 }

@@ -22,6 +22,16 @@ impl RunnerClient {
         }
     }
 
+    /// Whether any whole-assembly `score` query is in flight. `false` when no
+    /// orchestrator exists or no provider queued a query. Lets the caller tell
+    /// "a score reply is coming" from "no scorer, nothing queued" right after
+    /// [`Self::request_scores`].
+    pub(crate) fn has_pending_score_queries(&self) -> bool {
+        self.orchestrator
+            .as_ref()
+            .is_some_and(foldit_runner::Orchestrator::has_pending_score_queries)
+    }
+
     /// Drain whatever async `score` replies have arrived. Non-blocking;
     /// empty map when nothing is ready or no orchestrator exists.
     pub(crate) fn poll_score_results(

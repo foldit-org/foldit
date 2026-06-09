@@ -4,7 +4,12 @@
 //! `RunnerClient` holds the `Orchestrator` and (on native builds) the
 //! in-flight `StreamHost` state, plus the orchestrator-lifecycle handlers
 //! that touch only the orchestrator (`reset_for_new_structure`,
-//! `shutdown`).
+//! `shutdown`). Plugin bring-up is non-blocking: the kick/poll twins
+//! ([`RunnerClient::kick_warms`]/[`RunnerClient::poll_warms`],
+//! [`RunnerClient::kick_inits`]/[`RunnerClient::poll_inits`],
+//! [`RunnerClient::kick_normalize`]/[`RunnerClient::poll_normalizes`])
+//! let the startup state-machine on `App` drive bring-up one frame at a
+//! time so the host renders throughout.
 //! Inbound plugin traffic is drained here too: [`RunnerClient::drain_op_events`]
 //! consumes the orchestrator's raw `PluginUpdate`s and the stream table,
 //! resolving each into a core-side [`OpEvent`] keyed by the edit token so
@@ -107,20 +112,25 @@ impl RunnerClient {
     }
 }
 
-// ── Two-phase bring-up: warm (startup) then session-init (file-load) ──
+// ── Non-blocking two-phase bring-up: warm (startup) then session-init
+//    (file-load), each a kick + poll pair ──
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
-    /// Phase 1 (app startup): discover plugins under `root` and WARM each
-    /// one — spawn its worker, which loads the backend / database /
-    /// scoring with NO session and NO pose. This is the app-lifecycle
-    /// warm-up, independent of any structure; the session is created
-    /// later, at file-load, by [`Self::init_runner_sessions`]. Silently
-    /// degrades to viewer-only when no orchestrator is wired up or
-    /// discovery fails, rather than erroring.
-    pub(crate) fn warm_runner(&mut self, root: &std::path::Path) {
+    /// Kick off phase 1 (app startup) WITHOUT blocking on each worker's
+    /// connect: discover plugins under `root` and KICK a warm for each one
+    /// (bind the listener, spawn the worker child). The connects are
+    /// finished later by [`Self::poll_warms`]. Returns the plugin ids whose
+    /// warm was successfully KICKED (those that entered the pending-warm
+    /// table), so the caller can tally `poll_warms` completions against
+    /// exactly this set without reaching back into the orchestrator. A
+    /// plugin whose kick failed is dropped from the returned set: it never
+    /// becomes pending, so `poll_warms` would never report it and waiting on
+    /// it would hang bring-up. Silently degrades to viewer-only (returns an
+    /// empty `Vec`) when no orchestrator is wired up or discovery fails.
+    pub(crate) fn kick_warms(&mut self, root: &std::path::Path) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
-            return;
+            return Vec::new();
         };
         let discovered = match orch.discover_plugins(root) {
             Ok(ids) => ids,
@@ -129,55 +139,198 @@ impl RunnerClient {
                     "[RunnerClient] discover_plugins({}) failed: {e}; plugins disabled",
                     root.display()
                 );
-                return;
+                return Vec::new();
             }
         };
         log::info!("[RunnerClient] discovered plugins: {discovered:?}");
+        let mut kicked = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
             if let Some(descriptor) = orch.plugin_descriptor(plugin_id).cloned() {
-                match orch.warm_plugin(&descriptor) {
-                    Ok(()) => log::info!("[RunnerClient] {plugin_id} plugin warm"),
+                match orch.kick_warm_plugin(&descriptor) {
+                    Ok(()) => {
+                        log::info!("[RunnerClient] {plugin_id} plugin warming");
+                        kicked.push(plugin_id.clone());
+                    }
                     Err(e) => log::warn!(
-                        "[RunnerClient] warm_plugin('{plugin_id}') failed: {e}; \
+                        "[RunnerClient] kick_warm_plugin('{plugin_id}') failed: {e}; \
                          {plugin_id} plugin disabled"
                     ),
                 }
             }
         }
+        kicked
     }
 
-    /// Phase 2 (file-load): create each warm plugin's session by running
-    /// `Init` against the given initial assembly (the structure is built
-    /// here). Returns the `(plugin_id, post_init_bytes)` pair for every
-    /// plugin whose session came up; the post-Init bytes carry each
-    /// plugin's normalized assembly for the caller to apply. Empty `Vec`
-    /// when no orchestrator is wired up — degrades to viewer-only rather
-    /// than erroring. Iterates over the already-warmed (discovered)
-    /// plugins; `init_plugin_session` is a no-op for any that already
-    /// hold a session.
-    pub(crate) fn init_runner_sessions(
-        &mut self,
-        initial_assembly: &[u8],
-    ) -> Vec<(String, Vec<u8>)> {
+    /// Finish any warms whose worker has connected since the last call.
+    /// Non-blocking; a worker that has not connected yet stays warming and
+    /// is not reported until a later poll. Returns the `(plugin_id, ok)`
+    /// outcome for each plugin that COMPLETED its warm this poll: `true` on
+    /// success, `false` on failure (also logged, log-and-degrade). The `ok`
+    /// flag lets the caller answer "did any fail" without naming any
+    /// `foldit_runner` type. The poll twin of [`Self::kick_warms`]. Empty
+    /// when no orchestrator is wired up or nothing completed this poll; the
+    /// caller tallies completions against the kicked-plugin set to know when
+    /// all warms are done.
+    pub(crate) fn poll_warms(&mut self) -> Vec<(String, bool)> {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        orch.poll_warm_plugins()
+            .into_iter()
+            .map(|(plugin_id, result)| match result {
+                Ok(()) => {
+                    log::info!("[RunnerClient] {plugin_id} plugin warm");
+                    (plugin_id, true)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[RunnerClient] warm_plugin('{plugin_id}') failed: {e}; \
+                         {plugin_id} plugin disabled"
+                    );
+                    (plugin_id, false)
+                }
+            })
+            .collect()
+    }
+
+    /// Kick off phase 2 (file-load) WITHOUT blocking on each `Init` reply:
+    /// for every warmed (discovered) plugin, KICK an `Init` against
+    /// `initial_assembly`. The replies are drained later by
+    /// [`Self::poll_inits`]. Returns the plugin ids whose `Init` was
+    /// successfully KICKED (those that entered the pending-init table), so
+    /// the caller can tally `poll_inits` completions against exactly this
+    /// set. A plugin whose kick failed is dropped from the returned set: it
+    /// never becomes pending, so `poll_inits` would never report it and
+    /// waiting on it would hang bring-up. Empty `Vec` when no orchestrator
+    /// is wired up.
+    pub(crate) fn kick_inits(&mut self, initial_assembly: &[u8]) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
         };
         let discovered = orch.discovered_plugin_ids();
-        let mut registered = Vec::with_capacity(discovered.len());
+        let mut kicked = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
-            match orch.init_plugin_session(plugin_id, initial_assembly.to_owned()) {
+            match orch.kick_init_session(plugin_id, initial_assembly.to_owned()) {
+                Ok(()) => kicked.push(plugin_id.clone()),
+                Err(e) => log::warn!(
+                    "[RunnerClient] kick_init_session('{plugin_id}') failed: \
+                     {e}; {plugin_id} plugin disabled"
+                ),
+            }
+        }
+        kicked
+    }
+
+    /// Drain whatever `Init` replies have arrived since the last call.
+    /// Non-blocking; a plugin whose Init has not replied stays pending and
+    /// is not reported until a later poll. Returns the `(plugin_id,
+    /// post_init_bytes)` pair for each plugin whose session came up THIS
+    /// poll; the caller feeds the post-Init bytes to `apply_post_init` to
+    /// adopt each plugin's normalized assembly. Logs each failure
+    /// (log-and-degrade) without naming any `foldit_runner` type. The
+    /// poll twin of [`Self::kick_inits`]. Empty when no orchestrator is
+    /// wired up or nothing completed this poll; the caller tallies
+    /// completions against the kicked-plugin set to know when all inits are
+    /// done.
+    pub(crate) fn poll_inits(&mut self) -> Vec<(String, Vec<u8>)> {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        let mut registered = Vec::new();
+        for (plugin_id, result) in orch.poll_init_sessions() {
+            match result {
                 Ok(bytes) => {
                     log::info!("[RunnerClient] {plugin_id} plugin session ready");
-                    registered.push((plugin_id.clone(), bytes));
+                    registered.push((plugin_id, bytes));
                 }
-                Err(e) => {
-                    log::warn!(
-                        "[RunnerClient] init_plugin_session('{plugin_id}') \
-                         failed: {e}; {plugin_id} plugin disabled"
-                    );
-                }
+                Err(e) => log::warn!(
+                    "[RunnerClient] init_plugin_session('{plugin_id}') failed: \
+                     {e}; {plugin_id} plugin disabled"
+                ),
             }
         }
         registered
+    }
+
+    /// Kick a load-time normalize op WITHOUT blocking on the worker reply.
+    /// The non-blocking twin of the synchronous normalize dispatch: builds
+    /// the orchestrator `DispatchContext` from the core-shaped
+    /// [`DispatchIntent`] (same flatten as `dispatch_op`'s Invoke branch)
+    /// and forwards to `kick_invoke`. The op selection (whole-structure,
+    /// empty selection / no focus) and the intent construction stay in the
+    /// caller, exactly as the synchronous path builds them. The reply is
+    /// drained later by [`Self::poll_normalizes`]. Logs and degrades on a
+    /// kick failure (matching the synchronous normalize loop's
+    /// log-and-skip) without naming any `foldit_runner` error type.
+    pub(crate) fn kick_normalize(
+        &mut self,
+        intent: DispatchIntent,
+        plugin_id: &str,
+        entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
+    ) {
+        use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return;
+        };
+        // Flatten the authoritative selection (molex ids) into the
+        // wire-shape `ResidueRef` list the orchestrator's context expects.
+        let selection: Vec<ResidueRef> = intent
+            .selection
+            .iter()
+            .flat_map(|(entity, residues)| {
+                let id = *entity;
+                residues.iter().map(move |&residue_index| ResidueRef {
+                    entity_id: id,
+                    residue_index,
+                })
+            })
+            .collect();
+        let ctx = DispatchContext {
+            focused_entity_id: intent.focused_entity_id,
+            selection,
+        };
+        let params: std::collections::HashMap<
+            String,
+            foldit_runner::orchestrator::ParamValue,
+        > = intent
+            .params
+            .into_iter()
+            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+            .collect();
+        if let Err(e) = orch.kick_invoke(&intent.op_id, ctx, params, entity_type_of) {
+            log::warn!(
+                "[RunnerClient] kick_invoke('{plugin_id}', {:?}) failed: {e}; \
+                 skipping normalization apply",
+                intent.op_id
+            );
+        }
+    }
+
+    /// Drain whatever async normalize replies have arrived since the last
+    /// call. Non-blocking; a plugin whose normalize has not replied stays
+    /// pending. Returns the `(plugin_id, normalized_bytes)` pair for each
+    /// plugin whose normalize completed THIS poll, dropping the dispatch
+    /// `request_id` and resolved targets (the caller's `apply_post_init`
+    /// re-derives its target entities and mints its own checkpoint, so it
+    /// only needs the bytes). Logs each failure without naming any
+    /// `foldit_runner` error type. Empty when no orchestrator is wired up
+    /// or nothing completed this poll.
+    pub(crate) fn poll_normalizes(&mut self) -> Vec<(String, Vec<u8>)> {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        let mut done = Vec::new();
+        for (plugin_id, result) in orch.poll_invokes() {
+            match result {
+                Ok((_request_id, bytes, _targets)) => {
+                    done.push((plugin_id, bytes));
+                }
+                Err(e) => log::warn!(
+                    "[RunnerClient] normalize for '{plugin_id}' failed: {e}; \
+                     skipping normalization apply"
+                ),
+            }
+        }
+        done
     }
 }

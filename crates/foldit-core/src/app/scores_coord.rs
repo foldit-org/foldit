@@ -27,7 +27,7 @@ impl App {
     /// re-derives the displayed per-residue colors from the session-owned
     /// breakdown on that signal (no direct viso push here anymore).
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_score_reports(
+    pub(in crate::app) fn apply_score_reports(
         &mut self,
         reports: std::collections::HashMap<String, crate::scores::ScoreReport>,
     ) {
@@ -58,6 +58,17 @@ impl App {
         let Some(report) = chosen else {
             return;
         };
+
+        // A content-empty report carries nothing to stamp. The session goes
+        // live before the scorer's pose is built, so an early query lands an
+        // empty report in that window; stamping it would mint a hollow
+        // breakdown (no terms, no per-residue colors) that flips the "scored"
+        // state and leaves the backbone gray until the next real score. Skip
+        // it and leave the gauge at "not scored yet". Same predicate the
+        // blocking load-time scorer uses.
+        if report.term_names.is_empty() && report.per_residue_terms.is_empty() {
+            return;
+        }
 
         let (raw, game, breakdown) = self.prepare_score_stamp(report);
         // Whole-assembly score of the worker's live pose. With exactly one
