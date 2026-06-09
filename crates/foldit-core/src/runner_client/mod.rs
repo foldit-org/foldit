@@ -95,6 +95,18 @@ impl RunnerClient {
             .map(|op| op.plugin_id.clone())
     }
 
+    /// Whether `op_id` declares `creates_entities` (its output is a NEW
+    /// entity to adopt, not an edit of an existing lane). `false` for an
+    /// unknown op-id. Lets the dispatch path skip `begin_action` for
+    /// entity-creating ops without naming an orchestrator type.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn op_creates_entities(&self, op_id: &str) -> bool {
+        self.orchestrator
+            .as_ref()
+            .and_then(|o| o.plugin_registry().get_op(op_id))
+            .is_some_and(|op| op.lock_meta.creates_entities)
+    }
+
     /// Release any lock state when puzzle topology changes.
     pub fn reset_for_new_structure(&mut self) {
         if let Some(ref mut orch) = self.orchestrator {

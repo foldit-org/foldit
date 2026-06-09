@@ -301,6 +301,20 @@ impl Session {
         true
     }
 
+    /// Update an existing preview's geometry in place (a streaming
+    /// frame). Keeps the same id and metadata, so the published id set is
+    /// unchanged and the render projector animates coords without a
+    /// topology swap. No-op (returns `false`) if `id` is not a preview.
+    pub fn update_preview(&mut self, id: EntityId, mut entity: MoleculeEntity) -> bool {
+        if !self.transient.contains_key(&id) {
+            return false;
+        }
+        entity.set_id(id);
+        let _ = self.transient.insert(id, Arc::new(entity));
+        self.apply(SessionUpdate::PreviewUpdated);
+        true
+    }
+
     /// Promote a preview into history. Removes it from `transient` and
     /// pushes one checkpoint via [`History::add_entity`] with `kind`
     /// (typically [`CheckpointKind::PromotedPreview`] or one of the

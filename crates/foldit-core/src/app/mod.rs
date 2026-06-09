@@ -89,6 +89,16 @@ pub struct App {
     /// entry could otherwise collide with a fresh edit id).
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
+    /// `request_id` → (preview entity id, its atom count) for the
+    /// transient entity a creates-entities stream is animating. Created on
+    /// the first streamed frame, coord-updated per frame while the atom
+    /// count is unchanged (rebuilt under a new id when it changes, so the
+    /// render projector does a topology rebuild rather than a desyncing
+    /// coord update), and discarded at the terminal (the final full-atom
+    /// entity is adopted fresh).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) creates_previews:
+        std::collections::HashMap<u64, (molex::EntityId, usize)>,
     /// Pull-drag intent captured at left-button-down. The pull is
     /// determined by the down-target, not by where the cursor later
     /// wanders: a drag that began on empty background must never grab a
@@ -130,6 +140,8 @@ impl App {
             needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            creates_previews: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_pull_origin: None,
         }

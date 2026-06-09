@@ -43,28 +43,48 @@ impl App {
             // so no explicit raise is needed here.
             for event in events {
                 match event {
-                    OpEvent::Update { token, assembly, score } => {
-                        let applied =
-                            self.store.apply_streaming_assembly(&assembly, None, token);
-                        // The frame carries the warm score of its own
-                        // geometry; stamp the open edit directly from it so
-                        // the displayed score stays coupled to the frame
-                        // instead of trailing it.
-                        if applied {
-                            if let Some(report) = score {
-                                let (raw, game, breakdown) =
-                                    self.prepare_score_stamp(report);
-                                self.store.set_edit_scores(
-                                    token,
-                                    Some(raw),
-                                    Some(game),
-                                    Some(breakdown),
-                                );
+                    OpEvent::Update { token, assembly, score, creates_entities } => {
+                        if creates_entities {
+                            // Entity-creating op: stream the diffusion frame
+                            // into a live preview entity (created on the first
+                            // frame, updated in place after) so the viewport
+                            // animates the binder forming. Promoted at commit.
+                            self.stream_preview_frame(token, &assembly);
+                        } else {
+                            let applied = self
+                                .store
+                                .apply_streaming_assembly(&assembly, None, token);
+                            // The frame carries the warm score of its own
+                            // geometry; stamp the open edit directly from it so
+                            // the displayed score stays coupled to the frame
+                            // instead of trailing it.
+                            if applied {
+                                if let Some(report) = score {
+                                    let (raw, game, breakdown) =
+                                        self.prepare_score_stamp(report);
+                                    self.store.set_edit_scores(
+                                        token,
+                                        Some(raw),
+                                        Some(game),
+                                        Some(breakdown),
+                                    );
+                                }
                             }
                         }
                     }
-                    OpEvent::Commit { token, assembly, score } => {
-                        if let Some(token) = token {
+                    OpEvent::Commit { token, assembly, score, creates_entities } => {
+                        if creates_entities {
+                            // Entity-creating op (e.g. RFdiffusion3 design):
+                            // no edit was opened over the focused target. If a
+                            // live preview animated the stream, snap it to the
+                            // final geometry and promote it in place; else
+                            // adopt the terminal assembly fresh. Either way the
+                            // focused target is untouched.
+                            self.commit_created_entities(token, &assembly);
+                            if let Some(token) = token {
+                                let _ = self.score_targets.remove(&token);
+                            }
+                        } else if let Some(token) = token {
                             // Capture sole-open-ness while the edit is still
                             // pending: the commit below clears it.
                             let sole = self.store.sole_pending_request_id() == Some(token);
@@ -104,6 +124,13 @@ impl App {
                         // with no open edit, or whose edit already
                         // committed, is a no-op.
                         if let Some(token) = token {
+                            // Discard any in-progress creates-entities preview
+                            // this stream was animating.
+                            if let Some((preview_id, _)) =
+                                self.creates_previews.remove(&token)
+                            {
+                                let _ = self.store.remove_preview(preview_id);
+                            }
                             if self.store.is_pending(token) {
                                 if let Err(e) = self.store.abort_action(token) {
                                     log::warn!("abort_action failed: {e}");
@@ -203,11 +230,19 @@ impl App {
                 Err(_) => None,
             };
 
+            // An op that creates entities does NOT edit an existing lane: its
+            // terminal assembly is adopted as new entities at commit. Skipping
+            // `begin_action` leaves the focused target untouched (streaming
+            // frames then no-op for want of an open edit under their token).
+            let creates_entities =
+                self.runner_client.op_creates_entities(&op.op_id);
+
             // Open the edit under the dispatch id over the resolved lane set.
             // Skipped on dispatch failure (any open tentative belongs to a
-            // prior op) or when the resolved set has no editable lane.
+            // prior op), when the resolved set has no editable lane, or for a
+            // creates-entities op (handled via adoption at commit).
             let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
-                if lanes.is_empty() {
+                if creates_entities || lanes.is_empty() {
                     return None;
                 }
                 let kind = CheckpointKind::PluginOp {
@@ -286,6 +321,118 @@ impl App {
             }
         }
     }
+
+    /// Adopt every entity in an entity-creating op's terminal `assembly`
+    /// as a new committed entity. Each is inserted as a transient preview
+    /// (which allocates a fresh id, so it can't collide with the focused
+    /// target) and immediately promoted into history via
+    /// [`CheckpointKind::PromotedPreview`]. The focused target is never
+    /// touched: creates-entities ops open no edit over it, so this is
+    /// purely additive.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stream_preview_frame(&mut self, token: u64, assembly: &molex::Assembly) {
+        let Some(entity) = assembly.entities().first() else {
+            return;
+        };
+        // Draw the in-progress diffusion frame faithfully: rebuild protein
+        // chains as one continuous segment so noisy intermediate coordinates
+        // render as a connected backbone instead of fragmenting into a
+        // per-residue segment at every C->N gap.
+        let payload: molex::MoleculeEntity = entity.to_continuous();
+        let atoms = payload.atom_count();
+        match self.creates_previews.get(&token).copied() {
+            // Same topology: cheap in-place coord update (animates).
+            Some((preview_id, prev_atoms)) if prev_atoms == atoms => {
+                let _ = self.store.update_preview(preview_id, payload);
+            }
+            // Atom count changed: a same-id coord update would desync viso's
+            // topology vs positions (hard panic). Rebuild under a fresh id so
+            // the render projector does a topology `replace_assembly`.
+            Some((preview_id, _)) => {
+                let _ = self.store.remove_preview(preview_id);
+                let id = self.insert_design_preview(payload);
+                let _ = self.creates_previews.insert(token, (id, atoms));
+            }
+            None => {
+                let id = self.insert_design_preview(payload);
+                let _ = self.creates_previews.insert(token, (id, atoms));
+            }
+        }
+    }
+
+    /// Insert a streamed design frame as a transient preview, returning its
+    /// allocated id.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn insert_design_preview(&mut self, payload: molex::MoleculeEntity) -> molex::EntityId {
+        self.store.insert_preview(
+            payload,
+            String::from("RFdiffusion3 design"),
+            crate::session::EntityOrigin::Generated,
+        )
+    }
+
+    /// Terminal handling for a creates-entities stream. Tears down the
+    /// streaming preview (if any) and adopts the terminal assembly fresh.
+    ///
+    /// The preview is NOT promoted in place: streaming frames are
+    /// backbone-only, but the terminal entity carries full atoms (a
+    /// different topology). The render projector routes a same-id change
+    /// as a coord-only `set_assembly` (it detects topology change only via
+    /// id-set membership), which would index the new positions against the
+    /// old backbone topology and panic viso. Removing the preview and
+    /// adopting fresh (new id) forces a `replace_assembly` topology
+    /// rebuild. Both updates land in one drain, so the projector sees a
+    /// single net id-set change -- no flicker.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_created_entities(
+        &mut self,
+        token: Option<u64>,
+        assembly: &molex::Assembly,
+    ) {
+        if let Some(t) = token {
+            if let Some((preview_id, _)) = self.creates_previews.remove(&t) {
+                let _ = self.store.remove_preview(preview_id);
+            }
+        }
+        self.adopt_created_entities(assembly);
+    }
+
+    /// Adopt every entity in an entity-creating op's terminal `assembly`
+    /// as a new committed entity (the no-live-preview path).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt_created_entities(&mut self, assembly: &molex::Assembly) {
+        for entity in assembly.entities() {
+            self.adopt_one_entity((**entity).clone());
+        }
+    }
+
+    /// Insert `payload` as a transient preview (fresh id) and promote it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt_one_entity(&mut self, payload: molex::MoleculeEntity) {
+        let id = self.insert_design_preview(payload);
+        self.promote_adopted(id);
+    }
+
+    /// Promote an already-inserted preview `id` into history as a new
+    /// committed entity, scoring the resulting checkpoint. Discards the
+    /// preview on failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn promote_adopted(&mut self, id: molex::EntityId) {
+        match self.store.promote_preview(
+            id,
+            CheckpointKind::PromotedPreview { entity: id },
+            None,
+            None,
+            "RFdiffusion3",
+        ) {
+            Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+            Err(e) => {
+                log::warn!("promote_adopted: promote failed: {e}");
+                let _ = self.store.remove_preview(id);
+            }
+        }
+    }
+
     /// Apply the assembly bytes returned by a one-shot `dispatch_invoke`
     /// to the ongoing tentative and commit it. Mirrors the Stream-side
     /// `Final` path; called from `handle_dispatch_op` for `OpKind::Invoke`.

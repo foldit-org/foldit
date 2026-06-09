@@ -7,6 +7,10 @@
 pub enum EntityOrigin {
     /// Loaded from file or puzzle.
     Loaded,
+    /// Produced by a plugin op that creates entities (e.g. an
+    /// `RFdiffusion3` design or an `RF3` prediction), adopted into the
+    /// scene at the op's terminal.
+    Generated,
 }
 
 /// Per-entity metadata that rides alongside the entity payload.

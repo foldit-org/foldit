@@ -168,6 +168,10 @@ pub enum OpEvent {
         /// Warm score of this frame's geometry, absent for non-scoring
         /// plugins.
         score: Option<crate::scores::ScoreReport>,
+        /// True when the originating op declared `creates_entities`. Such
+        /// frames stream into a transient preview entity instead of an
+        /// edit on an existing lane.
+        creates_entities: bool,
     },
     /// Terminal success. The runner's distinct `Final` and `Cancelled`
     /// terminals collapse here because core commits either identically.
@@ -180,6 +184,11 @@ pub enum OpEvent {
         /// Warm score of this frame's geometry, absent for non-scoring
         /// plugins.
         score: Option<crate::scores::ScoreReport>,
+        /// True when the originating op declared `creates_entities`. Such
+        /// ops do not edit an existing lane; `App` adopts the terminal
+        /// assembly's entities as new entities instead of committing an
+        /// edit under `token`.
+        creates_entities: bool,
     },
     /// Terminal failure. `token` is the dispatch `request_id`; `App`
     /// aborts the edit open under it (gated on `is_pending`), or accounts
@@ -218,4 +227,8 @@ pub struct StreamHost {
 pub struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
+    /// Whether the originating op declared `creates_entities`. Stamped
+    /// onto the terminal [`OpEvent::Commit`] so `App` routes to the
+    /// entity-adoption path instead of an edit commit.
+    pub(crate) creates_entities: bool,
 }

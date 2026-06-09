@@ -30,6 +30,10 @@ pub enum SessionUpdate {
     HeadMoved,
     /// A preview (transient) entity was added to the overlay.
     PreviewAdded,
+    /// A preview (transient) entity's geometry was updated in place
+    /// (e.g. a streaming diffusion frame). Same id set as before; the
+    /// render projector republishes coords without a topology swap.
+    PreviewUpdated,
     /// A preview (transient) entity was discarded from the overlay.
     PreviewDiscarded,
     /// A head / edit / checkpoint score *value* changed. Signal-only,

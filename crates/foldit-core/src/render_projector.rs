@@ -174,20 +174,16 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         doc: &Session,
         engine: &mut viso::VisoEngine,
     ) {
-        // A selection change: source the highlight from the authoritative
-        // `Session` selection.
         if changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::SelectionChanged))
         {
             engine.set_selection(doc.selection());
         }
-        // A focus change: push viso's camera-framing mirror, then reframe.
         if changes.iter().any(|c| matches!(c, SessionUpdate::FocusChanged)) {
             engine.set_focus(doc.focus());
             engine.fit_camera_to_focus();
         }
-        // A view-options change: the session is the source of truth.
         if changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
@@ -207,6 +203,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
                 SessionUpdate::Edit { .. }
                     | SessionUpdate::HeadMoved
                     | SessionUpdate::PreviewAdded
+                    | SessionUpdate::PreviewUpdated
                     | SessionUpdate::PreviewDiscarded
             )
         });

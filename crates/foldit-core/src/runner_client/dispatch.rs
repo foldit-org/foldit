@@ -53,11 +53,18 @@ impl RunnerClient {
                         continue;
                     };
                     // The dispatch id is the edit token. `App` no-ops the
-                    // frame if no edit is open under it.
+                    // frame if no edit is open under it; for a
+                    // creates-entities op it streams into a preview instead.
+                    let creates_entities = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .is_some_and(|e| e.creates_entities);
                     events.push(OpEvent::Update {
                         token: request_id,
                         assembly,
                         score: score.map(Into::into),
+                        creates_entities,
                     });
                 }
                 PluginUpdate::Cancelled {
@@ -66,10 +73,16 @@ impl RunnerClient {
                     score,
                 } => {
                     let entities = assembly.entities().len();
+                    let creates_entities = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .is_some_and(|e| e.creates_entities);
                     events.push(OpEvent::Commit {
                         token: Some(request_id),
                         assembly,
                         score: score.map(Into::into),
+                        creates_entities,
                     });
                     // Free the table entry / dispatch lock / pull-drag
                     // regardless of whether an edit was open.
@@ -85,10 +98,16 @@ impl RunnerClient {
                     ..
                 } => {
                     let entities = assembly.entities().len();
+                    let creates_entities = self
+                        .stream_host
+                        .active_streams
+                        .get(&request_id)
+                        .is_some_and(|e| e.creates_entities);
                     events.push(OpEvent::Commit {
                         token: Some(request_id),
                         assembly,
                         score: score.map(Into::into),
+                        creates_entities,
                     });
                     let _ = self.release_terminal_stream(request_id);
                     log::info!(
@@ -231,7 +250,11 @@ impl RunnerClient {
                 let scope = edit_scope_from_handle(&handle);
                 let _ = self.stream_host.active_streams.insert(
                     rid,
-                    ActiveStreamEntry { handle, plugin_id },
+                    ActiveStreamEntry {
+                        handle,
+                        plugin_id,
+                        creates_entities: cached.lock_meta.creates_entities,
+                    },
                 );
                 Ok(OpOutcome::Stream {
                     request_id: rid,
@@ -292,6 +315,9 @@ impl RunnerClient {
             ActiveStreamEntry {
                 handle,
                 plugin_id: plugin_id.clone(),
+                // Pull-drag is an edit on an existing entity, never a
+                // create.
+                creates_entities: false,
             },
         );
         Ok((rid, plugin_id))

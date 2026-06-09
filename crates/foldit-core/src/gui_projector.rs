@@ -271,7 +271,8 @@ fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
     for update in updates {
         dirty |= match update {
             SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
-            SessionUpdate::Edit { tentative: true } => DirtyFlags::SCENE,
+            SessionUpdate::Edit { tentative: true }
+            | SessionUpdate::PreviewUpdated => DirtyFlags::SCENE,
             SessionUpdate::Edit { tentative: false }
             | SessionUpdate::PreviewAdded
             | SessionUpdate::PreviewDiscarded
