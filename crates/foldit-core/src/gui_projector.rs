@@ -365,6 +365,12 @@ fn project_view(session: &Session, host: &dyn crate::HostResources, frontend: &m
             .unwrap_or_default();
     }
     frontend.view.active_preset = session.active_preset().map(String::from);
+
+    // This arm writes `frontend.view.*` by direct field assignment, so it
+    // must raise the VIEW bit itself: the transmit step only emits the view
+    // section when the bit is set, and the options/schema written above are
+    // otherwise populated but never sent.
+    frontend.mark_dirty(DirtyFlags::VIEW);
 }
 
 /// Project the `SELECTION` section: the per-entity residue selection.
@@ -446,5 +452,50 @@ fn sync_history(cursor: &mut HistorySyncCursor, session: &Session, frontend: &mu
                 cursor.live_push_at = Some(now);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::path::Path;
+
+    /// Minimal [`crate::HostResources`] stub. `project_view`'s preset read
+    /// resolves to `None`, so the test never touches the filesystem.
+    struct TestHost;
+
+    impl crate::HostResources for TestHost {
+        fn read_file(&self, _path: &str) -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "test stub"))
+        }
+        fn view_presets_dir(&self) -> Option<&Path> {
+            None
+        }
+        fn initial_structure_path(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// `project_view` populates `frontend.view` by direct field write, so it
+    /// must also raise the VIEW dirty bit. The transmit step only emits the
+    /// view section when that bit is set; without the raise the populated
+    /// options/schema are written but never sent, and the JS store keeps a
+    /// null schema. Drive the arm directly and assert the bit lands.
+    #[test]
+    fn project_view_raises_view_dirty_bit() {
+        let session = Session::new();
+        let host = TestHost;
+        let mut frontend = FrontendState::new();
+        // Clear any construction-time dirt so the assertion is about
+        // `project_view`'s own raise.
+        let _ = frontend.take_dirty();
+
+        project_view(&session, &host, &mut frontend);
+
+        assert!(
+            frontend.take_dirty().contains(DirtyFlags::VIEW),
+            "project_view must raise VIEW so the populated view section transmits"
+        );
     }
 }
