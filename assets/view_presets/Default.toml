@@ -21,10 +21,10 @@ rim_power = 5.0
 rim_intensity = 0.3
 rim_directionality = 0.3
 rim_color = [1.0, 0.85, 0.7]
-ibl_strength = 0.6
+ibl_strength = 0.5
 rim_dir = [0.0, -0.7, 0.5]
-roughness = 0.35
-metalness = 0.15
+roughness = 0.5
+metalness = 0.5
 
 [post_processing]
 outline_thickness = 1.0
