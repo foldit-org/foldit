@@ -217,7 +217,10 @@ impl AppRunner {
         // per-frame `app.tick` below advances the startup state-machine one
         // step at a time, so the loading screen keeps animating throughout.
         // The wgpu RenderContext is already initialized (in `resumed()` before
-        // webview attachment) so the engine is alive and rendering during it.
+        // webview attachment), so each frame the engine renders its empty scene
+        // (which clears to black) and presents it; the surface shows black
+        // matching the loading-screen background rather than the OS window
+        // default, until the webview paints.
         if self.init_pending {
             let should_init = self.webview_ready
                 || self.webview.is_none()
@@ -233,7 +236,11 @@ impl AppRunner {
                 self.app.begin_startup();
                 // Fall through to tick + render this frame.
             } else {
-                // Webview still loading — keep pumping frames so it can paint
+                // Webview still loading. Present the engine's empty scene so the
+                // surface clears to black (matching the loading-screen
+                // background) instead of the OS compositor default, then keep
+                // pumping frames so the webview can paint.
+                self.app.render();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -281,7 +288,17 @@ impl ApplicationHandler for AppRunner {
     )]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            // Create window.
+            // Create window. The window is shown immediately rather than created
+            // hidden and revealed on a first-paint signal: the three platform
+            // webview engines wry uses (WKWebView on macOS, WebView2 on Windows,
+            // WebKitGTK on Linux) all refuse to lay out and paint their content
+            // while the host window is hidden or off-screen (they gate rendering,
+            // and even JS execution, on the host being visible), so the
+            // Electron-style "create hidden, show on ready-to-show" pattern is
+            // not available on any of foldit's targets. The load gap before the
+            // webview's first paint is instead covered by presenting an opaque
+            // black frame (see the init_pending wait in `tick_frame`) that
+            // matches the loading-screen background.
             // On Windows, disable WS_CLIPCHILDREN so the wry child HWND
             // doesn't occlude the wgpu DirectComposition swap chain.
             #[allow(unused_mut)]

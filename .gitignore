@@ -1,3 +1,10 @@
 target/
 bundle/
 assets/gui
+
+# macOS finder cruft (matches at any depth)
+.DS_Store
+._*
+.AppleDouble
+.Spotlight-V100
+.Trashes

@@ -309,7 +309,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     // it for ASSEM01 IO and Assembly walks. Invoke via
     // --manifest-path so cargo treats this as a standalone build,
     // bypassing the workspace resolver. crates/molex is workspace-
-    // excluded; the workspace itself pins published molex ^0.3.0 for
+    // excluded; the workspace itself pins published molex ^0.5.1 for
     // foldit-core, which does not resolve against the in-tree 0.4.x.
     // Running outside the workspace sidesteps that conflict.
     // rustc's Windows host target is MSVC, but the Rosetta C++ is linked by
