@@ -272,6 +272,45 @@ impl AppRunner {
         self.dev_server = None;
     }
 
+    /// Resolve the directory holding the built frontend (`index.html` +
+    /// `assets/`). Mirrors [`foldit_core::locate_plugins_root`]'s
+    /// bundle-vs-dev resolution so the exe serves the GUI from the right
+    /// place regardless of launch cwd. Both layouts put it at
+    /// `assets/gui` relative to some ancestor of the executable:
+    ///
+    ///   * Bundle: `assets/gui/` next to the executable (xtask `bundle()`
+    ///     copies the repo's `assets/gui` there).
+    ///   * Dev release build (`cargo run --release`, `target/release/foldit`):
+    ///     no sibling `assets/`, so a higher ancestor is the repo root whose
+    ///     `assets/gui` `cargo xtask build-gui` writes.
+    ///
+    /// `FOLDIT_GUI_ROOT` overrides both. Returns `None` if nothing resolves,
+    /// which the caller logs once and the protocol handler then 404s (blank
+    /// webview) -- the same surface as a genuinely missing asset.
+    #[cfg(not(debug_assertions))]
+    fn resolve_gui_root() -> Option<std::path::PathBuf> {
+        if let Some(env) = std::env::var_os("FOLDIT_GUI_ROOT") {
+            let p = std::path::PathBuf::from(env);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        // Walk up from the executable. Iteration 0 (the exe's own dir) is the
+        // bundle layout; a higher ancestor is the dev-tree repo root.
+        let exe = std::env::current_exe().ok()?;
+        let mut cursor = exe.parent()?.to_path_buf();
+        loop {
+            let candidate = cursor.join("assets/gui");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !cursor.pop() {
+                break;
+            }
+        }
+        None
+    }
+
     /// Create the wry webview for release mode, serving assets via custom protocol.
     #[cfg(not(debug_assertions))]
     pub(super) fn create_webview_release(
@@ -287,6 +326,15 @@ impl AppRunner {
             // closure (Fn, called many times) captures a cheap clone
             // rather than re-walking on every request.
             let plugins_root = crate::plugin_assets::resolve_plugins_root();
+            let gui_root = Self::resolve_gui_root();
+            if gui_root.is_none() {
+                log::error!(
+                    "Frontend assets directory not found (looked for `gui/` next \
+                     to the executable and `assets/gui` up-tree from it); the \
+                     webview will be blank. Set FOLDIT_GUI_ROOT or run \
+                     `cargo xtask build-gui`."
+                );
+            }
 
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
@@ -327,7 +375,13 @@ impl AppRunner {
                         request_path.trim_start_matches('/')
                     };
 
-                    let asset_path = std::path::Path::new("assets/gui").join(path);
+                    let Some(root) = gui_root.as_ref() else {
+                        return wry::http::Response::builder()
+                            .status(404)
+                            .body(Cow::Borrowed(b"Not Found" as &[u8]))
+                            .unwrap();
+                    };
+                    let asset_path = root.join(path);
                     match std::fs::read(&asset_path) {
                         Ok(content) => {
                             let mime = Self::mime_from_ext(

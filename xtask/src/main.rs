@@ -508,13 +508,27 @@ fn bundle() -> Result<()> {
         anyhow::bail!("Failed to assemble Python plugins");
     }
 
-    // 5. Frontend assets.
+    // 5. Read-only data assets, mirrored under bundle/assets/ so the exe finds
+    //    them next to itself regardless of launch cwd. The frontend resolver
+    //    (`create_webview_release`) looks for `assets/gui`; the view-preset
+    //    resolver (`DesktopHost::resolve_view_presets_dir`) looks for
+    //    `assets/view_presets`. Without these the webview is blank and the
+    //    preset menu empty with no startup preset.
+    std::fs::create_dir_all("bundle/assets")?;
+
     if Path::new("assets/gui").exists() {
         println!("Copying frontend assets...");
-        copy_dir("assets/gui", "bundle/gui")?;
+        copy_dir("assets/gui", "bundle/assets/gui")?;
     } else {
         println!("Warning: Frontend assets not found at assets/gui");
         println!("  Run 'cargo xtask build-gui' first");
+    }
+
+    if Path::new("assets/view_presets").exists() {
+        println!("Copying view presets...");
+        copy_dir("assets/view_presets", "bundle/assets/view_presets")?;
+    } else {
+        println!("Warning: view presets not found at assets/view_presets");
     }
 
     println!("Bundle ready at ./bundle/");
