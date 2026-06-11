@@ -359,7 +359,13 @@ fn project_view(
 ) {
     // Source of truth is the App-owned view options, not the engine: the
     // engine is a follower that the tick re-applies on `ViewOptionsChanged`.
-    frontend.view.options = serde_json::to_value(view_options).unwrap_or_default();
+    // The `display` group is the only sparse one (its `DisplayOverrides`
+    // drop `None` fields on serialization); densify it so the settings
+    // panel reads each control's effective value instead of falling back to
+    // a control minimum. The other groups are already dense.
+    let mut display_dense = view_options.clone();
+    display_dense.display = display_dense.display.with_resolved_overrides();
+    frontend.view.options = serde_json::to_value(&display_dense).unwrap_or_default();
 
     // Schema is static - only set once
     if frontend.view.options_schema.is_null() {
@@ -417,13 +423,18 @@ fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut Frontend
             .entity_appearance(entity.id())
             .is_some_and(|o| !o.is_empty());
         // The resolved display values: the global display options with this
-        // entity's overrides overlaid (or the bare global when it has none).
-        // Serialized flat by field name so a values-bound panel can read each
-        // control's current setting directly.
-        let resolved = engine.entity_appearance(entity.id()).map_or_else(
-            || engine.options().display.clone(),
-            |o| o.to_display_options(&engine.options().display),
-        );
+        // entity's overrides overlaid (or the bare global when it has none),
+        // then densified so every field carries its effective value.
+        // Serialized flat by field name so a values-bound panel reads each
+        // control's current setting directly, with no field falling back to
+        // a control minimum because its override slot was `None`.
+        let resolved = engine
+            .entity_appearance(entity.id())
+            .map_or_else(
+                || engine.options().display.clone(),
+                |o| o.to_display_options(&engine.options().display),
+            )
+            .with_resolved_overrides();
         let appearance_values = serde_json::to_value(&resolved).unwrap_or_default();
         let mol_str = match entity.molecule_type() {
             MoleculeType::Protein => "protein",
