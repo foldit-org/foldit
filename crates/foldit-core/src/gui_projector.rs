@@ -252,7 +252,7 @@ impl GuiProjector {
             project_selection(src.session, frontend);
         }
         if dirty.contains(DirtyFlags::SCENE) {
-            project_scene(src.session, frontend);
+            project_scene(src.session, src.engine, frontend);
         }
 
         sync_history(&mut self.history_sync, src.session, frontend);
@@ -388,13 +388,25 @@ fn project_selection(session: &Session, frontend: &mut FrontendState) {
 
 /// Project the `SCENE` section: the per-entity scene listing plus the
 /// focused-entity highlight.
-fn project_scene(session: &Session, frontend: &mut FrontendState) {
+fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut FrontendState) {
     use molex::MoleculeType;
     let mut scene_entities = Vec::new();
     for (eid, _meta) in session.iter() {
         let Some(entity) = session.entity(eid) else {
             continue;
         };
+        let has_overrides = engine
+            .entity_appearance(entity.id())
+            .is_some_and(|o| !o.is_empty());
+        // The resolved display values: the global display options with this
+        // entity's overrides overlaid (or the bare global when it has none).
+        // Serialized flat by field name so a values-bound panel can read each
+        // control's current setting directly.
+        let resolved = engine.entity_appearance(entity.id()).map_or_else(
+            || engine.options().display.clone(),
+            |o| o.to_display_options(&engine.options().display),
+        );
+        let appearance_values = serde_json::to_value(&resolved).unwrap_or_default();
         let mol_str = match entity.molecule_type() {
             MoleculeType::Protein => "protein",
             MoleculeType::DNA => "dna",
@@ -412,6 +424,8 @@ fn project_scene(session: &Session, frontend: &mut FrontendState) {
             molecule_type: mol_str.to_owned(),
             atom_count: entity.atom_count(),
             residue_count: entity.residue_count(),
+            has_overrides,
+            appearance_values,
         });
     }
     frontend.set_scene_entities(scene_entities);

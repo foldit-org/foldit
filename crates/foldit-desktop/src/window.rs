@@ -481,8 +481,10 @@ pub fn run(
 }
 
 /// Build a wgpu `RenderContext` against a winit window, construct the
-/// `VisoEngine`, apply desktop-only tweaks (default view preset, render
-/// scale based on DPI), and hand the engine to `App`.
+/// `VisoEngine`, apply desktop-only tweaks (render scale based on DPI), and
+/// hand the engine to `App`. The session drives the view preset on every
+/// structure-load (it is the source of truth for view state), so no preset
+/// is applied to the engine here.
 ///
 /// Must run BEFORE the wry `WebView` is attached as a child of the window —
 /// on macOS, `wgpu::Instance::create_surface` calls `setLayer:` on the
@@ -515,8 +517,6 @@ fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
         }
     };
 
-    let presets_dir = std::path::Path::new("assets/view_presets");
-    engine.load_preset("default", presets_dir);
     engine.set_render_scale(if scale < 2.0 { 2 } else { 1 });
 
     app.attach_engine(engine);

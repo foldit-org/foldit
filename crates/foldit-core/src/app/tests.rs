@@ -74,6 +74,27 @@ mod selection_tests {
         assert!(app.store.selection_is_empty());
     }
 
+    /// `SetFocus` is handled before the engine guard, so it takes effect on
+    /// an engine-less App. `Some(raw)` focuses that entity; `None` returns to
+    /// whole-session focus.
+    #[test]
+    fn handle_set_focus_routes_to_session_focus() {
+        use viso::Focus;
+
+        let mut app = fresh_app();
+        let id = app
+            .store
+            .insert_preview(mk_bulk(), "e".to_owned(), crate::session::EntityOrigin::Loaded);
+
+        app.handle_app_command(foldit_gui::AppCommand::SetFocus {
+            entity_id: Some(id.raw()),
+        });
+        assert_eq!(app.store.focus(), Focus::Entity(EntityId::from_raw(id.raw())));
+
+        app.handle_app_command(foldit_gui::AppCommand::SetFocus { entity_id: None });
+        assert_eq!(app.store.focus(), Focus::All);
+    }
+
     /// One committed Bulk entity, promoted into history so the store has a
     /// non-root committed head.
     fn mk_bulk() -> molex::MoleculeEntity {

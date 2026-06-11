@@ -28,6 +28,16 @@ impl App {
             return;
         }
 
+        // Focus is pure session state; no engine borrow needed.
+        if let AppCommand::SetFocus { entity_id } = command {
+            let focus = match entity_id {
+                None => viso::Focus::All,
+                Some(raw) => viso::Focus::Entity(EntityId::from_raw(raw)),
+            };
+            self.store.set_focus(focus);
+            return;
+        }
+
         if self.engine.is_none() {
             return;
         }
@@ -38,6 +48,15 @@ impl App {
         match command {
             AppCommand::LoadStructure { path } => self.handle_load_structure(&path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
+            AppCommand::SetEntityAppearance {
+                entity_id,
+                field,
+                value,
+            } => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.apply_entity_appearance_field(entity_id, &field, &value);
+                }
+            }
             AppCommand::SetViewOptions { options } => {
                 // The session is the source of truth: store the options and
                 // let the tick apply them to the engine (+ raise VIEW) off
@@ -49,17 +68,7 @@ impl App {
             }
             AppCommand::LoadViewPreset { name } => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(dir) = self.host.view_presets_dir() {
-                    if let Some(engine) = self.engine.as_mut() {
-                        // Use the engine to read the preset file off disk,
-                        // then record it as the active preset on the session
-                        // (the source of truth). The tick re-applies the
-                        // options to the engine + raises VIEW.
-                        engine.load_preset(&name, dir);
-                        let opts = engine.options().clone();
-                        self.store.apply_preset(name, opts);
-                    }
-                }
+                self.apply_view_preset_to_session(&name);
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
@@ -85,7 +94,9 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
             }
-            AppCommand::History { .. } | AppCommand::AdvanceBubble { .. } => {
+            AppCommand::History { .. }
+            | AppCommand::AdvanceBubble { .. }
+            | AppCommand::SetFocus { .. } => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `AppCommand`: a new variant
                 // without a handler is a compile error.
@@ -113,6 +124,11 @@ impl App {
                 // `clear_puzzle` is a no-op emits nothing, so the puzzle
                 // panel's title refresh rides the full populate below.
                 self.store.start(name, None);
+                // Seed the session's view options from the Default preset so
+                // the panel reflects the true coloring and the whole-blob
+                // option emit is faithful. The session is the source of truth.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.apply_view_preset_to_session("Default");
 
                 // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, publishes
                 // via the render projector, and runs engine.update(0.0)
@@ -156,14 +172,16 @@ impl App {
         // now-empty highlight to viso and raises SELECTION dirty; `reset`
         // itself only emits `HeadMoved`.
         self.store.clear_selection();
-        // viso's own per-entity score map has an id-reuse hole:
-        // replace_assembly now preserves scores across a swap (so a
-        // settling preview doesn't flash the survivors gray), reconciling
-        // membership by id. A puzzle reload restarts the entity allocator,
-        // so the new puzzle's ids collide with the outgoing ones and would
-        // inherit their colors; clear viso scores explicitly here.
+        // viso's own per-entity score and appearance maps have an id-reuse
+        // hole: replace_assembly now preserves both across a swap (so a
+        // settling preview doesn't flash the survivors gray and user-authored
+        // per-entity appearance persists), reconciling membership by id. A
+        // puzzle reload restarts the entity allocator, so the new puzzle's ids
+        // collide with the outgoing ones and would inherit their colors and
+        // overrides; clear both viso maps explicitly here.
         if let Some(engine) = self.engine.as_mut() {
             engine.clear_scores();
+            engine.clear_all_appearance();
         }
 
         match crate::puzzle::load_puzzle_structure(puzzle_id) {
@@ -191,20 +209,15 @@ impl App {
                     }),
                 );
 
+                // A puzzle may pin its own view preset; otherwise fall back to
+                // the Default preset so the session carries the boot coloring
+                // and the view panel reflects the true state. The tick(0.0)
+                // below drains the emitted `ViewOptionsChanged` and re-applies
+                // the options to the engine.
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(preset_name) = &puzzle_data.view_preset {
-                    if let Some(dir) = self.host.view_presets_dir() {
-                        if let Some(engine) = self.engine.as_mut() {
-                            // Read the preset off disk via the engine, then
-                            // record it as the active preset on the session.
-                            // The tick(0.0) below drains the emitted
-                            // `ViewOptionsChanged` and re-applies the options.
-                            engine.load_preset(preset_name, dir);
-                            let opts = engine.options().clone();
-                            self.store.apply_preset(preset_name.clone(), opts);
-                        }
-                    }
-                }
+                self.apply_view_preset_to_session(
+                    puzzle_data.view_preset.as_deref().unwrap_or("Default"),
+                );
 
                 let ss_override = puzzle_data.ss_override;
                 let cam = &puzzle_data.camera;
@@ -262,6 +275,35 @@ impl App {
         // one-shot full populate to push the not-scored-yet gauge / catalog
         // the batch does not carry on a reload.
         self.enter_session();
+    }
+
+    /// Load a named view preset's options off disk and install them on the
+    /// session as the active preset. The session is the source of truth for
+    /// view state, so every structure-load routes through here to seed the
+    /// session's view options; otherwise the view panel would show bare
+    /// defaults while the engine renders the boot preset, and the panel's
+    /// whole-blob option emit would clobber the engine's coloring. When an
+    /// engine is attached it is synced immediately; the tick also re-applies
+    /// the options off the emitted `ViewOptionsChanged`. A missing presets
+    /// dir or an unreadable preset file is logged and left as a no-op (the
+    /// session keeps its current options).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_view_preset_to_session(&mut self, name: &str) {
+        let Some(dir) = self.host.view_presets_dir() else {
+            return;
+        };
+        let path = dir.join(format!("{name}.toml"));
+        let opts = match viso::options::VisoOptions::load(&path) {
+            Ok(opts) => opts,
+            Err(e) => {
+                log::error!("Failed to load view preset '{name}': {e}");
+                return;
+            }
+        };
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_options(opts.clone());
+        }
+        self.store.apply_preset(name.to_owned(), opts);
     }
 
     // ── Tutorial-bubble cursor ──
@@ -560,6 +602,10 @@ impl App {
                 // scientist puzzle panel + title reach the GUI at the
                 // InSession gate's full populate.
                 self.store.start(name.clone(), None);
+                // Seed the session's view options from the Default preset so
+                // the panel reflects the true coloring on first paint (the
+                // session is the source of truth for view state).
+                self.apply_view_preset_to_session("Default");
                 log::info!("Loaded structure: {name}");
             }
             Err(e) => {
@@ -834,4 +880,63 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod preset_tests {
+    use crate::HostResources;
+    use crate::app::App;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use viso::options::ColorScheme;
+
+    /// Host stub whose `view_presets_dir` points at the repository's shipped
+    /// `assets/view_presets`, so the helper reads the real Default preset.
+    struct PresetHost {
+        presets_dir: PathBuf,
+    }
+
+    impl HostResources for PresetHost {
+        fn read_file(&self, _path: &str) -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "test stub"))
+        }
+        fn view_presets_dir(&self) -> Option<&Path> {
+            Some(&self.presets_dir)
+        }
+        fn initial_structure_path(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// After applying the Default preset through the session, the session's
+    /// view options carry the preset's coloring (Score, not the bare-default
+    /// Entity) and record it as the active preset. The session is what the
+    /// view panel binds, so the menu now shows the true state rather than a
+    /// stale default. The engine-attached re-sync and the full GPU load path
+    /// are exercised by the parent's runtime confirmation.
+    #[test]
+    fn default_preset_seeds_session_view_options() {
+        let presets_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let mut app = App::new(Box::new(PresetHost { presets_dir }));
+
+        // A fresh session is at the bare default (Entity coloring, no active
+        // preset) - the state the bug left the menu in while the engine
+        // rendered the boot preset.
+        assert_eq!(
+            app.store.view_options().display.backbone_color_scheme(),
+            ColorScheme::Entity,
+        );
+        assert!(app.store.active_preset().is_none());
+
+        app.apply_view_preset_to_session("Default");
+
+        assert_eq!(
+            app.store.view_options().display.backbone_color_scheme(),
+            ColorScheme::Score,
+            "Default preset colors by Score, not bare-default Entity",
+        );
+        assert_eq!(app.store.active_preset(), Some("Default"));
+    }
 }
