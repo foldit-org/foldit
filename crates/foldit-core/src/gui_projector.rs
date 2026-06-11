@@ -192,6 +192,12 @@ pub struct GuiSources<'a> {
     /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
     pub host: &'a dyn crate::HostResources,
+    /// App-owned active view options for the `VIEW` section. Lives on `App`
+    /// (not `Session`) so it survives a topology swap.
+    pub view_options: &'a viso::options::VisoOptions,
+    /// App-owned active preset name for the `VIEW` section, or `None` when the
+    /// options were set manually.
+    pub active_preset: Option<&'a str>,
 }
 
 impl GuiProjector {
@@ -246,7 +252,7 @@ impl GuiProjector {
             project_actions(src.session, src.driver, frontend);
         }
         if dirty.contains(DirtyFlags::VIEW) {
-            project_view(src.session, src.host, frontend);
+            project_view(src.view_options, src.active_preset, src.host, frontend);
         }
         if dirty.contains(DirtyFlags::SELECTION) {
             project_selection(src.session, frontend);
@@ -279,6 +285,7 @@ fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
             | SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
             SessionUpdate::HeadMoved => DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS,
             SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
+            SessionUpdate::EntityAppearanceChanged => DirtyFlags::SCENE,
             SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
             SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
             SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
@@ -344,15 +351,26 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut Fron
 
 /// Project the `VIEW` section: view options, the static schema, and the
 /// host-sourced preset list.
-fn project_view(session: &Session, host: &dyn crate::HostResources, frontend: &mut FrontendState) {
-    // Source of truth is the session, not the engine: the engine is
-    // a follower that the tick re-applies on `ViewOptionsChanged`.
-    frontend.view.options = serde_json::to_value(session.view_options()).unwrap_or_default();
+fn project_view(
+    view_options: &viso::options::VisoOptions,
+    active_preset: Option<&str>,
+    host: &dyn crate::HostResources,
+    frontend: &mut FrontendState,
+) {
+    // Source of truth is the App-owned view options, not the engine: the
+    // engine is a follower that the tick re-applies on `ViewOptionsChanged`.
+    frontend.view.options = serde_json::to_value(view_options).unwrap_or_default();
 
     // Schema is static - only set once
     if frontend.view.options_schema.is_null() {
         frontend.view.options_schema =
             serde_json::to_value(viso::options::VisoOptions::json_schema()).unwrap_or_default();
+    }
+
+    // Per-entity appearance schema is likewise static - only set once.
+    if frontend.view.appearance_schema.is_null() {
+        frontend.view.appearance_schema =
+            serde_json::to_value(viso::DisplayOverrides::json_schema()).unwrap_or_default();
     }
 
     // The presets *list* is a disk/library read (App/host), not
@@ -364,7 +382,7 @@ fn project_view(session: &Session, host: &dyn crate::HostResources, frontend: &m
             .map(viso::options::VisoOptions::list_presets)
             .unwrap_or_default();
     }
-    frontend.view.active_preset = session.active_preset().map(String::from);
+    frontend.view.active_preset = active_preset.map(String::from);
 
     // This arm writes `frontend.view.*` by direct field assignment, so it
     // must raise the VIEW bit itself: the transmit step only emits the view
@@ -498,14 +516,14 @@ mod tests {
     /// null schema. Drive the arm directly and assert the bit lands.
     #[test]
     fn project_view_raises_view_dirty_bit() {
-        let session = Session::new();
+        let view_options = viso::options::VisoOptions::default();
         let host = TestHost;
         let mut frontend = FrontendState::new();
         // Clear any construction-time dirt so the assertion is about
         // `project_view`'s own raise.
         let _ = frontend.take_dirty();
 
-        project_view(&session, &host, &mut frontend);
+        project_view(&view_options, None, &host, &mut frontend);
 
         assert!(
             frontend.take_dirty().contains(DirtyFlags::VIEW),

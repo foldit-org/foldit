@@ -750,6 +750,43 @@ fn selection_mutation_emits_one_selection_changed() {
 }
 
 #[test]
+fn set_entity_appearance_field_inserts_and_emits_one_change() {
+    // A valid appearance-field merge on a fresh session inserts an entry and
+    // emits exactly one `EntityAppearanceChanged` (the App tick pushes it
+    // into the engine working copy via the render projector). A second field
+    // on the same id merges into the same entry rather than replacing it.
+    let mut store = Session::new();
+    let e = mint_ids(1)[0];
+
+    store.set_entity_appearance_field(e, "show_sidechains", &serde_json::json!(true));
+    assert!(
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::EntityAppearanceChanged]
+        ),
+        "a valid appearance merge emits exactly EntityAppearanceChanged",
+    );
+    assert!(
+        store.appearance().contains_key(&e),
+        "the merge inserted an override entry for the entity",
+    );
+
+    store.set_entity_appearance_field(e, "color_scheme", &serde_json::json!("score"));
+    assert!(
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::EntityAppearanceChanged]
+        ),
+        "a second field on the same id emits one more EntityAppearanceChanged",
+    );
+    assert_eq!(
+        store.appearance().len(),
+        1,
+        "the second field merges into the same entry, not a new one",
+    );
+}
+
+#[test]
 fn reset_clears_selection() {
     // Selection is ambient, not history-versioned, but a topology swap
     // (`reset`) must drop it: the incoming assembly can reuse the outgoing
@@ -990,107 +1027,4 @@ fn reset_clears_puzzle_and_leaves_title() {
 
     assert!(store.puzzle().is_none(), "reset drops the puzzle add-on");
     assert_eq!(store.title(), "P", "reset leaves the title untouched");
-}
-
-/// A non-default `VisoOptions`, distinguishable from the default by a
-/// single toggle. Only used to exercise the change-guard.
-fn mk_non_default_options() -> viso::options::VisoOptions {
-    let mut opts = viso::options::VisoOptions::default();
-    opts.debug.show_normals = true;
-    opts
-}
-
-#[test]
-fn set_view_options_emits_one_change_and_clears_preset() {
-    // View options + active preset are ambient session state. A manual
-    // `set_view_options` installs the options and clears the active preset
-    // (manually-set options no longer match a named preset), emitting
-    // exactly one `ViewOptionsChanged` when something changes. The App tick
-    // turns this into `engine.set_options` + the VIEW GUI dirty.
-    let mut store = Session::new();
-    assert_eq!(store.view_options(), &viso::options::VisoOptions::default());
-    assert!(store.active_preset().is_none());
-
-    // Seed an active preset so the next manual set has a preset to clear.
-    store.apply_preset("warm".to_owned(), mk_non_default_options());
-    let _ = store.take_updates();
-    assert_eq!(store.active_preset(), Some("warm"));
-
-    // A manual set to the default options still differs (options change +
-    // preset clears), so it emits and drops the active preset.
-    store.set_view_options(viso::options::VisoOptions::default());
-    assert!(
-        matches!(
-            store.take_updates().as_slice(),
-            [SessionUpdate::ViewOptionsChanged]
-        ),
-        "set_view_options emits exactly ViewOptionsChanged",
-    );
-    assert_eq!(store.view_options(), &viso::options::VisoOptions::default());
-    assert!(
-        store.active_preset().is_none(),
-        "a manual set clears the active preset",
-    );
-
-    // Idempotent: same options, preset already cleared -> silent.
-    store.set_view_options(viso::options::VisoOptions::default());
-    assert!(
-        store.take_updates().is_empty(),
-        "an idempotent set with no preset to clear emits nothing",
-    );
-}
-
-#[test]
-fn apply_preset_emits_and_sets_both() {
-    // `apply_preset` installs the options and records the preset name,
-    // emitting exactly one `ViewOptionsChanged`.
-    let mut store = Session::new();
-    let opts = mk_non_default_options();
-
-    store.apply_preset("warm".to_owned(), opts.clone());
-    assert!(
-        matches!(
-            store.take_updates().as_slice(),
-            [SessionUpdate::ViewOptionsChanged]
-        ),
-        "apply_preset emits exactly ViewOptionsChanged",
-    );
-    assert_eq!(store.view_options(), &opts, "apply_preset installs options");
-    assert_eq!(
-        store.active_preset(),
-        Some("warm"),
-        "apply_preset records the preset name",
-    );
-
-    // Idempotent: same preset + same options -> silent.
-    store.apply_preset("warm".to_owned(), opts);
-    assert!(
-        store.take_updates().is_empty(),
-        "re-applying the same preset emits nothing",
-    );
-}
-
-#[test]
-fn reset_restores_default_view_options() {
-    // A topology swap (`reset`) returns view options + active preset to
-    // their defaults (view options reset per session, not persist). Unlike
-    // focus, nothing re-pushes default options to the engine on its own, so
-    // the reset emits `ViewOptionsChanged` when there was a non-default
-    // state to clear.
-    let mut store = Session::new();
-    store.apply_preset("warm".to_owned(), mk_non_default_options());
-    let _ = store.take_updates();
-    assert_ne!(store.view_options(), &viso::options::VisoOptions::default());
-    assert_eq!(store.active_preset(), Some("warm"));
-
-    store.reset();
-    assert_eq!(
-        store.view_options(),
-        &viso::options::VisoOptions::default(),
-        "reset restores default view options",
-    );
-    assert!(
-        store.active_preset().is_none(),
-        "reset clears the active preset",
-    );
 }

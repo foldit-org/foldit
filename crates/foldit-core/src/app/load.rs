@@ -38,6 +38,30 @@ impl App {
             return;
         }
 
+        // Per-entity appearance is authoritative on the session; the render
+        // projector pushes it into the engine working copy on the emitted
+        // `EntityAppearanceChanged`. No engine borrow needed here, so it is
+        // handled before the engine-presence guard like focus.
+        if let AppCommand::SetEntityAppearance {
+            entity_id,
+            field,
+            value,
+        } = command
+        {
+            self.store
+                .set_entity_appearance_field(EntityId::from_raw(entity_id), &field, &value);
+            return;
+        }
+
+        // Clearing an entity's whole appearance override is likewise pure
+        // session state; handled before the engine-presence guard for the
+        // same reason as the per-field merge above.
+        if let AppCommand::ClearEntityAppearance { entity_id } = command {
+            self.store
+                .clear_entity_appearance(EntityId::from_raw(entity_id));
+            return;
+        }
+
         if self.engine.is_none() {
             return;
         }
@@ -48,25 +72,31 @@ impl App {
         match command {
             AppCommand::LoadStructure { path } => self.handle_load_structure(&path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
-            AppCommand::SetEntityAppearance {
-                entity_id,
-                field,
-                value,
-            } => {
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.apply_entity_appearance_field(entity_id, &field, &value);
-                }
-            }
             AppCommand::SetViewOptions { options } => {
-                // The session is the source of truth: store the options and
-                // let the tick apply them to the engine (+ raise VIEW) off
-                // the emitted `ViewOptionsChanged`.
+                // A manual edit: store the App-owned options, clear the active
+                // preset (manually-set options no longer match a named preset),
+                // and latch the player-touched flag so future loads keep this
+                // choice instead of re-seeding from the puzzle/Default preset.
+                // The tick applies the options to the engine (+ raises VIEW) off
+                // the `ViewOptionsChanged` we note when something actually
+                // changed; an idempotent set is silent.
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
-                    Ok(opts) => self.store.set_view_options(opts),
+                    Ok(opts) => {
+                        let changed = self.view_options != opts || self.active_preset.is_some();
+                        self.view_options = opts;
+                        self.active_preset = None;
+                        self.view_settings_touched = true;
+                        if changed {
+                            self.store.note_view_options_changed();
+                        }
+                    }
                     Err(e) => log::error!("Failed to deserialize view options: {e}"),
                 }
             }
             AppCommand::LoadViewPreset { name } => {
+                // An explicit player preset pick: latch the touched flag (so it
+                // persists across later loads) and apply the preset now.
+                self.view_settings_touched = true;
                 #[cfg(not(target_arch = "wasm32"))]
                 self.apply_view_preset_to_session(&name);
                 #[cfg(target_arch = "wasm32")]
@@ -96,7 +126,9 @@ impl App {
             }
             AppCommand::History { .. }
             | AppCommand::AdvanceBubble { .. }
-            | AppCommand::SetFocus { .. } => {
+            | AppCommand::SetFocus { .. }
+            | AppCommand::SetEntityAppearance { .. }
+            | AppCommand::ClearEntityAppearance { .. } => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `AppCommand`: a new variant
                 // without a handler is a compile error.
@@ -124,11 +156,20 @@ impl App {
                 // `clear_puzzle` is a no-op emits nothing, so the puzzle
                 // panel's title refresh rides the full populate below.
                 self.store.start(name, None);
-                // Seed the session's view options from the Default preset so
-                // the panel reflects the true coloring and the whole-blob
-                // option emit is faithful. The session is the source of truth.
+                // Seed the view options from the Default preset on a fresh app
+                // (so the panel reflects the true coloring and the whole-blob
+                // option emit is faithful); once the player has touched any view
+                // setting, skip the seed and keep their persisted choice. Either
+                // way, push the persisted-or-seeded options to the freshly-reset
+                // engine before the publish below. The funnel does the eager set
+                // + note itself when it seeds; the touched branch does it from
+                // the App-owned options.
                 #[cfg(not(target_arch = "wasm32"))]
-                self.apply_view_preset_to_session("Default");
+                if self.view_settings_touched {
+                    self.reapply_view_options_to_engine();
+                } else {
+                    self.apply_view_preset_to_session("Default");
+                }
 
                 // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, publishes
                 // via the render projector, and runs engine.update(0.0)
@@ -210,14 +251,20 @@ impl App {
                 );
 
                 // A puzzle may pin its own view preset; otherwise fall back to
-                // the Default preset so the session carries the boot coloring
-                // and the view panel reflects the true state. The tick(0.0)
-                // below drains the emitted `ViewOptionsChanged` and re-applies
-                // the options to the engine.
+                // the Default preset so the view panel reflects the true state.
+                // Seed only on a fresh app; once the player has touched any view
+                // setting, skip the seed and keep their persisted choice. Either
+                // way the freshly-reset engine is given the persisted-or-seeded
+                // options. The tick(0.0) below drains the noted
+                // `ViewOptionsChanged` and re-applies them to the engine.
                 #[cfg(not(target_arch = "wasm32"))]
-                self.apply_view_preset_to_session(
-                    puzzle_data.view_preset.as_deref().unwrap_or("Default"),
-                );
+                if self.view_settings_touched {
+                    self.reapply_view_options_to_engine();
+                } else {
+                    self.apply_view_preset_to_session(
+                        puzzle_data.view_preset.as_deref().unwrap_or("Default"),
+                    );
+                }
 
                 let ss_override = puzzle_data.ss_override;
                 let cam = &puzzle_data.camera;
@@ -277,16 +324,16 @@ impl App {
         self.enter_session();
     }
 
-    /// Load a named view preset's options off disk and install them on the
-    /// session as the active preset. The session is the source of truth for
-    /// view state, so every structure-load routes through here to seed the
-    /// session's view options; otherwise the view panel would show bare
-    /// defaults while the engine renders the boot preset, and the panel's
-    /// whole-blob option emit would clobber the engine's coloring. When an
-    /// engine is attached it is synced immediately; the tick also re-applies
-    /// the options off the emitted `ViewOptionsChanged`. A missing presets
-    /// dir or an unreadable preset file is logged and left as a no-op (the
-    /// session keeps its current options).
+    /// Load a named view preset's options off disk and install them as the
+    /// App-owned active options + active preset. App owns the view state (so
+    /// it persists across a topology swap); the seed paths route through here
+    /// so the view panel reflects the true coloring rather than bare defaults
+    /// while the engine renders the boot preset, and the panel's whole-blob
+    /// option emit does not clobber the engine's coloring. When an engine is
+    /// attached it is synced immediately; the tick also re-applies the options
+    /// off the noted `ViewOptionsChanged`. A missing presets dir or an
+    /// unreadable preset file is logged and left as a no-op (the App keeps its
+    /// current options).
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_view_preset_to_session(&mut self, name: &str) {
         let Some(dir) = self.host.view_presets_dir() else {
@@ -300,10 +347,29 @@ impl App {
                 return;
             }
         };
+        self.view_options = opts.clone();
+        self.active_preset = Some(name.to_owned());
+        // Eager engine sync so the engine has the options before this load's
+        // `tick(0.0)`; the noted `ViewOptionsChanged` re-applies them through
+        // the tick seam too (idempotent).
         if let Some(engine) = self.engine.as_mut() {
-            engine.set_options(opts.clone());
+            engine.set_options(opts);
         }
-        self.store.apply_preset(name.to_owned(), opts);
+        self.store.note_view_options_changed();
+    }
+
+    /// Push the persisted App-owned view options to the (freshly-reset) engine
+    /// and note the change so the tick re-applies them. Used by the load paths
+    /// when the player has already touched a view setting, so the preset seed
+    /// is skipped but the engine still receives the persisted options on every
+    /// load. The eager set mirrors the funnel's own engine sync.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reapply_view_options_to_engine(&mut self) {
+        let opts = self.view_options.clone();
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_options(opts);
+        }
+        self.store.note_view_options_changed();
     }
 
     // ── Tutorial-bubble cursor ──
@@ -602,10 +668,18 @@ impl App {
                 // scientist puzzle panel + title reach the GUI at the
                 // InSession gate's full populate.
                 self.store.start(name.clone(), None);
-                // Seed the session's view options from the Default preset so
-                // the panel reflects the true coloring on first paint (the
-                // session is the source of truth for view state).
-                self.apply_view_preset_to_session("Default");
+                // Seed the view options from the Default preset on a fresh app
+                // so the panel reflects the true coloring on first paint; once
+                // the player has touched any view setting, skip the seed and
+                // keep their persisted choice. Either way the freshly-reset
+                // engine is given the persisted-or-seeded options. The eager set
+                // + note here is drained by the surrounding tick (advance_startup
+                // runs before this tick's `SessionUpdate` drain + render seam).
+                if self.view_settings_touched {
+                    self.reapply_view_options_to_engine();
+                } else {
+                    self.apply_view_preset_to_session("Default");
+                }
                 log::info!("Loaded structure: {name}");
             }
             Err(e) => {
@@ -909,34 +983,94 @@ mod preset_tests {
         }
     }
 
-    /// After applying the Default preset through the session, the session's
+    /// A non-default `VisoOptions`, distinguishable from the default by a
+    /// single toggle. Used to exercise the change-guard on the App writers.
+    fn mk_non_default_options() -> viso::options::VisoOptions {
+        let mut opts = viso::options::VisoOptions::default();
+        opts.debug.show_normals = true;
+        opts
+    }
+
+    /// After applying the Default preset through the funnel, the App-owned
     /// view options carry the preset's coloring (Score, not the bare-default
-    /// Entity) and record it as the active preset. The session is what the
-    /// view panel binds, so the menu now shows the true state rather than a
-    /// stale default. The engine-attached re-sync and the full GPU load path
-    /// are exercised by the parent's runtime confirmation.
+    /// Entity) and record it as the active preset. The App is what the view
+    /// panel binds, so the menu shows the true state rather than a stale
+    /// default. The engine-attached re-sync and the full GPU load path are
+    /// exercised by the parent's runtime confirmation.
     #[test]
-    fn default_preset_seeds_session_view_options() {
+    fn default_preset_seeds_view_options() {
         let presets_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
 
-        // A fresh session is at the bare default (Entity coloring, no active
-        // preset) - the state the bug left the menu in while the engine
-        // rendered the boot preset.
+        // A fresh app is at the bare default (Entity coloring, no active
+        // preset, untouched) - the state the bug left the menu in while the
+        // engine rendered the boot preset.
         assert_eq!(
-            app.store.view_options().display.backbone_color_scheme(),
+            app.view_options().display.backbone_color_scheme(),
             ColorScheme::Entity,
         );
-        assert!(app.store.active_preset().is_none());
+        assert!(app.active_preset().is_none());
+        assert!(!app.view_settings_touched);
 
         app.apply_view_preset_to_session("Default");
 
         assert_eq!(
-            app.store.view_options().display.backbone_color_scheme(),
+            app.view_options().display.backbone_color_scheme(),
             ColorScheme::Score,
             "Default preset colors by Score, not bare-default Entity",
         );
-        assert_eq!(app.store.active_preset(), Some("Default"));
+        assert_eq!(app.active_preset(), Some("Default"));
+    }
+
+    /// The funnel records the preset name AND notes a single
+    /// `ViewOptionsChanged` on the `SessionUpdate` stream so the tick applies
+    /// the options to the engine and refreshes the VIEW panel. Coverage that
+    /// moved off the deleted `Session::apply_preset`.
+    #[test]
+    fn funnel_records_preset_and_notes_one_change() {
+        let presets_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let mut app = App::new(Box::new(PresetHost { presets_dir }));
+        let _ = app.store.take_updates();
+
+        app.apply_view_preset_to_session("Default");
+
+        assert_eq!(app.active_preset(), Some("Default"));
+        assert!(
+            matches!(
+                app.store.take_updates().as_slice(),
+                [crate::session::SessionUpdate::ViewOptionsChanged]
+            ),
+            "the funnel notes exactly one ViewOptionsChanged",
+        );
+    }
+
+    /// The view options + active preset live on `App` and survive
+    /// `Session::reset` (a topology swap). This is the inverted reset
+    /// semantics: a player's display choices carry from one structure to the
+    /// next instead of zeroing per session. Coverage that moved off the
+    /// deleted `Session::reset` view-options block.
+    #[test]
+    fn view_options_persist_across_session_reset() {
+        let presets_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let mut app = App::new(Box::new(PresetHost { presets_dir }));
+
+        app.view_options = mk_non_default_options();
+        app.active_preset = Some("warm".to_owned());
+
+        app.store.reset();
+
+        assert_eq!(
+            app.view_options(),
+            &mk_non_default_options(),
+            "App view options survive a topology swap",
+        );
+        assert_eq!(
+            app.active_preset(),
+            Some("warm"),
+            "App active preset survives a topology swap",
+        );
     }
 }

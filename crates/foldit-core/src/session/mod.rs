@@ -44,7 +44,6 @@ use indexmap::IndexMap;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::{Assembly, MoleculeEntity};
 use viso::Focus;
-use viso::options::VisoOptions;
 
 use crate::history::{CheckpointId, History, HistoryError};
 
@@ -115,6 +114,16 @@ pub struct Session {
     /// so iterating yields only entities that currently have at least one
     /// selected residue. [`Self::reset`] clears it on a topology swap.
     selection: BTreeMap<EntityId, BTreeSet<u32>>,
+    /// Ambient per-entity render overrides, keyed by entity. A first-class
+    /// scene field beside `selection`, and likewise *not* history-versioned:
+    /// undo / redo / jump leave it untouched. Authoritative and
+    /// session-scoped (entity ids are session-specific and reused across
+    /// puzzles), so [`Self::reset`] clears it on a topology swap for id-reuse
+    /// safety. The render projector reads it via [`Self::appearance`] and
+    /// pushes it into the viso engine, which holds the resolved working copy
+    /// the GUI reads back. Empty override entries are never stored - merging
+    /// a field that leaves an entry empty removes the entity entry.
+    appearance: BTreeMap<EntityId, viso::DisplayOverrides>,
     /// Ambient session focus (Tab-cycle target), a first-class scene
     /// field beside `selection`. Not history-versioned: undo / redo / jump
     /// leave it untouched. [`Self::reset`] returns it to [`Focus::All`] on
@@ -137,19 +146,6 @@ pub struct Session {
     /// [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
     /// [`SessionUpdate::BubbleChanged`].
     puzzle: Option<Puzzle>,
-    /// Active view options (render settings). Ambient session state, not
-    /// history-versioned; the source of truth for what viso renders. The
-    /// `App` tick applies these to the engine on every
-    /// [`SessionUpdate::ViewOptionsChanged`]. [`Self::reset`] returns them to
-    /// [`VisoOptions::default`] on a topology swap (view options reset per
-    /// session). Holding `VisoOptions` directly relaxes the otherwise
-    /// viso-free `Session` boundary for this one field.
-    view_options: VisoOptions,
-    /// Name of the preset whose options are currently loaded, or `None` when
-    /// the active options were set manually (a manual edit no longer matches
-    /// any preset) or at startup. Ambient session state; [`Self::reset`]
-    /// clears it.
-    active_preset: Option<String>,
     /// Score-term weight map (`term_name -> weight`) core multiplies the
     /// plugin's raw per-term energies by to produce the weighted total +
     /// per-residue scalars. Session-lifetime ambient state, not
@@ -192,11 +188,10 @@ impl Session {
             allocator: EntityIdAllocator::new(),
             history: History::new(std::iter::empty(), PathBuf::new()),
             selection: BTreeMap::new(),
+            appearance: BTreeMap::new(),
             focus: Focus::default(),
             title: "Unknown".to_owned(),
             puzzle: None,
-            view_options: VisoOptions::default(),
-            active_preset: None,
             term_weights: std::collections::HashMap::new(),
             term_names: Vec::new(),
             pending_updates: Vec::new(),
@@ -406,6 +401,16 @@ impl Session {
         &self.selection
     }
 
+    /// The current per-entity appearance overrides, keyed by entity. Empty
+    /// override entries are never present (merging a field that leaves an
+    /// entry empty removes it), so every entry carries at least one set
+    /// field. The render projector reads this and reconciles the engine's
+    /// working copy against it.
+    #[must_use]
+    pub const fn appearance(&self) -> &BTreeMap<EntityId, viso::DisplayOverrides> {
+        &self.appearance
+    }
+
     /// Selected residues on a specific entity, or `None` if the entity
     /// has no selection. Sets are never empty by invariant, so
     /// `Some(_)` always carries at least one residue. Selection query
@@ -473,21 +478,6 @@ impl Session {
     #[must_use]
     pub const fn puzzle(&self) -> Option<&Puzzle> {
         self.puzzle.as_ref()
-    }
-
-    // ── View options + active preset reads ────────────────────────────
-
-    /// The active view options.
-    #[must_use]
-    pub const fn view_options(&self) -> &VisoOptions {
-        &self.view_options
-    }
-
-    /// The name of the currently-loaded preset, or `None` when the active
-    /// options were set manually.
-    #[must_use]
-    pub fn active_preset(&self) -> Option<&str> {
-        self.active_preset.as_deref()
     }
 
     // ── Score-term weight reads ───────────────────────────────────────

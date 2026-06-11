@@ -13,7 +13,6 @@ use std::sync::Arc;
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::MoleculeEntity;
 use viso::Focus;
-use viso::options::VisoOptions;
 
 use crate::history::{
     CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History, HistoryError,
@@ -513,6 +512,52 @@ impl Session {
         now_selected
     }
 
+    // ── Per-entity appearance ─────────────────────────────────────────
+    //
+    // Ambient per-entity render overrides (not history-versioned).
+    // Authoritative on the session; the render projector pushes them into
+    // the engine's working copy. Each successful merge emits exactly one
+    // [`SessionUpdate::EntityAppearanceChanged`].
+
+    /// Merge a single appearance override field into an entity's overrides.
+    /// Clones the entity's current overrides (or the default when none),
+    /// merges `field`/`value` via [`viso::DisplayOverrides::apply_json_field`],
+    /// then either stores the merged overrides back or removes the entry when
+    /// the merge left it empty. An unknown field is logged and skipped (no
+    /// state change, no emit), matching the engine's own merge. On a
+    /// successful merge emits exactly one
+    /// [`SessionUpdate::EntityAppearanceChanged`].
+    pub fn set_entity_appearance_field(
+        &mut self,
+        id: EntityId,
+        field: &str,
+        value: &serde_json::Value,
+    ) {
+        let mut ovr = self.appearance.get(&id).cloned().unwrap_or_default();
+        if let Err(unknown) = ovr.apply_json_field(field, value) {
+            log::warn!("Unknown entity appearance field: {unknown}");
+            return;
+        }
+        if ovr.is_empty() {
+            self.appearance.remove(&id);
+        } else {
+            self.appearance.insert(id, ovr);
+        }
+        self.apply(SessionUpdate::EntityAppearanceChanged);
+    }
+
+    /// Remove an entity's whole appearance override entry, reverting it to
+    /// inherited/global appearance. Emits exactly one
+    /// [`SessionUpdate::EntityAppearanceChanged`] only when an entry was
+    /// actually removed; the render projector's removal-diff then clears
+    /// the engine working copy. Clearing an absent id is a silent no-op
+    /// (no emit), so a stray reset never drives a wasted reconcile.
+    pub fn clear_entity_appearance(&mut self, id: EntityId) {
+        if self.appearance.remove(&id).is_some() {
+            self.apply(SessionUpdate::EntityAppearanceChanged);
+        }
+    }
+
     // ── Focus ─────────────────────────────────────────────────────────
     //
     // Ambient session focus (not history-versioned). Mutating it emits
@@ -601,42 +646,6 @@ impl Session {
         self.apply(SessionUpdate::BubbleChanged);
     }
 
-    // ── View options + active preset ──────────────────────────────────
-    //
-    // Ambient session state (not history-versioned). The active options are
-    // the source of truth for what viso renders; the `App` tick applies
-    // them to the engine on each [`SessionUpdate::ViewOptionsChanged`]. A
-    // manual option edit clears the active preset (the options no longer
-    // match a named preset); applying a preset sets both together. Each
-    // mutator emits exactly one `ViewOptionsChanged`, and only when
-    // something actually changes.
-
-    /// Set the active view options (a manual edit). Clears the active preset
-    /// (manually-set options no longer match any named preset). Emits
-    /// [`SessionUpdate::ViewOptionsChanged`] when the options or the active
-    /// preset actually change; an idempotent set emits nothing.
-    pub fn set_view_options(&mut self, options: VisoOptions) {
-        let changed = self.view_options != options || self.active_preset.is_some();
-        self.view_options = options;
-        self.active_preset = None;
-        if changed {
-            self.apply(SessionUpdate::ViewOptionsChanged);
-        }
-    }
-
-    /// Apply a named preset: install its `options` and record `name` as the
-    /// active preset. Emits [`SessionUpdate::ViewOptionsChanged`] when the
-    /// options or the active preset actually change.
-    pub fn apply_preset(&mut self, name: String, options: VisoOptions) {
-        let changed =
-            self.view_options != options || self.active_preset.as_deref() != Some(name.as_str());
-        self.view_options = options;
-        self.active_preset = Some(name);
-        if changed {
-            self.apply(SessionUpdate::ViewOptionsChanged);
-        }
-    }
-
     // ── Score-term weights ────────────────────────────────────────────
 
     /// Install the score-term weight map. Silent (no `SessionUpdate`): the
@@ -675,6 +684,13 @@ impl Session {
         // dropped on every topology swap. Co-located here so both load
         // paths (puzzle + free-form structure) clear it.
         self.selection.clear();
+        // Per-entity appearance overrides are keyed by entity id from the
+        // outgoing assembly; the incoming one may reuse those ids (the
+        // allocator restarts), so a stale override must be dropped on every
+        // topology swap. Cleared silently (no emit): the engine's working
+        // copy is wiped separately at the load seam, and the reset's own
+        // `HeadMoved` below stands in for the topology swap.
+        self.appearance.clear();
         // Focus is ambient session state; a topology swap returns it to
         // the all-entities view. Set silently (no `FocusChanged`): viso
         // independently resets its mirror to `All` on the assembly
@@ -690,18 +706,10 @@ impl Session {
         // `term_weights` is likewise left untouched: the load re-sets it via
         // the App-init seam, so it carries across the topology swap.
         self.puzzle = None;
-        // View options + active preset are ambient session state; a topology
-        // swap resets both to defaults (view options reset per session, not
-        // persist). Unlike focus (which viso re-derives on the assembly
-        // replace), nothing pushes default options to the engine on its own,
-        // so this emits `ViewOptionsChanged` below when there was a non-
-        // default state to clear, driving the tick's `set_options` + the
-        // GUI panel refresh. A load path that wants a preset then re-applies
-        // it via `apply_preset`, whose own emit reads the latest options.
-        let view_changed =
-            self.view_options != VisoOptions::default() || self.active_preset.is_some();
-        self.view_options = VisoOptions::default();
-        self.active_preset = None;
+        // View options + active preset are not reset here: they live on `App`
+        // and persist across a topology swap, so a player's display choices
+        // carry from one structure to the next. The load path re-applies the
+        // persisted-or-seeded options to the freshly-reset engine itself.
         // Drop any changes emitted before the reset - they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
         // so that change survives. The runner projector's published snapshot is
@@ -709,9 +717,6 @@ impl Session {
         // post-reset empty-assembly diff still advances the host's gen
         // counter, so plugins never see `from_gen` go backwards.
         self.pending_updates.clear();
-        if view_changed {
-            self.apply(SessionUpdate::ViewOptionsChanged);
-        }
         self.apply(SessionUpdate::HeadMoved);
     }
 }

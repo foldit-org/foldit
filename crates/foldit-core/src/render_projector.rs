@@ -36,6 +36,13 @@ pub struct RenderProjector {
     /// a same-set publish re-derives correctly through `set_assembly`
     /// without the scene-local teardown `replace_assembly` forces.
     last_published_ids: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// Entity ids whose appearance overrides were last pushed to the engine
+    /// working copy. The session owns the authoritative overrides; this set
+    /// lets the appearance reaction detect an entry that the session dropped
+    /// since the last push so the engine can clear the now-stale override
+    /// (a `clear_entity_appearance` on an absent id is a harmless no-op, but
+    /// without this we would never issue it).
+    last_pushed_appearance: BTreeSet<molex::entity::molecule::id::EntityId>,
 }
 
 impl RenderProjector {
@@ -43,6 +50,7 @@ impl RenderProjector {
         Self {
             publish_seq: 0,
             last_published_ids: BTreeSet::new(),
+            last_pushed_appearance: BTreeSet::new(),
         }
     }
 
@@ -154,7 +162,10 @@ impl RenderProjector {
 /// - A `SelectionChanged` sources the highlight from the authoritative
 ///   `Session` selection.
 /// - A `FocusChanged` pushes viso's camera-framing mirror and reframes.
-/// - A `ViewOptionsChanged` applies the session-owned view options.
+/// - An `EntityAppearanceChanged` reconciles the engine's per-entity
+///   override working copy against the authoritative `Session` appearance
+///   map: every current override is pushed, and any entity dropped from the
+///   map since the last push is cleared on the engine.
 /// - A geometry change (`Edit` / `HeadMoved` / preview add/discard)
 ///   republishes the current head assembly, picking `replace_assembly`
 ///   only when the entity-id *set* changed since the last publish (an id
@@ -163,10 +174,14 @@ impl RenderProjector {
 /// - A `ScoresChanged` re-derives the per-residue colors from the
 ///   session-owned breakdown ([`Self::project_scores`]).
 ///
-/// The selection / focus / view reactions run before the geometry /
-/// scores reactions. A batch may carry any subset. No-ops on a batch
-/// carrying none of them (e.g. a `BubbleChanged` / `PuzzleChanged`-only
-/// batch): no wasted assembly builds, generation bumps, or pushes.
+/// The `ViewOptionsChanged` reaction is NOT here: the view options live on
+/// `App` (so they persist across a topology swap), and `App` applies them
+/// to the engine at the same tick seam, gated on the same signal.
+///
+/// The selection / focus reactions run before the geometry / scores
+/// reactions. A batch may carry any subset. No-ops on a batch carrying none
+/// of them (e.g. a `BubbleChanged` / `PuzzleChanged`-only batch): no wasted
+/// assembly builds, generation bumps, or pushes.
 impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
     fn consume(
         &mut self,
@@ -186,10 +201,27 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         }
         if changes
             .iter()
-            .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
+            .any(|c| matches!(c, SessionUpdate::EntityAppearanceChanged))
         {
-            engine.set_options(doc.view_options().clone());
+            // Reconcile the engine working copy against the authoritative
+            // session map: push every current override, then clear any entity
+            // that was in the last push but is no longer present (an emptied
+            // or removed entry).
+            let appearance = doc.appearance();
+            for (id, ovr) in appearance {
+                engine.set_entity_appearance(*id, ovr.clone());
+            }
+            for id in &self.last_pushed_appearance {
+                if !appearance.contains_key(id) {
+                    engine.clear_entity_appearance(*id);
+                }
+            }
+            self.last_pushed_appearance = appearance.keys().copied().collect();
         }
+        // The `ViewOptionsChanged` reaction (apply the App-owned options to
+        // the engine) is driven by `App` at the same tick seam: the options
+        // live on `App` (so they survive a topology swap), not on `Session`,
+        // and this projector only takes a `&Session`.
 
         // A geometry change republishes the head assembly; a `ScoresChanged`
         // re-derives the per-residue colors. A batch can carry both (a

@@ -27,4 +27,14 @@ impl Session {
     pub fn take_updates(&mut self) -> Vec<SessionUpdate> {
         std::mem::take(&mut self.pending_updates)
     }
+
+    /// Push a [`SessionUpdate::ViewOptionsChanged`] onto the drain queue.
+    /// The view options live on `App` (so they survive a topology swap),
+    /// but the change still flows through the one `SessionUpdate` stream the
+    /// projectors drain. This thin emitter lets `App` signal a view-options
+    /// change without exposing the private [`Self::apply`] funnel or the
+    /// `pending_updates` queue.
+    pub fn note_view_options_changed(&mut self) {
+        self.apply(SessionUpdate::ViewOptionsChanged);
+    }
 }

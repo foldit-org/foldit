@@ -76,6 +76,13 @@ pub enum SessionUpdate {
     /// View options are not a geometry mutation, so the plugin broadcaster
     /// ignores it.
     ViewOptionsChanged,
+    /// A per-entity ambient appearance override changed (a field merged into
+    /// or removed from an entity's overrides). Signal-only: the authoritative
+    /// per-entity overrides live on the `Document`, and the render projector
+    /// re-reads them to reconcile the engine's working copy. An appearance
+    /// override is not a geometry mutation, so the plugin broadcaster ignores
+    /// it.
+    EntityAppearanceChanged,
 }
 
 /// The contract every head-assembly-change consumer implements.

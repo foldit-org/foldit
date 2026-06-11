@@ -47,6 +47,22 @@ pub struct App {
     pub(crate) engine: Option<VisoEngine>,
     pub(in crate::app) keybindings: KeyBindings,
     pub(crate) store: Session,
+    /// Active view options (render settings). App-owned so they survive a
+    /// puzzle/structure reload (`Session::reset` no longer touches them); the
+    /// tick applies them to the engine on every
+    /// [`SessionUpdate::ViewOptionsChanged`] the App emits. The single source
+    /// of truth for what viso renders and what the view panel binds.
+    pub(in crate::app) view_options: viso::options::VisoOptions,
+    /// Name of the preset whose options are currently loaded, or `None` when
+    /// the active options were set manually (a manual edit no longer matches
+    /// any named preset). App-owned alongside [`Self::view_options`].
+    pub(in crate::app) active_preset: Option<String>,
+    /// Latched the first time the player touches any view setting (a manual
+    /// option edit or an explicit preset pick). Once set, the per-load preset
+    /// seed is skipped so the player's persisted choice overrides the
+    /// puzzle/Default seed on every subsequent load. A fresh app starts
+    /// `false`, so its first load still seeds from the puzzle/Default preset.
+    pub(in crate::app) view_settings_touched: bool,
     pub(crate) runner_client: RunnerClient,
     /// Plugin projection of the `SessionUpdate` stream. A peer field to
     /// `runner_client` (not nested inside it) so the tick seam can borrow
@@ -128,6 +144,9 @@ impl App {
                 kb
             },
             store: Session::new(),
+            view_options: viso::options::VisoOptions::default(),
+            active_preset: None,
+            view_settings_touched: false,
             runner_client: RunnerClient::new(),
             runner_projector: RunnerProjector::new(),
             render_projector: RenderProjector::new(),
@@ -185,6 +204,23 @@ impl App {
     pub(in crate::app) fn set_app_phase(&mut self, state: AppPhase) {
         self.lifecycle = state;
         self.frontend.set_app_state(self.lifecycle);
+    }
+
+    // ── View-options reads ──
+
+    /// The active view options. App-owned so they persist across a reload;
+    /// the view panel binds these and the render projection re-applies them
+    /// to the engine on each `ViewOptionsChanged`.
+    #[must_use]
+    pub const fn view_options(&self) -> &viso::options::VisoOptions {
+        &self.view_options
+    }
+
+    /// The name of the currently-loaded preset, or `None` when the active
+    /// options were set manually.
+    #[must_use]
+    pub fn active_preset(&self) -> Option<&str> {
+        self.active_preset.as_deref()
     }
 
     // ── Engine-only delegation ──
@@ -303,8 +339,8 @@ impl App {
         // `render_changes` counts only the scene-mutating updates: an
         // assembly republish keys off these, and the steady-state async
         // rescore (step 5) gates on them. A ScoresChanged / SelectionChanged
-        // / FocusChanged / view / bubble / puzzle update is not a scene
-        // mutation, so it is excluded here: republishing geometry on such a
+        // / FocusChanged / view / bubble / puzzle / appearance update is not a
+        // scene mutation, so it is excluded here: republishing geometry on such a
         // reply is wasted work (and forces a spurious full rebuild on a
         // topology tick), and re-querying scores in response would loop. The
         // render projector still runs on a score-only batch to re-derive
@@ -320,6 +356,7 @@ impl App {
                         | SessionUpdate::BubbleChanged
                         | SessionUpdate::PuzzleChanged
                         | SessionUpdate::ViewOptionsChanged
+                        | SessionUpdate::EntityAppearanceChanged
                 )
             })
             .count();
@@ -333,12 +370,21 @@ impl App {
                 self.runner_projector
                     .consume(&changes, &self.store, orch);
             }
-            // The render projector self-filters all five of its reactions
-            // (selection / focus / view-options / geometry / scores), so it
-            // runs on any non-empty batch and no-ops internally on one that
-            // carries none of them.
+            // The render projector self-filters its reactions (selection /
+            // focus / geometry / scores), so it runs on any non-empty batch
+            // and no-ops internally on one that carries none of them. The
+            // view-options reaction is driven here, not in the projector: the
+            // options live on `App` (so they persist across a topology swap),
+            // and applying them to the engine is gated on the same
+            // `ViewOptionsChanged` signal the projector would have keyed off.
             if let Some(engine) = self.engine.as_mut() {
                 self.render_projector.consume(&changes, &self.store, engine);
+                if changes
+                    .iter()
+                    .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
+                {
+                    engine.set_options(self.view_options.clone());
+                }
             }
         }
 
@@ -394,6 +440,8 @@ impl App {
                 engine,
                 driver: &self.runner_client,
                 host: self.host.as_ref(),
+                view_options: &self.view_options,
+                active_preset: self.active_preset.as_deref(),
             };
             self.gui_projector
                 .consume(&changes, full_populate, &src, &mut self.frontend);
