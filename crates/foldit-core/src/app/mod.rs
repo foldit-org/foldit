@@ -27,8 +27,11 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 mod dispatch;
 pub(crate) mod input;
 mod load;
+mod startup;
 #[cfg(not(target_arch = "wasm32"))]
 mod scores_coord;
+#[cfg(not(target_arch = "wasm32"))]
+mod voids_coord;
 #[cfg(test)]
 mod tests;
 
@@ -408,6 +411,27 @@ impl App {
         {
             if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
                 self.request_scores();
+            }
+        }
+
+        // 5b. Refresh the engine's external cavity set from the plugin's
+        //     `voids` query. Like the at-rest rescore, voids go stale on a
+        //     geometry change, so refresh on the same at-rest gate; also
+        //     refresh when the cavity-display toggle flipped (a
+        //     ViewOptionsChanged carries it) so toggling on requests voids
+        //     and toggling off clears them. The call self-gates on the engine
+        //     being present, the cavity display being on, and a plugin
+        //     advertising `voids`, so it is an inert no-op until the plugin
+        //     implements the query.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let view_toggled = changes
+                .iter()
+                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
+            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
+                || view_toggled
+            {
+                self.refresh_external_cavities();
             }
         }
 

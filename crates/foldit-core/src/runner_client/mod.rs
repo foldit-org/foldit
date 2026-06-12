@@ -24,6 +24,8 @@
 mod dispatch;
 mod catalog;
 mod scores;
+#[cfg(not(target_arch = "wasm32"))]
+mod voids;
 mod types;
 
 #[cfg(not(target_arch = "wasm32"))]

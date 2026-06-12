@@ -47,6 +47,10 @@ thiserror = "2"
 # `web_sys::window().fetch_with_str`, native uses a sync HTTP client).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
+# Decodes the opaque `voids` query payload (proto `VoidField`) at the
+# native runner-client boundary; the void detection + render path is
+# native-only, mirroring how the score path names the runner's proto types.
+prost = "0.13"
 
 [dev-dependencies]
 proptest = "1"

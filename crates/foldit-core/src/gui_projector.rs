@@ -278,14 +278,14 @@ fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
         dirty |= match update {
             SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
             SessionUpdate::Edit { tentative: true }
-            | SessionUpdate::PreviewUpdated => DirtyFlags::SCENE,
+            | SessionUpdate::PreviewUpdated
+            | SessionUpdate::EntityAppearanceChanged => DirtyFlags::SCENE,
             SessionUpdate::Edit { tentative: false }
             | SessionUpdate::PreviewAdded
             | SessionUpdate::PreviewDiscarded
             | SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
             SessionUpdate::HeadMoved => DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS,
             SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
-            SessionUpdate::EntityAppearanceChanged => DirtyFlags::SCENE,
             SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
             SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
             SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
