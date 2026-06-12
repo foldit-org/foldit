@@ -15,10 +15,7 @@ targets = [
 
 [advisories]
 unmaintained = "workspace"
-ignore = [
-    # gtk3 is a transitive dep of wry via webkit2gtk; not under our control
-    { id = "RUSTSEC-2024-0415", reason = "transitive dep of wry, awaiting upstream migration to gtk4" },
-]
+ignore = []
 
 [licenses]
 allow = [
