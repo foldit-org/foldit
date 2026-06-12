@@ -32,6 +32,8 @@ mod startup;
 mod scores_coord;
 #[cfg(not(target_arch = "wasm32"))]
 mod voids_coord;
+#[cfg(not(target_arch = "wasm32"))]
+mod clash_coord;
 #[cfg(test)]
 mod tests;
 
@@ -432,6 +434,27 @@ impl App {
                 || view_toggled
             {
                 self.refresh_external_cavities();
+            }
+        }
+
+        // 5c. Refresh the engine's steric-clash arcs from the plugin's
+        //     `clashes` query, on the same at-rest geometry gate as the
+        //     rescore and voids refresh (clashes go stale on a geometry
+        //     change); also refresh when the clash-display toggle flipped (a
+        //     ViewOptionsChanged carries it) so toggling on requests clashes
+        //     and toggling off clears them. The call self-gates on the engine
+        //     being present, the clash display being on, and a plugin
+        //     advertising `clashes`, so it is an inert no-op until the plugin
+        //     implements the query.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let view_toggled = changes
+                .iter()
+                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
+            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
+                || view_toggled
+            {
+                self.refresh_clashes();
             }
         }
 
