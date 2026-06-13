@@ -29,7 +29,77 @@ mod window;
 
 use foldit_core::app::App;
 
+/// Platform file name of the python-host cdylib (the worker dlopens it by this
+/// name). Mirrors `xtask`'s `python_host_lib_name`.
+#[cfg(target_os = "macos")]
+const PYTHON_HOST_DYLIB_NAME: &str = "libfoldit_python_host.dylib";
+#[cfg(target_os = "windows")]
+const PYTHON_HOST_DYLIB_NAME: &str = "foldit_python_host.dll";
+#[cfg(target_os = "linux")]
+const PYTHON_HOST_DYLIB_NAME: &str = "libfoldit_python_host.so";
+
+/// Locate the packaged resource directory and point the resource resolvers at
+/// it via their env overrides. Probes a small candidate list relative to the
+/// executable (macOS `Contents/MacOS` -> `../Resources`; Linux `usr/bin` ->
+/// `../lib/foldit` or `../share/foldit`; Windows / flat bundle -> next to the
+/// exe), picking the first that actually contains `assets/gui`. Each override
+/// is a LEAF path (the asset dir itself), matching the resolver contracts. A
+/// pre-existing env value always wins, and a dev `cargo run` matches no
+/// candidate, so this is a no-op outside a real bundle.
+fn init_bundle_resource_paths() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return;
+    };
+
+    let candidates = [
+        exe_dir.join("../Resources"),
+        exe_dir.join("../lib/foldit"),
+        exe_dir.join("../share/foldit"),
+        exe_dir.to_path_buf(),
+    ];
+    let Some(root) = candidates
+        .into_iter()
+        .find(|c| c.join("assets/gui").is_dir())
+    else {
+        return; // not a recognized bundle layout; keep default resolution
+    };
+    // Normalize away the `..` so logged/resolved paths are clean.
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+
+    let set_if_unset = |key: &str, path: std::path::PathBuf| {
+        if std::env::var_os(key).is_none() {
+            if let Some(s) = path.to_str() {
+                std::env::set_var(key, s);
+            }
+        }
+    };
+    set_if_unset("FOLDIT_GUI_ROOT", root.join("assets/gui"));
+    set_if_unset("FOLDIT_VIEW_PRESETS_DIR", root.join("assets/view_presets"));
+    set_if_unset("FOLDIT_LEVELS_ROOT", root.join("assets/levels"));
+    set_if_unset("FOLDIT_SCORING_DIR", root.join("assets/scoring"));
+    set_if_unset("FOLDIT_PLUGINS_ROOT", root.join("plugins"));
+
+    // The python-host dylib is found next to the worker exe by default; when it
+    // ships as a resource instead, point the worker (which inherits this env)
+    // at it explicitly.
+    let dylib = root.join(PYTHON_HOST_DYLIB_NAME);
+    if dylib.is_file() {
+        set_if_unset("FOLDIT_PYTHON_HOST_DYLIB", dylib);
+    }
+}
+
 fn main() {
+    // When launched from a packaged bundle (macOS .app, Linux AppImage/deb,
+    // Windows installer), the read-only assets and plugins live in a
+    // platform-specific resource directory, not next to the executable. The
+    // resolvers default to "next to the exe", so point their env overrides at
+    // the resource root before anything reads them. Must run before threads
+    // spawn (set_var is not thread-safe) and before the first resolver fires.
+    init_bundle_resource_paths();
+
     let default_filter = "info,wgpu_hal::vulkan::instance=off,naga=warn";
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned());
     let log_buffer = tee_logger::init(&filter);

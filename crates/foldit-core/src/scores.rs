@@ -183,6 +183,17 @@ pub fn parse_wts(src: &str) -> HashMap<String, f32> {
 /// can log if no ancestor carries the asset or the file is unreadable.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_default_term_weights() -> Result<HashMap<String, f32>, String> {
+    // Explicit override (set by a packaged bundle whose assets are not an
+    // ancestor of the exe, e.g. a macOS .app's Contents/Resources). Points at
+    // the `scoring` dir.
+    if let Some(dir) = std::env::var_os("FOLDIT_SCORING_DIR") {
+        let candidate = std::path::PathBuf::from(dir).join("ref2015_cart.wts");
+        if candidate.is_file() {
+            let src = std::fs::read_to_string(&candidate)
+                .map_err(|e| format!("reading {}: {e}", candidate.display()))?;
+            return Ok(parse_wts(&src));
+        }
+    }
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe lookup failed: {e}"))?;
     let mut dir = exe.parent();

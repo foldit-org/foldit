@@ -161,6 +161,15 @@ pub struct PuzzleData {
 /// than a CWD-dependent silent miss, since the caller can surface the
 /// problem with the actual exe path.
 pub fn levels_root() -> Result<PathBuf, String> {
+    // Explicit override, set by a packaged bundle whose assets live in a
+    // platform resource dir that is not an ancestor of the executable (e.g. a
+    // macOS .app's Contents/Resources). Points directly at the `levels` dir.
+    if let Some(dir) = std::env::var_os("FOLDIT_LEVELS_ROOT") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return Ok(p);
+        }
+    }
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe lookup failed: {e}"))?;
     let mut dir = exe.parent();
