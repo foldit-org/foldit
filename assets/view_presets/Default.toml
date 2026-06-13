@@ -6,6 +6,7 @@ lipid_mode = "coarse"
 show_sidechains = true
 show_hydrogens = false
 color_scheme = "score"
+sidechain_color_mode = "hydrophobicity"
 palette_preset = "green_yellow_red"
 palette_mode = "gradient"
 
@@ -50,8 +51,8 @@ zoom_speed = 0.1
 
 [colors]
 lipid_carbon_tint = [0.76, 0.7, 0.5]
-hydrophobic_sidechain = [0.3, 0.5, 0.9]
-hydrophilic_sidechain = [0.95, 0.6, 0.2]
+hydrophobic_sidechain = [0.95, 0.6, 0.2]
+hydrophilic_sidechain = [0.3, 0.5, 0.9]
 nucleic_acid = [0.45, 0.55, 0.85]
 band_default = [0.5, 0.0, 0.5]
 band_backbone = [1.0, 0.75, 0.0]

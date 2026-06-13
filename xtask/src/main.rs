@@ -47,6 +47,12 @@ const fn rosetta_lib_name() -> &'static str {
     }
 }
 
+/// Intermediate staging dir where `assemble` lays out the full payload (host
+/// binaries + python-host dylib + plugins + assets) that `cargo packager` then
+/// wraps into the installers in `dist/`. Lives under `target/` so it is already
+/// git-ignored and clearly a build artifact, not a deliverable.
+const STAGING: &str = "target/staging";
+
 /// Platform-canonical file name for the python-host cdylib. The worker
 /// dlopens this by filename next to its own executable.
 const fn python_host_lib_name() -> &'static str {
@@ -84,8 +90,20 @@ enum Commands {
         #[arg(long)]
         clean: bool,
     },
-    /// Create distribution bundle
-    Bundle,
+    /// THE desktop prod path: assemble the staging payload then build OS
+    /// installers via cargo-packager (macOS .app/.dmg, Windows NSIS/MSI, Linux
+    /// deb/AppImage). Requires `cargo install cargo-packager`. Config lives in
+    /// `packager.json`.
+    Package {
+        /// Comma-separated cargo-packager formats (e.g. "app,dmg"). Defaults
+        /// to the current platform's defaults.
+        #[arg(long)]
+        formats: Option<String>,
+        /// Skip the assembly step and package the existing staging payload
+        /// as-is (fast iteration on packaging config).
+        #[arg(long)]
+        skip_assembly: bool,
+    },
     /// Rebuild the molex Python extension from local source
     BuildMolex,
     /// Build the GUI (bun run build) and copy dist to assets/gui
@@ -108,9 +126,9 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Build the web wasm artifact AND run `bun run build:web` to produce a
-    /// static `dist/` ready for deployment.
-    BundleWeb,
+    /// The web prod path: build the web wasm artifact AND run `bun run
+    /// build:web` to produce a static site ready for deployment.
+    PackageWeb,
 }
 
 fn main() -> Result<()> {
@@ -128,12 +146,15 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::SetupEnvs => setup_envs(),
         Commands::BuildRosettaInteractive { clean } => build_rosetta_interactive(clean),
-        Commands::Bundle => bundle(),
+        Commands::Package {
+            formats,
+            skip_assembly,
+        } => package(formats.as_deref(), skip_assembly),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
         Commands::BuildHost { debug } => build_host(debug),
         Commands::BuildWeb { debug } => build_web(debug),
-        Commands::BundleWeb => bundle_web(),
+        Commands::PackageWeb => package_web(),
     }
 }
 
@@ -215,7 +236,7 @@ fn build_web(debug: bool) -> Result<()> {
     Ok(())
 }
 
-fn bundle_web() -> Result<()> {
+fn package_web() -> Result<()> {
     build_web(false)?;
 
     let js_dir = Path::new("crates/foldit-gui/js");
@@ -228,7 +249,7 @@ fn bundle_web() -> Result<()> {
         anyhow::bail!("bun run build:web failed");
     }
 
-    println!("✓ web bundle ready at crates/foldit-gui/js/dist/");
+    println!("✓ web build ready at crates/foldit-gui/js/dist/");
     Ok(())
 }
 
@@ -432,7 +453,11 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     Ok(())
 }
 
-fn bundle() -> Result<()> {
+/// Assemble the full payload into the [`STAGING`] dir: build the host
+/// artifacts, copy them flat with the python-host dylib, copy the native +
+/// Python plugins, and mirror the read-only data assets. `package` runs this
+/// (unless `--skip-assembly`) before handing `STAGING` to cargo-packager.
+fn assemble() -> Result<()> {
     let exe_ext = if cfg!(windows) { ".exe" } else { "" };
 
     // 1. Build the host artifacts into target/release/. A plain
@@ -469,11 +494,11 @@ fn bundle() -> Result<()> {
         }
     }
 
-    // 2. Fresh bundle/ with host infra flat at the root: the app, the
+    // 2. Fresh staging dir with host infra flat at the root: the app, the
     //    worker, and the python-host dylib (the worker dlopens it next to
-    //    its own exe). No pixi, no .pixi — the bundle is self-contained.
-    let _ = std::fs::remove_dir_all("bundle");
-    std::fs::create_dir_all("bundle")?;
+    //    its own exe). No pixi, no .pixi — the payload is self-contained.
+    let _ = std::fs::remove_dir_all(STAGING);
+    std::fs::create_dir_all(STAGING)?;
 
     let host_files = [
         format!("foldit{exe_ext}"),
@@ -483,65 +508,163 @@ fn bundle() -> Result<()> {
     for name in &host_files {
         let src = format!("target/release/{name}");
         if Path::new(&src).exists() {
-            std::fs::copy(&src, format!("bundle/{name}"))?;
-            println!("Copied {name} to bundle.");
+            std::fs::copy(&src, format!("{STAGING}/{name}"))?;
+            println!("Staged {name}.");
         } else {
             anyhow::bail!("expected host artifact missing: {src}");
         }
     }
 
-    // 3. Native plugins: copy the Rosetta plugin into bundle/plugins/rosetta.
+    // 3. Native plugins: copy the Rosetta plugin into <staging>/plugins/rosetta.
     copy_rosetta_plugin()?;
 
     // 4. Python plugins: delegate to the pixi-side bundler, which copies each
     //    plugin's conda env + materializes its editable installs into
-    //    bundle/plugins/<id>/. It runs in the default env (needs only a
+    //    <staging>/plugins/<id>/. It runs in the default env (needs only a
     //    Python interpreter; it reads each .pixi/envs/<env> from disk).
     println!("Assembling Python plugins (foundry, esmfold, simplefold)...");
-    let bundle_abs = std::fs::canonicalize("bundle")?;
+    let staging_abs = std::fs::canonicalize(STAGING)?;
     let status = Command::new("pixi")
         .args(["run", "bundle", "--output"])
-        .arg(&bundle_abs)
+        .arg(&staging_abs)
         .current_dir("crates/foldit-runner")
         .status()?;
     if !status.success() {
         anyhow::bail!("Failed to assemble Python plugins");
     }
 
-    // 5. Read-only data assets, mirrored under bundle/assets/ so the exe finds
-    //    them next to itself regardless of launch cwd. The frontend resolver
-    //    (`create_webview_release`) looks for `assets/gui`; the view-preset
-    //    resolver (`DesktopHost::resolve_view_presets_dir`) looks for
-    //    `assets/view_presets`. Without these the webview is blank and the
-    //    preset menu empty with no startup preset.
-    std::fs::create_dir_all("bundle/assets")?;
+    // 5. Read-only data assets, mirrored under <staging>/assets/ so the runtime
+    //    resolvers find them. Each is reached either next to the exe (Windows /
+    //    flat layout) or via a FOLDIT_*_ROOT env override the desktop shim sets
+    //    when the assets live in a platform resource dir (macOS .app Resources):
+    //      gui          -> `create_webview_release` / FOLDIT_GUI_ROOT
+    //      view_presets -> `resolve_view_presets_dir` / FOLDIT_VIEW_PRESETS_DIR
+    //      levels       -> `puzzle::levels_root` / FOLDIT_LEVELS_ROOT
+    //      scoring      -> `scores::load_default_term_weights` / FOLDIT_SCORING_DIR
+    //      puzzle_setup -> referenced by the above data.
+    //    `models/` (the on-demand PDB-by-id download cache) is intentionally
+    //    omitted; staged `levels` carry their own `structure.pdb`. The app icon
+    //    is NOT here - it is build-time packaging input (`packaging/icon.png`).
+    std::fs::create_dir_all(format!("{STAGING}/assets"))?;
 
-    if Path::new("assets/gui").exists() {
-        println!("Copying frontend assets...");
-        copy_dir("assets/gui", "bundle/assets/gui")?;
-    } else {
-        println!("Warning: Frontend assets not found at assets/gui");
-        println!("  Run 'cargo xtask build-gui' first");
+    let asset_dirs = ["gui", "view_presets", "levels", "scoring", "puzzle_setup"];
+    for name in asset_dirs {
+        let src = format!("assets/{name}");
+        let dst = format!("{STAGING}/assets/{name}");
+        if Path::new(&src).exists() {
+            println!("Staging {src} -> {dst} ...");
+            copy_dir(&src, &dst)?;
+        } else if name == "gui" {
+            println!("Warning: Frontend assets not found at assets/gui");
+            println!("  Run 'cargo xtask build-gui' first");
+        } else {
+            println!("Warning: asset dir not found at {src} (skipping)");
+        }
     }
 
-    if Path::new("assets/view_presets").exists() {
-        println!("Copying view presets...");
-        copy_dir("assets/view_presets", "bundle/assets/view_presets")?;
-    } else {
-        println!("Warning: view presets not found at assets/view_presets");
-    }
-
-    println!("Bundle ready at ./bundle/");
+    println!("Staging payload ready at ./{STAGING}/");
     Ok(())
 }
 
-/// Copy the Rosetta native plugin into `bundle/plugins/rosetta`, mirroring
+// ─────────────────────────────────────────────────────────────────────────────
+// OS installers via cargo-packager (.app/.dmg, NSIS/MSI, deb/AppImage)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build OS installers from the [`STAGING`] payload via `cargo packager`
+/// (config in `packager.json`). Runs [`assemble`] first unless `skip_assembly`.
+///
+/// cargo-packager places the `binaries` (`foldit` + `foldit-worker`) adjacent
+/// in the package and the `resources` (assets, plugins, python-host dylib) in
+/// the platform resource dir; the launch shim in `foldit-desktop::main` points
+/// the runtime resolvers there. See `docs/app_packaging.md`.
+fn package(formats: Option<&str>, skip_assembly: bool) -> Result<()> {
+    if skip_assembly {
+        if !Path::new(&format!("{STAGING}/foldit")).exists() {
+            anyhow::bail!(
+                "{STAGING}/foldit not found - drop --skip-assembly so it gets \
+                 built first"
+            );
+        }
+    } else {
+        assemble()?;
+    }
+
+    let have_packager = Command::new("cargo")
+        .args(["packager", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !have_packager {
+        anyhow::bail!(
+            "cargo-packager not found - install it with \
+             `cargo install cargo-packager --locked`"
+        );
+    }
+
+    // Pass the config's CONTENTS as the raw `-c` argument (it starts with
+    // `{`, so cargo-packager parses it inline). This skips the tree-walking
+    // `**/packager.toml` glob discovery and keeps relative paths resolving from
+    // the workspace root (no chdir to a manifest/config dir).
+    let config = std::fs::read_to_string("packager.json")
+        .map_err(|e| anyhow::anyhow!("read packager.json: {e}"))?;
+
+    println!("Packaging via cargo-packager...");
+    let mut args = vec!["packager".to_owned(), "-c".to_owned(), config.clone()];
+    if let Some(formats) = formats {
+        for fmt in formats.split(',') {
+            args.push("--formats".to_owned());
+            args.push(fmt.trim().to_owned());
+        }
+    }
+    let status = Command::new("cargo").args(&args).status()?;
+    if !status.success() {
+        anyhow::bail!("cargo packager failed");
+    }
+
+    // cargo-packager only code-signs when a `signingIdentity` is configured.
+    // For the default (ad-hoc) path, seal each produced .app so it has a valid
+    // bundle signature (Apple Silicon also requires signed code to run at all).
+    // A real `signingIdentity` means cargo-packager already signed properly, so
+    // leave it untouched rather than clobber it with an ad-hoc signature.
+    #[cfg(target_os = "macos")]
+    if !config.contains("\"signingIdentity\"") {
+        adhoc_seal_apps("dist")?;
+    }
+
+    println!("Installers ready in ./dist/");
+    Ok(())
+}
+
+/// Ad-hoc code-sign each `*.app` in `out_dir` (`codesign --sign -`). Used for
+/// the default unsigned-distribution path; sealing works because the bundled
+/// conda envs live under `Contents/Resources/` (codesign hashes them as
+/// resources rather than trying to sign them as nested code).
+#[cfg(target_os = "macos")]
+fn adhoc_seal_apps(out_dir: &str) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(out_dir) else {
+        return Ok(());
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.extension().and_then(|e| e.to_str()) == Some("app") {
+            println!("Ad-hoc sealing {}...", path.display());
+            let status = Command::new("codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&path)
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("ad-hoc codesign failed for {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy the Rosetta native plugin into `<staging>/plugins/rosetta`, mirroring
 /// the dev-tree layout the orchestrator's `discover_plugins` scans
 /// (`plugins/<id>/{plugin.toml, <dylib>, assets/}`). The plugin dir is the
 /// source of truth, written by `build-rosetta-interactive`. We deliberately
 /// do NOT copy `deps/` (the rosetta-interactive C++ source submodule + cmake
 /// build tree). Missing artifacts warn rather than fail, so a dev without
-/// Rosetta built can still bundle the Python plugins.
+/// Rosetta built can still stage the Python plugins.
 fn copy_rosetta_plugin() -> Result<()> {
     let rosetta_plugin_src = "crates/foldit-runner/plugins/rosetta";
     let rosetta_lib = rosetta_lib_name();
@@ -553,9 +676,9 @@ fn copy_rosetta_plugin() -> Result<()> {
         return Ok(());
     }
 
-    println!("Copying Rosetta plugin -> bundle/plugins/rosetta ...");
-    let rosetta_plugin_dst = "bundle/plugins/rosetta";
-    std::fs::create_dir_all(rosetta_plugin_dst)?;
+    let rosetta_plugin_dst = format!("{STAGING}/plugins/rosetta");
+    println!("Copying Rosetta plugin -> {rosetta_plugin_dst} ...");
+    std::fs::create_dir_all(&rosetta_plugin_dst)?;
 
     std::fs::copy(
         format!("{rosetta_plugin_src}/plugin.toml"),

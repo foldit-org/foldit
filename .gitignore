@@ -1,5 +1,5 @@
 target/
-bundle/
+dist/
 assets/gui
 
 # macOS finder cruft (matches at any depth)

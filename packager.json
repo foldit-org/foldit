@@ -1,0 +1,20 @@
+{
+  "productName": "Foldit",
+  "identifier": "org.foldit.desktop",
+  "version": "0.1.0",
+  "binariesDir": "target/staging",
+  "outDir": "dist",
+  "icons": ["packaging/icon.png", "packaging/icon@2x.png"],
+  "binaries": [
+    { "path": "foldit", "main": true },
+    { "path": "foldit-worker" }
+  ],
+  "resources": [
+    { "src": "target/staging/assets", "target": "assets" },
+    { "src": "target/staging/plugins", "target": "plugins" },
+    { "src": "target/staging/libfoldit_python_host.dylib", "target": "libfoldit_python_host.dylib" }
+  ],
+  "macos": {
+    "minimumSystemVersion": "11.0"
+  }
+}
