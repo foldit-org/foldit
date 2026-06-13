@@ -48,19 +48,6 @@ impl RunnerClient {
             .unwrap_or_default()
     }
 
-    /// Score the plugin's live session pose synchronously, BLOCKING until
-    /// the first `score` provider replies, and return the core-owned report.
-    /// Passes no bytes: the `score` query covers the current session pose.
-    /// `None` when no orchestrator / provider exists or the score fails.
-    /// Used at load time to stamp the first per-residue score before the
-    /// scene is shown; not for the per-frame path.
-    pub(crate) fn score_session_blocking(&mut self) -> Option<crate::scores::ScoreReport> {
-        self.orchestrator
-            .as_mut()
-            .and_then(foldit_runner::Orchestrator::score_session_blocking)
-            .map(Into::into)
-    }
-
     /// Fire a composition-score request for `request_id`, carrying the
     /// ASSEM02 bytes of the composition to score (one open edit's lanes
     /// over its peers' committed heads, or a committed checkpoint's union).

@@ -134,7 +134,10 @@ impl App {
     /// `HeadMoved`s from `load_entity_into_history`).
     fn handle_load_structure(&mut self, path: &str) {
         self.set_app_phase(AppPhase::LoadingSession);
-        match crate::puzzle::load_file_as_entities(path) {
+        // Drop any prior plugin sessions (warm workers stay up) so the
+        // bring-up armed below re-`Init`s every plugin against this load.
+        self.runner_client.reset_for_new_structure();
+        let loaded = match crate::puzzle::load_file_as_entities(path) {
             Ok((entities, name)) => {
                 log::info!("Loaded structure via IPC: {name}");
                 for entity in entities {
@@ -153,40 +156,30 @@ impl App {
                 // option emit is faithful); once the player has touched any view
                 // setting, skip the seed and keep their persisted choice. Either
                 // way, push the persisted-or-seeded options to the freshly-reset
-                // engine before the publish below. The funnel does the eager set
-                // + note itself when it seeds; the touched branch does it from
-                // the App-owned options.
+                // engine. The funnel does the eager set + note itself when it
+                // seeds; the touched branch does it from the App-owned options.
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.view_settings_touched {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session("Default");
                 }
-
-                // Publish + fit. tick(0.0) drains the `SessionUpdate` stream, publishes
-                // via the render projector, and runs engine.update(0.0)
-                // so fit_camera_to_focus has bounding-radius to read.
-                self.tick(0.0);
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.fit_camera_to_focus();
-                }
+                // Camera frames on the focused geometry; the default
+                // `StartupCamera::Fit` is what the bring-up terminal applies.
+                true
             }
             Err(e) => {
                 log::error!("Failed to load structure '{path}': {e}");
+                false
             }
-        }
-        // Stamp the first per-residue score synchronously, then drain its
-        // `ScoresChanged` through the render projector with a tick(0.0) so the
-        // backbone is already colored on the first rendered frame (no gray
-        // flash). `score_head_now` no-ops when there is no scoring plugin.
-        self.score_head_now();
-        self.tick(0.0);
-        // Loading is done: flip into InSession (clears the loading screen) and
-        // raise the one-shot full populate so the next tick's GUI consumer
-        // pushes every section, covering the puzzle-panel title and the
-        // not-scored-yet gauge / catalog that no batch variant carries on a
-        // free-form load.
-        self.enter_session();
+        };
+        // Hand bring-up to the startup state-machine: it `Init`s every warm
+        // plugin against the just-loaded structure, adopts each normalized
+        // pose, runs the first score, then flips into the session (clearing
+        // the loading screen and raising the full populate). Without this the
+        // plugins stay session-less, the op registry is empty (no actions, no
+        // clashes/voids), and the backbone never scores (renders gray).
+        self.arm_session_bringup(loaded);
     }
 
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
@@ -217,7 +210,7 @@ impl App {
             engine.clear_all_appearance();
         }
 
-        match crate::puzzle::load_puzzle_structure(puzzle_id) {
+        let loaded = match crate::puzzle::load_puzzle_structure(puzzle_id) {
             Ok(puzzle_data) => {
                 // Install the puzzle (title + objective + tutorial bubbles)
                 // through the create seam. The tutorial sequence and its
@@ -277,43 +270,29 @@ impl App {
                     }
                 }
 
-                // Topology swap rides the `SessionUpdate` stream - tick's render
-                // projector picks `replace_assembly` because the id set
-                // differs from the last publish (post-reset = empty).
-                self.tick(0.0);
-
-                if let Some(engine) = self.engine.as_mut() {
-                    // Snap so bounding_radius reflects molecule extent
-                    // (fog driver), then override the pose with the
-                    // puzzle's saved eye/up but anchor the orbit
-                    // center on the protein centroid.
-                    engine.snap_camera_to_focus();
-                    if let Some(centroid) = engine.focus_centroid() {
-                        engine.set_camera_pose(centroid, cam_eye, cam_up);
-                    }
-
-                    if let Some(ss) = ss_override {
-                        if let Some(&first_id) = ids.first() {
-                            engine.set_ss_override(first_id.raw(), ss);
-                        }
-                    }
-                }
+                // Defer the camera + SS to the bring-up terminal so they apply
+                // to the settled (post-normalize) geometry: the puzzle's saved
+                // pose instead of a focus fit, and its pinned SS after the
+                // cartoon rebake. The topology swap itself rides the
+                // `SessionUpdate` stream (tick's render projector picks
+                // `replace_assembly` because the id set differs from the
+                // post-reset empty publish).
+                self.startup_camera =
+                    StartupCamera::PuzzlePose { eye: cam_eye, up: cam_up };
+                self.startup_ss_override = ss_override
+                    .and_then(|ss| ids.first().map(|&first_id| (first_id.raw(), ss)));
+                true
             }
-            Err(e) => log::error!("Failed to load puzzle {puzzle_id}: {e}"),
-        }
-        // Stamp the first per-residue score synchronously, then drain its
-        // `ScoresChanged` through the render projector with a tick(0.0) so the
-        // backbone is already colored on the first rendered frame (no gray
-        // flash). `score_head_now` no-ops when there is no scoring plugin.
-        self.score_head_now();
-        self.tick(0.0);
-        // PUZZLE rides the `start` emit drained by the inner `tick(0.0)`
-        // above (its PUZZLE arm also pushes the current bubble), and the
-        // topology swap re-pushes the entity list via the batch. Loading is
-        // done: flip into InSession (clears the loading screen) and raise the
-        // one-shot full populate to push the not-scored-yet gauge / catalog
-        // the batch does not carry on a reload.
-        self.enter_session();
+            Err(e) => {
+                log::error!("Failed to load puzzle {puzzle_id}: {e}");
+                false
+            }
+        };
+        // Hand bring-up to the startup state-machine (see handle_load_structure):
+        // it `Init`s + normalizes + scores every warm plugin against the loaded
+        // puzzle, then flips into the session. The puzzle's saved camera + SS
+        // stashed above are applied by the terminal once the geometry settles.
+        self.arm_session_bringup(loaded);
     }
 
     /// Load a named view preset's options off disk and install them as the
@@ -422,6 +401,22 @@ pub(in crate::app) enum StartupPhase {
     },
     /// Bring-up complete; the machine is inert.
     Done,
+}
+
+/// How the startup-machine terminal ([`App::enter_session_from_startup`])
+/// frames the camera once the geometry has settled (post-normalize). The
+/// launch and free-form structure paths fit on the focused geometry; a
+/// puzzle load stashes its saved pose so the terminal honors it instead of
+/// fitting. Consumed (reset to [`StartupCamera::Fit`]) when the terminal runs.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(in crate::app) enum StartupCamera {
+    /// Frame on the focused geometry (launch + free-form structure load).
+    #[default]
+    Fit,
+    /// Apply a puzzle's saved eye/up anchored on the post-normalize
+    /// centroid; falls back to a focus fit when no centroid is available.
+    PuzzlePose { eye: glam::Vec3, up: glam::Vec3 },
 }
 
 /// Locate the runtime plugins directory.

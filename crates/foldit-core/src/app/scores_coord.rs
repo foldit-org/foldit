@@ -108,33 +108,6 @@ impl App {
         (raw, game, breakdown)
     }
 
-    /// Score the live session pose synchronously and stamp the result,
-    /// BLOCKING for the worker's reply. Queries the `score` provider with no
-    /// composition argument, so it scores the plugin's current session pose,
-    /// which the preceding load-time `tick(0.0)` has already synced to the
-    /// loaded structure. Used at load time, before the scene is first shown,
-    /// so the backbone renders already-colored instead of gray-then-recolor.
-    ///
-    /// No-ops gracefully (no stamp, no hang) when there is no orchestrator /
-    /// score provider or an empty report comes back. Stamps the head exactly
-    /// like `apply_score_reports`'s no-pending-edit branch: the emitted
-    /// `ScoresChanged` lets the render projector derive the per-residue colors
-    /// on the next drain.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) fn score_head_now(&mut self) {
-        let Some(report) = self.runner_client.score_session_blocking() else {
-            return;
-        };
-        // An empty report carries nothing to stamp (degraded / non-scoring
-        // setup): leave the gauge at "not scored yet" and let the load proceed.
-        if report.term_names.is_empty() && report.per_residue_terms.is_empty() {
-            return;
-        }
-        let (raw, game, breakdown) = self.prepare_score_stamp(report);
-        self.store
-            .set_head_scores(Some(raw), Some(game), Some(breakdown));
-    }
-
     /// Fire a composition score for the committed union of `ckpt_id` under a
     /// fresh `request_id`, routing the reply to stamp that (now-immutable)
     /// checkpoint. Called right after a user-action commit so the new

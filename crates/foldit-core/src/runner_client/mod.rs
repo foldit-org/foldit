@@ -111,12 +111,19 @@ impl RunnerClient {
             .is_some_and(|op| op.lock_meta.creates_entities)
     }
 
-    /// Release any lock state when puzzle topology changes.
+    /// Release lock state and drop every plugin session when puzzle topology
+    /// changes. Dropping the sessions (the warm workers stay up) is what lets
+    /// the load path re-`Init` each plugin against the new structure:
+    /// `init_plugin_session` is idempotent on a live session, so without this
+    /// a switched-in puzzle would keep the outgoing structure's pose and the
+    /// op registry would never refresh.
     pub fn reset_for_new_structure(&mut self) {
         if let Some(ref mut orch) = self.orchestrator {
             for eid in orch.locked_entities() {
                 orch.unlock(eid);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            orch.drop_all_sessions();
         }
     }
 

@@ -94,6 +94,19 @@ pub struct App {
     /// first score) run across frames while the host keeps rendering.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup: self::load::StartupPhase,
+    /// Camera framing the startup-machine terminal applies once the geometry
+    /// has settled (post-normalize). `Fit` (the default) frames on focus; a
+    /// puzzle load stashes its saved pose here so the terminal honors it
+    /// instead of fitting. Reset to `Fit` after the terminal consumes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) startup_camera: self::load::StartupCamera,
+    /// Secondary-structure override the startup-machine terminal applies to
+    /// the loaded entity (`(entity raw id, per-residue SS)`) once the geometry
+    /// has settled, so a puzzle's pinned SS survives the post-normalize
+    /// rebake. `None` outside a puzzle load; cleared after the terminal
+    /// consumes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
     /// One-shot "push every GUI section once" signal. Raised on session
     /// birth (the Loading → `InSession` flip on every load path) and
     /// consumed + cleared by `tick` on the next
@@ -161,6 +174,10 @@ impl App {
             lifecycle: AppPhase::Initializing,
             #[cfg(not(target_arch = "wasm32"))]
             startup: self::load::StartupPhase::Idle,
+            #[cfg(not(target_arch = "wasm32"))]
+            startup_camera: self::load::StartupCamera::Fit,
+            #[cfg(not(target_arch = "wasm32"))]
+            startup_ss_override: None,
             needs_full_populate: false,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
@@ -179,22 +196,21 @@ impl App {
     /// - The score gauge is reset to "not scored yet" so a reload never
     ///   displays the previous structure's score. `project_score` no-ops
     ///   when `display_score()` is `None` (and never resets `score.invalid`),
-    ///   so this is the only place the stale value is cleared. When the load
-    ///   path stamped a head score (see `score_head_now`), the one-shot full
-    ///   populate below re-derives the gauge from that stamp on the next pass.
+    ///   so this is the only place the stale value is cleared. The first
+    ///   async score the startup machine drives stamps the head, and the
+    ///   one-shot full populate below re-derives the gauge from that stamp on
+    ///   the next pass.
     /// - The score title is read from the store here because `project_score`
     ///   does not write the title.
     /// - `needs_full_populate` reprojects every session section (score
     ///   panel, title, history, scene, view, selection, actions) on the
     ///   next GUI-consumer pass.
     ///
-    /// Who stamps the first score depends on the path. The two mid-session
-    /// reload paths stamp it synchronously (via `score_head_now`) *before*
-    /// this flip, so the backbone is already colored when the scene is first
-    /// shown. The startup path flips into the session as soon as the first
-    /// async score has stamped the head (the startup machine watches for it
-    /// before calling this), so the backbone is colored there too. Either
-    /// way, this method no longer requests the score.
+    /// Every load path now brings plugins up through the startup state-machine,
+    /// which flips into the session (via `enter_session_from_startup`, which
+    /// calls this) only once the first async score has stamped the head, so the
+    /// backbone is already colored when the scene is first shown. This method
+    /// no longer requests the score.
     pub(in crate::app) fn enter_session(&mut self) {
         self.set_app_phase(AppPhase::InSession);
         self.frontend.set_score(0.0, true);
@@ -298,9 +314,8 @@ impl App {
     ///    the render projector also runs on a score-only batch).
     /// 5. fire the next async rescore (gated on a geometry change; reply
     ///    applies on a later tick's step 2). The FIRST score per session is
-    ///    stamped either synchronously by a reload path (`score_head_now`) or
-    ///    asynchronously by the startup machine's first-score kick, not by
-    ///    this at-rest gate.
+    ///    stamped by the startup machine's first-score kick (every load path
+    ///    brings plugins up through it), not by this at-rest gate.
     /// 6. engine update (camera animation, mesh upload, etc.).
     /// 7. visualization overlay (bands / pull).
     /// 8. GUI consumer projects the batch (+ one-shot full populate) into

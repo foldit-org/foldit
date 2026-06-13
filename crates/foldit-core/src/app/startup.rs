@@ -10,7 +10,7 @@ use foldit_gui::AppPhase;
 use molex::entity::molecule::id::EntityId;
 
 use super::App;
-use super::load::{StartupPhase, locate_plugins_root};
+use super::load::{StartupCamera, StartupPhase, locate_plugins_root};
 use crate::history::CheckpointKind;
 use crate::render_projector::RenderProjector;
 use crate::runner_client::DispatchIntent;
@@ -265,8 +265,25 @@ impl App {
     fn enter_session_from_startup(&mut self) {
         self.enter_session();
         self.set_app_phase(AppPhase::InSession);
+        // Consume the stashed camera intent + puzzle SS before the engine
+        // borrow (these are separate `App` fields from `engine`).
+        let camera = std::mem::take(&mut self.startup_camera);
+        let ss_override = self.startup_ss_override.take();
         if let Some(engine) = self.engine.as_mut() {
-            engine.fit_camera_to_focus();
+            // Camera: a puzzle load supplies its saved eye/up (anchored on the
+            // settled centroid); every other path frames on the focused
+            // geometry.
+            match camera {
+                StartupCamera::Fit => engine.fit_camera_to_focus(),
+                StartupCamera::PuzzlePose { eye, up } => {
+                    engine.snap_camera_to_focus();
+                    if let Some(centroid) = engine.focus_centroid() {
+                        engine.set_camera_pose(centroid, eye, up);
+                    } else {
+                        engine.fit_camera_to_focus();
+                    }
+                }
+            }
             // Force a per-residue color re-push now that viso has fully synced
             // the final (post-normalize) geometry. The first score may have
             // pushed before viso created the entity's scene-local state, in
@@ -280,7 +297,25 @@ impl App {
             // arrived). Force a full-rebuild republish now that the scores are
             // populated so the backbone mesh re-bakes colored.
             self.render_projector.rebake_geometry(&self.store, engine);
+            // Apply any puzzle-pinned SS override AFTER the rebake: it calls
+            // `replace_assembly`, which rebuilds the cartoon from the
+            // assembly's own (loop) SS, so an override set earlier would be
+            // clobbered. Setting it last invalidates RE_MESH, so the next
+            // engine.update remeshes the ribbon with the override shape.
+            if let Some((entity_raw, ss)) = ss_override {
+                engine.set_ss_override(entity_raw, ss);
+            }
         }
+        // Fire the initial structural-viz queries once. The at-rest clash /
+        // void refresh in `tick` gates on `startup_settled() && render_changes
+        // > 0`, but the geometry changes happen DURING bring-up (before the
+        // machine settles) and the settled session is at rest, so that gate
+        // never fires for the first display. Kick them here so clashes and
+        // voids show without waiting for the first user edit. Each self-gates
+        // on the engine, its display toggle, and a plugin advertising the
+        // query, so this is an inert no-op when any is absent.
+        self.refresh_clashes();
+        self.refresh_external_cavities();
     }
 
     /// Warms complete: parse + publish the bootstrap structure
@@ -328,6 +363,36 @@ impl App {
         // warm plugin's `Init` against it. Session-init uses this one
         // snapshot for every plugin, so adopting rosetta's post-Init result
         // later does not change what other plugins init against.
+        self.arm_plugin_bringup()
+    }
+
+    /// Set [`Self::startup`] to drive plugin bring-up for an in-session load
+    /// (file / puzzle). When `loaded`, arms the same `Init` -> normalize ->
+    /// score -> `InSession` sequence the launch path runs (the plugins are
+    /// already warm, so it enters at `Initializing`); when the load failed,
+    /// flips straight into the session degraded so the loading screen still
+    /// clears. The reload path's own reset already dropped the prior plugin
+    /// sessions, so the kicked `Init`s re-bind every plugin to this structure.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn arm_session_bringup(&mut self, loaded: bool) {
+        self.startup = if loaded {
+            self.arm_plugin_bringup()
+        } else {
+            // Nothing loaded; clear the loading screen degraded (viewer-only).
+            self.enter_session();
+            StartupPhase::Idle
+        };
+    }
+
+    /// Serialize the current head assembly, KICK each warm plugin's `Init`
+    /// against it, and return the `Initializing` phase to install. Shared by
+    /// the launch path (after the bootstrap parse) and the in-session reload
+    /// paths (after reset + ingest); the plugins are already warm in both. On
+    /// a serialize failure, or when no plugin session is brought up, kicks the
+    /// first score and returns its phase so the load still completes
+    /// (viewer-only on the plugin side).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn arm_plugin_bringup(&mut self) -> StartupPhase {
         let initial_assembly = {
             let head_before = self.store.head_assembly();
             match molex::ops::wire::serialize_assembly(&head_before) {
@@ -337,8 +402,6 @@ impl App {
                         "[App] failed to serialize initial assembly for plugin \
                          session init: {e:?}; plugins disabled"
                     );
-                    // Nothing to init against; jump to the first score so the
-                    // load still completes (viewer-only on the plugin side).
                     return self.kick_first_score_then_phase();
                 }
             }
