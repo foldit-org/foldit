@@ -28,6 +28,8 @@ mod scores;
 mod clashes;
 #[cfg(not(target_arch = "wasm32"))]
 mod voids;
+#[cfg(not(target_arch = "wasm32"))]
+mod exposed_hydrophobics;
 mod types;
 
 #[cfg(not(target_arch = "wasm32"))]

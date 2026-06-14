@@ -34,6 +34,8 @@ mod scores_coord;
 mod voids_coord;
 #[cfg(not(target_arch = "wasm32"))]
 mod clash_coord;
+#[cfg(not(target_arch = "wasm32"))]
+mod exposed_hydro_coord;
 #[cfg(test)]
 mod tests;
 
@@ -470,6 +472,28 @@ impl App {
                 || view_toggled
             {
                 self.refresh_clashes();
+            }
+        }
+
+        // 5d. Refresh the engine's exposed-hydrophobic grease beads from the
+        //     plugin's `exposed_hydrophobics` query, on the same at-rest
+        //     geometry gate as the rescore, voids, and clashes refresh (the
+        //     flagged residues go stale on a geometry change); also refresh
+        //     when the exposed-hydrophobic display toggle flipped (a
+        //     ViewOptionsChanged carries it) so toggling on requests the
+        //     residues and toggling off clears them. The call self-gates on
+        //     the engine being present, the display being on, and a plugin
+        //     advertising `exposed_hydrophobics`, so it is an inert no-op until
+        //     the plugin implements the query.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let view_toggled = changes
+                .iter()
+                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
+            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
+                || view_toggled
+            {
+                self.refresh_exposed_hydrophobics();
             }
         }
 

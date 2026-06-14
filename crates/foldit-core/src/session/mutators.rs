@@ -706,6 +706,12 @@ impl Session {
         // `term_weights` is likewise left untouched: the load re-sets it via
         // the App-init seam, so it carries across the topology swap.
         self.puzzle = None;
+        // The met-objective RAW bonus is derived from the outgoing puzzle's
+        // objectives; clear it on the topology swap so a free-form load (or a
+        // puzzle with no objectives) starts at zero. The following puzzle load
+        // re-derives it from its own objectives via the exposed-hydro
+        // coordinator once the scene settles.
+        self.objective_bonus = 0.0;
         // View options + active preset are not reset here: they live on `App`
         // and persist across a topology swap, so a player's display choices
         // carry from one structure to the next. The load path re-applies the

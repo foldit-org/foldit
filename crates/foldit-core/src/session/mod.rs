@@ -86,6 +86,18 @@ pub struct Puzzle {
     pub id: u32,
     pub start_energy: f64,
     pub completion_energy: f64,
+    /// Optional per-puzzle scorefunction weight patch (`scoretype_name ->
+    /// weight`) from the puzzle TOML's `[puzzle.weights]` table. `None` when
+    /// the puzzle declares no patch. The host overlays it onto its display
+    /// weight map at load, and threads it to the bridge through the normalize
+    /// dispatch params so the patched terms ship and are optimized against.
+    pub weight_patch: Option<std::collections::HashMap<String, f32>>,
+    /// Scored objectives from the puzzle TOML's `[[puzzle.objective]]`
+    /// tables. Empty when the puzzle declares none. Evaluated by the
+    /// exposed-hydro coordinator (for `exposed_count` objectives), whose
+    /// met-bonus total is stored on [`Session::objective_bonus`] and folded
+    /// into the headline game score.
+    pub objectives: Vec<crate::puzzle::Objective>,
     pub bubbles: Option<Vec<crate::puzzle::Bubble>>,
     pub current_bubble: Option<usize>,
 }
@@ -163,6 +175,16 @@ pub struct Session {
     /// score overwrites it. Lives once on the session rather than being
     /// duplicated on every checkpoint's breakdown.
     term_names: Vec<String>,
+    /// Accumulated RAW score bonus from the loaded puzzle's met objectives
+    /// (e.g. an `exposed_count` objective awards its `bonus` when the
+    /// exposed-hydrophobic count is below `max`). A RAW delta folded into
+    /// the headline game score before the raw->game map, so a met objective
+    /// can push the displayed score across `completion_score`. Ambient
+    /// session state, not history-versioned and never on the `SessionUpdate`
+    /// stream: the exposed-hydro coordinator recomputes it at rest each
+    /// geometry change. Default `0.0`; [`Self::reset`] clears it on a
+    /// topology swap (a new puzzle re-derives it from its own objectives).
+    objective_bonus: f64,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -194,6 +216,7 @@ impl Session {
             puzzle: None,
             term_weights: std::collections::HashMap::new(),
             term_names: Vec::new(),
+            objective_bonus: 0.0,
             pending_updates: Vec::new(),
         }
     }
@@ -478,6 +501,22 @@ impl Session {
     #[must_use]
     pub const fn puzzle(&self) -> Option<&Puzzle> {
         self.puzzle.as_ref()
+    }
+
+    /// The accumulated RAW score bonus from the loaded puzzle's met
+    /// objectives. `0.0` in a free-form session or when no objective is met.
+    /// The score path folds this into the raw value before the raw->game map.
+    #[must_use]
+    pub const fn objective_bonus(&self) -> f64 {
+        self.objective_bonus
+    }
+
+    /// Install the met-objective RAW bonus total. Silent (no `SessionUpdate`):
+    /// it rides the `ScoresChanged` that the score write following it emits.
+    /// Recomputed by the exposed-hydro coordinator at rest each geometry
+    /// change; [`Self::reset`] clears it on a topology swap.
+    pub fn set_objective_bonus(&mut self, bonus: f64) {
+        self.objective_bonus = bonus;
     }
 
     // ── Score-term weight reads ───────────────────────────────────────

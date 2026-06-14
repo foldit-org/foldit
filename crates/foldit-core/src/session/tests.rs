@@ -885,6 +885,8 @@ fn mk_puzzle(bubble_count: usize) -> Puzzle {
         id: 1,
         start_energy: 0.0,
         completion_energy: 100.0,
+        weight_patch: None,
+        objectives: Vec::new(),
         bubbles,
         current_bubble,
     }
@@ -962,6 +964,8 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
         id: 7,
         start_energy: 0.0,
         completion_energy: 100.0,
+        weight_patch: None,
+        objectives: Vec::new(),
         bubbles: None,
         current_bubble: None,
     });

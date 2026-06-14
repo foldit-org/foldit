@@ -224,16 +224,56 @@ impl App {
                     Some(puzzle_data.bubbles)
                 };
                 let current_bubble = bubbles.as_ref().map(|_| 0);
+                let weight_patch = puzzle_data.weights.clone();
+                let objectives = puzzle_data.objectives.clone();
                 self.store.start(
                     puzzle_data.name.clone(),
                     Some(Puzzle {
                         id: puzzle_id,
                         start_energy: puzzle_data.start_energy,
                         completion_energy: puzzle_data.completion_score,
+                        weight_patch,
+                        objectives,
                         bubbles,
                         current_bubble,
                     }),
                 );
+
+                // Overlay the puzzle's scorefunction weight patch onto the
+                // host's display weight map so `weighted_total` includes the
+                // patched terms (e.g. `envsmooth`, weight-zero in stock
+                // ref2015_cart). Rebuild from the default base each puzzle load
+                // rather than insert-in-place: the base survives `reset`, so an
+                // earlier puzzle's patch would otherwise persist into a puzzle
+                // that declares none. On a base-load failure, fall back to
+                // overlaying the patch onto whatever weights are currently held
+                // (degraded, but the patched term still weights).
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let mut weights = match crate::scores::load_default_term_weights()
+                    {
+                        Ok(base) => base,
+                        Err(e) => {
+                            log::error!(
+                                "[App] puzzle {puzzle_id}: failed to reload base \
+                                 score-term weights for patch overlay: {e}"
+                            );
+                            self.store.term_weights().clone()
+                        }
+                    };
+                    if let Some(patch) = puzzle_data.weights.as_ref() {
+                        for (name, &w) in patch {
+                            weights.insert(name.clone(), w);
+                        }
+                        log::info!(
+                            "[App] puzzle {puzzle_id}: applied {} score-term \
+                             weight patch entr{}",
+                            patch.len(),
+                            if patch.len() == 1 { "y" } else { "ies" }
+                        );
+                    }
+                    self.store.set_term_weights(weights);
+                }
 
                 // A puzzle may pin its own view preset; otherwise fall back to
                 // the Default preset so the view panel reflects the true state.

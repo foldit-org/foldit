@@ -14,6 +14,8 @@ pub(crate) mod scores;
 pub(crate) mod clashes;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod voids;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod exposed_hydrophobics;
 pub mod puzzle;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pull_drag;

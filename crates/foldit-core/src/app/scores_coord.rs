@@ -99,7 +99,12 @@ impl App {
         report: crate::scores::ScoreReport,
     ) -> (f64, f64, crate::scores::StoredBreakdown) {
         let raw = report.weighted_total(self.store.term_weights());
-        let game = crate::scores::rosetta_raw_to_game(raw);
+        // Fold the loaded puzzle's met-objective RAW bonus into the headline
+        // game score before the raw->game map (game = raw_to_game(raw +
+        // bonus)); `raw` itself stays the true rosetta value (free-form
+        // display), only `game` carries the bonus. `0.0` outside a puzzle.
+        let game =
+            crate::scores::rosetta_raw_to_game(raw + self.store.objective_bonus());
         self.store.set_term_names(report.term_names);
         let breakdown = crate::scores::StoredBreakdown {
             whole_pose_terms: report.whole_pose_terms,
@@ -149,7 +154,12 @@ impl App {
                 continue;
             };
             let raw = report.weighted_total(self.store.term_weights());
-            let game = crate::scores::rosetta_raw_to_game(raw);
+            // Fold the met-objective RAW bonus into the game score (same as
+            // `prepare_score_stamp`), so a composition / commit-stamp score
+            // and the at-rest headline agree on the bonus. `raw` stays the
+            // true rosetta value; `0.0` outside a puzzle.
+            let game =
+                crate::scores::rosetta_raw_to_game(raw + self.store.objective_bonus());
             // Install the alignment key before stamping the breakdown.
             self.store.set_term_names(report.term_names);
             let breakdown = crate::scores::StoredBreakdown {

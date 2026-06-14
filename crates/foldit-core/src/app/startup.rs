@@ -310,12 +310,14 @@ impl App {
         // void refresh in `tick` gates on `startup_settled() && render_changes
         // > 0`, but the geometry changes happen DURING bring-up (before the
         // machine settles) and the settled session is at rest, so that gate
-        // never fires for the first display. Kick them here so clashes and
-        // voids show without waiting for the first user edit. Each self-gates
+        // never fires for the first display. Kick them here so clashes,
+        // voids, and exposed-hydrophobic beads show without waiting for the
+        // first user edit. Each self-gates
         // on the engine, its display toggle, and a plugin advertising the
         // query, so this is an inert no-op when any is absent.
         self.refresh_clashes();
         self.refresh_external_cavities();
+        self.refresh_exposed_hydrophobics();
     }
 
     /// Warms complete: parse + publish the bootstrap structure
@@ -427,15 +429,41 @@ impl App {
     /// phase (`Normalizing` over the kicked normalize set, or `Scoring` with
     /// the first score already kicked when no plugin normalizes).
     ///
-    /// Whole-structure normalize: empty selection / no focus / no params
-    /// (the bridge ignores selection for normalize). The dispatch's own
-    /// `request_id` / scope are discarded; `apply_post_init` re-derives its
-    /// target entities and mints its own checkpoint when the reply lands.
+    /// Whole-structure normalize: empty selection / no focus (the bridge
+    /// ignores selection for normalize). The params carry the loaded puzzle's
+    /// scorefunction weight patch as `weight.<scoretype>` entries (empty when
+    /// the puzzle declares no patch); see `weight_params` below. The
+    /// dispatch's own `request_id` / scope are discarded; `apply_post_init`
+    /// re-derives its target entities and mints its own checkpoint when the
+    /// reply lands.
     #[cfg(not(target_arch = "wasm32"))]
     fn inits_done_kick_normalizes(
         &mut self,
         adopted: &std::collections::BTreeSet<String>,
     ) -> StartupPhase {
+        // Thread the loaded puzzle's scorefunction weight patch to the bridge
+        // through the normalize dispatch params, one `weight.<scoretype>` ->
+        // Float(weight) entry per patch entry. The bridge stashes these on the
+        // session at normalize and applies them at every scorefunction build,
+        // so weight-zero terms (e.g. `envsmooth`) ship and are optimized
+        // against. Empty when the session carries no puzzle or no patch.
+        let weight_params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
+            self.store
+                .puzzle()
+                .and_then(|p| p.weight_patch.as_ref())
+                .map(|patch| {
+                    patch
+                        .iter()
+                        .map(|(name, &w)| {
+                            (
+                                format!("weight.{name}"),
+                                foldit_gui::state::ParamValue::Float(w),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
         let mut expected = std::collections::BTreeSet::new();
         for plugin_id in adopted {
             let Some(op_id) = self.runner_client.normalize_op_for(plugin_id) else {
@@ -445,7 +473,7 @@ impl App {
                 selection: std::collections::BTreeMap::new(),
                 focused_entity_id: None,
                 op_id,
-                params: std::collections::HashMap::new(),
+                params: weight_params.clone(),
             };
             let store = &self.store;
             self.runner_client

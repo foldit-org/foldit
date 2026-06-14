@@ -30,10 +30,37 @@ pub struct PuzzleMeta {
     pub camera: Camera,
     /// Optional view preset name (loads `assets/view_presets/{name}.toml`).
     pub view_preset: Option<String>,
+    /// Optional per-puzzle scorefunction weight patch (`[puzzle.weights]`):
+    /// a `scoretype_name -> weight` table applied on top of the named
+    /// scorefunction. Used to weight terms the stock scorefunction zeroes
+    /// (e.g. `envsmooth = 5.0` on `ref2015_cart`); the host overlays it onto
+    /// its display weights and the bridge applies it at every scorefunction
+    /// build so the patched terms ship and are optimized against.
+    #[serde(default)]
+    pub weights: Option<HashMap<String, f32>>,
+    /// Per-puzzle scored objectives (`[[puzzle.objective]]`): each awards a
+    /// RAW score bonus when its condition is met, folded into the headline
+    /// game score before the raw->game map (so a met objective can push the
+    /// score across `completion_score`). Empty when the puzzle declares none.
+    #[serde(default)]
+    pub objective: Vec<Objective>,
     // Remaining fields (view_setup, scorefxn, min_moves, guide_visible,
     // files, setup, view_options, etc.) are captured here and silently ignored.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
+}
+
+/// A single `[[puzzle.objective]]` declaration. Generic over objective
+/// kinds: `kind` (TOML `type`) selects the evaluator, `max` / `bonus` are
+/// its parameters. Only `exposed_count` is evaluated this pass (award
+/// `bonus` when the exposed-hydrophobic count is `< max`); an unknown
+/// `kind` parses but evaluates to no bonus (forward-compatible).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Objective {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub max: Option<u32>,
+    pub bonus: f32,
 }
 
 // -- Sub-structs --
@@ -138,6 +165,13 @@ pub struct PuzzleData {
     pub start_energy: f64,
     /// Completion target from `[puzzle] completion_score` (game units).
     pub completion_score: f64,
+    /// Optional per-puzzle scorefunction weight patch from `[puzzle.weights]`
+    /// (`scoretype_name -> weight`). `None` when the puzzle declares none.
+    pub weights: Option<HashMap<String, f32>>,
+    /// Scored objectives from `[[puzzle.objective]]`. Empty when the puzzle
+    /// declares none. Carried to the session `Puzzle` so the score path can
+    /// fold a met objective's RAW bonus into the headline game score.
+    pub objectives: Vec<Objective>,
     /// Ordered tutorial bubbles from `[[sequence]]`. Empty for puzzles
     /// with no intro. Tier-1 wiring pushes `bubbles[0]` to the GUI on
     /// load; advancement is unimplemented.
@@ -262,6 +296,8 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         camera: puzzle.puzzle.camera,
         start_energy: puzzle.puzzle.start_energy,
         completion_score: puzzle.puzzle.completion_score,
+        weights: puzzle.puzzle.weights.take(),
+        objectives: std::mem::take(&mut puzzle.puzzle.objective),
         bubbles: std::mem::take(&mut puzzle.sequence),
     })
 }
