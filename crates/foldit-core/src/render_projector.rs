@@ -43,6 +43,15 @@ pub struct RenderProjector {
     /// (a `clear_entity_appearance` on an absent id is a harmless no-op, but
     /// without this we would never issue it).
     last_pushed_appearance: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// Rendering connections (hydrogen bonds + disulfides) to stamp onto the
+    /// published assembly, chosen by `App` per publish. `Some(map)` means the
+    /// plugin is the live connections provider and this held, atom-index map
+    /// is stamped verbatim (no molex geometry runs); `None` means no plugin
+    /// provides them, so molex's geometric fallback is detected per publish.
+    /// `App` writes this before each publish path
+    /// ([`Self::set_publish_connections`]); the default is `None` (fallback).
+    publish_connections:
+        Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
 }
 
 impl RenderProjector {
@@ -51,7 +60,20 @@ impl RenderProjector {
             publish_seq: 0,
             last_published_ids: BTreeSet::new(),
             last_pushed_appearance: BTreeSet::new(),
+            publish_connections: None,
         }
+    }
+
+    /// Choose the rendering connections for the next publish. `Some(map)`
+    /// stamps the plugin-provided held set (hydrogen bonds + disulfides)
+    /// verbatim and skips molex's geometric fallback; `None` falls back to
+    /// molex's per-publish geometry. `App` calls this before every publish
+    /// path so the choice is current for that tick's republish.
+    pub(crate) fn set_publish_connections(
+        &mut self,
+        connections: Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
+    ) {
+        self.publish_connections = connections;
     }
 
     /// Re-derive the displayed per-residue colors from the session-owned
@@ -144,6 +166,7 @@ impl RenderProjector {
     /// does not read a spurious topology change.
     pub(crate) fn rebake_geometry(&mut self, doc: &Session, engine: &mut viso::VisoEngine) {
         let mut asm = doc.head_assembly();
+        self.populate_connections(&mut asm);
         let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
             asm.entities().iter().map(|e| e.id()).collect();
 
@@ -153,6 +176,26 @@ impl RenderProjector {
 
         engine.replace_assembly(asm);
         self.last_published_ids = new_ids;
+    }
+
+    /// Stamp the rendering connections (disulfides and hydrogen bonds) onto
+    /// the owned assembly before it is published. The assembly is rebuilt
+    /// per conformation change and its `connections` start empty, so the
+    /// owner must populate them on every publish; viso resolves the
+    /// endpoints to rendered atom positions reactively. Both publish paths
+    /// call this so they cannot drift apart on what gets stamped.
+    ///
+    /// Provider-aware on the choice `App` made via
+    /// [`Self::set_publish_connections`]: when a plugin provides connections
+    /// the held atom-index map is stamped verbatim and molex's geometric
+    /// fallback is NOT run; otherwise molex detects them geometrically per
+    /// publish.
+    fn populate_connections(&self, asm: &mut molex::Assembly) {
+        let connections = self
+            .publish_connections
+            .as_ref()
+            .map_or_else(|| asm.detect_fallback_connections(), Clone::clone);
+        asm.set_connections(connections);
     }
 }
 
@@ -248,6 +291,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         // color push it sizes against).
         if has_geometry {
             let mut asm = doc.head_assembly();
+            self.populate_connections(&mut asm);
             let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
                 asm.entities().iter().map(|e| e.id()).collect();
             let topology_changed = new_ids != self.last_published_ids;

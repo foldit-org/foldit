@@ -1,6 +1,26 @@
 use crate::app::App;
 use crate::history::CheckpointId;
 
+/// Sum the RAW score bonus of every `exposed_count` objective met at the
+/// given exposed-hydrophobic `count`. An `exposed_count` objective awards
+/// its `bonus` when `count < max` (the legacy `ExposedCount` filter: max=1
+/// means the win is `count == 0`), else `0`. An objective with no `max`
+/// (malformed) and any non-`exposed_count` kind contribute nothing
+/// (forward-compatible: an unknown objective type parses but is inert). The
+/// result is a RAW delta the score path folds in before the raw->game map.
+#[must_use]
+pub(in crate::app) fn exposed_count_bonus(
+    objectives: &[crate::puzzle::Objective],
+    count: u32,
+) -> f64 {
+    objectives
+        .iter()
+        .filter(|o| o.kind == "exposed_count")
+        .filter_map(|o| o.max.map(|max| (max, o.bonus)))
+        .map(|(max, bonus)| if count < max { f64::from(bonus) } else { 0.0 })
+        .sum()
+}
+
 impl App {
     /// Fire a non-blocking `score` query at every provider with no query
     /// already in flight. The reply lands on a stored receiver drained by
@@ -170,5 +190,48 @@ impl App {
                 .set_checkpoint_scores(ckpt_id, Some(raw), Some(game), Some(breakdown));
             let _ = self.score_targets.remove(&rid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exposed_count_bonus;
+    use crate::puzzle::Objective;
+
+    fn exposed_count(max: u32, bonus: f32) -> Objective {
+        Objective {
+            kind: "exposed_count".to_owned(),
+            max: Some(max),
+            bonus,
+        }
+    }
+
+    #[test]
+    fn bonus_awarded_below_max() {
+        // max=1: the win is count==0; count 0 < 1 awards the bonus.
+        let objs = [exposed_count(1, -100.0)];
+        assert_eq!(exposed_count_bonus(&objs, 0), -100.0);
+    }
+
+    #[test]
+    fn no_bonus_at_or_above_max() {
+        let objs = [exposed_count(1, -100.0)];
+        assert_eq!(exposed_count_bonus(&objs, 1), 0.0);
+        assert_eq!(exposed_count_bonus(&objs, 5), 0.0);
+    }
+
+    #[test]
+    fn unknown_kind_is_inert() {
+        let objs = [Objective {
+            kind: "some_future_kind".to_owned(),
+            max: Some(1),
+            bonus: -100.0,
+        }];
+        assert_eq!(exposed_count_bonus(&objs, 0), 0.0);
+    }
+
+    #[test]
+    fn empty_objectives_yield_zero() {
+        assert_eq!(exposed_count_bonus(&[], 0), 0.0);
     }
 }

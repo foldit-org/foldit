@@ -29,13 +29,9 @@ pub(crate) mod input;
 mod load;
 mod startup;
 #[cfg(not(target_arch = "wasm32"))]
-mod scores_coord;
+mod score_apply;
 #[cfg(not(target_arch = "wasm32"))]
-mod voids_coord;
-#[cfg(not(target_arch = "wasm32"))]
-mod clash_coord;
-#[cfg(not(target_arch = "wasm32"))]
-mod exposed_hydro_coord;
+mod viz_refresh;
 #[cfg(test)]
 mod tests;
 
@@ -146,6 +142,24 @@ pub struct App {
     /// it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
+    /// Plugin-provided rendering connections (hydrogen bonds + disulfides) as
+    /// stable atom-index links, decoded once against the head assembly by the
+    /// at-rest connection refresh and re-applied per publish (viso resolves
+    /// the endpoints against live positions). `Some` only while a plugin
+    /// advertises the `connections` query; cleared on a topology change so
+    /// stale ids from a prior puzzle are never re-applied (entity ids can be
+    /// reused across loads). `None`/absent until the first at-rest query
+    /// fills it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) held_connections:
+        Option<std::collections::HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
+    /// Entity-id set the held connections were decoded against. Compared
+    /// against the live head each refresh to detect a topology change (a new
+    /// puzzle or an entity joining/leaving) and drop the now-stale held set
+    /// before re-querying, guarding against id reuse across loads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) connections_topology_ids:
+        std::collections::BTreeSet<molex::EntityId>,
 }
 
 impl App {
@@ -187,6 +201,10 @@ impl App {
             creates_previews: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_pull_origin: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            held_connections: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            connections_topology_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -385,6 +403,22 @@ impl App {
         // BubbleChanged / PuzzleChanged have no viso side effect; their GUI
         // dirty (TEXT_BUBBLE / PUZZLE) is derived from the batch by the GUI
         // consumer below, so there are no tick arms for them anymore.
+
+        // Refresh the held rendering connections (hydrogen bonds + disulfides)
+        // and choose the per-publish provider BEFORE the render projector
+        // publishes below, so a geometry-change tick stamps the freshly queried
+        // set. Same at-rest geometry gate as the rescore / voids / clashes
+        // refresh (connections go stale on a geometry change); there is no
+        // connections display toggle, so no view-toggle arm. The call
+        // self-gates on the engine being present and a plugin advertising
+        // `connections` (else it puts the projector on the molex fallback).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
+                self.refresh_connections();
+            }
+        }
+
         if !changes.is_empty() {
             // The projector self-filters score-only batches (scores are
             // not an observable mutation for plugins); a no-op call is cheap.
@@ -433,15 +467,17 @@ impl App {
             }
         }
 
-        // 5b. Refresh the engine's external cavity set from the plugin's
-        //     `voids` query. Like the at-rest rescore, voids go stale on a
-        //     geometry change, so refresh on the same at-rest gate; also
-        //     refresh when the cavity-display toggle flipped (a
-        //     ViewOptionsChanged carries it) so toggling on requests voids
-        //     and toggling off clears them. The call self-gates on the engine
-        //     being present, the cavity display being on, and a plugin
-        //     advertising `voids`, so it is an inert no-op until the plugin
-        //     implements the query.
+        // 5b. Refresh the post-publish structural-viz overlays: external
+        //     cavities (voids), steric-clash arcs, and exposed-hydrophobic
+        //     grease beads. All three go stale on a geometry change, so they
+        //     run on the same at-rest geometry gate as the rescore above;
+        //     each also refreshes when a view toggle flipped (a
+        //     ViewOptionsChanged carries it) so toggling on requests the
+        //     overlay and toggling off clears it. Each call self-gates on the
+        //     engine being present, its display toggle, and a plugin
+        //     advertising its query, so each is an inert no-op until the
+        //     plugin implements that query. Call order is voids, clashes,
+        //     exposed-hydrophobics.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let view_toggled = changes
@@ -451,48 +487,7 @@ impl App {
                 || view_toggled
             {
                 self.refresh_external_cavities();
-            }
-        }
-
-        // 5c. Refresh the engine's steric-clash arcs from the plugin's
-        //     `clashes` query, on the same at-rest geometry gate as the
-        //     rescore and voids refresh (clashes go stale on a geometry
-        //     change); also refresh when the clash-display toggle flipped (a
-        //     ViewOptionsChanged carries it) so toggling on requests clashes
-        //     and toggling off clears them. The call self-gates on the engine
-        //     being present, the clash display being on, and a plugin
-        //     advertising `clashes`, so it is an inert no-op until the plugin
-        //     implements the query.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let view_toggled = changes
-                .iter()
-                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
-            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
-                || view_toggled
-            {
                 self.refresh_clashes();
-            }
-        }
-
-        // 5d. Refresh the engine's exposed-hydrophobic grease beads from the
-        //     plugin's `exposed_hydrophobics` query, on the same at-rest
-        //     geometry gate as the rescore, voids, and clashes refresh (the
-        //     flagged residues go stale on a geometry change); also refresh
-        //     when the exposed-hydrophobic display toggle flipped (a
-        //     ViewOptionsChanged carries it) so toggling on requests the
-        //     residues and toggling off clears them. The call self-gates on
-        //     the engine being present, the display being on, and a plugin
-        //     advertising `exposed_hydrophobics`, so it is an inert no-op until
-        //     the plugin implements the query.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let view_toggled = changes
-                .iter()
-                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
-            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
-                || view_toggled
-            {
                 self.refresh_exposed_hydrophobics();
             }
         }

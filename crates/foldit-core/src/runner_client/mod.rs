@@ -24,12 +24,6 @@
 mod dispatch;
 mod catalog;
 mod scores;
-#[cfg(not(target_arch = "wasm32"))]
-mod clashes;
-#[cfg(not(target_arch = "wasm32"))]
-mod voids;
-#[cfg(not(target_arch = "wasm32"))]
-mod exposed_hydrophobics;
 mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -133,6 +127,55 @@ impl RunnerClient {
     pub fn shutdown(&self) {
         if let Some(ref orch) = self.orchestrator {
             orch.shutdown();
+        }
+    }
+}
+
+// ── Generic raw-bytes plugin queries ──
+//
+// The at-rest viz coordinators (clashes, voids, exposed-hydrophobics) each
+// forward a well-known query id to the orchestrator over the generic
+// raw-bytes dispatch and decode the opaque reply themselves; the payload
+// goes to the viso engine, not an orchestrator score merge, so it stays on
+// this generic query path rather than the score-specialized one. The
+// support gate keeps each path an inert no-op until a plugin advertises the
+// query.
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RunnerClient {
+    /// Whether any plugin has registered the query `id`. The bridge
+    /// advertises a query by registration (same index the `score` query
+    /// lives in), so this is the host-side support gate: an at-rest viz
+    /// trigger requests the query ONLY when this is `true`, keeping the path
+    /// inert until a plugin implements it. `false` when no orchestrator is
+    /// installed.
+    pub(crate) fn supports_query(&self, id: &str) -> bool {
+        self.orchestrator
+            .as_ref()
+            .is_some_and(|orch| orch.plugin_registry().get_query(id).is_some())
+    }
+
+    /// Request the query `id` synchronously and return its raw opaque reply
+    /// bytes, the payload the caller decodes. Passes no bytes and the default
+    /// dispatch context: the query covers the current session pose, like the
+    /// whole-assembly `score` query.
+    ///
+    /// Returns an empty `Vec` (the "clear" signal) when no orchestrator is
+    /// installed, no plugin advertises the query, or the query errors. The
+    /// unsupported case is filtered by [`Self::supports_query`] before the
+    /// call; the error case is swallowed at `trace` level so an at-rest miss
+    /// never spams the log.
+    pub(crate) fn request_query_bytes(&mut self, id: &str) -> Vec<u8> {
+        use foldit_runner::orchestrator::DispatchContext;
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return Vec::new();
+        };
+        match orch.dispatch_query(id, DispatchContext::default(), std::collections::HashMap::new()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::trace!("query '{id}' failed: {e}");
+                Vec::new()
+            }
         }
     }
 }

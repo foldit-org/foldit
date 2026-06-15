@@ -10,6 +10,7 @@
 use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
 
+use crate::history::CheckpointKind;
 use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 
 /// Plugin projection of the [`SessionUpdate`] stream.
@@ -87,8 +88,29 @@ impl SessionUpdateConsumer<foldit_runner::Orchestrator> for RunnerProjector {
             // received; STALE_GEN recovery covers the gap meanwhile.
             return;
         };
-        orch.broadcast_to_plugins(&payload);
+        // Exclude the plugin that sourced this edit from the fan-out: it
+        // already holds the post-op assembly, so re-broadcasting it would
+        // land back as a destructive self-delta. A host-internal edit
+        // carries no plugin source, so it broadcasts to everyone ("").
+        let source_plugin_id = head_plugin_source(doc);
+        orch.broadcast_to_plugins(&payload, source_plugin_id);
         self.last_published = Some(new);
+    }
+}
+
+/// The plugin id that sourced the session's current head edit, or `""`
+/// for a host-internal edit with no plugin source. Reads the committed
+/// graph head; a `PluginOp` checkpoint carries the originating plugin's
+/// id, every other checkpoint kind is host-internal.
+fn head_plugin_source(doc: &Session) -> &str {
+    let history = doc.history();
+    let head_id = history.checkpoints().head();
+    match history.checkpoint(head_id) {
+        Some(ckpt) => match &ckpt.kind {
+            CheckpointKind::PluginOp { plugin_id, .. } => plugin_id,
+            _ => "",
+        },
+        None => "",
     }
 }
 

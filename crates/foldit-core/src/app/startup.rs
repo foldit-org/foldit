@@ -269,6 +269,12 @@ impl App {
         // borrow (these are separate `App` fields from `engine`).
         let camera = std::mem::take(&mut self.startup_camera);
         let ss_override = self.startup_ss_override.take();
+        // Choose the connection provider and (if a plugin provides them)
+        // populate the held set BEFORE the rebake below stamps the assembly,
+        // so the first display already carries the plugin's connections and
+        // the rebake never runs molex's geometric fallback under a provider.
+        // Self-gates on the engine, which is present at this seam.
+        self.refresh_connections();
         if let Some(engine) = self.engine.as_mut() {
             // Camera: a puzzle load supplies its saved eye/up (anchored on the
             // settled centroid); every other path frames on the focused
