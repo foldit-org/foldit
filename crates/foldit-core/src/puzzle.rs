@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-// -- Top-level --
-
+// Top level puzzle struct
 #[derive(Debug, Deserialize)]
 pub struct PuzzleLevel {
     pub puzzle: PuzzleMeta,
@@ -19,8 +18,7 @@ pub struct PuzzleLevel {
     pub game_event: Vec<GameEvent>,
 }
 
-// -- Puzzle metadata ([puzzle] + nested tables) --
-
+// Puzzle metadata
 #[derive(Debug, Deserialize)]
 pub struct PuzzleMeta {
     pub title: String,
@@ -31,19 +29,11 @@ pub struct PuzzleMeta {
     /// Optional view preset name (loads `assets/view_presets/{name}.toml`).
     pub view_preset: Option<String>,
     /// Optional per-puzzle scorefunction weight patch (`[puzzle.weights]`):
-    /// a `scoretype_name -> weight` table applied on top of the named
-    /// scorefunction. Used to weight terms the stock scorefunction zeroes
-    /// (e.g. `envsmooth = 5.0` on `ref2015_cart`); the host overlays it onto
-    /// its display weights and the bridge applies it at every scorefunction
-    /// build so the patched terms ship and are optimized against.
     #[serde(default)]
     pub weights: Option<HashMap<String, f32>>,
     /// Per-puzzle scored filters (`[[puzzle.filter]]`): each evaluates a
     /// named condition and either awards a RAW score bonus folded into the
-    /// headline game score before the raw->game map (so a met filter can
-    /// push the score across `completion_score`) or, when it names a
-    /// `plugin`, is forwarded to that plugin to score. Empty when the puzzle
-    /// declares none.
+    /// headline game score
     #[serde(default)]
     pub filter: Vec<FilterSpec>,
     /// Ligand entities to load alongside the structure (`[[puzzle.ligand]]`).
@@ -56,8 +46,7 @@ pub struct PuzzleMeta {
     #[serde(default)]
     pub constraints: Option<ConstraintsRef>,
     /// Per-chain design masks (`[[puzzle.design_mask]]`) declaring which
-    /// residues a designer may mutate, keyed by structure chain. Empty when
-    /// the puzzle declares none; a chain with no entry is fully locked.
+    /// residues a designer may mutate
     #[serde(default)]
     pub design_mask: Vec<DesignMaskEntry>,
     // Remaining fields (view_setup, scorefxn, min_moves, guide_visible,
@@ -69,15 +58,6 @@ pub struct PuzzleMeta {
 /// A single `[[puzzle.filter]]` declaration, mirroring the rosetta `Filter`
 /// model: `kind` (TOML `type`) names the filter and `plugin` decides who
 /// scores it.
-///
-/// Two modes:
-/// - foldit-native (`plugin` absent): the filter is evaluated in-process.
-///   `ExposedCount` is the only native evaluator; it awards `params["bonus"]`
-///   (a RAW delta) when the exposed-hydrophobic count is below
-///   `params["max_exposed_hydrophobics"]`. A missing threshold or bonus is
-///   treated as no-bonus.
-/// - forwarded (`plugin = Some(name)`): the filter is handed to that plugin
-///   to score. Its parameters live in `params`.
 ///
 /// Every filter parameter (including any named `max`/`bonus`) lives in `params`
 /// so the same flat key/value set round-trips through serialization and is
@@ -94,23 +74,17 @@ pub struct FilterSpec {
     pub plugin: Option<String>,
     /// All filter parameters (e.g. a native filter's threshold/bonus or a
     /// forwarded filter's ramp widths), in a deterministic key order so
-    /// serialization is stable. Captured by flatten so they round-trip without
-    /// loss.
+    /// serialization is stable.
     #[serde(flatten)]
     pub params: BTreeMap<String, toml::Value>,
 }
 
-// -- Sub-structs --
-
 #[derive(Debug, Deserialize)]
 pub struct StructureRef {
-    /// Path to a structure file (relative to puzzle dir). Mutually exclusive with `data`.
+    // path and data are mutually exclusive methods for loading in structure
     pub path: Option<String>,
-    /// Base64-encoded `BinaryCIF` data, inline. Mutually exclusive with `path`.
     pub data: Option<String>,
     pub format: String,
-    /// DSSP-style secondary structure annotation (e.g. "EEE" for 3 sheet residues).
-    /// When present, overrides auto-detection.
     pub ss: Option<String>,
 }
 
@@ -184,8 +158,6 @@ pub struct Bubble {
     pub trigger: Option<String>,
 }
 
-// -- Events --
-
 #[derive(Debug, Deserialize)]
 pub struct EventBubble {
     pub event: String,
@@ -206,8 +178,6 @@ pub struct GameEvent {
     pub fields: HashMap<String, toml::Value>,
 }
 
-// -- Error --
-
 #[derive(Debug, thiserror::Error)]
 pub enum PuzzleError {
     #[error("{}: {}", .0.display(), .1)]
@@ -215,8 +185,6 @@ pub enum PuzzleError {
     #[error("{}: {}", .0.display(), .1)]
     Parse(PathBuf, #[source] toml::de::Error),
 }
-
-// -- Load --
 
 /// Parse `<dir>/puzzle.toml` into a [`PuzzleLevel`].
 ///
@@ -226,8 +194,7 @@ pub enum PuzzleError {
 /// [`PuzzleError::Parse`] if its contents are not valid puzzle TOML.
 pub fn load_puzzle(dir: &Path) -> Result<PuzzleLevel, PuzzleError> {
     let path = dir.join("puzzle.toml");
-    let contents =
-        std::fs::read_to_string(&path).map_err(|e| PuzzleError::Io(path.clone(), e))?;
+    let contents = std::fs::read_to_string(&path).map_err(|e| PuzzleError::Io(path.clone(), e))?;
     toml::from_str(&contents).map_err(|e| PuzzleError::Parse(path, e))
 }
 
@@ -272,18 +239,9 @@ pub struct PuzzleData {
 /// walking up from the running executable. Stops at the first
 /// ancestor that contains an `assets/levels` directory.
 ///
-/// Works in three shapes:
-/// - test binaries (`target/debug/deps/foo-HASH`) → walks up to the
-///   workspace root,
-/// - dev binaries (`target/debug/foo`, `cargo run`) → same,
-/// - installed binaries (`<prefix>/bin/foldit` shipped with sibling
-///   `<prefix>/bin/assets/`) → finds the sibling.
-///
 /// # Errors
 ///
-/// Returns an `Err` if no ancestor carries `assets/levels` - better
-/// than a CWD-dependent silent miss, since the caller can surface the
-/// problem with the actual exe path.
+/// Returns an `Err` if no ancestor carries `assets/levels`
 pub fn levels_root() -> Result<PathBuf, String> {
     // Explicit override, set by a packaged bundle whose assets live in a
     // platform resource dir that is not an ancestor of the executable (e.g. a
@@ -294,8 +252,8 @@ pub fn levels_root() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current_exe lookup failed: {e}"))?;
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe lookup failed: {e}"))?;
     let mut dir = exe.parent();
     while let Some(d) = dir {
         let candidate = d.join("assets/levels");
@@ -304,6 +262,7 @@ pub fn levels_root() -> Result<PathBuf, String> {
         }
         dir = d.parent();
     }
+
     Err(format!(
         "levels_root: no `assets/levels` directory found in any ancestor of {}",
         exe.display()
@@ -311,11 +270,6 @@ pub fn levels_root() -> Result<PathBuf, String> {
 }
 
 /// Load a puzzle by ID: parse its TOML and return entities for the engine.
-///
-/// Looks up `<levels_root>/{puzzle_id:010}/puzzle.toml` (see
-/// [`levels_root`]) and resolves the structure from
-/// `[puzzle.structure]` - either via `path` (file reference) or
-/// `data` (base64-encoded inline `BinaryCIF`).
 ///
 /// # Errors
 ///
@@ -327,10 +281,6 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
 }
 
 /// Load a puzzle from an arbitrary directory containing a `puzzle.toml`.
-///
-/// Structure `path` entries resolve relative to that dir. The campaign
-/// ID-keyed [`load_puzzle_structure`] is the `<levels_root>/{id:010}` caller of
-/// this; a user-chosen directory load calls it directly.
 ///
 /// # Errors
 ///
@@ -369,17 +319,19 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
                     bcif_to_entities(&raw)
                         .map_err(|e| format!("Failed to parse inline BinaryCIF: {e:?}"))?
                 }
-                other => return Err(format!(
-                    "Inline structure data not supported for format '{other}'"
-                )),
+                other => {
+                    return Err(format!(
+                        "Inline structure data not supported for format '{other}'"
+                    ))
+                }
             }
         }
-        (Some(_), Some(_)) => return Err(
-            "puzzle.structure: 'path' and 'data' are mutually exclusive".to_owned()
-        ),
-        (None, None) => return Err(
-            "puzzle.structure: either 'path' or 'data' must be specified".to_owned()
-        ),
+        (Some(_), Some(_)) => {
+            return Err("puzzle.structure: 'path' and 'data' are mutually exclusive".to_owned())
+        }
+        (None, None) => {
+            return Err("puzzle.structure: either 'path' or 'data' must be specified".to_owned())
+        }
     };
 
     let ss_override = structure.ss.as_ref().map(|ss_str| {
@@ -392,8 +344,7 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         ss
     });
 
-    let (constraints, design_masks, ligands) =
-        load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
+    let (constraints, design_masks, ligands) = load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
 
     Ok(PuzzleData {
         entities,
@@ -439,38 +390,30 @@ type PuzzleSetup = (
 /// (`[[puzzle.design_mask]]`), and read any declared ligand asset bytes off
 /// disk.
 ///
-/// A missing/malformed constraints or design-mask file fails the load (a
-/// broken puzzle should not load silently). A missing ligand asset only
-/// warns and is skipped (not added to the returned list) - ligand delivery to
-/// rosetta is a later pass, so a missing asset degrades rather than blocks.
-///
 /// # Errors
 ///
 /// Returns an `Err` if a referenced constraints file cannot be read, or if
 /// the constraints or any chain's design-mask text is malformed.
-fn load_puzzle_setup(
-    puzzle_dir: &Path,
-    meta: &PuzzleMeta,
-) -> Result<PuzzleSetup, String> {
+fn load_puzzle_setup(puzzle_dir: &Path, meta: &PuzzleMeta) -> Result<PuzzleSetup, String> {
     let constraints = match &meta.constraints {
         Some(cref) => {
             let cstr_path = puzzle_dir.join(&cref.file);
-            let text = std::fs::read_to_string(&cstr_path).map_err(|e| {
-                format!("Failed to read constraints {}: {e}", cstr_path.display())
-            })?;
-            crate::puzzle_setup::parse_constraints(&text).map_err(|e| {
-                format!("Failed to parse constraints {}: {e}", cstr_path.display())
-            })?
+            let text = std::fs::read_to_string(&cstr_path)
+                .map_err(|e| format!("Failed to read constraints {}: {e}", cstr_path.display()))?;
+            crate::puzzle_setup::parse_constraints(&text)
+                .map_err(|e| format!("Failed to parse constraints {}: {e}", cstr_path.display()))?
         }
         None => Vec::new(),
     };
 
     let mut design_masks = BTreeMap::new();
     for entry in &meta.design_mask {
-        let mask = crate::puzzle_setup::parse_design_mask(&entry.can_design)
-            .map_err(|e| {
-                format!("Failed to parse design mask for chain '{}': {e}", entry.chain)
-            })?;
+        let mask = crate::puzzle_setup::parse_design_mask(&entry.can_design).map_err(|e| {
+            format!(
+                "Failed to parse design mask for chain '{}': {e}",
+                entry.chain
+            )
+        })?;
         design_masks.insert(entry.chain.clone(), mask);
     }
 
@@ -480,14 +423,12 @@ fn load_puzzle_setup(
     let mut ligands = Vec::new();
     for lig in &meta.ligand {
         let params_path = puzzle_dir.join(&lig.params);
-        let Some(params) = read_or_warn(&params_path, &meta.title, "params")
-        else {
+        let Some(params) = read_or_warn(&params_path, &meta.title, "params") else {
             continue;
         };
         let conformers = lig.conformers.as_ref().and_then(|conf| {
             let conf_path = puzzle_dir.join(conf);
-            read_or_warn(&conf_path, &meta.title, "conformers")
-                .map(|bytes| (conf.clone(), bytes))
+            read_or_warn(&conf_path, &meta.title, "conformers").map(|bytes| (conf.clone(), bytes))
         });
         ligands.push(LigandAsset {
             name: lig.params.clone(),
@@ -513,14 +454,13 @@ fn load_puzzle_setup(
 ///
 /// Returns an `Err` if the file cannot be read or its contents cannot
 /// be parsed into entities.
-pub fn load_file_as_entities(
-    path: &str,
-) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
+pub fn load_file_as_entities(path: &str) -> Result<(Vec<molex::MoleculeEntity>, String), String> {
     let p = Path::new(path);
     let name = p
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("Unknown").to_owned();
+        .unwrap_or("Unknown")
+        .to_owned();
 
     let entities = load_entities_from_file(p)?;
     Ok((entities, name))
@@ -548,9 +488,11 @@ pub fn classify_session_path(path: &Path) -> SessionLoadKind {
         };
     }
     if path.file_name().and_then(|n| n.to_str()) == Some("puzzle.toml") {
-        return path.parent().map_or(SessionLoadKind::Unsupported, |parent| {
-            SessionLoadKind::PuzzleDir(parent.to_path_buf())
-        });
+        return path
+            .parent()
+            .map_or(SessionLoadKind::Unsupported, |parent| {
+                SessionLoadKind::PuzzleDir(parent.to_path_buf())
+            });
     }
     match path
         .extension()
@@ -606,8 +548,8 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
     let url = format!("https://files.rcsb.org/download/{pdb_id}.cif");
     log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
 
-    let response = reqwest::blocking::get(&url)
-        .map_err(|e| format!("Failed to download {pdb_id}: {e}"))?;
+    let response =
+        reqwest::blocking::get(&url).map_err(|e| format!("Failed to download {pdb_id}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -621,8 +563,7 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
         .text()
         .map_err(|e| format!("Failed to read response: {e}"))?;
 
-    std::fs::write(&local_path, &content)
-        .map_err(|e| format!("Failed to save CIF file: {e}"))?;
+    std::fs::write(&local_path, &content).map_err(|e| format!("Failed to save CIF file: {e}"))?;
 
     log::info!("Downloaded to {}", local_path.display());
     Ok(local_path.to_string_lossy().to_string())
@@ -647,9 +588,7 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
 ///
 /// Returns an `Err` if the file extension is unsupported or the file
 /// cannot be read or parsed.
-pub fn load_entities_from_file(
-    path: &Path,
-) -> Result<Vec<molex::MoleculeEntity>, String> {
+pub fn load_entities_from_file(path: &Path) -> Result<Vec<molex::MoleculeEntity>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -657,18 +596,12 @@ pub fn load_entities_from_file(
         .unwrap_or_default();
 
     match ext.as_str() {
-        "pdb" => {
-            molex::adapters::pdb::pdb_file_to_entities(path)
-                .map_err(|e| format!("Failed to parse PDB: {e:?}"))
-        }
-        "cif" | "mmcif" => {
-            molex::adapters::mmcif_file_to_entities(path)
-                .map_err(|e| format!("Failed to parse mmCIF: {e:?}"))
-        }
-        "bcif" => {
-            molex::adapters::bcif::bcif_file_to_entities(path)
-                .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}"))
-        }
+        "pdb" => molex::adapters::pdb::pdb_file_to_entities(path)
+            .map_err(|e| format!("Failed to parse PDB: {e:?}")),
+        "cif" | "mmcif" => molex::adapters::mmcif_file_to_entities(path)
+            .map_err(|e| format!("Failed to parse mmCIF: {e:?}")),
+        "bcif" => molex::adapters::bcif::bcif_file_to_entities(path)
+            .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}")),
         _ => Err(format!("Unknown file extension: {ext}")),
     }
 }
@@ -756,10 +689,8 @@ mod tests {
 
     #[test]
     fn load_bglb_ligand_constraints_and_mask() {
-        let bglb_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/levels/bglb");
-        let data = load_puzzle_data_from_dir(&bglb_dir)
-            .expect("BglB puzzle should load");
+        let bglb_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/levels/bglb");
+        let data = load_puzzle_data_from_dir(&bglb_dir).expect("BglB puzzle should load");
 
         // The LG1 ligand must be present as a small-molecule entity.
         assert!(!data.entities.is_empty(), "expected entities");
@@ -781,7 +712,10 @@ mod tests {
             .iter()
             .find(|l| l.name.contains("LG1"))
             .expect("expected an LG1 ligand asset");
-        assert!(!lg1.params.is_empty(), "expected non-empty LG1 params bytes");
+        assert!(
+            !lg1.params.is_empty(),
+            "expected non-empty LG1 params bytes"
+        );
 
         // The protein chain "A" carries a four-range design mask with the
         // catalytic gap locked; the LG1 ligand chain ("X") is intentionally
