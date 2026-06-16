@@ -49,7 +49,7 @@ impl RunnerClient {
     }
 
     /// Fire a composition-score request for `request_id`, carrying the
-    /// ASSEM02 bytes of the composition to score (one open edit's lanes
+    /// assembly bytes of the composition to score (one open edit's lanes
     /// over its peers' committed heads, or a committed checkpoint's union).
     /// Replies land on receivers drained by
     /// [`Self::poll_composition_scores`]. No-op when no orchestrator exists.

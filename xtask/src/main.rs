@@ -327,7 +327,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     }
 
     // Build the molex static lib first; the bridge dylib links against
-    // it for ASSEM01 IO and Assembly walks. Invoke via
+    // it for assembly IO and Assembly walks. Invoke via
     // --manifest-path so cargo treats this as a standalone build,
     // bypassing the workspace resolver. crates/molex is workspace-
     // excluded; the workspace itself pins published molex ^0.5.1 for
