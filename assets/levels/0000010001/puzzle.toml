@@ -13,6 +13,12 @@ center = [17, 4.9, -22]
 eye = [-11, 4.3, 20]
 up = [0.066, 1, 0.059]
 
+[[puzzle.filter]]
+type = "ClashCount"
+plugin = "rosetta"
+bonus = 200
+max_clashes = 1
+
 [[sequence]]
 text = "Welcome to educational mode! In this tutorial, we'll be going through some of the basics of protein biochemistry using Foldit."
 point_to = "level"

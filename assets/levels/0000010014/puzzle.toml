@@ -25,6 +25,12 @@ center = [11, -9.8, 1.5]
 eye = [48, -42, 4.7]
 up = [0.65, 0.74, -0.18]
 
+[[puzzle.filter]]
+type = "HBondCount"
+plugin = "rosetta"
+bonus = -200
+min_bonds = 18
+
 [[sequence]]
 text = """
 You can translate the view around by holding down %%middle click camera%% and dragging the background. You can also hold %%shift camera%% and left-click and drag instead.

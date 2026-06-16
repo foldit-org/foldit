@@ -24,6 +24,12 @@ center = [9.6, 1.2, -3.1]
 eye = [50, 21, 27]
 up = [0.15, 0.71, -0.69]
 
+[[puzzle.filter]]
+type = "HBondCount"
+plugin = "rosetta"
+bonus = -200
+min_bonds = 23
+
 [[sequence]]
 text = "Time to match up some sheets! Try using rubber bands to connect up the two small sheets."
 point_to = "backbone"

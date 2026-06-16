@@ -26,6 +26,10 @@ up = [-0.94, 0.34, -0.079]
 [puzzle.view_options]
 sidechain_mode = "Show All (Slow)"
 
+[[puzzle.design_mask]]
+chain = "A"
+can_design = "34-34||41-41||"
+
 [[sequence]]
 text = "In 'design' puzzles, you have the power to design new proteins!"
 point_to = "background"

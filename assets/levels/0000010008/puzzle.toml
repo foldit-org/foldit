@@ -34,6 +34,19 @@ show_non_protein_hbonds = true
 show_bondable_atoms = true
 sidechain_mode = "Show All (Slow)"
 
+[[puzzle.filter]]
+type = "DisulfideCountScore"
+plugin = "rosetta"
+allow_intrachain_disulfides = 1
+bonus_per_disulfide = -25
+n_disulfides_downward_ramp_width = 0
+n_disulfides_plateau_width = 0
+n_disulfides_upward_ramp_width = 4
+
+[[puzzle.design_mask]]
+chain = "A"
+can_design = "2-2||4-10||12-14||17-27||30-35||37-39||41-47||49-50||52-58||60-62||65-75||78-83||85-87||89-89||92-92||"
+
 [[sequence]]
 text = "This is the BACKBONE of the protein."
 color = "science"

@@ -28,6 +28,10 @@ show_voids = false
 dark_background = true
 current_visor = "Score/Hydro+CPK"
 
+[[puzzle.design_mask]]
+chain = "A"
+can_design = "1-56||"
+
 [[sequence]]
 text = "Help us design a protein drug for COVID-19!"
 point_to = "sidechain"

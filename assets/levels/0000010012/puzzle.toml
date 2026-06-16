@@ -24,6 +24,12 @@ center = [11.96, 18.25, 17.78]
 eye = [-2.98, -20.72, -10.19]
 up = [0.95, -0.19, -0.24]
 
+[[puzzle.filter]]
+type = "HBondCount"
+plugin = "rosetta"
+bonus = -200
+min_bonds = 12
+
 [[sequence]]
 text = "The other major type of SECONDARY STRUCTURE in proteins are BETA-SHEETS (or SHEETS for short)."
 color = "science"

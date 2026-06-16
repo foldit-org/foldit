@@ -21,14 +21,6 @@ ss = "LLLLLLLLLLLLLLLLLLLLLLL"
 [puzzle.weights]
 envsmooth = 5.0
 
-# Scored objective: award a RAW score bonus when every exposed hydrophobic is
-# buried (exposed count < max). max=1 means the win is count==0; bonus=-100 RAW
-# folds to +1000 game, pushing the score across completion_score (8000).
-[[puzzle.objective]]
-type = "exposed_count"
-max = 1
-bonus = -100
-
 [puzzle.files]
 # filters: 70fa0c97c9b95174b09c073c15a2b3ac
 # wts_patch: c20d221d55e7452ee836f9b55bae8d74
@@ -38,6 +30,11 @@ bonus = -100
 center = [3.2, 4, 10]
 eye = [-7.2, -9.9, -36]
 up = [0.52, -0.84, 0.14]
+
+[[puzzle.filter]]
+type = "ExposedCount"
+bonus = -100
+max_exposed_hydrophobics = 1
 
 [[sequence]]
 text = "Proteins don't exist in a vacuum - they are surrounded by water! For simplicity, we don't show it in Foldit, but you can imagine water molecules filling all the space around the protein!"

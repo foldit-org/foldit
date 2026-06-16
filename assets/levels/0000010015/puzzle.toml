@@ -26,6 +26,12 @@ center = [-12, 6.5, 10]
 eye = [-45, 29, 41]
 up = [-0.52, -0.85, 0.07]
 
+[[puzzle.filter]]
+type = "HBondCount"
+plugin = "rosetta"
+bonus = -200
+min_bonds = 70
+
 [[sequence]]
 text = "Sheets like to be alongside each other. Remember, hydrogen bonds are great for your score."
 point_to = "sheet"

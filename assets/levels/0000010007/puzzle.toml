@@ -28,6 +28,14 @@ up = [0.029, -0.22, -0.97]
 [puzzle.view_options]
 show_bondable_atoms = false
 
+[[puzzle.filter]]
+type = "DisulfideCountScore"
+plugin = "rosetta"
+bonus_per_disulfide = -100
+n_disulfides_downward_ramp_width = 4
+n_disulfides_plateau_width = 3
+n_disulfides_upward_ramp_width = 4
+
 [[sequence]]
 text = "This green yellow band is a disulfide bond. Disulfide bonds are good for your protein. You can form more bonds like these to gain bonus points."
 color = "game"

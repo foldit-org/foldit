@@ -35,6 +35,22 @@ dark_background = true
 show_outlines = true
 sidechain_mode = "Don't Show (Fast)"
 
+[[puzzle.filter]]
+type = "ResidueIEScore"
+plugin = "rosetta"
+
+[[puzzle.filter]]
+type = "LayerScore"
+plugin = "rosetta"
+cutoff_min_core = 20
+display_name = "Core Existence"
+per_res_core_under_penalty = 4
+satisfied_bonus = -16
+
+[[puzzle.design_mask]]
+chain = "B"
+can_design = "1-17||19-20||23-24||27-27||30-74||"
+
 [[sequence]]
 text = "This virus has a defense! The Ebola glycoprotein has a 'cap' that covers the binding site. In order to properly block Ebola, you need to design a binder protein that can stick to the binding site despite the cap."
 color = "science"
