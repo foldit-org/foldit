@@ -105,13 +105,10 @@ impl SessionUpdateConsumer<foldit_runner::Orchestrator> for RunnerProjector {
 fn head_plugin_source(doc: &Session) -> &str {
     let history = doc.history();
     let head_id = history.checkpoints().head();
-    match history.checkpoint(head_id) {
-        Some(ckpt) => match &ckpt.kind {
-            CheckpointKind::PluginOp { plugin_id, .. } => plugin_id,
-            _ => "",
-        },
-        None => "",
-    }
+    history.checkpoint(head_id).map_or("", |ckpt| match &ckpt.kind {
+        CheckpointKind::PluginOp { plugin_id, .. } => plugin_id,
+        _ => "",
+    })
 }
 
 /// Encode the broadcast for one drain: a coord-only `Delta` when `prior`

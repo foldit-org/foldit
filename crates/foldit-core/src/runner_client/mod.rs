@@ -271,14 +271,26 @@ impl RunnerClient {
     /// never becomes pending, so `poll_inits` would never report it and
     /// waiting on it would hang bring-up. Empty `Vec` when no orchestrator
     /// is wired up.
-    pub(crate) fn kick_inits(&mut self, initial_assembly: &[u8]) -> Vec<String> {
+    pub(crate) fn kick_inits(
+        &mut self,
+        initial_assembly: &[u8],
+        ligands: &[crate::puzzle::LigandAsset],
+        constraints: &[crate::puzzle_setup::Constraint],
+    ) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
         };
+        // Convert the core-side puzzle payload into the orchestrator's native
+        // mirror types once; the per-plugin loop clones the payload per kick.
+        let payload = init_payload_from_puzzle(ligands, constraints);
         let discovered = orch.discovered_plugin_ids();
         let mut kicked = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
-            match orch.kick_init_session(plugin_id, initial_assembly.to_owned()) {
+            match orch.kick_init_session(
+                plugin_id,
+                initial_assembly.to_owned(),
+                payload.clone(),
+            ) {
                 Ok(()) => kicked.push(plugin_id.clone()),
                 Err(e) => log::warn!(
                     "[RunnerClient] kick_init_session('{plugin_id}') failed: \
@@ -400,5 +412,80 @@ impl RunnerClient {
             }
         }
         done
+    }
+}
+
+// ── Core-side puzzle payload -> orchestrator native mirror ──
+//
+// The session-init kick delivers the loaded puzzle's ligand assets +
+// catalytic constraints to the worker. These free functions convert core's
+// puzzle types into the orchestrator's native mirror types (the same pattern
+// `kick_normalize` uses to flatten selection / params); the orchestrator's
+// IPC boundary then encodes them to proto.
+
+#[cfg(not(target_arch = "wasm32"))]
+fn init_payload_from_puzzle(
+    ligands: &[crate::puzzle::LigandAsset],
+    constraints: &[crate::puzzle_setup::Constraint],
+) -> foldit_runner::orchestrator::InitPayload {
+    use foldit_runner::orchestrator::{InitPayload, PuzzleAsset};
+
+    // Each ligand contributes its `.params` asset and, when present, its
+    // conformer PDB as a second asset.
+    let mut assets: Vec<PuzzleAsset> = Vec::new();
+    for lig in ligands {
+        assets.push(PuzzleAsset {
+            name: lig.name.clone(),
+            data: lig.params.clone(),
+        });
+        if let Some((conf_name, conf_bytes)) = &lig.conformers {
+            assets.push(PuzzleAsset {
+                name: conf_name.clone(),
+                data: conf_bytes.clone(),
+            });
+        }
+    }
+
+    InitPayload {
+        assets,
+        constraints: constraints.iter().map(constraint_to_runner).collect(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn constraint_to_runner(
+    c: &crate::puzzle_setup::Constraint,
+) -> foldit_runner::orchestrator::Constraint {
+    use crate::puzzle_setup::{ConstraintFunc as CoreFunc, ConstraintKind as CoreKind};
+    use foldit_runner::orchestrator::{
+        Constraint, ConstraintAtom, ConstraintFunc, ConstraintKind,
+    };
+
+    let kind = match c.kind {
+        CoreKind::AtomPair => ConstraintKind::AtomPair,
+        CoreKind::Angle => ConstraintKind::Angle,
+        CoreKind::Dihedral => ConstraintKind::Dihedral,
+    };
+    let func = match c.func {
+        CoreFunc::FlatHarmonic { x0, sd, tol } => {
+            ConstraintFunc::FlatHarmonic { x0, sd, tol }
+        }
+        CoreFunc::CircularHarmonic { x0, sd } => {
+            ConstraintFunc::CircularHarmonic { x0, sd }
+        }
+    };
+    Constraint {
+        kind,
+        atoms: c
+            .atoms
+            .iter()
+            .map(|a| ConstraintAtom {
+                atom_name: a.atom_name.clone(),
+                res_num: a.res_num,
+                // proto has no char; chain travels as a single-char string.
+                chain: a.chain.to_string(),
+            })
+            .collect(),
+        func,
     }
 }

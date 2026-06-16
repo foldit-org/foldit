@@ -601,6 +601,23 @@ impl Session {
         }
     }
 
+    /// Install the resolved per-entity design gating on the loaded puzzle.
+    /// Called by the load path after the chain->EntityId mapping is known
+    /// (the entities must already be in history). Silent (no `SessionUpdate`):
+    /// it is load-time state set once before the first projection, and DG-C
+    /// reads it by query at projection time rather than off a change signal.
+    /// A no-op when no puzzle is installed (free-form load).
+    pub(crate) fn set_puzzle_design_gating(
+        &mut self,
+        gating: Option<
+            std::collections::BTreeMap<EntityId, crate::puzzle_setup::DesignMask>,
+        >,
+    ) {
+        if let Some(puzzle) = self.puzzle.as_mut() {
+            puzzle.design_gating = gating;
+        }
+    }
+
     /// Begin a session over a freshly-loaded structure: install its display
     /// `title` and `puzzle` add-on in one funnel. `puzzle` is `Some` for a
     /// campaign/intro puzzle load (carrying its objective + tutorial

@@ -100,6 +100,35 @@ pub struct Puzzle {
     pub objectives: Vec<crate::puzzle::Objective>,
     pub bubbles: Option<Vec<crate::puzzle::Bubble>>,
     pub current_bubble: Option<usize>,
+    /// Catalytic constraints parsed from the puzzle's `.cnstr` file. Empty
+    /// when the puzzle declares none. Carried here so the session-init kick
+    /// can deliver them to the worker.
+    pub constraints: Vec<crate::puzzle_setup::Constraint>,
+    /// Ligand asset bytes read from the puzzle dir. Empty for protein-only
+    /// puzzles. Carried here so the session-init kick can deliver them to the
+    /// worker.
+    pub ligands: Vec<crate::puzzle::LigandAsset>,
+    /// Per-entity design gating, keyed by the loaded `EntityId`. `None` means
+    /// the puzzle declares no gating (e.g. a free-edit fold puzzle); `Some`
+    /// carries one mask per designable entity (resolved from the puzzle TOML's
+    /// per-chain masks at load). The query is secure-by-default: an entity
+    /// absent from the map - or any residue outside its mask - is not
+    /// designable, so the ligand (and any chain without an entry) is locked.
+    pub design_gating: Option<BTreeMap<EntityId, crate::puzzle_setup::DesignMask>>,
+}
+
+impl Puzzle {
+    /// Whether residue `res` on `entity` may be designed (mutated).
+    ///
+    /// Secure-by-default: `None` gating answers `false` for every residue,
+    /// and an entity absent from the gating map - or a residue outside its
+    /// mask - is not designable.
+    #[must_use]
+    pub fn is_designable(&self, entity: EntityId, res: u32) -> bool {
+        self.design_gating
+            .as_ref()
+            .is_some_and(|map| map.get(&entity).is_some_and(|m| m.is_designable(res)))
+    }
 }
 
 // ── Session ───────────────────────────────────────────────────────────
@@ -503,6 +532,56 @@ impl Session {
         self.puzzle.as_ref()
     }
 
+    /// Whether residue `res` on `entity` may be designed (mutated) in the
+    /// current session. Secure-by-default: a free-form session (no puzzle),
+    /// a puzzle with no design gating, or an entity/residue outside the mask
+    /// all answer `false`. Forwards to [`Puzzle::is_designable`].
+    #[must_use]
+    pub fn is_designable(&self, entity: EntityId, res: u32) -> bool {
+        self.puzzle
+            .as_ref()
+            .is_some_and(|p| p.is_designable(entity, res))
+    }
+
+    /// Whether the current focus-scoped selection is fully designable.
+    ///
+    /// Mirrors the runner's selection-spec focus scoping: with
+    /// [`Focus::Entity`] only that entity's selected residues are checked;
+    /// with [`Focus::All`] every selected `(entity, residue)` is checked.
+    /// A design-gated action is enabled only when this holds. The empty
+    /// selection is vacuously designable (the action's `selection_spec`
+    /// min-residues gate handles the empty case separately).
+    ///
+    /// Secure-by-default through [`Self::is_designable`]: any residue in
+    /// scope that is not designable (including a free-form session or an
+    /// ungated puzzle) makes the result `false`.
+    #[must_use]
+    pub fn selection_is_designable(&self) -> bool {
+        match self.focus {
+            Focus::Entity(eid) => self
+                .selection
+                .get(&eid)
+                .into_iter()
+                .flatten()
+                .all(|&res| self.is_designable(eid, res)),
+            Focus::All => self.selection.iter().all(|(&eid, residues)| {
+                residues.iter().all(|&res| self.is_designable(eid, res))
+            }),
+        }
+    }
+
+    /// Whether the loaded puzzle gates design per entity (its `design_gating`
+    /// is `Some`). Distinguishes a design puzzle (overlay the lock visuals)
+    /// from a free-edit fold puzzle or free-form session (no gating). Consumed
+    /// by the design overlay (a later pass); currently only exercised by tests.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn design_gating_active(&self) -> bool {
+        self.puzzle
+            .as_ref()
+            .is_some_and(|p| p.design_gating.is_some())
+    }
+
     /// The accumulated RAW score bonus from the loaded puzzle's met
     /// objectives. `0.0` in a free-form session or when no objective is met.
     /// The score path folds this into the raw value before the raw->game map.
@@ -515,7 +594,7 @@ impl Session {
     /// it rides the `ScoresChanged` that the score write following it emits.
     /// Recomputed by the exposed-hydro coordinator at rest each geometry
     /// change; [`Self::reset`] clears it on a topology swap.
-    pub fn set_objective_bonus(&mut self, bonus: f64) {
+    pub const fn set_objective_bonus(&mut self, bonus: f64) {
         self.objective_bonus = bonus;
     }
 

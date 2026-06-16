@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 // -- Top-level --
@@ -44,13 +44,29 @@ pub struct PuzzleMeta {
     /// score across `completion_score`). Empty when the puzzle declares none.
     #[serde(default)]
     pub objective: Vec<Objective>,
+    /// Ligand entities to load alongside the structure (`[[puzzle.ligand]]`).
+    /// Each references a rosetta `.params` file (and optional conformers).
+    /// Empty for protein-only puzzles.
+    #[serde(default)]
+    pub ligand: Vec<LigandRef>,
+    /// Optional catalytic constraints table (`[puzzle.constraints]`),
+    /// referencing a `.cnstr` file in the puzzle dir.
+    #[serde(default)]
+    pub constraints: Option<ConstraintsRef>,
+    /// Per-chain design masks (`[[puzzle.design_mask]]`) declaring which
+    /// residues a designer may mutate, keyed by structure chain. Empty when
+    /// the puzzle declares none; a chain with no entry is fully locked.
+    #[serde(default)]
+    pub design_mask: Vec<DesignMaskEntry>,
     // Remaining fields (view_setup, scorefxn, min_moves, guide_visible,
     // files, setup, view_options, etc.) are captured here and silently ignored.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
 
-/// A single `[[puzzle.objective]]` declaration. Generic over objective
+/// A single `[[puzzle.objective]]` declaration.
+///
+/// Generic over objective
 /// kinds: `kind` (TOML `type`) selects the evaluator, `max` / `bonus` are
 /// its parameters. Only `exposed_count` is evaluated this pass (award
 /// `bonus` when the exposed-hydrophobic count is `< max`); an unknown
@@ -82,6 +98,48 @@ pub struct Camera {
     pub center: [f64; 3],
     pub eye: [f64; 3],
     pub up: [f64; 3],
+}
+
+/// One `[[puzzle.ligand]]` entry: a ligand to load alongside the structure.
+#[derive(Debug, Deserialize)]
+pub struct LigandRef {
+    /// Path (relative to the puzzle dir) to the rosetta `.params` file.
+    pub params: String,
+    /// Optional path (relative to the puzzle dir) to a conformer PDB.
+    pub conformers: Option<String>,
+}
+
+/// A loaded ligand's asset bytes, read from the puzzle dir at load time.
+///
+/// Carried to the session `Puzzle` so the session-init path can deliver them
+/// to the worker. `params` is the rosetta `.params` file bytes; `conformers`
+/// is the optional conformer PDB as `(file_name, bytes)`.
+#[derive(Debug, Clone)]
+pub struct LigandAsset {
+    /// `.params` file name (relative to the puzzle dir), e.g. "LG1.params".
+    pub name: String,
+    /// Raw `.params` file bytes.
+    pub params: Vec<u8>,
+    /// Optional conformer PDB: `(file_name, bytes)`.
+    pub conformers: Option<(String, Vec<u8>)>,
+}
+
+/// The `[puzzle.constraints]` table: a reference to a `.cnstr` file.
+#[derive(Debug, Deserialize)]
+pub struct ConstraintsRef {
+    /// Path (relative to the puzzle dir) to the `.cnstr` file.
+    pub file: String,
+}
+
+/// One `[[puzzle.design_mask]]` entry: the designable-residue specification
+/// for a single structure chain.
+#[derive(Debug, Deserialize)]
+pub struct DesignMaskEntry {
+    /// Structure chain this mask applies to (e.g. "A"). The protein chain a
+    /// designer may edit; chains with no entry (e.g. the ligand) are locked.
+    pub chain: String,
+    /// Inclusive `start-end` ranges separated by `||` (trailing `||` ok).
+    pub can_design: String,
 }
 
 // -- Bubbles --
@@ -176,6 +234,17 @@ pub struct PuzzleData {
     /// with no intro. Tier-1 wiring pushes `bubbles[0]` to the GUI on
     /// load; advancement is unimplemented.
     pub bubbles: Vec<Bubble>,
+    /// Catalytic constraints parsed from the `[puzzle.constraints]` file.
+    /// Empty when the puzzle declares no constraints.
+    pub constraints: Vec<crate::puzzle_setup::Constraint>,
+    /// Per-chain designable-residue masks from `[[puzzle.design_mask]]`,
+    /// keyed by structure chain. Empty when the puzzle declares no gating;
+    /// a chain absent from the map is fully locked.
+    pub design_masks: BTreeMap<String, crate::puzzle_setup::DesignMask>,
+    /// Ligand asset bytes read from the puzzle dir (`[[puzzle.ligand]]`).
+    /// Empty for protein-only puzzles. Carried to the session `Puzzle` so the
+    /// session-init path can deliver them to the worker.
+    pub ligands: Vec<LigandAsset>,
 }
 
 /// Resolve the absolute path to the `assets/levels` directory by
@@ -233,7 +302,21 @@ pub fn levels_root() -> Result<PathBuf, String> {
 /// TOML fails to parse, or the referenced structure cannot be loaded.
 pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
     let puzzle_dir = levels_root()?.join(format!("{puzzle_id:010}"));
-    let mut puzzle = load_puzzle(&puzzle_dir).map_err(|e| e.to_string())?;
+    load_puzzle_data_from_dir(&puzzle_dir)
+}
+
+/// Load a puzzle from an arbitrary directory containing a `puzzle.toml`.
+///
+/// Structure `path` entries resolve relative to that dir. The campaign
+/// ID-keyed [`load_puzzle_structure`] is the `<levels_root>/{id:010}` caller of
+/// this; a user-chosen directory load calls it directly.
+///
+/// # Errors
+///
+/// Returns an `Err` if the puzzle TOML fails to parse or the referenced
+/// structure cannot be loaded.
+pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String> {
+    let mut puzzle = load_puzzle(puzzle_dir).map_err(|e| e.to_string())?;
     let structure = &puzzle.puzzle.structure;
 
     let entities = match (&structure.path, &structure.data) {
@@ -288,6 +371,9 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         ss
     });
 
+    let (constraints, design_masks, ligands) =
+        load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
+
     Ok(PuzzleData {
         entities,
         name: puzzle.puzzle.title,
@@ -299,7 +385,105 @@ pub fn load_puzzle_structure(puzzle_id: u32) -> Result<PuzzleData, String> {
         weights: puzzle.puzzle.weights.take(),
         objectives: std::mem::take(&mut puzzle.puzzle.objective),
         bubbles: std::mem::take(&mut puzzle.sequence),
+        constraints,
+        design_masks,
+        ligands,
     })
+}
+
+/// Read a ligand asset file, warning (and returning `None`) on a missing /
+/// unreadable file rather than failing the load. `kind` labels the asset in
+/// the warning ("params" / "conformers").
+fn read_or_warn(path: &Path, title: &str, kind: &str) -> Option<Vec<u8>> {
+    std::fs::read(path)
+        .map_err(|_| {
+            log::warn!(
+                "Puzzle '{title}': declared ligand {kind} {} not found",
+                path.display()
+            );
+        })
+        .ok()
+}
+
+/// Parsed foldit-owned puzzle-setup inputs: catalytic constraints, the
+/// per-chain design masks, and the ligand asset bytes.
+type PuzzleSetup = (
+    Vec<crate::puzzle_setup::Constraint>,
+    BTreeMap<String, crate::puzzle_setup::DesignMask>,
+    Vec<LigandAsset>,
+);
+
+/// Parse a puzzle's foldit-owned setup inputs: catalytic constraints
+/// (`[puzzle.constraints]`) and the per-chain design masks
+/// (`[[puzzle.design_mask]]`), and read any declared ligand asset bytes off
+/// disk.
+///
+/// A missing/malformed constraints or design-mask file fails the load (a
+/// broken puzzle should not load silently). A missing ligand asset only
+/// warns and is skipped (not added to the returned list) - ligand delivery to
+/// rosetta is a later pass, so a missing asset degrades rather than blocks.
+///
+/// # Errors
+///
+/// Returns an `Err` if a referenced constraints file cannot be read, or if
+/// the constraints or any chain's design-mask text is malformed.
+fn load_puzzle_setup(
+    puzzle_dir: &Path,
+    meta: &PuzzleMeta,
+) -> Result<PuzzleSetup, String> {
+    let constraints = match &meta.constraints {
+        Some(cref) => {
+            let cstr_path = puzzle_dir.join(&cref.file);
+            let text = std::fs::read_to_string(&cstr_path).map_err(|e| {
+                format!("Failed to read constraints {}: {e}", cstr_path.display())
+            })?;
+            crate::puzzle_setup::parse_constraints(&text).map_err(|e| {
+                format!("Failed to parse constraints {}: {e}", cstr_path.display())
+            })?
+        }
+        None => Vec::new(),
+    };
+
+    let mut design_masks = BTreeMap::new();
+    for entry in &meta.design_mask {
+        let mask = crate::puzzle_setup::parse_design_mask(&entry.can_design)
+            .map_err(|e| {
+                format!("Failed to parse design mask for chain '{}': {e}", entry.chain)
+            })?;
+        design_masks.insert(entry.chain.clone(), mask);
+    }
+
+    // Read declared ligand asset bytes; a missing asset warns (doesn't fail)
+    // so an authoring slip surfaces in the log without blocking the load, and
+    // the missing ligand is simply skipped.
+    let mut ligands = Vec::new();
+    for lig in &meta.ligand {
+        let params_path = puzzle_dir.join(&lig.params);
+        let Some(params) = read_or_warn(&params_path, &meta.title, "params")
+        else {
+            continue;
+        };
+        let conformers = lig.conformers.as_ref().and_then(|conf| {
+            let conf_path = puzzle_dir.join(conf);
+            read_or_warn(&conf_path, &meta.title, "conformers")
+                .map(|bytes| (conf.clone(), bytes))
+        });
+        ligands.push(LigandAsset {
+            name: lig.params.clone(),
+            params,
+            conformers,
+        });
+    }
+
+    log::info!(
+        "Puzzle '{}': {} catalytic constraints, {} designable chain(s), {} ligand(s)",
+        meta.title,
+        constraints.len(),
+        design_masks.len(),
+        ligands.len()
+    );
+
+    Ok((constraints, design_masks, ligands))
 }
 
 /// Load a file (PDB/CIF/BCIF) and return entities + name (file stem).
@@ -319,6 +503,43 @@ pub fn load_file_as_entities(
 
     let entities = load_entities_from_file(p)?;
     Ok((entities, name))
+}
+
+/// How a user-picked filesystem path should be loaded.
+pub enum SessionLoadKind {
+    /// A directory containing `puzzle.toml` (carries the directory).
+    PuzzleDir(PathBuf),
+    /// A bare structure file (pdb/cif/mmcif/bcif).
+    Structure(PathBuf),
+    /// Not a recognized session input.
+    Unsupported,
+}
+
+/// Classify a picked path for the Load Session flow. Pure (no native deps),
+/// so it is shared by the desktop dialog and any future web picker.
+#[must_use]
+pub fn classify_session_path(path: &Path) -> SessionLoadKind {
+    if path.is_dir() {
+        return if path.join("puzzle.toml").is_file() {
+            SessionLoadKind::PuzzleDir(path.to_path_buf())
+        } else {
+            SessionLoadKind::Unsupported
+        };
+    }
+    if path.file_name().and_then(|n| n.to_str()) == Some("puzzle.toml") {
+        return path.parent().map_or(SessionLoadKind::Unsupported, |parent| {
+            SessionLoadKind::PuzzleDir(parent.to_path_buf())
+        });
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdb" | "cif" | "mmcif" | "bcif") => SessionLoadKind::Structure(path.to_path_buf()),
+        _ => SessionLoadKind::Unsupported,
+    }
 }
 
 /// Check if a string looks like a PDB ID (4 alphanumeric characters).
@@ -442,14 +663,21 @@ mod tests {
     #[test]
     fn parse_all_puzzles() {
         let dir = levels_dir();
+        // The campaign puzzles are the 10-digit ID-keyed directories; other
+        // puzzle dirs (named levels) are parsed separately.
         let mut entries: Vec<_> = std::fs::read_dir(&dir)
             .expect("assets/levels directory should exist")
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.len() == 10 && n.bytes().all(|b| b.is_ascii_digit()))
+            })
             .collect();
         entries.sort_by_key(std::fs::DirEntry::file_name);
 
-        assert_eq!(entries.len(), 40, "expected 40 puzzle directories");
+        assert_eq!(entries.len(), 40, "expected 40 campaign puzzle directories");
 
         for entry in &entries {
             let puzzle_dir = entry.path();
@@ -503,5 +731,47 @@ mod tests {
         assert_eq!(puzzle.puzzle.title, "COVID-19 Spike Binder");
         assert_eq!(puzzle.sequence.len(), 8);
         assert!(puzzle.puzzle.extra.contains_key("view_options"));
+    }
+
+    #[test]
+    fn load_bglb_ligand_constraints_and_mask() {
+        let bglb_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/levels/bglb");
+        let data = load_puzzle_data_from_dir(&bglb_dir)
+            .expect("BglB puzzle should load");
+
+        // The LG1 ligand must be present as a small-molecule entity.
+        assert!(!data.entities.is_empty(), "expected entities");
+        let has_lg1 = data.entities.iter().any(|e| {
+            e.as_small_molecule()
+                .is_some_and(|sm| &sm.residue_name == b"LG1")
+        });
+        assert!(has_lg1, "expected an LG1 small-molecule (ligand) entity");
+
+        // Eight catalytic constraints.
+        assert_eq!(data.constraints.len(), 8, "expected 8 constraints");
+
+        // The LG1 ligand's `.params` bytes are read off disk and carried on
+        // `PuzzleData` (the session-init payload source). Non-empty bytes
+        // confirm the file was read, not just validated for presence.
+        assert!(!data.ligands.is_empty(), "expected ligand assets");
+        let lg1 = data
+            .ligands
+            .iter()
+            .find(|l| l.name.contains("LG1"))
+            .expect("expected an LG1 ligand asset");
+        assert!(!lg1.params.is_empty(), "expected non-empty LG1 params bytes");
+
+        // The protein chain "A" carries a four-range design mask with the
+        // catalytic gap locked; the LG1 ligand chain ("X") is intentionally
+        // absent from the map and so is fully locked.
+        assert_eq!(data.design_masks.len(), 1, "expected one designable chain");
+        let mask = data
+            .design_masks
+            .get("A")
+            .expect("expected a design mask for chain A");
+        assert_eq!(mask.ranges.len(), 4, "expected 4 designable ranges");
+        assert!(mask.is_designable(100));
+        assert!(!mask.is_designable(164));
     }
 }

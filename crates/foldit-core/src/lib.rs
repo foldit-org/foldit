@@ -13,6 +13,7 @@ pub(crate) mod scores;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod viz;
 pub mod puzzle;
+pub mod puzzle_setup;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pull_drag;
 pub(crate) mod render_projector;

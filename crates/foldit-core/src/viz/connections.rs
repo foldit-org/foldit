@@ -155,20 +155,20 @@ mod tests {
     use molex::entity::molecule::protein::ProteinEntity;
     use molex::{Element, MoleculeEntity};
 
-    fn atom(name: &[u8; 4], element: Element) -> Atom {
+    const fn atom(name: [u8; 4], element: Element) -> Atom {
         Atom {
             position: glam::Vec3::ZERO,
             occupancy: 1.0,
             b_factor: 0.0,
             element,
-            name: *name,
+            name,
             formal_charge: 0,
         }
     }
 
-    fn residue(name: &[u8; 3], label_seq_id: i32, atom_range: std::ops::Range<usize>) -> Residue {
+    const fn residue(name: [u8; 3], label_seq_id: i32, atom_range: std::ops::Range<usize>) -> Residue {
         Residue {
-            name: *name,
+            name,
             label_seq_id,
             auth_seq_id: None,
             auth_comp_id: None,
@@ -180,7 +180,7 @@ mod tests {
 
     /// Build a single-entity assembly with two CYS residues, each a full
     /// canonical backbone (`N`, `CA`, `C`, `O`) plus `CB` and `SG`, so a
-    /// disulfide between their `SG`s and an HBond between backbone atoms
+    /// disulfide between their `SG`s and an `HBond` between backbone atoms
     /// resolve. The residues survive protein canonicalization (which drops
     /// residues missing backbone atoms).
     fn two_cys_assembly() -> (molex::Assembly, EntityId) {
@@ -188,17 +188,17 @@ mod tests {
         let id = alloc.allocate();
         let cys_atoms = || {
             vec![
-                atom(b"N   ", Element::N),
-                atom(b"CA  ", Element::C),
-                atom(b"C   ", Element::C),
-                atom(b"O   ", Element::O),
-                atom(b"CB  ", Element::C),
-                atom(b"SG  ", Element::S),
+                atom(*b"N   ", Element::N),
+                atom(*b"CA  ", Element::C),
+                atom(*b"C   ", Element::C),
+                atom(*b"O   ", Element::O),
+                atom(*b"CB  ", Element::C),
+                atom(*b"SG  ", Element::S),
             ]
         };
         let mut atoms = cys_atoms();
         atoms.extend(cys_atoms());
-        let residues = vec![residue(b"CYS", 1, 0..6), residue(b"CYS", 2, 6..12)];
+        let residues = vec![residue(*b"CYS", 1, 0..6), residue(*b"CYS", 2, 6..12)];
         let entity = ProteinEntity::new(id, atoms, residues, b'A', None);
         let asm = molex::Assembly::new(vec![MoleculeEntity::Protein(entity)]);
         (asm, id)
@@ -234,7 +234,7 @@ mod tests {
     }
 
     /// A disulfide between the two residues' `SG` atoms decodes into a
-    /// single `Disulfide` link, and an HBond between backbone atoms decodes
+    /// single `Disulfide` link, and an `HBond` between backbone atoms decodes
     /// into a single `HBond` link, both carrying the resolved `AtomId`s a
     /// direct name scan finds.
     #[test]

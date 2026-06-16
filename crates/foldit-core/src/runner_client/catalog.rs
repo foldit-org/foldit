@@ -17,6 +17,14 @@ impl RunnerClient {
     /// would. The `CatalogEntry -> ActionInfo` forward lives here so `App`
     /// names no runner catalog type.
     ///
+    /// `selection_designable` is the host-computed design gate (every
+    /// focus-scoped selected residue is designable). The orchestrator never
+    /// sees the design mask, so the gate is folded in here: an entry whose
+    /// manifest set `requires_designable` is forced disabled when the
+    /// selection is not fully designable. Ungated ops ignore the flag, and
+    /// `requires_designable` is internal gating metadata that never reaches
+    /// the frontend `ActionInfo`.
+    ///
     /// [`ActionInfo`]: foldit_gui::state::ActionInfo
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn actions_catalog<F>(
@@ -26,6 +34,7 @@ impl RunnerClient {
             molex::EntityId,
             std::collections::BTreeSet<u32>,
         >,
+        selection_designable: bool,
         entity_type_of: F,
     ) -> Vec<foldit_gui::state::ActionInfo>
     where
@@ -61,7 +70,10 @@ impl RunnerClient {
                 plugin_id: entry.plugin_id,
                 display: entry.display,
                 icon_path: entry.icon_path.to_string_lossy().into_owned(),
-                enabled: entry.enabled,
+                // Fold the host-side design gate into the orchestrator's
+                // lock/selection `enabled` for design-gated ops only.
+                enabled: entry.enabled
+                    && (!entry.requires_designable || selection_designable),
                 active: false,
                 hotkey: entry.hotkey,
                 tooltip: entry.tooltip,

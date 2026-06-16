@@ -80,10 +80,47 @@ impl AppRunner {
                 IpcMessage::DispatchOp(op) => self.app.on_dispatch_op(op),
                 IpcMessage::AppCommand(command) => self.app.on_app_command(command),
                 IpcMessage::SetSelection { entries } => self.app.on_set_selection(entries),
+                IpcMessage::OpenSessionDialog => self.open_session_dialog(),
                 IpcMessage::Request { wish_id, kind, payload } => {
                     let result = self.app.handle_request(kind, payload);
                     self.send_response_to_webview(&wish_id, &result);
                 }
+            }
+        }
+    }
+
+    /// Open the native "Load Session" file picker, classify the chosen file,
+    /// and route it to the existing load path. Runs on the event-loop thread
+    /// (rfd requires it); the modal blocks this frame for its lifetime, which
+    /// is the intended behavior for a file picker.
+    fn open_session_dialog(&mut self) {
+        use foldit_core::puzzle::SessionLoadKind;
+        use foldit_gui::{AppCommand, Dispatcher};
+
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Load Session")
+            .add_filter("Foldit session", &["toml", "pdb", "cif", "mmcif", "bcif"])
+            .pick_file()
+        else {
+            return; // user cancelled
+        };
+
+        match foldit_core::puzzle::classify_session_path(&path) {
+            SessionLoadKind::PuzzleDir(dir) => {
+                self.app.on_app_command(AppCommand::LoadPuzzleDir {
+                    path: dir.to_string_lossy().into_owned(),
+                });
+            }
+            SessionLoadKind::Structure(file) => {
+                self.app.on_app_command(AppCommand::LoadStructure {
+                    path: file.to_string_lossy().into_owned(),
+                });
+            }
+            SessionLoadKind::Unsupported => {
+                log::warn!(
+                    "Load Session: unsupported selection {}",
+                    path.display()
+                );
             }
         }
     }

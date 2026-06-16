@@ -195,6 +195,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::float_cmp,
+        reason = "exact-constant assertions on deterministic bonus returns"
+    )]
+
     use super::exposed_count_bonus;
     use crate::puzzle::Objective;
 

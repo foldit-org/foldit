@@ -214,6 +214,62 @@ impl App {
         })
     }
 
+    /// Refresh the engine's per-residue non-designable overlay from the
+    /// loaded puzzle's design gating. The overlay desaturates locked
+    /// residues toward white so the player can see which parts of the
+    /// structure may not be mutated.
+    ///
+    /// Static per puzzle (the design mask is set at load, not per tick), so
+    /// this is cheap to re-run at the same seams as the other overlays. It
+    /// is driven off the puzzle's design gating, not a plugin query: there
+    /// is no view toggle and no plugin involvement.
+    ///
+    /// Gated on the engine being present and the loaded puzzle declaring
+    /// design gating ([`crate::session::Session::design_gating_active`]).
+    /// When gating is inactive (a free-edit / fold puzzle or free-form
+    /// session) this pushes an empty set, clearing any overlay a prior
+    /// design puzzle established so a structure swap renders normally.
+    ///
+    /// For each gated entity, the non-designable set is every residue in the
+    /// entity's full residue range (sourced from the head assembly) where
+    /// [`crate::session::Session::is_designable`] is false. viso owns the
+    /// flat residue order and re-derives the GPU bitset itself, so the host
+    /// passes only the per-entity residue indices.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn refresh_design_gating(&mut self) {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        if self.engine.is_none() {
+            return;
+        }
+        // No design gating: clear any overlay a prior design puzzle pushed
+        // and stop, so a swap to a non-design structure renders normally.
+        if !self.store.design_gating_active() {
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_non_designable(&BTreeMap::new());
+            }
+            return;
+        }
+        // Build the non-designable set per entity from the head assembly's
+        // residue counts: every residue the session reports as not designable.
+        let head = self.store.head_assembly();
+        let mut non_designable: BTreeMap<molex::EntityId, BTreeSet<u32>> =
+            BTreeMap::new();
+        for entity in head.entities() {
+            let eid = entity.id();
+            let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
+            let locked: BTreeSet<u32> = (0..count)
+                .filter(|&res| !self.store.is_designable(eid, res))
+                .collect();
+            if !locked.is_empty() {
+                non_designable.insert(eid, locked);
+            }
+        }
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_non_designable(&non_designable);
+        }
+    }
+
     /// Refresh the engine's exposed-hydrophobic grease beads and the loaded
     /// puzzle's met-objective bonus from the plugin's `exposed_hydrophobics`
     /// query. Runs after the render projector publishes, on the at-rest

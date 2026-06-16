@@ -66,7 +66,7 @@ mod tests {
     use super::*;
     use foldit_runner::proto::plugin::{ExposedHydrophobicReport, ResidueRef};
 
-    fn residue_ref(entity_id: u64, residue_index: u32) -> ResidueRef {
+    const fn residue_ref(entity_id: u64, residue_index: u32) -> ResidueRef {
         ResidueRef {
             entity_id,
             residue_index,

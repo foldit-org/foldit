@@ -889,6 +889,9 @@ fn mk_puzzle(bubble_count: usize) -> Puzzle {
         objectives: Vec::new(),
         bubbles,
         current_bubble,
+        constraints: Vec::new(),
+        ligands: Vec::new(),
+        design_gating: None,
     }
 }
 
@@ -968,6 +971,9 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
         objectives: Vec::new(),
         bubbles: None,
         current_bubble: None,
+        constraints: Vec::new(),
+        ligands: Vec::new(),
+        design_gating: None,
     });
     assert!(
         matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
@@ -1031,4 +1037,126 @@ fn reset_clears_puzzle_and_leaves_title() {
 
     assert!(store.puzzle().is_none(), "reset drops the puzzle add-on");
     assert_eq!(store.title(), "P", "reset leaves the title untouched");
+}
+
+#[test]
+fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
+    // The chain->EntityId resolution that `App::load_puzzle_from_data` runs,
+    // exercised at the `Session` boundary (no App/host/runner needed): load
+    // the real BglB entities into history, resolve each polymer entity's PDB
+    // chain against the puzzle's per-chain masks, install the gating, then
+    // query. A protein entity on chain "A" is masked; the LG1 ligand has no
+    // chain byte, so it never matches and stays locked (secure-by-default).
+    let bglb_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/levels/bglb");
+    let data = crate::puzzle::load_puzzle_data_from_dir(&bglb_dir)
+        .expect("BglB puzzle should load");
+
+    let mut store = Session::new();
+    store.start(
+        "BglB".to_owned(),
+        Some(Puzzle {
+            id: 0,
+            start_energy: 0.0,
+            completion_energy: 0.0,
+            weight_patch: None,
+            objectives: Vec::new(),
+            bubbles: None,
+            current_bubble: None,
+            constraints: Vec::new(),
+            ligands: Vec::new(),
+            design_gating: None,
+        }),
+    );
+
+    // Mirror the load path: capture each entity's chain before history
+    // consumes it, resolve against the per-chain masks onto its EntityId.
+    let mut protein_entity: Option<EntityId> = None;
+    let mut ligand_entity: Option<EntityId> = None;
+    let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> =
+        BTreeMap::new();
+    for entity in data.entities {
+        let is_ligand = entity
+            .as_small_molecule()
+            .is_some_and(|sm| &sm.residue_name == b"LG1");
+        let chain_key = entity.pdb_chain_id().map(|b| (b as char).to_string());
+        if let Some(id) = store.load_entity_into_history(entity, "BglB") {
+            if let Some(key) = chain_key {
+                if let Some(mask) = data.design_masks.get(&key) {
+                    gating.insert(id, mask.clone());
+                    protein_entity = Some(id);
+                }
+            }
+            if is_ligand {
+                ligand_entity = Some(id);
+            }
+        }
+    }
+    store.set_puzzle_design_gating(Some(gating));
+
+    let protein = protein_entity.expect("BglB protein chain A should load");
+    let ligand = ligand_entity.expect("BglB LG1 ligand should load");
+
+    // The session reports design gating is active.
+    assert!(store.design_gating_active(), "BglB declares design gating");
+
+    // Protein residue 100 is designable; the catalytic gap (164/295/353) is
+    // locked.
+    assert!(store.is_designable(protein, 100), "residue 100 is designable");
+    assert!(!store.is_designable(protein, 164), "residue 164 is locked");
+    assert!(!store.is_designable(protein, 295), "residue 295 is locked");
+    assert!(!store.is_designable(protein, 353), "residue 353 is locked");
+
+    // The ligand entity carries no mask (no chain match), so every residue
+    // on it is locked - the secure-by-default answer.
+    assert!(
+        !store.is_designable(ligand, 1),
+        "the ligand entity is never designable",
+    );
+    assert!(
+        !store.is_designable(ligand, 100),
+        "the ligand entity is never designable",
+    );
+
+    // ── selection_is_designable: the DG-B design gate predicate ──────────
+    //
+    // Empty selection is vacuously designable (the min-residues selection
+    // spec gates the empty case separately).
+    assert!(
+        store.selection_is_designable(),
+        "an empty selection is vacuously designable",
+    );
+
+    // Focus::All, all selected residues designable → true.
+    store.set_focus(viso::Focus::All);
+    store.select_residue(protein, 100);
+    store.select_residue(protein, 101);
+    assert!(
+        store.selection_is_designable(),
+        "a selection of only designable residues passes the gate",
+    );
+
+    // Focus::All, add a locked catalytic residue → false (gate disables
+    // Shake Mutate). This is the BglB 164 case the design gate must catch.
+    store.select_residue(protein, 164);
+    assert!(
+        !store.selection_is_designable(),
+        "selecting locked catalytic residue 164 fails the design gate",
+    );
+
+    // Focus scoping: focus the ligand (no selection on it) → the protein's
+    // out-of-scope locked residue is ignored, so the gate is vacuously
+    // true for the focused entity's empty selection.
+    store.set_focus(viso::Focus::Entity(ligand));
+    assert!(
+        store.selection_is_designable(),
+        "focusing the ligand scopes out the protein's locked selection",
+    );
+
+    // Focus the protein: now its locked 164 is back in scope → false.
+    store.set_focus(viso::Focus::Entity(protein));
+    assert!(
+        !store.selection_is_designable(),
+        "focusing the protein brings locked residue 164 back into scope",
+    );
 }

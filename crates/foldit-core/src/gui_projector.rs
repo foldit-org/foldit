@@ -344,8 +344,17 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut Fron
         Focus::Entity(eid) => Some(eid),
         Focus::All => None,
     };
-    let actions =
-        driver.actions_catalog(focus, session.selection(), |id| session.entity_type(id));
+    // Design gate: a property of the current focus-scoped selection, so it
+    // is computed once and folded into each design-gated op's `enabled`
+    // inside the driver. The design mask is host-owned and never reaches
+    // the orchestrator.
+    let selection_designable = session.selection_is_designable();
+    let actions = driver.actions_catalog(
+        focus,
+        session.selection(),
+        selection_designable,
+        |id| session.entity_type(id),
+    );
     frontend.set_actions(actions);
 }
 

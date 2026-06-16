@@ -52,6 +52,13 @@ pub struct RenderProjector {
     /// ([`Self::set_publish_connections`]); the default is `None` (fallback).
     publish_connections:
         Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
+    /// The last SS-bearing published assembly (the one a `recompute_ss` ran on),
+    /// cached so a streaming tentative frame can carry its secondary structure
+    /// forward onto the new coords without re-running DSSP. `None` until the
+    /// first committed / load publish. molex preserves `ss_types` across
+    /// `SetEntityCoords` edits, so cloning this and stamping the new coords
+    /// keeps the cartoon's SS during a drag instead of flattening to loops.
+    last_ss: Option<molex::Assembly>,
 }
 
 impl RenderProjector {
@@ -61,6 +68,7 @@ impl RenderProjector {
             last_published_ids: BTreeSet::new(),
             last_pushed_appearance: BTreeSet::new(),
             publish_connections: None,
+            last_ss: None,
         }
     }
 
@@ -167,6 +175,10 @@ impl RenderProjector {
     pub(crate) fn rebake_geometry(&mut self, doc: &Session, engine: &mut viso::VisoEngine) {
         let mut asm = doc.head_assembly();
         self.populate_connections(&mut asm);
+        // Session-entry full rebuild bakes the cartoon, so it needs SS (molex
+        // construction leaves `ss_types` empty; this is a load-time publish).
+        asm.recompute_ss();
+        self.last_ss = Some(asm.clone());
         let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
             asm.entities().iter().map(|e| e.id()).collect();
 
@@ -285,17 +297,57 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         let has_scores = changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::ScoresChanged));
+        // SS is opt-in on molex `Assembly` construction (`ss_types` starts
+        // empty); restore it only on committed geometry (a `HeadMoved`: action
+        // commit, load, reset), never on a streaming tentative `Edit`. DSSP is
+        // expensive, so running it per streamed frame was the wiggle/shake
+        // stall; a coord-only streaming publish leaves `ss_types` empty and
+        // viso falls back to its cached SS, so the cartoon does not flatten
+        // mid-edit. (Topology-changing publishes also recompute below, to seed
+        // SS for newly loaded / created entities.)
+        let committed_geometry = changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::HeadMoved));
 
         // Geometry republish first (moot for ordering since viso retains
         // scores across `replace_assembly`, but keeps the publish before the
         // color push it sizes against).
         if has_geometry {
-            let mut asm = doc.head_assembly();
-            self.populate_connections(&mut asm);
+            let head = doc.head_assembly();
             let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
-                asm.entities().iter().map(|e| e.id()).collect();
+                head.entities().iter().map(|e| e.id()).collect();
             let topology_changed = new_ids != self.last_published_ids;
 
+            // SS is opt-in on molex construction (`ss_types` starts empty). On a
+            // committed / topology-changing publish (load, action commit, entity
+            // create) recompute it and cache the SS-bearing assembly. On a
+            // streaming tentative `Edit` frame, carry that cached SS forward onto
+            // the fresh coords instead of re-running DSSP per frame (the
+            // wiggle/shake stall): molex preserves `ss_types` across
+            // `SetEntityCoords`, so the cartoon keeps its SS during the drag
+            // rather than flattening to loops. (viso re-derives loops from an
+            // empty `ss_types` on a coord-only publish, so we must carry it.)
+            let mut asm = if committed_geometry || topology_changed {
+                let mut a = head;
+                a.recompute_ss();
+                self.last_ss = Some(a.clone());
+                a
+            } else if let Some(prev) = self.last_ss.as_ref() {
+                let mut a = prev.clone();
+                for e in head.entities() {
+                    let _ = a.apply_edit(
+                        &molex::ops::edit::AssemblyEdit::SetEntityCoords {
+                            entity: e.id(),
+                            coords: e.positions(),
+                        },
+                    );
+                }
+                a
+            } else {
+                head
+            };
+
+            self.populate_connections(&mut asm);
             self.publish_seq = self.publish_seq.saturating_add(1);
             asm.set_generation(self.publish_seq);
             let asm = std::sync::Arc::new(asm);

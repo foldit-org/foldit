@@ -324,6 +324,11 @@ impl App {
         self.refresh_clashes();
         self.refresh_external_cavities();
         self.refresh_exposed_hydrophobics();
+        // The design-gating overlay is static per puzzle (the mask is set at
+        // load), so a single load-time push suffices: viso re-derives the GPU
+        // bitset from the per-entity set on every mesh rebuild, keeping the
+        // overlay pinned across geometry changes without a per-tick re-push.
+        self.refresh_design_gating();
     }
 
     /// Warms complete: parse + publish the bootstrap structure
@@ -415,9 +420,20 @@ impl App {
             }
         };
 
+        // Source the puzzle-specific session payload (ligand asset bytes +
+        // catalytic constraints) from the loaded puzzle, mirroring how the
+        // normalize kick reads `weight_patch`. A free-form structure load has
+        // no puzzle, so both default empty. Cloned out of the puzzle to
+        // release the `self.store` borrow before the `&mut self.runner_client`
+        // kick below.
+        let (ligands, constraints) = self.store.puzzle().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |p| (p.ligands.clone(), p.constraints.clone()),
+        );
+
         let expected: std::collections::BTreeSet<String> = self
             .runner_client
-            .kick_inits(&initial_assembly)
+            .kick_inits(&initial_assembly, &ligands, &constraints)
             .into_iter()
             .collect();
         if expected.is_empty() {

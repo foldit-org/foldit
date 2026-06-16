@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use foldit_gui::AppPhase;
 use molex::entity::molecule::id::EntityId;
 
@@ -64,6 +66,7 @@ impl App {
         match command {
             AppCommand::LoadStructure { path } => self.handle_load_structure(&path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
+            AppCommand::LoadPuzzleDir { path } => self.handle_load_puzzle_dir(&path),
             AppCommand::SetViewOptions { options } => {
                 // A manual edit: store the App-owned options, clear the active
                 // preset (manually-set options no longer match a named preset),
@@ -185,6 +188,23 @@ impl App {
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
     /// metadata, then tick + snap + apply the puzzle's saved pose.
     fn handle_load_puzzle(&mut self, puzzle_id: u32) {
+        let data = crate::puzzle::load_puzzle_structure(puzzle_id);
+        self.load_puzzle_from_data(puzzle_id, data);
+    }
+
+    /// Load an arbitrary puzzle directory (user-chosen via Load Session). No
+    /// campaign ID exists for such a load, so a sentinel id of 0 is recorded on
+    /// the session `Puzzle` (the id is only stored/logged, never used for lookup).
+    fn handle_load_puzzle_dir(&mut self, dir: &str) {
+        let data = crate::puzzle::load_puzzle_data_from_dir(std::path::Path::new(dir));
+        self.load_puzzle_from_data(0, data);
+    }
+
+    fn load_puzzle_from_data(
+        &mut self,
+        puzzle_id: u32,
+        data: Result<crate::puzzle::PuzzleData, String>,
+    ) {
         self.set_app_phase(AppPhase::LoadingSession);
         // Entity display name for the loaded molecules: the outgoing
         // session title (captured before `reset`, which leaves it intact).
@@ -210,7 +230,7 @@ impl App {
             engine.clear_all_appearance();
         }
 
-        let loaded = match crate::puzzle::load_puzzle_structure(puzzle_id) {
+        let loaded = match data {
             Ok(puzzle_data) => {
                 // Install the puzzle (title + objective + tutorial bubbles)
                 // through the create seam. The tutorial sequence and its
@@ -226,6 +246,12 @@ impl App {
                 let current_bubble = bubbles.as_ref().map(|_| 0);
                 let weight_patch = puzzle_data.weights.clone();
                 let objectives = puzzle_data.objectives.clone();
+                // Carry the puzzle's catalytic constraints + ligand asset
+                // bytes onto the session `Puzzle` so the session-init kick can
+                // deliver them to the worker. Taken here (the entities loop
+                // below consumes the rest of `puzzle_data`).
+                let constraints = puzzle_data.constraints.clone();
+                let ligands = puzzle_data.ligands.clone();
                 self.store.start(
                     puzzle_data.name.clone(),
                     Some(Puzzle {
@@ -236,6 +262,11 @@ impl App {
                         objectives,
                         bubbles,
                         current_bubble,
+                        constraints,
+                        ligands,
+                        // Resolved + installed after the entity-load loop below
+                        // (the chain->EntityId mapping needs the loaded ids).
+                        design_gating: None,
                     }),
                 );
 
@@ -301,14 +332,13 @@ impl App {
                 #[allow(clippy::cast_possible_truncation)]
                 let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
-                let mut ids: Vec<EntityId> = Vec::new();
-                for entity in puzzle_data.entities {
-                    if let Some(id) =
-                        self.store.load_entity_into_history(entity, &title)
-                    {
-                        ids.push(id);
-                    }
-                }
+                // Load the entities into history and resolve + install the
+                // puzzle's per-chain design gating onto the loaded EntityIds.
+                let ids = self.load_puzzle_entities(
+                    puzzle_data.entities,
+                    &puzzle_data.design_masks,
+                    &title,
+                );
 
                 // Defer the camera + SS to the bring-up terminal so they apply
                 // to the settled (post-normalize) geometry: the puzzle's saved
@@ -333,6 +363,46 @@ impl App {
         // puzzle, then flips into the session. The puzzle's saved camera + SS
         // stashed above are applied by the terminal once the geometry settles.
         self.arm_session_bringup(loaded);
+    }
+
+    /// Load a puzzle's entities into history and install its per-chain design
+    /// gating onto the resolved [`EntityId`]s. Returns the committed ids in
+    /// load order.
+    ///
+    /// A polymer entity carries a single PDB chain byte (`pdb_chain_id`); when
+    /// that chain keys a mask in `design_masks`, the entity becomes designable
+    /// under that mask. A ligand / small molecule has no chain byte, so it
+    /// never matches and stays locked (secure-by-default). The chain is read
+    /// BEFORE `load_entity_into_history` consumes the entity. An empty
+    /// `design_masks` installs `None` (a free-edit / fold puzzle); otherwise
+    /// the EntityId-keyed map is the source the design overlay + edit gate read.
+    fn load_puzzle_entities(
+        &mut self,
+        entities: Vec<molex::MoleculeEntity>,
+        design_masks: &BTreeMap<String, crate::puzzle_setup::DesignMask>,
+        name: &str,
+    ) -> Vec<EntityId> {
+        let mut ids: Vec<EntityId> = Vec::new();
+        let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> =
+            BTreeMap::new();
+        for entity in entities {
+            let chain_key = entity.pdb_chain_id().map(|b| (b as char).to_string());
+            if let Some(id) = self.store.load_entity_into_history(entity, name) {
+                ids.push(id);
+                if let Some(key) = chain_key {
+                    if let Some(mask) = design_masks.get(&key) {
+                        gating.insert(id, mask.clone());
+                    }
+                }
+            }
+        }
+        let design_gating = if design_masks.is_empty() {
+            None
+        } else {
+            Some(gating)
+        };
+        self.store.set_puzzle_design_gating(design_gating);
+        ids
     }
 
     /// Load a named view preset's options off disk and install them as the
