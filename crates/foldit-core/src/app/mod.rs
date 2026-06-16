@@ -1,15 +1,19 @@
 //! Foldit application state - host-agnostic.
 //!
-//! `App` owns the `Session`, `RunnerClient` (which carries the
-//! orchestrator), the three projectors (`RunnerProjector`,
-//! `RenderProjector`, `GuiProjector`), and the cross-cutting
-//! bookkeeping (puzzle metadata, viso engine handle, dirty-flags,
-//! history-version trackers). Both the desktop (`foldit-desktop`) and
-//! web (`foldit-web`) builds wrap this in their host-specific lifecycle:
+//! `App` owns the following:
+//! - `Session`
+//! - `RunnerClient` (which carries the orchestrator)
+//! - The three projectors (`RunnerProjector`, `RenderProjector`, `GuiProjector`)
+//! - The cross-cutting bookkeeping
+//!   (Puzzle metadata, viso engine handle, dirty-flags, history-version trackers).
+//!
+//! Both the desktop (`foldit-desktop`) and web (`foldit-web`) builds
+//! wrap this in their host-specific lifecycle:
 //!
 //! - desktop: `window::AppRunner` holds the wry webview + winit window
 //!   alongside `App`; winit events are converted to host-agnostic
 //!   types before being forwarded to `App`'s methods.
+//!
 //! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
 //!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
 
@@ -27,13 +31,13 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 mod dispatch;
 pub(crate) mod input;
 mod load;
-mod startup;
 #[cfg(not(target_arch = "wasm32"))]
 mod score_apply;
-#[cfg(not(target_arch = "wasm32"))]
-mod viz_refresh;
+mod startup;
 #[cfg(test)]
 mod tests;
+#[cfg(not(target_arch = "wasm32"))]
+mod viz_refresh;
 
 use self::input::update_all_visualizations;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,119 +51,52 @@ pub use self::load::locate_plugins_root;
 /// the host seam) and the `AppPhase` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
 pub struct App {
-    pub(crate) engine: Option<VisoEngine>,
-    pub(in crate::app) keybindings: KeyBindings,
+    // Session encapsulates all state that shares a lifecycle with
+    // a structure or puzzle that is loaded into the client.
     pub(crate) store: Session,
-    /// Active view options (render settings). App-owned so they survive a
-    /// puzzle/structure reload (`Session::reset` no longer touches them); the
-    /// tick applies them to the engine on every
-    /// [`SessionUpdate::ViewOptionsChanged`] the App emits. The single source
-    /// of truth for what viso renders and what the view panel binds.
-    pub(in crate::app) view_options: viso::options::VisoOptions,
-    /// Name of the preset whose options are currently loaded, or `None` when
-    /// the active options were set manually (a manual edit no longer matches
-    /// any named preset). App-owned alongside [`Self::view_options`].
-    pub(in crate::app) active_preset: Option<String>,
-    /// Latched the first time the player touches any view setting (a manual
-    /// option edit or an explicit preset pick). Once set, the per-load preset
-    /// seed is skipped so the player's persisted choice overrides the
-    /// puzzle/Default seed on every subsequent load. A fresh app starts
-    /// `false`, so its first load still seeds from the puzzle/Default preset.
-    pub(in crate::app) view_settings_touched: bool,
+
+    // The Viso Engine and Runner Client encapsulate app level state that
+    // inits on app startup, predating and outliving any individual session
+    pub(crate) engine: Option<VisoEngine>,
     pub(crate) runner_client: RunnerClient,
-    /// Plugin projection of the `SessionUpdate` stream. A peer field to
-    /// `runner_client` (not nested inside it) so the tick seam can borrow
-    /// the orchestrator handle and this projector disjointly.
+
+    // Frontend state/input handling fields
+    pub(in crate::app) frontend: FrontendState,
+    pub(in crate::app) keybindings: KeyBindings,
+    pub(in crate::app) lifecycle: AppPhase,
+
+    // Viso option fields
+    pub(in crate::app) view_options: viso::options::VisoOptions,
+    pub(in crate::app) active_preset: Option<String>,
+    pub(in crate::app) view_settings_touched: bool,
+
+    // Three projector classes which are the consumers of Assembly updates
     pub(in crate::app) runner_projector: RunnerProjector,
     pub(in crate::app) render_projector: RenderProjector,
     pub(in crate::app) gui_projector: GuiProjector,
+
     /// Host-provided filesystem / resource access. The only path through
     /// which foldit-core touches the filesystem outside puzzle loading.
     pub(in crate::app) host: Box<dyn crate::HostResources>,
-    /// Frontend mirror - written by the GUI consumer
-    /// ([`GuiProjector::consume`]) at the end of each tick and drained by
-    /// the host via [`Self::serialize_frontend_dirty`].
-    pub(in crate::app) frontend: FrontendState,
-    /// App-lifetime lifecycle phase. `App` advances this through the
-    /// startup phases and flips it to `InSession` the moment a structure
-    /// finishes loading (see [`Self::enter_session`]). Mirrored verbatim
-    /// to the frontend via [`FrontendState::set_app_state`].
-    pub(in crate::app) lifecycle: AppPhase,
-    /// Non-blocking startup state-machine. Armed by
-    /// [`Self::begin_startup`] (the host trigger) and advanced one step per
-    /// frame by [`Self::advance_startup`] near the top of [`Self::tick`], so
-    /// bring-up's worker round-trips (warm connect, plugin `Init`, normalize,
-    /// first score) run across frames while the host keeps rendering.
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup: self::load::StartupPhase,
-    /// Camera framing the startup-machine terminal applies once the geometry
-    /// has settled (post-normalize). `Fit` (the default) frames on focus; a
-    /// puzzle load stashes its saved pose here so the terminal honors it
-    /// instead of fitting. Reset to `Fit` after the terminal consumes it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup_camera: self::load::StartupCamera,
-    /// Secondary-structure override the startup-machine terminal applies to
-    /// the loaded entity (`(entity raw id, per-residue SS)`) once the geometry
-    /// has settled, so a puzzle's pinned SS survives the post-normalize
-    /// rebake. `None` outside a puzzle load; cleared after the terminal
-    /// consumes it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
-    /// One-shot "push every GUI section once" signal. Raised on session
-    /// birth (the Loading → `InSession` flip on every load path) and
-    /// consumed + cleared by `tick` on the next
-    /// GUI-consumer pass, which projects a full `DirtyFlags::all()` populate.
-    /// The incremental sections during a load still flow through the ordinary
-    /// `SessionUpdate` batch; this catches the sections no batch variant
-    /// carries (a free-form reload's puzzle-panel title, the post-load score /
-    /// action catalog).
     pub(in crate::app) needs_full_populate: bool,
-    /// Commit-stamp correlation: each in-flight commit-time composition-score
-    /// `request_id` → the committed checkpoint its reply stamps. The checkpoint
-    /// is immutable, so its identity is stable until the reply lands. Cleared
-    /// on orchestrator reinit (request ids restart at 1 there, so a stale
-    /// entry could otherwise collide with a fresh edit id).
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
-    /// `request_id` → (preview entity id, its atom count) for the
-    /// transient entity a creates-entities stream is animating. Created on
-    /// the first streamed frame, coord-updated per frame while the atom
-    /// count is unchanged (rebuilt under a new id when it changes, so the
-    /// render projector does a topology rebuild rather than a desyncing
-    /// coord update), and discarded at the terminal (the final full-atom
-    /// entity is adopted fresh).
     #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) creates_previews:
-        std::collections::HashMap<u64, (molex::EntityId, usize)>,
-    /// Pull-drag intent captured at left-button-down. The pull is
-    /// determined by the down-target, not by where the cursor later
-    /// wanders: a drag that began on empty background must never grab a
-    /// residue it crosses, and a drag that began on a residue must pull
-    /// *that* residue. `Some(route)` after a left-down that resolved to a
-    /// pullable target; `None` after a down on empty / non-pullable
-    /// surface (that gesture can only camera-rotate). The first qualifying
-    /// pointer-move takes the route to open the stream; `PointerUp` clears
-    /// it.
+    pub(in crate::app) creates_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
-    /// Plugin-provided rendering connections (hydrogen bonds + disulfides) as
-    /// stable atom-index links, decoded once against the head assembly by the
-    /// at-rest connection refresh and re-applied per publish (viso resolves
-    /// the endpoints against live positions). `Some` only while a plugin
-    /// advertises the `connections` query; cleared on a topology change so
-    /// stale ids from a prior puzzle are never re-applied (entity ids can be
-    /// reused across loads). `None`/absent until the first at-rest query
-    /// fills it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) held_connections:
         Option<std::collections::HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
-    /// Entity-id set the held connections were decoded against. Compared
-    /// against the live head each refresh to detect a topology change (a new
-    /// puzzle or an entity joining/leaving) and drop the now-stale held set
-    /// before re-querying, guarding against id reuse across loads.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) connections_topology_ids:
-        std::collections::BTreeSet<molex::EntityId>,
+    pub(in crate::app) connections_topology_ids: std::collections::BTreeSet<molex::EntityId>,
 }
 
 impl App {
@@ -210,27 +147,6 @@ impl App {
 
     /// Flip the App into the in-session lifecycle phase the moment a
     /// structure finishes loading, on every load path.
-    ///
-    /// - `set_app_phase(InSession)` is the routing signal the
-    ///   frontend reads; flipping it here clears the loading screen.
-    /// - The score gauge is reset to "not scored yet" so a reload never
-    ///   displays the previous structure's score. `project_score` no-ops
-    ///   when `display_score()` is `None` (and never resets `score.invalid`),
-    ///   so this is the only place the stale value is cleared. The first
-    ///   async score the startup machine drives stamps the head, and the
-    ///   one-shot full populate below re-derives the gauge from that stamp on
-    ///   the next pass.
-    /// - The score title is read from the store here because `project_score`
-    ///   does not write the title.
-    /// - `needs_full_populate` reprojects every session section (score
-    ///   panel, title, history, scene, view, selection, actions) on the
-    ///   next GUI-consumer pass.
-    ///
-    /// Every load path now brings plugins up through the startup state-machine,
-    /// which flips into the session (via `enter_session_from_startup`, which
-    /// calls this) only once the first async score has stamped the head, so the
-    /// backbone is already colored when the scene is first shown. This method
-    /// no longer requests the score.
     pub(in crate::app) fn enter_session(&mut self) {
         self.set_app_phase(AppPhase::InSession);
         self.frontend.set_score(0.0, true);
@@ -246,8 +162,6 @@ impl App {
         self.lifecycle = state;
         self.frontend.set_app_state(self.lifecycle);
     }
-
-    // ── View-options reads ──
 
     /// The active view options. App-owned so they persist across a reload;
     /// the view panel binds these and the render projection re-applies them
@@ -309,82 +223,33 @@ impl App {
             .map(|v| v.to_string().into_bytes())
     }
 
-    // The GUI projection now lives on `GuiProjector` as the third
-    // `SessionUpdate` consumer; see `impl GuiProjector` below. The tick
-    // builds a `GuiSources` and calls `gui_projector.consume(...)` at the
-    // end-of-tick route. There is no `populate_frontend` method anymore:
-    // its body moved verbatim onto the consumer, reading named inputs
-    // instead of `&mut self`.
-
-    // ── The per-frame drive loop ──
-
-    /// Drive one frame.
-    ///
-    /// Order:
-    /// 0. advance the non-blocking startup state-machine (native only): one
-    ///    bring-up step, before the drain so a publish it triggers is routed
-    ///    this frame. Inert once startup is done.
-    /// 1. drain pending plugin updates (apply to `Session`; emits
-    ///    `SessionUpdate`s through the funnel).
-    /// 2. apply this tick's async score replies so their `ScoresChanged`
-    ///    joins this tick's batch.
-    /// 3. drain the `SessionUpdate` stream in one go.
-    /// 4. route the batch: runner projector fan-out and render projector
-    ///    publish + per-residue color re-derive (both no-op on empty batches;
-    ///    the render projector also runs on a score-only batch).
-    /// 5. fire the next async rescore (gated on a geometry change; reply
-    ///    applies on a later tick's step 2). The FIRST score per session is
-    ///    stamped by the startup machine's first-score kick (every load path
-    ///    brings plugins up through it), not by this at-rest gate.
-    /// 6. engine update (camera animation, mesh upload, etc.).
-    /// 7. visualization overlay (bands / pull).
-    /// 8. GUI consumer projects the batch (+ one-shot full populate) into
-    ///    the frontend so the next `serialize_frontend_dirty` carries the
-    ///    latest snapshot.
+    // App::tick is the per-frame drive loop
     pub fn tick(&mut self, dt: f32) {
-        // 0. Advance the non-blocking startup state-machine. Runs before the
-        //    drain so a publish a startup step triggers (the structure parse,
-        //    a committed normalize) lands in this frame's `changes` batch and
-        //    is projected the same frame. Inert once bring-up is done.
+        // Advance the non-blocking startup state-machine. Runs before the
+        // drain so a publish a startup step triggers (the structure parse,
+        // a committed normalize) lands in this frame's `changes` batch and
+        // is projected the same frame. Inert once bring-up is done.
         #[cfg(not(target_arch = "wasm32"))]
         self.advance_startup();
 
-        // 1. Plugin updates.
+        // Plugin updates.
         self.apply_backend_updates();
 
-        // 2. Apply this tick's score replies BEFORE the drain so their
-        //    `ScoresChanged` lands in this tick's `changes` batch. That makes
-        //    the render projector re-derive the per-residue colors the same
-        //    frame the score arrives (and, on the first score, the same frame
-        //    the geometry publishes), instead of a tick late. The async
-        //    request that triggers the NEXT rescore stays AFTER the drain
-        //    (it gates on this tick's geometry change). Always async: the
-        //    session goes live before the first score now, so the render
-        //    thread must never block on the worker, including pre-first-score.
+        // Apply this tick's score replies BEFORE the drain so their
+        // `ScoresChanged` lands in this tick's `changes` batch. That makes
+        // the render projector re-derive the per-residue colors the same
+        // frame the score arrives
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Apply whatever async whole-assembly and composition replies have
-            // arrived (none until the first request below lands). Each stamps
-            // the session and emits `ScoresChanged`, drained just below.
             self.poll_async_scores();
             self.poll_composition_scores();
         }
 
-        // 3-4. Drain the SessionUpdate stream once and route to both
-        //      projectors. The tick is the sole drain. Handlers used to call
-        //      `pump_scene_changes` per-event, but that race-conditioned
-        //      against the render projector reading the same update queue, so
-        //      the per-handler pumps were removed.
+        // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();
+
         // `render_changes` counts only the scene-mutating updates: an
-        // assembly republish keys off these, and the steady-state async
-        // rescore (step 5) gates on them. A ScoresChanged / SelectionChanged
-        // / FocusChanged / view / bubble / puzzle / appearance update is not a
-        // scene mutation, so it is excluded here: republishing geometry on such a
-        // reply is wasted work (and forces a spurious full rebuild on a
-        // topology tick), and re-querying scores in response would loop. The
-        // render projector still runs on a score-only batch to re-derive
-        // colors, but it self-filters and does not republish geometry there.
+        // assembly republish keys off of these
         let render_changes = changes
             .iter()
             .filter(|c| {
@@ -400,18 +265,7 @@ impl App {
                 )
             })
             .count();
-        // BubbleChanged / PuzzleChanged have no viso side effect; their GUI
-        // dirty (TEXT_BUBBLE / PUZZLE) is derived from the batch by the GUI
-        // consumer below, so there are no tick arms for them anymore.
 
-        // Refresh the held rendering connections (hydrogen bonds + disulfides)
-        // and choose the per-publish provider BEFORE the render projector
-        // publishes below, so a geometry-change tick stamps the freshly queried
-        // set. Same at-rest geometry gate as the rescore / voids / clashes
-        // refresh (connections go stale on a geometry change); there is no
-        // connections display toggle, so no view-toggle arm. The call
-        // self-gates on the engine being present and a plugin advertising
-        // `connections` (else it puts the projector on the molex fallback).
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
@@ -420,19 +274,12 @@ impl App {
         }
 
         if !changes.is_empty() {
-            // The projector self-filters score-only batches (scores are
-            // not an observable mutation for plugins); a no-op call is cheap.
+            // RunnerProjector consumes changes, see `RunnerProjector`
             if let Some(orch) = self.runner_client.orchestrator_mut() {
-                self.runner_projector
-                    .consume(&changes, &self.store, orch);
+                self.runner_projector.consume(&changes, &self.store, orch);
             }
-            // The render projector self-filters its reactions (selection /
-            // focus / geometry / scores), so it runs on any non-empty batch
-            // and no-ops internally on one that carries none of them. The
-            // view-options reaction is driven here, not in the projector: the
-            // options live on `App` (so they persist across a topology swap),
-            // and applying them to the engine is gated on the same
-            // `ViewOptionsChanged` signal the projector would have keyed off.
+
+            // RenderProjector consumes changes and engine receives view option updates
             if let Some(engine) = self.engine.as_mut() {
                 self.render_projector.consume(&changes, &self.store, engine);
                 if changes
@@ -530,15 +377,11 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bridge: Dispatcher trait impl
-// ---------------------------------------------------------------------------
-
+/// The foldit app implements the `foldit_gui::Dispatcher` trait
+///
+/// This essentially just denotes the App as the struct that processes
+/// frontend -> backend commands dispatched by the gui
 impl foldit_gui::Dispatcher for App {
-    /// Webview signaled it's ready - mark every section of the owned
-    /// `FrontendState` dirty so the next `serialize_frontend_dirty`
-    /// emits a full snapshot. App owns the frontend mirror, so
-    /// this lives here rather than on the host.
     fn on_ready(&mut self) {
         self.frontend.mark_all_dirty();
     }
