@@ -17,3 +17,6 @@ workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+toml_edit = "0.22"
+toml = "0.8"
+foldit-core = { path = "../crates/foldit-core" }

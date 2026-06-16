@@ -80,7 +80,8 @@ impl RunnerClient {
 /// move as-is; `per_residue_terms` is rebuilt, dropping any entry with no
 /// residue ref (the proto field is optional). That skip preserves the
 /// historical `residue.as_ref() else continue` behavior, relocated from the
-/// consumer.
+/// consumer. `bonus_breakdown` carries each forwarded-filter contribution
+/// `(kind, value)` through unchanged.
 impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreReport {
     fn from(report: foldit_runner::proto::plugin::ScoreReport) -> Self {
         Self {
@@ -103,6 +104,11 @@ impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreRep
                         }
                     })
                 })
+                .collect(),
+            bonus_breakdown: report
+                .bonus_breakdown
+                .into_iter()
+                .map(|bc| (bc.kind, bc.value))
                 .collect(),
         }
     }

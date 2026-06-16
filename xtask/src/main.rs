@@ -11,6 +11,9 @@ use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::process::Command;
 
+mod filters_transcribe;
+use filters_transcribe::transcribe_filters;
+
 fn rosetta_interactive_path() -> String {
     "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_owned()
 }
@@ -129,6 +132,14 @@ enum Commands {
     /// The web prod path: build the web wasm artifact AND run `bun run
     /// build:web` to produce a static site ready for deployment.
     PackageWeb,
+    /// Transcribe the legacy rosetta `.ir_puzzle.filters` files into
+    /// `[[puzzle.filter]]` blocks, and the pose-numbered `"can_design"` from
+    /// each `.ir_puzzle.puzzle_setup` into per-chain `[[puzzle.design_mask]]`
+    /// blocks (remapping rosetta pose numbering to per-chain PDB numbering via
+    /// the structure's residue order), in the curated level assets. One-shot,
+    /// idempotent: re-running replaces any existing arrays. Only touches levels
+    /// where the curated `puzzle.toml` and the matching legacy source exist.
+    TranscribeFilters,
 }
 
 fn main() -> Result<()> {
@@ -155,6 +166,7 @@ fn main() -> Result<()> {
         Commands::BuildHost { debug } => build_host(debug),
         Commands::BuildWeb { debug } => build_web(debug),
         Commands::PackageWeb => package_web(),
+        Commands::TranscribeFilters => transcribe_filters(),
     }
 }
 

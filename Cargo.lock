@@ -7015,6 +7015,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "foldit-core",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

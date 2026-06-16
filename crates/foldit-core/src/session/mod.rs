@@ -72,10 +72,10 @@ pub enum SessionError {
 // ── Puzzle ─────────────────────────────────────────────────────────────
 
 /// Puzzle-shaped session add-on. `None` on the [`Session`] is the default
-/// free-form ("scientist") session with no objective; `Some` is a loaded
+/// free-form ("scientist") session with no puzzle goal; `Some` is a loaded
 /// campaign/intro puzzle. Populated from the puzzle TOML on a puzzle load.
 ///
-/// `start_energy` / `completion_energy` are the objective energies handed
+/// `start_energy` / `completion_energy` are the target energies handed
 /// to the GUI (the same numbers, in the same units, that the puzzle TOML
 /// supplies). `bubbles` / `current_bubble` carry the tutorial sequence and
 /// its cursor; they move together - a puzzle with a tutorial sequence is
@@ -92,12 +92,12 @@ pub struct Puzzle {
     /// weight map at load, and threads it to the bridge through the normalize
     /// dispatch params so the patched terms ship and are optimized against.
     pub weight_patch: Option<std::collections::HashMap<String, f32>>,
-    /// Scored objectives from the puzzle TOML's `[[puzzle.objective]]`
-    /// tables. Empty when the puzzle declares none. Evaluated by the
-    /// exposed-hydro coordinator (for `exposed_count` objectives), whose
-    /// met-bonus total is stored on [`Session::objective_bonus`] and folded
-    /// into the headline game score.
-    pub objectives: Vec<crate::puzzle::Objective>,
+    /// Scored filters from the puzzle TOML's `[[puzzle.filter]]` tables.
+    /// Empty when the puzzle declares none. The native `ExposedCount`
+    /// filter is evaluated by the exposed-hydro coordinator, whose met-bonus
+    /// breakdown is stored on [`Session::filter_bonus`] and folded into the
+    /// headline game score.
+    pub filters: Vec<crate::puzzle::FilterSpec>,
     pub bubbles: Option<Vec<crate::puzzle::Bubble>>,
     pub current_bubble: Option<usize>,
     /// Catalytic constraints parsed from the puzzle's `.cnstr` file. Empty
@@ -181,9 +181,9 @@ pub struct Session {
     title: String,
     /// Puzzle-shaped session state. `None` is the default free-form
     /// ("scientist") session; `Some` is a loaded campaign/intro puzzle
-    /// carrying its objective energies and tutorial-bubble cursor. Ambient
+    /// carrying its target energies and tutorial-bubble cursor. Ambient
     /// session state, not history-versioned; [`Self::reset`] clears it on a
-    /// topology swap. Installing or clearing the objective emits
+    /// topology swap. Installing or clearing the puzzle emits
     /// [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
     /// [`SessionUpdate::BubbleChanged`].
     puzzle: Option<Puzzle>,
@@ -204,16 +204,18 @@ pub struct Session {
     /// score overwrites it. Lives once on the session rather than being
     /// duplicated on every checkpoint's breakdown.
     term_names: Vec<String>,
-    /// Accumulated RAW score bonus from the loaded puzzle's met objectives
-    /// (e.g. an `exposed_count` objective awards its `bonus` when the
-    /// exposed-hydrophobic count is below `max`). A RAW delta folded into
-    /// the headline game score before the raw->game map, so a met objective
-    /// can push the displayed score across `completion_score`. Ambient
-    /// session state, not history-versioned and never on the `SessionUpdate`
-    /// stream: the exposed-hydro coordinator recomputes it at rest each
-    /// geometry change. Default `0.0`; [`Self::reset`] clears it on a
-    /// topology swap (a new puzzle re-derives it from its own objectives).
-    objective_bonus: f64,
+    /// Labeled breakdown of the RAW score bonus from the loaded puzzle's met
+    /// filters: each entry is `(filter label, bonus value)` in RAW score
+    /// units (e.g. the native `ExposedCount` filter contributes
+    /// `("exposed_count", bonus)` when the exposed-hydrophobic count is below
+    /// its threshold). The summed total is a RAW delta folded into the headline game
+    /// score before the raw->game map, so a met filter can push the displayed
+    /// score across `completion_score`; the breakdown is also surfaced to the
+    /// dev readout. Ambient session state, not history-versioned and never on
+    /// the `SessionUpdate` stream: the exposed-hydro coordinator recomputes it
+    /// at rest each geometry change. Empty by default; [`Self::reset`] clears
+    /// it on a topology swap (a new puzzle re-derives it from its own filters).
+    filter_bonus: Vec<(String, f64)>,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -245,7 +247,7 @@ impl Session {
             puzzle: None,
             term_weights: std::collections::HashMap::new(),
             term_names: Vec::new(),
-            objective_bonus: 0.0,
+            filter_bonus: Vec::new(),
             pending_updates: Vec::new(),
         }
     }
@@ -582,20 +584,30 @@ impl Session {
             .is_some_and(|p| p.design_gating.is_some())
     }
 
-    /// The accumulated RAW score bonus from the loaded puzzle's met
-    /// objectives. `0.0` in a free-form session or when no objective is met.
-    /// The score path folds this into the raw value before the raw->game map.
+    /// The labeled breakdown of the RAW score bonus from the loaded puzzle's
+    /// met filters, each entry `(filter label, bonus value)`. Empty in a
+    /// free-form session or when no filter is met. The dev readout lists it;
+    /// the score path folds [`Self::filter_bonus_total`] into the raw value
+    /// before the raw->game map.
     #[must_use]
-    pub const fn objective_bonus(&self) -> f64 {
-        self.objective_bonus
+    pub fn filter_bonus(&self) -> &[(String, f64)] {
+        &self.filter_bonus
     }
 
-    /// Install the met-objective RAW bonus total. Silent (no `SessionUpdate`):
+    /// The summed RAW score bonus across every met filter. `0.0` in a
+    /// free-form session or when no filter is met. The score path folds this
+    /// into the raw value before the raw->game map.
+    #[must_use]
+    pub fn filter_bonus_total(&self) -> f64 {
+        self.filter_bonus.iter().map(|(_, v)| v).sum()
+    }
+
+    /// Replace the met-filter RAW bonus breakdown. Silent (no `SessionUpdate`):
     /// it rides the `ScoresChanged` that the score write following it emits.
     /// Recomputed by the exposed-hydro coordinator at rest each geometry
     /// change; [`Self::reset`] clears it on a topology swap.
-    pub const fn set_objective_bonus(&mut self, bonus: f64) {
-        self.objective_bonus = bonus;
+    pub fn set_filter_bonus(&mut self, breakdown: Vec<(String, f64)>) {
+        self.filter_bonus = breakdown;
     }
 
     // ── Score-term weight reads ───────────────────────────────────────

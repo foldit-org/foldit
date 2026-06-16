@@ -27,6 +27,13 @@ pub struct ScoreReport {
     /// Raw (unweighted) per-residue energies, each `terms` aligned to
     /// `term_names`.
     pub per_residue_terms: Vec<ResidueTermScores>,
+    /// Labeled puzzle-filter bonuses forwarded by the plugin, each
+    /// `(kind, value)` in RAW rosetta energy (same sign convention as the
+    /// energy terms). Separate from the weighted raw terms: the score path
+    /// adds their sum into the headline game total alongside the native
+    /// filter bonus. Empty for a free-form session or a puzzle that
+    /// forwarded no filters.
+    pub bonus_breakdown: Vec<(String, f32)>,
 }
 
 /// A single residue's RAW per-term energies, addressed by
@@ -240,6 +247,7 @@ mod tests {
                 residue_index: 3,
                 terms: vec![4.0, 6.0],
             }],
+            bonus_breakdown: Vec::new(),
         };
 
         assert_eq!(report.weighted_total(&weights), 25.0);
@@ -285,6 +293,7 @@ mod tests {
                     terms: vec![-3.0, 4.0, 8.0],
                 },
             ],
+            bonus_breakdown: Vec::new(),
         };
         let stored = StoredBreakdown {
             whole_pose_terms: report.whole_pose_terms.clone(),
@@ -308,6 +317,7 @@ mod tests {
             term_names: vec!["a".to_owned(), "unknown".to_owned()],
             whole_pose_terms: vec![3.0, 100.0],
             per_residue_terms: Vec::new(),
+            bonus_breakdown: Vec::new(),
         };
         // 3*2.0 + 100*0.0 = 6.0; the unknown term is dropped.
         assert_eq!(report.weighted_total(&weights), 6.0);

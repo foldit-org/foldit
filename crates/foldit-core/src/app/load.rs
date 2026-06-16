@@ -147,7 +147,7 @@ impl App {
                     let _ = self.store.load_entity_into_history(entity, &name);
                 }
                 // Free-form load: set the title and drop any puzzle
-                // objective + tutorial bubbles through the create seam.
+                // add-on (filters + tutorial bubbles) through the create seam.
                 // `start` emits `PuzzleChanged` (via `clear_puzzle`) when
                 // there was a puzzle to clear, which the tick turns into
                 // PUZZLE dirty. A scientist→scientist reload where
@@ -232,7 +232,7 @@ impl App {
 
         let loaded = match data {
             Ok(puzzle_data) => {
-                // Install the puzzle (title + objective + tutorial bubbles)
+                // Install the puzzle (title + filters + tutorial bubbles)
                 // through the create seam. The tutorial sequence and its
                 // cursor move together: a non-empty sequence starts at index
                 // 0, an empty sequence is `None`. `start` emits
@@ -245,7 +245,7 @@ impl App {
                 };
                 let current_bubble = bubbles.as_ref().map(|_| 0);
                 let weight_patch = puzzle_data.weights.clone();
-                let objectives = puzzle_data.objectives.clone();
+                let filters = puzzle_data.filters.clone();
                 // Carry the puzzle's catalytic constraints + ligand asset
                 // bytes onto the session `Puzzle` so the session-init kick can
                 // deliver them to the worker. Taken here (the entities loop
@@ -259,7 +259,7 @@ impl App {
                         start_energy: puzzle_data.start_energy,
                         completion_energy: puzzle_data.completion_score,
                         weight_patch,
-                        objectives,
+                        filters,
                         bubbles,
                         current_bubble,
                         constraints,

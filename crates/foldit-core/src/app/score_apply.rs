@@ -1,23 +1,43 @@
 use crate::app::App;
 use crate::history::CheckpointId;
 
-/// Sum the RAW score bonus of every `exposed_count` objective met at the
-/// given exposed-hydrophobic `count`. An `exposed_count` objective awards
-/// its `bonus` when `count < max` (the legacy `ExposedCount` filter: max=1
-/// means the win is `count == 0`), else `0`. An objective with no `max`
-/// (malformed) and any non-`exposed_count` kind contribute nothing
-/// (forward-compatible: an unknown objective type parses but is inert). The
+/// Read a `toml::Value` as an `f64`, accepting an integer or float literal.
+/// Anything else (string, bool, ...) yields `None`. Filter thresholds and
+/// bonuses are small magnitudes, so the integer widening is exact in practice.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "filter thresholds/bonuses are small integers; widening is exact"
+)]
+const fn toml_number(value: &toml::Value) -> Option<f64> {
+    match value {
+        toml::Value::Integer(n) => Some(*n as f64),
+        toml::Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Sum the RAW score bonus of every native `ExposedCount` filter met at the
+/// given exposed-hydrophobic `count`. A native `ExposedCount` filter awards its
+/// `bonus` param when `count` is below `max_exposed_hydrophobics`
+/// (`max_exposed_hydrophobics = 1` means the win is `count == 0`), else `0`. A
+/// filter that names a `plugin` (forwarded, not scored here), one missing the
+/// threshold or the bonus param, and any non-`ExposedCount` kind all contribute
+/// nothing (forward-compatible: an unknown filter type parses but is inert). The
 /// result is a RAW delta the score path folds in before the raw->game map.
 #[must_use]
 pub(in crate::app) fn exposed_count_bonus(
-    objectives: &[crate::puzzle::Objective],
+    filters: &[crate::puzzle::FilterSpec],
     count: u32,
 ) -> f64 {
-    objectives
+    filters
         .iter()
-        .filter(|o| o.kind == "exposed_count")
-        .filter_map(|o| o.max.map(|max| (max, o.bonus)))
-        .map(|(max, bonus)| if count < max { f64::from(bonus) } else { 0.0 })
+        .filter(|f| f.kind == "ExposedCount" && f.plugin.is_none())
+        .filter_map(|f| {
+            let max = toml_number(f.params.get("max_exposed_hydrophobics")?)?;
+            let bonus = toml_number(f.params.get("bonus")?)?;
+            Some((max, bonus))
+        })
+        .map(|(max, bonus)| if f64::from(count) < max { bonus } else { 0.0 })
         .sum()
 }
 
@@ -119,12 +139,27 @@ impl App {
         report: crate::scores::ScoreReport,
     ) -> (f64, f64, crate::scores::StoredBreakdown) {
         let raw = report.weighted_total(self.store.term_weights());
-        // Fold the loaded puzzle's met-objective RAW bonus into the headline
+        // Fold the loaded puzzle's met-filter RAW bonus into the headline
         // game score before the raw->game map (game = raw_to_game(raw +
         // bonus)); `raw` itself stays the true rosetta value (free-form
         // display), only `game` carries the bonus. `0.0` outside a puzzle.
-        let game =
-            crate::scores::rosetta_raw_to_game(raw + self.store.objective_bonus());
+        // Two sources sum here: the native breakdown the exposed-hydro
+        // coordinator stores on the session, and the forwarded breakdown the
+        // plugin returned on this report.
+        let forwarded_bonus: f64 =
+            report.bonus_breakdown.iter().map(|(_, v)| f64::from(*v)).sum();
+        let filter_bonus = self.store.filter_bonus_total() + forwarded_bonus;
+        // Attribution readout: list the native per-filter breakdown and the
+        // forwarded per-filter breakdown alongside the summed bonus when any
+        // filter is contributing.
+        if !self.store.filter_bonus().is_empty() || !report.bonus_breakdown.is_empty() {
+            log::debug!(
+                "[App] filter bonus: native={:?} forwarded={:?} (sum={filter_bonus})",
+                self.store.filter_bonus(),
+                report.bonus_breakdown,
+            );
+        }
+        let game = crate::scores::rosetta_raw_to_game(raw + filter_bonus);
         self.store.set_term_names(report.term_names);
         let breakdown = crate::scores::StoredBreakdown {
             whole_pose_terms: report.whole_pose_terms,
@@ -174,12 +209,18 @@ impl App {
                 continue;
             };
             let raw = report.weighted_total(self.store.term_weights());
-            // Fold the met-objective RAW bonus into the game score (same as
+            // Fold the met-filter RAW bonus into the game score (same as
             // `prepare_score_stamp`), so a composition / commit-stamp score
-            // and the at-rest headline agree on the bonus. `raw` stays the
-            // true rosetta value; `0.0` outside a puzzle.
-            let game =
-                crate::scores::rosetta_raw_to_game(raw + self.store.objective_bonus());
+            // and the at-rest headline agree on the bonus. The forwarded
+            // breakdown rides this report (the same bridge `compute_score_report`
+            // that feeds the whole-assembly path), so the composition score
+            // carries it too. `raw` stays the true rosetta value; `0.0` outside
+            // a puzzle.
+            let forwarded_bonus: f64 =
+                report.bonus_breakdown.iter().map(|(_, v)| f64::from(*v)).sum();
+            let game = crate::scores::rosetta_raw_to_game(
+                raw + self.store.filter_bonus_total() + forwarded_bonus,
+            );
             // Install the alignment key before stamping the breakdown.
             self.store.set_term_names(report.term_names);
             let breakdown = crate::scores::StoredBreakdown {
@@ -201,42 +242,57 @@ mod tests {
     )]
 
     use super::exposed_count_bonus;
-    use crate::puzzle::Objective;
+    use crate::puzzle::FilterSpec;
+    use std::collections::BTreeMap;
 
-    fn exposed_count(max: u32, bonus: f32) -> Objective {
-        Objective {
-            kind: "exposed_count".to_owned(),
-            max: Some(max),
-            bonus,
+    /// Build an `ExposedCount` filter with its threshold + bonus params, the
+    /// way the transcribed `[[puzzle.filter]]` block stores them.
+    fn exposed_count(max: i64, bonus: i64) -> FilterSpec {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "max_exposed_hydrophobics".to_owned(),
+            toml::Value::Integer(max),
+        );
+        params.insert("bonus".to_owned(), toml::Value::Integer(bonus));
+        FilterSpec {
+            kind: "ExposedCount".to_owned(),
+            plugin: None,
+            params,
         }
     }
 
     #[test]
     fn bonus_awarded_below_max() {
         // max=1: the win is count==0; count 0 < 1 awards the bonus.
-        let objs = [exposed_count(1, -100.0)];
-        assert_eq!(exposed_count_bonus(&objs, 0), -100.0);
+        let filters = [exposed_count(1, -100)];
+        assert_eq!(exposed_count_bonus(&filters, 0), -100.0);
     }
 
     #[test]
     fn no_bonus_at_or_above_max() {
-        let objs = [exposed_count(1, -100.0)];
-        assert_eq!(exposed_count_bonus(&objs, 1), 0.0);
-        assert_eq!(exposed_count_bonus(&objs, 5), 0.0);
+        let filters = [exposed_count(1, -100)];
+        assert_eq!(exposed_count_bonus(&filters, 1), 0.0);
+        assert_eq!(exposed_count_bonus(&filters, 5), 0.0);
     }
 
     #[test]
     fn unknown_kind_is_inert() {
-        let objs = [Objective {
-            kind: "some_future_kind".to_owned(),
-            max: Some(1),
-            bonus: -100.0,
-        }];
-        assert_eq!(exposed_count_bonus(&objs, 0), 0.0);
+        let mut filter = exposed_count(1, -100);
+        filter.kind = "some_future_kind".to_owned();
+        assert_eq!(exposed_count_bonus(&[filter], 0), 0.0);
     }
 
     #[test]
-    fn empty_objectives_yield_zero() {
+    fn forwarded_filter_is_inert() {
+        // A filter that names a plugin is forwarded for scoring, not
+        // evaluated here, so it contributes no native bonus.
+        let mut filter = exposed_count(1, -100);
+        filter.plugin = Some("rosetta".to_owned());
+        assert_eq!(exposed_count_bonus(&[filter], 0), 0.0);
+    }
+
+    #[test]
+    fn empty_filters_yield_zero() {
         assert_eq!(exposed_count_bonus(&[], 0), 0.0);
     }
 }

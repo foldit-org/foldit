@@ -574,23 +574,23 @@ impl Session {
         }
     }
 
-    // ── Puzzle objective + tutorial bubbles ───────────────────────────
+    // ── Puzzle add-on + tutorial bubbles ──────────────────────────────
     //
     // Ambient session state (not history-versioned). The puzzle add-on
-    // carries the objective energies and the tutorial-bubble cursor. A
+    // carries the target energies and the tutorial-bubble cursor. A
     // puzzle load installs it; a free-form load clears it. Installing or
-    // clearing the objective emits exactly one
+    // clearing the puzzle emits exactly one
     // [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
     // exactly one [`SessionUpdate::BubbleChanged`].
 
-    /// Install a puzzle objective (a puzzle load). Always emits
+    /// Install a puzzle add-on (a puzzle load). Always emits
     /// [`SessionUpdate::PuzzleChanged`].
     pub fn set_puzzle(&mut self, puzzle: Puzzle) {
         self.puzzle = Some(puzzle);
         self.apply(SessionUpdate::PuzzleChanged);
     }
 
-    /// Drop the puzzle objective and revert to the free-form session (a
+    /// Drop the puzzle add-on and revert to the free-form session (a
     /// free-form structure load). Emits [`SessionUpdate::PuzzleChanged`]
     /// only when there was a puzzle to clear.
     pub fn clear_puzzle(&mut self) {
@@ -620,7 +620,7 @@ impl Session {
 
     /// Begin a session over a freshly-loaded structure: install its display
     /// `title` and `puzzle` add-on in one funnel. `puzzle` is `Some` for a
-    /// campaign/intro puzzle load (carrying its objective + tutorial
+    /// campaign/intro puzzle load (carrying its filters + tutorial
     /// bubbles) and `None` for a free-form structure load. The single
     /// create seam every load path routes through. The `PuzzleChanged`
     /// comes from the inner [`Self::set_puzzle`] / [`Self::clear_puzzle`];
@@ -713,7 +713,7 @@ impl Session {
         // independently resets its mirror to `All` on the assembly
         // replace, and the reset's `HeadMoved` below drives the reframe.
         self.focus = Focus::default();
-        // The puzzle add-on (objective + tutorial bubbles) is ambient
+        // The puzzle add-on (filters + tutorial bubbles) is ambient
         // session state tied to the outgoing structure. Clear it silently
         // here (the load path that follows a reset re-installs it via the
         // `start` create seam, whose `PuzzleChanged` drives the panel); the
@@ -723,12 +723,12 @@ impl Session {
         // `term_weights` is likewise left untouched: the load re-sets it via
         // the App-init seam, so it carries across the topology swap.
         self.puzzle = None;
-        // The met-objective RAW bonus is derived from the outgoing puzzle's
-        // objectives; clear it on the topology swap so a free-form load (or a
-        // puzzle with no objectives) starts at zero. The following puzzle load
-        // re-derives it from its own objectives via the exposed-hydro
+        // The met-filter RAW bonus breakdown is derived from the outgoing
+        // puzzle's filters; clear it on the topology swap so a free-form load
+        // (or a puzzle with no filters) starts empty. The following puzzle
+        // load re-derives it from its own filters via the exposed-hydro
         // coordinator once the scene settles.
-        self.objective_bonus = 0.0;
+        self.filter_bonus.clear();
         // View options + active preset are not reset here: they live on `App`
         // and persist across a topology swap, so a player's display choices
         // carry from one structure to the next. The load path re-applies the

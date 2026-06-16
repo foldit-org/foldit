@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -38,12 +38,14 @@ pub struct PuzzleMeta {
     /// build so the patched terms ship and are optimized against.
     #[serde(default)]
     pub weights: Option<HashMap<String, f32>>,
-    /// Per-puzzle scored objectives (`[[puzzle.objective]]`): each awards a
-    /// RAW score bonus when its condition is met, folded into the headline
-    /// game score before the raw->game map (so a met objective can push the
-    /// score across `completion_score`). Empty when the puzzle declares none.
+    /// Per-puzzle scored filters (`[[puzzle.filter]]`): each evaluates a
+    /// named condition and either awards a RAW score bonus folded into the
+    /// headline game score before the raw->game map (so a met filter can
+    /// push the score across `completion_score`) or, when it names a
+    /// `plugin`, is forwarded to that plugin to score. Empty when the puzzle
+    /// declares none.
     #[serde(default)]
-    pub objective: Vec<Objective>,
+    pub filter: Vec<FilterSpec>,
     /// Ligand entities to load alongside the structure (`[[puzzle.ligand]]`).
     /// Each references a rosetta `.params` file (and optional conformers).
     /// Empty for protein-only puzzles.
@@ -64,19 +66,38 @@ pub struct PuzzleMeta {
     pub extra: HashMap<String, toml::Value>,
 }
 
-/// A single `[[puzzle.objective]]` declaration.
+/// A single `[[puzzle.filter]]` declaration, mirroring the rosetta `Filter`
+/// model: `kind` (TOML `type`) names the filter and `plugin` decides who
+/// scores it.
 ///
-/// Generic over objective
-/// kinds: `kind` (TOML `type`) selects the evaluator, `max` / `bonus` are
-/// its parameters. Only `exposed_count` is evaluated this pass (award
-/// `bonus` when the exposed-hydrophobic count is `< max`); an unknown
-/// `kind` parses but evaluates to no bonus (forward-compatible).
-#[derive(Debug, Clone, Deserialize)]
-pub struct Objective {
+/// Two modes:
+/// - foldit-native (`plugin` absent): the filter is evaluated in-process.
+///   `ExposedCount` is the only native evaluator; it awards `params["bonus"]`
+///   (a RAW delta) when the exposed-hydrophobic count is below
+///   `params["max_exposed_hydrophobics"]`. A missing threshold or bonus is
+///   treated as no-bonus.
+/// - forwarded (`plugin = Some(name)`): the filter is handed to that plugin
+///   to score. Its parameters live in `params`.
+///
+/// Every filter parameter (including any named `max`/`bonus`) lives in `params`
+/// so the same flat key/value set round-trips through serialization and is
+/// forwarded to the bridge without loss. An unknown native `kind` parses but
+/// evaluates to no bonus (forward-compatible).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FilterSpec {
     #[serde(rename = "type")]
     pub kind: String,
-    pub max: Option<u32>,
-    pub bonus: f32,
+    /// Plugin to forward this filter to (e.g. `"rosetta"`). Absent means a
+    /// foldit-native filter scored in-process. Omitted from serialized output
+    /// when absent, so a native block carries no `plugin` line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    /// All filter parameters (e.g. a native filter's threshold/bonus or a
+    /// forwarded filter's ramp widths), in a deterministic key order so
+    /// serialization is stable. Captured by flatten so they round-trip without
+    /// loss.
+    #[serde(flatten)]
+    pub params: BTreeMap<String, toml::Value>,
 }
 
 // -- Sub-structs --
@@ -226,10 +247,10 @@ pub struct PuzzleData {
     /// Optional per-puzzle scorefunction weight patch from `[puzzle.weights]`
     /// (`scoretype_name -> weight`). `None` when the puzzle declares none.
     pub weights: Option<HashMap<String, f32>>,
-    /// Scored objectives from `[[puzzle.objective]]`. Empty when the puzzle
+    /// Scored filters from `[[puzzle.filter]]`. Empty when the puzzle
     /// declares none. Carried to the session `Puzzle` so the score path can
-    /// fold a met objective's RAW bonus into the headline game score.
-    pub objectives: Vec<Objective>,
+    /// fold a met native filter's RAW bonus into the headline game score.
+    pub filters: Vec<FilterSpec>,
     /// Ordered tutorial bubbles from `[[sequence]]`. Empty for puzzles
     /// with no intro. Tier-1 wiring pushes `bubbles[0]` to the GUI on
     /// load; advancement is unimplemented.
@@ -383,7 +404,7 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         start_energy: puzzle.puzzle.start_energy,
         completion_score: puzzle.puzzle.completion_score,
         weights: puzzle.puzzle.weights.take(),
-        objectives: std::mem::take(&mut puzzle.puzzle.objective),
+        filters: std::mem::take(&mut puzzle.puzzle.filter),
         bubbles: std::mem::take(&mut puzzle.sequence),
         constraints,
         design_masks,

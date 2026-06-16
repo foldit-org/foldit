@@ -886,7 +886,7 @@ fn mk_puzzle(bubble_count: usize) -> Puzzle {
         start_energy: 0.0,
         completion_energy: 100.0,
         weight_patch: None,
-        objectives: Vec::new(),
+        filters: Vec::new(),
         bubbles,
         current_bubble,
         constraints: Vec::new(),
@@ -968,7 +968,7 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
         start_energy: 0.0,
         completion_energy: 100.0,
         weight_patch: None,
-        objectives: Vec::new(),
+        filters: Vec::new(),
         bubbles: None,
         current_bubble: None,
         constraints: Vec::new(),
@@ -984,7 +984,7 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
     store.clear_puzzle();
     assert!(
         matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
-        "clear_puzzle drops the objective and emits PuzzleChanged",
+        "clear_puzzle drops the puzzle add-on and emits PuzzleChanged",
     );
     assert!(store.puzzle().is_none());
 
@@ -992,7 +992,7 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
     store.clear_puzzle();
     assert!(
         store.take_updates().is_empty(),
-        "clear_puzzle on an already-cleared objective emits nothing",
+        "clear_puzzle on an already-cleared puzzle emits nothing",
     );
 }
 
@@ -1023,7 +1023,7 @@ fn start_sets_title_and_installs_puzzle() {
 
 #[test]
 fn reset_clears_puzzle_and_leaves_title() {
-    // A topology swap (`reset`) drops the ambient puzzle add-on (objective +
+    // A topology swap (`reset`) drops the ambient puzzle add-on (filters +
     // bubble flow) tied to the outgoing structure. The clear is silent (the
     // load path that follows re-installs via `start`); `reset` already emits
     // `HeadMoved`. `title` is left untouched for the following `start` to
@@ -1060,7 +1060,7 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
             start_energy: 0.0,
             completion_energy: 0.0,
             weight_patch: None,
-            objectives: Vec::new(),
+            filters: Vec::new(),
             bubbles: None,
             current_bubble: None,
             constraints: Vec::new(),

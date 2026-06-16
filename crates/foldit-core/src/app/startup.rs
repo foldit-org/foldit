@@ -469,7 +469,7 @@ impl App {
         // session at normalize and applies them at every scorefunction build,
         // so weight-zero terms (e.g. `envsmooth`) ship and are optimized
         // against. Empty when the session carries no puzzle or no patch.
-        let weight_params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
+        let mut weight_params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
             self.store
                 .puzzle()
                 .and_then(|p| p.weight_patch.as_ref())
@@ -485,6 +485,46 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default();
+
+        // Thread the loaded puzzle's forwarded filters (those naming
+        // `plugin = "rosetta"`) onto the same normalize param map so the bridge
+        // runs them at normalize and emits their per-filter bonuses on the
+        // score report's `bonus_breakdown`. Each selected filter takes a
+        // contiguous index `i` (over the forwarded filters only); the bridge
+        // decodes `filter.<i>.type` for the filter kind and `filter.<i>.<key>`
+        // for each flattened param entry, all String-typed. A non-rosetta
+        // plugin is unsupported here: warn (naming it) and skip rather than
+        // forward to a bridge that cannot score it.
+        if let Some(filters) = self.store.puzzle().map(|p| p.filters.clone()) {
+            let mut i = 0;
+            for spec in &filters {
+                match spec.plugin.as_deref() {
+                    None => {}
+                    Some("rosetta") => {
+                        weight_params.insert(
+                            format!("filter.{i}.type"),
+                            foldit_gui::state::ParamValue::String(spec.kind.clone()),
+                        );
+                        for (key, value) in &spec.params {
+                            weight_params.insert(
+                                format!("filter.{i}.{key}"),
+                                foldit_gui::state::ParamValue::String(
+                                    toml_value_to_plain_string(value),
+                                ),
+                            );
+                        }
+                        i += 1;
+                    }
+                    Some(other) => {
+                        log::warn!(
+                            "[App] puzzle filter '{}' names unknown plugin '{other}'; \
+                             skipping (only 'rosetta' is forwarded)",
+                            spec.kind,
+                        );
+                    }
+                }
+            }
+        }
 
         let mut expected = std::collections::BTreeSet::new();
         for plugin_id in adopted {
@@ -609,5 +649,22 @@ impl App {
         );
         // Republish is stream-driven: the HeadMoved from commit_action
         // rides through the next tick's render projector.
+    }
+}
+
+/// Render a `toml::Value` as the bare string the forwarded-filter param
+/// convention expects: an `Integer(-100)` becomes `"-100"`, a `Float` its
+/// decimal string, and a `String` its bare contents (no surrounding quotes,
+/// unlike `Value::to_string`). Other variants fall back to their `Display`
+/// form. Used to flatten a `FilterSpec.params` entry into a `filter.<i>.<key>`
+/// String param.
+#[cfg(not(target_arch = "wasm32"))]
+fn toml_value_to_plain_string(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(n) => n.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        other => other.to_string(),
     }
 }

@@ -271,27 +271,27 @@ impl App {
     }
 
     /// Refresh the engine's exposed-hydrophobic grease beads and the loaded
-    /// puzzle's met-objective bonus from the plugin's `exposed_hydrophobics`
+    /// puzzle's met-filter bonus from the plugin's `exposed_hydrophobics`
     /// query. Runs after the render projector publishes, on the at-rest
     /// geometry gate (or an exposed-hydrophobic-toggle flip), so the flagged
-    /// residues and the objective count track the committed pose.
+    /// residues and the filter count track the committed pose.
     ///
     /// The query runs when EITHER the exposed-hydrophobic display is ON OR the
-    /// loaded puzzle declares an active `exposed_count` objective (and a
+    /// loaded puzzle declares an active native `ExposedCount` filter (and a
     /// plugin advertises the query,
     /// [`crate::runner_client::RunnerClient::supports_query`]).
     /// Decoupling the query from the viz toggle keeps scoring correct when the
-    /// player hides the beads: the objective bonus is recomputed from the live
+    /// player hides the beads: the filter bonus is recomputed from the live
     /// count regardless of the toggle. The viso bead push stays gated on the
-    /// display toggle ALONE - with the toggle off but the objective active,
+    /// display toggle ALONE - with the toggle off but the filter active,
     /// the query runs for the count but no beads are drawn (an empty set is
     /// pushed, clearing any stale beads).
     ///
     /// Gated three ways at the top: the engine must be present (like every
-    /// engine-touching arm); the display must be ON or an `exposed_count`
-    /// objective active; and a plugin must advertise the query. When none of
-    /// those hold this clears any previously pushed beads, zeroes the
-    /// objective bonus, and stops.
+    /// engine-touching arm); the display must be ON or an `ExposedCount`
+    /// filter active; and a plugin must advertise the query. When none of
+    /// those hold this clears any previously pushed beads, clears the
+    /// filter bonus, and stops.
     ///
     /// Decode is the pure [`crate::viz::exposed_hydrophobics::exposed_from_bytes`]
     /// helper; each decoded residue's proto `entity_id` is mapped to a molex
@@ -310,45 +310,52 @@ impl App {
             return;
         }
         let show = self.view_options.display.show_exposed_hydrophobics();
-        // The objective is active only when the loaded puzzle declares an
-        // `exposed_count` objective; that is what makes the query run even
-        // with the viz toggle off so the score still responds to burying.
-        let objective_active = self
-            .store
-            .puzzle()
-            .is_some_and(|p| p.objectives.iter().any(|o| o.kind == "exposed_count"));
-        // Neither the display nor an objective wants the query: clear any
-        // beads we pushed earlier, zero the bonus, and stop before any query
-        // work, so toggling the option off removes the beads.
-        if !show && !objective_active {
+        // The filter is active only when the loaded puzzle declares a native
+        // `ExposedCount` filter; that is what makes the query run even with
+        // the viz toggle off so the score still responds to burying.
+        let filter_active = self.store.puzzle().is_some_and(|p| {
+            p.filters
+                .iter()
+                .any(|f| f.kind == "ExposedCount" && f.plugin.is_none())
+        });
+        // Neither the display nor a filter wants the query: clear any beads we
+        // pushed earlier, clear the bonus, and stop before any query work, so
+        // toggling the option off removes the beads.
+        if !show && !filter_active {
             if let Some(engine) = self.engine.as_mut() {
                 engine.update_exposed_hydrophobics(Vec::new());
             }
-            self.store.set_objective_bonus(0.0);
+            self.store.set_filter_bonus(Vec::new());
             return;
         }
         // No plugin advertises `exposed_hydrophobics`: clear any set we pushed
-        // earlier, zero the bonus, and stop, so swapping to a detector-less
+        // earlier, clear the bonus, and stop, so swapping to a detector-less
         // structure removes stale beads and drops a stale bonus.
         if !self.runner_client.supports_query("exposed_hydrophobics") {
             if let Some(engine) = self.engine.as_mut() {
                 engine.update_exposed_hydrophobics(Vec::new());
             }
-            self.store.set_objective_bonus(0.0);
+            self.store.set_filter_bonus(Vec::new());
             return;
         }
         let bytes = self.runner_client.request_query_bytes("exposed_hydrophobics");
         let report = crate::viz::exposed_hydrophobics::exposed_from_bytes(&bytes);
-        // Evaluate every active `exposed_count` objective on the loaded puzzle
-        // against the live count and store the met-bonus total. Folded into
-        // the headline game score by the score path before the raw->game map.
-        // No puzzle (free-form) yields no objectives -> zero bonus.
+        // Evaluate every active native `ExposedCount` filter on the loaded
+        // puzzle against the live count and store the met-bonus breakdown.
+        // Folded into the headline game score by the score path before the
+        // raw->game map. No puzzle (free-form) yields no filters -> empty
+        // breakdown. A zero bonus is stored as an empty breakdown too.
         let count = u32::try_from(report.exposed.len()).unwrap_or(u32::MAX);
         let bonus = self.store.puzzle().map_or(0.0, |p| {
-            crate::app::score_apply::exposed_count_bonus(&p.objectives, count)
+            crate::app::score_apply::exposed_count_bonus(&p.filters, count)
         });
-        self.store.set_objective_bonus(bonus);
-        // Beads stay gated on the display toggle ALONE: with the objective
+        if bonus == 0.0 {
+            self.store.set_filter_bonus(Vec::new());
+        } else {
+            self.store
+                .set_filter_bonus(vec![("exposed_count".to_owned(), bonus)]);
+        }
+        // Beads stay gated on the display toggle ALONE: with the filter
         // active but the toggle off, push an empty set so no beads the player
         // didn't ask for are drawn (and any stale set is cleared).
         if !show {

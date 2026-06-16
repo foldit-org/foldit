@@ -400,6 +400,7 @@ mod selection_tests {
                 term_names: Vec::new(),
                 whole_pose_terms: Vec::new(),
                 per_residue_terms: Vec::new(),
+                bonus_breakdown: Vec::new(),
             },
         );
         app.apply_score_reports(empty);
@@ -420,6 +421,7 @@ mod selection_tests {
                     residue_index: 0,
                     terms: vec![1.5],
                 }],
+                bonus_breakdown: Vec::new(),
             },
         );
         app.apply_score_reports(full);
