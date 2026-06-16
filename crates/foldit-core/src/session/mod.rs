@@ -54,6 +54,8 @@ pub use change::SessionUpdateConsumer;
 mod metadata;
 pub use metadata::{EntityMetadata, EntityOrigin};
 mod mutators;
+mod viz;
+pub use viz::VizState;
 
 // ── Errors ─────────────────────────────────────────────────────────────
 
@@ -216,6 +218,17 @@ pub struct Session {
     /// at rest each geometry change. Empty by default; [`Self::reset`] clears
     /// it on a topology swap (a new puzzle re-derives it from its own filters).
     filter_bonus: Vec<(String, f64)>,
+    /// Session-scoped DERIVED viz cache: the plugin-provided rendering
+    /// connections plus the topology id set they were queried for, and the
+    /// three structural-viz overlay payloads (cavities, clashes,
+    /// exposed-hydrophobics) with their dirty flag. Not history-versioned and
+    /// never on the `SessionUpdate` stream (it is regenerated from the
+    /// structure via plugin queries). [`Self::reset`] clears it on a topology
+    /// swap so a new puzzle reusing the same entity ids does not inherit a
+    /// stale held set. The App's overlay refreshes write it; the render
+    /// projector reads the connections per publish and pushes the overlays on
+    /// the drain when the cache is dirty.
+    pub(crate) viz: VizState,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
     /// through [`Self::apply`]. `App` drains it once per tick via
     /// [`Self::take_updates`] and routes the batch to the
@@ -248,6 +261,7 @@ impl Session {
             term_weights: std::collections::HashMap::new(),
             term_names: Vec::new(),
             filter_bonus: Vec::new(),
+            viz: VizState::default(),
             pending_updates: Vec::new(),
         }
     }
@@ -357,6 +371,12 @@ impl Session {
     /// (committed first, then preview).
     pub fn ids(&self) -> impl Iterator<Item = EntityId> + '_ {
         self.live_ids()
+    }
+
+    /// Resolve a proto `entity_id` (`u64`) to a live molex `EntityId` against
+    /// the current session. Returns `None` when no live entity matches.
+    pub(crate) fn resolve_entity(&self, entity_id: u64) -> Option<EntityId> {
+        self.ids().find(|id| u64::from(id.raw()) == entity_id)
     }
 
     /// Number of live (committed ∪ preview) entities.

@@ -32,12 +32,10 @@ mod dispatch;
 pub(crate) mod input;
 mod load;
 #[cfg(not(target_arch = "wasm32"))]
-mod score_apply;
+pub(crate) mod score_apply;
 mod startup;
 #[cfg(test)]
 mod tests;
-#[cfg(not(target_arch = "wasm32"))]
-mod viz_refresh;
 
 use self::input::update_all_visualizations;
 #[cfg(not(target_arch = "wasm32"))]
@@ -92,11 +90,6 @@ pub struct App {
     pub(in crate::app) creates_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) held_connections:
-        Option<std::collections::HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) connections_topology_ids: std::collections::BTreeSet<molex::EntityId>,
 }
 
 impl App {
@@ -138,10 +131,6 @@ impl App {
             creates_previews: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_pull_origin: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            held_connections: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            connections_topology_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -248,28 +237,58 @@ impl App {
         // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();
 
-        // `render_changes` counts only the scene-mutating updates: an
-        // assembly republish keys off of these
-        let render_changes = changes
-            .iter()
-            .filter(|c| {
-                !matches!(
-                    c,
-                    SessionUpdate::ScoresChanged
-                        | SessionUpdate::SelectionChanged
-                        | SessionUpdate::FocusChanged
-                        | SessionUpdate::BubbleChanged
-                        | SessionUpdate::PuzzleChanged
-                        | SessionUpdate::ViewOptionsChanged
-                        | SessionUpdate::EntityAppearanceChanged
-                )
-            })
-            .count();
+        // `has_geometry` is true when this batch carries a scene-mutating
+        // update: an assembly republish keys off of it.
+        let has_geometry = changes.iter().any(SessionUpdate::is_geometry);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
-                self.refresh_connections();
+            if self.engine.is_some()
+                && self.startup_settled()
+                && has_geometry
+                && !self.store.has_pending()
+            {
+                crate::viz::refresh::refresh_connections(&mut self.runner_client, &mut self.store);
+            }
+        }
+
+        // Refresh the structural-viz overlays into the viz cache: external
+        // cavities (voids), steric-clash arcs, and exposed-hydrophobic grease
+        // beads. All three go stale on a geometry change, so they run on the
+        // same at-rest geometry gate as the rescore below; each also refreshes
+        // when a view toggle flipped (a ViewOptionsChanged carries it) so
+        // toggling on requests the overlay and toggling off clears it. Each
+        // call self-gates on the engine being present, its display toggle, and
+        // a plugin advertising its query, so each is an inert no-op until the
+        // plugin implements that query. Refresh order is voids, clashes,
+        // exposed-hydrophobics. Each refresh stores into the viz cache and
+        // marks it dirty; the render projector pushes the cache to the engine
+        // on the consume drain below. This runs BEFORE the drain so the same
+        // tick that recomputes the overlays also pushes them.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let view_toggled = changes
+                .iter()
+                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
+            if self.engine.is_some()
+                && ((self.startup_settled() && has_geometry && !self.store.has_pending())
+                    || view_toggled)
+            {
+                crate::viz::refresh::refresh_external_cavities(
+                    &mut self.runner_client,
+                    &mut self.store,
+                    &self.view_options,
+                );
+                crate::viz::refresh::refresh_clashes(
+                    &mut self.runner_client,
+                    &mut self.store,
+                    &self.view_options,
+                );
+                crate::viz::refresh::refresh_exposed_hydrophobics(
+                    &mut self.runner_client,
+                    &mut self.store,
+                    &self.view_options,
+                );
             }
         }
 
@@ -282,6 +301,15 @@ impl App {
             // RenderProjector consumes changes and engine receives view option updates
             if let Some(engine) = self.engine.as_mut() {
                 self.render_projector.consume(&changes, &self.store, engine);
+                // Push the structural-viz overlays from the viz cache in the
+                // same engine-borrow stage as the consume drain, gated on the
+                // cache being dirty (set by this tick's overlay refresh above).
+                // The projector is the single pusher; it reports back so we can
+                // clear the flag it cannot clear through its shared `&Session`.
+                #[cfg(not(target_arch = "wasm32"))]
+                if RenderProjector::push_overlays(&self.store, engine) {
+                    self.store.viz.viz_dirty = false;
+                }
                 if changes
                     .iter()
                     .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
@@ -309,33 +337,8 @@ impl App {
         //    outstanding query per provider is the most in flight.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if self.startup_settled() && render_changes > 0 && !self.store.has_pending() {
+            if self.startup_settled() && has_geometry && !self.store.has_pending() {
                 self.request_scores();
-            }
-        }
-
-        // 5b. Refresh the post-publish structural-viz overlays: external
-        //     cavities (voids), steric-clash arcs, and exposed-hydrophobic
-        //     grease beads. All three go stale on a geometry change, so they
-        //     run on the same at-rest geometry gate as the rescore above;
-        //     each also refreshes when a view toggle flipped (a
-        //     ViewOptionsChanged carries it) so toggling on requests the
-        //     overlay and toggling off clears it. Each call self-gates on the
-        //     engine being present, its display toggle, and a plugin
-        //     advertising its query, so each is an inert no-op until the
-        //     plugin implements that query. Call order is voids, clashes,
-        //     exposed-hydrophobics.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let view_toggled = changes
-                .iter()
-                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
-            if (self.startup_settled() && render_changes > 0 && !self.store.has_pending())
-                || view_toggled
-            {
-                self.refresh_external_cavities();
-                self.refresh_clashes();
-                self.refresh_exposed_hydrophobics();
             }
         }
 

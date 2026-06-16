@@ -25,10 +25,7 @@ const fn toml_number(value: &toml::Value) -> Option<f64> {
 /// nothing (forward-compatible: an unknown filter type parses but is inert). The
 /// result is a RAW delta the score path folds in before the raw->game map.
 #[must_use]
-pub(in crate::app) fn exposed_count_bonus(
-    filters: &[crate::puzzle::FilterSpec],
-    count: u32,
-) -> f64 {
+pub fn exposed_count_bonus(filters: &[crate::puzzle::FilterSpec], count: u32) -> f64 {
     filters
         .iter()
         .filter(|f| f.kind == "ExposedCount" && f.plugin.is_none())

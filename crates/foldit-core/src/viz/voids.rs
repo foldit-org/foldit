@@ -40,6 +40,15 @@ impl VoidFieldData {
     }
 }
 
+/// The default field is the cleared form, so a defaulted viz cache reads as
+/// "no external void set".
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for VoidFieldData {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// Decode opaque `voids`-query bytes into a [`VoidFieldData`] the viso
 /// engine meshes directly.
 ///

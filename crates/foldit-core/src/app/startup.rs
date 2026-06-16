@@ -273,8 +273,10 @@ impl App {
         // populate the held set BEFORE the rebake below stamps the assembly,
         // so the first display already carries the plugin's connections and
         // the rebake never runs molex's geometric fallback under a provider.
-        // Self-gates on the engine, which is present at this seam.
-        self.refresh_connections();
+        // Gated on the engine, which is present at this seam.
+        if self.engine.is_some() {
+            crate::viz::refresh::refresh_connections(&mut self.runner_client, &mut self.store);
+        }
         if let Some(engine) = self.engine.as_mut() {
             // Camera: a puzzle load supplies its saved eye/up (anchored on the
             // settled centroid); every other path frames on the focused
@@ -313,22 +315,40 @@ impl App {
             }
         }
         // Fire the initial structural-viz queries once. The at-rest clash /
-        // void refresh in `tick` gates on `startup_settled() && render_changes
-        // > 0`, but the geometry changes happen DURING bring-up (before the
+        // void refresh in `tick` gates on `startup_settled()` and a
+        // geometry change in the batch, but the geometry changes happen
+        // DURING bring-up (before the
         // machine settles) and the settled session is at rest, so that gate
         // never fires for the first display. Kick them here so clashes,
         // voids, and exposed-hydrophobic beads show without waiting for the
-        // first user edit. Each self-gates
-        // on the engine, its display toggle, and a plugin advertising the
-        // query, so this is an inert no-op when any is absent.
-        self.refresh_clashes();
-        self.refresh_external_cavities();
-        self.refresh_exposed_hydrophobics();
+        // first user edit. Each gates
+        // on its display toggle and a plugin advertising the
+        // query, so this is an inert no-op when any is absent. The caller
+        // gates on the engine, which is present at this seam.
+        if self.engine.is_some() {
+            crate::viz::refresh::refresh_clashes(
+                &mut self.runner_client,
+                &mut self.store,
+                &self.view_options,
+            );
+            crate::viz::refresh::refresh_external_cavities(
+                &mut self.runner_client,
+                &mut self.store,
+                &self.view_options,
+            );
+            crate::viz::refresh::refresh_exposed_hydrophobics(
+                &mut self.runner_client,
+                &mut self.store,
+                &self.view_options,
+            );
+        }
         // The design-gating overlay is static per puzzle (the mask is set at
         // load), so a single load-time push suffices: viso re-derives the GPU
         // bitset from the per-entity set on every mesh rebuild, keeping the
         // overlay pinned across geometry changes without a per-tick re-push.
-        self.refresh_design_gating();
+        if let Some(engine) = self.engine.as_mut() {
+            crate::viz::refresh::refresh_design_gating(&self.store, engine);
+        }
     }
 
     /// Warms complete: parse + publish the bootstrap structure

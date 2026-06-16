@@ -43,15 +43,6 @@ pub struct RenderProjector {
     /// (a `clear_entity_appearance` on an absent id is a harmless no-op, but
     /// without this we would never issue it).
     last_pushed_appearance: BTreeSet<molex::entity::molecule::id::EntityId>,
-    /// Rendering connections (hydrogen bonds + disulfides) to stamp onto the
-    /// published assembly, chosen by `App` per publish. `Some(map)` means the
-    /// plugin is the live connections provider and this held, atom-index map
-    /// is stamped verbatim (no molex geometry runs); `None` means no plugin
-    /// provides them, so molex's geometric fallback is detected per publish.
-    /// `App` writes this before each publish path
-    /// ([`Self::set_publish_connections`]); the default is `None` (fallback).
-    publish_connections:
-        Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
     /// The last SS-bearing published assembly (the one a `recompute_ss` ran on),
     /// cached so a streaming tentative frame can carry its secondary structure
     /// forward onto the new coords without re-running DSSP. `None` until the
@@ -67,21 +58,8 @@ impl RenderProjector {
             publish_seq: 0,
             last_published_ids: BTreeSet::new(),
             last_pushed_appearance: BTreeSet::new(),
-            publish_connections: None,
             last_ss: None,
         }
-    }
-
-    /// Choose the rendering connections for the next publish. `Some(map)`
-    /// stamps the plugin-provided held set (hydrogen bonds + disulfides)
-    /// verbatim and skips molex's geometric fallback; `None` falls back to
-    /// molex's per-publish geometry. `App` calls this before every publish
-    /// path so the choice is current for that tick's republish.
-    pub(crate) fn set_publish_connections(
-        &mut self,
-        connections: Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
-    ) {
-        self.publish_connections = connections;
     }
 
     /// Re-derive the displayed per-residue colors from the session-owned
@@ -174,7 +152,7 @@ impl RenderProjector {
     /// does not read a spurious topology change.
     pub(crate) fn rebake_geometry(&mut self, doc: &Session, engine: &mut viso::VisoEngine) {
         let mut asm = doc.head_assembly();
-        self.populate_connections(&mut asm);
+        Self::populate_connections(doc, &mut asm);
         // Session-entry full rebuild bakes the cartoon, so it needs SS (molex
         // construction leaves `ss_types` empty; this is a load-time publish).
         asm.recompute_ss();
@@ -197,17 +175,50 @@ impl RenderProjector {
     /// endpoints to rendered atom positions reactively. Both publish paths
     /// call this so they cannot drift apart on what gets stamped.
     ///
-    /// Provider-aware on the choice `App` made via
-    /// [`Self::set_publish_connections`]: when a plugin provides connections
-    /// the held atom-index map is stamped verbatim and molex's geometric
-    /// fallback is NOT run; otherwise molex detects them geometrically per
-    /// publish.
-    fn populate_connections(&self, asm: &mut molex::Assembly) {
-        let connections = self
-            .publish_connections
+    /// Provider-aware on the session's held set
+    /// (`crate::viz::refresh::refresh_connections` writes it earlier in the
+    /// same tick): when a
+    /// plugin provides connections the held atom-index map is stamped
+    /// verbatim and molex's geometric fallback is NOT run; otherwise molex
+    /// detects them geometrically per publish.
+    fn populate_connections(doc: &Session, asm: &mut molex::Assembly) {
+        let connections = doc
+            .viz
+            .held_connections
             .as_ref()
             .map_or_else(|| asm.detect_fallback_connections(), Clone::clone);
         asm.set_connections(connections);
+    }
+
+    /// Push the three structural-viz overlays (external cavities/voids,
+    /// steric-clash arcs, exposed-hydrophobic grease beads) from the cached
+    /// viz state to the engine, but only when the cache is dirty. The App's
+    /// overlay refresh recomputes the payloads at rest each geometry change
+    /// (and on a view toggle) and marks the cache dirty; this is the single
+    /// pusher, fired on the drain. Returns `true` when it pushed so the
+    /// caller can clear the dirty flag (the projector holds only a shared
+    /// `&Session`, so it cannot clear the flag itself).
+    ///
+    /// Gating on the dirty flag is what makes the overlays freeze during a
+    /// wiggle: while motion is in flight the refresh does not run, the flag
+    /// stays clear, and this skips the push instead of re-pushing the stale
+    /// payloads every drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn push_overlays(doc: &Session, engine: &mut viso::VisoEngine) -> bool {
+        if !doc.viz.viz_dirty {
+            return false;
+        }
+        let field = &doc.viz.void_field;
+        engine.set_external_void_field(
+            field.dims,
+            field.origin,
+            field.spacing,
+            field.phi.clone(),
+            field.threshold,
+        );
+        engine.update_clashes(doc.viz.clashes.clone());
+        engine.update_exposed_hydrophobics(doc.viz.exposed_hydrophobics.clone());
+        true
     }
 }
 
@@ -284,16 +295,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         // tick), one, or (for a steady-state rescore reply) only the score.
         // Self-filter so a score-only batch never republishes geometry and a
         // geometry-only batch never re-pushes colors.
-        let has_geometry = changes.iter().any(|c| {
-            matches!(
-                c,
-                SessionUpdate::Edit { .. }
-                    | SessionUpdate::HeadMoved
-                    | SessionUpdate::PreviewAdded
-                    | SessionUpdate::PreviewUpdated
-                    | SessionUpdate::PreviewDiscarded
-            )
-        });
+        let has_geometry = changes.iter().any(SessionUpdate::is_geometry);
         let has_scores = changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::ScoresChanged));
@@ -347,7 +349,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
                 head
             };
 
-            self.populate_connections(&mut asm);
+            Self::populate_connections(doc, &mut asm);
             self.publish_seq = self.publish_seq.saturating_add(1);
             asm.set_generation(self.publish_seq);
             let asm = std::sync::Arc::new(asm);

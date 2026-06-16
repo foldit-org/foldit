@@ -85,6 +85,22 @@ pub enum SessionUpdate {
     EntityAppearanceChanged,
 }
 
+impl SessionUpdate {
+    /// A geometry/coordinate change that makes the rendered scene, scores,
+    /// and viz overlays stale; the signal both projectors and the at-rest
+    /// refreshes key off.
+    pub const fn is_geometry(&self) -> bool {
+        matches!(
+            self,
+            Self::Edit { .. }
+                | Self::HeadMoved
+                | Self::PreviewAdded
+                | Self::PreviewUpdated
+                | Self::PreviewDiscarded
+        )
+    }
+}
+
 /// The contract every head-assembly-change consumer implements.
 ///
 /// A consumer reacts to the drained [`SessionUpdate`] batch by

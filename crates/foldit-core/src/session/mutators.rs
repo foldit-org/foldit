@@ -729,6 +729,12 @@ impl Session {
         // load re-derives it from its own filters via the exposed-hydro
         // coordinator once the scene settles.
         self.filter_bonus.clear();
+        // The derived viz cache (plugin-provided connections + the topology
+        // id set they were queried for) is keyed by entity ids from the
+        // outgoing assembly; the incoming one may reuse those ids, so a stale
+        // held set must be dropped on the topology swap. The App's
+        // `refresh_connections` re-derives it from the new structure.
+        self.viz = crate::session::VizState::default();
         // View options + active preset are not reset here: they live on `App`
         // and persist across a topology swap, so a player's display choices
         // carry from one structure to the next. The load path re-applies the
