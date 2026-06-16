@@ -518,20 +518,11 @@ fn assemble() -> Result<()> {
     // 3. Native plugins: copy the Rosetta plugin into <staging>/plugins/rosetta.
     copy_rosetta_plugin()?;
 
-    // 4. Python plugins: delegate to the pixi-side bundler, which copies each
-    //    plugin's conda env + materializes its editable installs into
-    //    <staging>/plugins/<id>/. It runs in the default env (needs only a
-    //    Python interpreter; it reads each .pixi/envs/<env> from disk).
-    println!("Assembling Python plugins (foundry, esmfold, simplefold)...");
-    let staging_abs = std::fs::canonicalize(STAGING)?;
-    let status = Command::new("pixi")
-        .args(["run", "bundle", "--output"])
-        .arg(&staging_abs)
-        .current_dir("crates/foldit-runner")
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Failed to assemble Python plugins");
-    }
+    // 4. Python plugins: TEMPORARILY DISABLED for a Rosetta-only demo build.
+    //    To restore foundry/esmfold/simplefold, re-add the pixi bundler step in
+    //    place of this skip: `pixi run bundle --output <abs STAGING>` run in
+    //    crates/foldit-runner (canonicalize STAGING first; bail on non-zero exit).
+    println!("Skipping Python plugins (Rosetta-only demo build).");
 
     // 5. Read-only data assets, mirrored under <staging>/assets/ so the runtime
     //    resolvers find them. Each is reached either next to the exe (Windows /
