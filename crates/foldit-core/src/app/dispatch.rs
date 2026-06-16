@@ -3,11 +3,11 @@ use molex::entity::molecule::id::EntityId;
 
 use crate::app::App;
 use crate::gui_projector::project_history;
-use crate::session::SessionError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome};
+use crate::session::SessionError;
 #[cfg(not(target_arch = "wasm32"))]
 use viso::Focus;
 
@@ -25,8 +25,6 @@ enum HistoryOutcome {
 }
 
 impl App {
-    // ── Backend update processing ──
-
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -43,7 +41,12 @@ impl App {
             // so no explicit raise is needed here.
             for event in events {
                 match event {
-                    OpEvent::Update { token, assembly, score, creates_entities } => {
+                    OpEvent::Update {
+                        token,
+                        assembly,
+                        score,
+                        creates_entities,
+                    } => {
                         if creates_entities {
                             // Entity-creating op: stream the diffusion frame
                             // into a live preview entity (created on the first
@@ -51,17 +54,15 @@ impl App {
                             // animates the binder forming. Promoted at commit.
                             self.stream_preview_frame(token, &assembly);
                         } else {
-                            let applied = self
-                                .store
-                                .apply_streaming_assembly(&assembly, None, token);
+                            let applied =
+                                self.store.apply_streaming_assembly(&assembly, None, token);
                             // The frame carries the warm score of its own
                             // geometry; stamp the open edit directly from it so
                             // the displayed score stays coupled to the frame
                             // instead of trailing it.
                             if applied {
                                 if let Some(report) = score {
-                                    let (raw, game, breakdown) =
-                                        self.prepare_score_stamp(report);
+                                    let (raw, game, breakdown) = self.prepare_score_stamp(report);
                                     self.store.set_edit_scores(
                                         token,
                                         Some(raw),
@@ -72,7 +73,12 @@ impl App {
                             }
                         }
                     }
-                    OpEvent::Commit { token, assembly, score, creates_entities } => {
+                    OpEvent::Commit {
+                        token,
+                        assembly,
+                        score,
+                        creates_entities,
+                    } => {
                         if creates_entities {
                             // Entity-creating op (e.g. RFdiffusion3 design):
                             // no edit was opened over the focused target. If a
@@ -126,9 +132,7 @@ impl App {
                         if let Some(token) = token {
                             // Discard any in-progress creates-entities preview
                             // this stream was animating.
-                            if let Some((preview_id, _)) =
-                                self.creates_previews.remove(&token)
-                            {
+                            if let Some((preview_id, _)) = self.creates_previews.remove(&token) {
                                 let _ = self.store.remove_preview(preview_id);
                             }
                             if self.store.is_pending(token) {
@@ -143,6 +147,7 @@ impl App {
             }
         }
     }
+
     /// Dispatch a plugin op by op-id. Resolves the op against the
     /// orchestrator's `PluginRegistry` to pick Invoke vs `Start_stream`;
     /// builds a `DispatchContext` from the GUI-provided focus and the
@@ -205,9 +210,7 @@ impl App {
             let store = &self.store;
             let dispatch_outcome =
                 self.runner_client
-                    .dispatch_op(intent, plugin_id.clone(), |id| {
-                        store.entity_type(id)
-                    });
+                    .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
 
             // The dispatch allocated the id the edit and the stream table
             // both key on, and resolved the entity set the op operates on.
@@ -225,8 +228,9 @@ impl App {
                 Err(_) => None,
             };
             let dispatch_id = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { request_id, .. } | OpOutcome::Invoke { request_id, ..
-}) => Some(*request_id),
+                Ok(OpOutcome::Stream { request_id, .. } | OpOutcome::Invoke { request_id, .. }) => {
+                    Some(*request_id)
+                }
                 Err(_) => None,
             };
 
@@ -234,8 +238,7 @@ impl App {
             // terminal assembly is adopted as new entities at commit. Skipping
             // `begin_action` leaves the focused target untouched (streaming
             // frames then no-op for want of an open edit under their token).
-            let creates_entities =
-                self.runner_client.op_creates_entities(&op.op_id);
+            let creates_entities = self.runner_client.op_creates_entities(&op.op_id);
 
             // Open the edit under the dispatch id over the resolved lane set.
             // Skipped on dispatch failure (any open tentative belongs to a
@@ -250,7 +253,10 @@ impl App {
                     op_id: op.op_id.clone(),
                     display: display.clone(),
                 };
-                match self.store.begin_action(lanes, kind, display.clone(), request_id) {
+                match self
+                    .store
+                    .begin_action(lanes, kind, display.clone(), request_id)
+                {
                     Ok(()) => Some(request_id),
                     Err(e) => {
                         log::trace!(
@@ -316,9 +322,7 @@ impl App {
         let has_lane = |id: &EntityId| self.store.history().lane(*id).is_some();
         match scope {
             EditScope::AllEntities => self.store.ids().filter(has_lane).collect(),
-            EditScope::Entities(set) => {
-                set.iter().copied().filter(has_lane).collect()
-            }
+            EditScope::Entities(set) => set.iter().copied().filter(has_lane).collect(),
         }
     }
 
@@ -384,11 +388,7 @@ impl App {
     /// rebuild. Both updates land in one drain, so the projector sees a
     /// single net id-set change -- no flicker.
     #[cfg(not(target_arch = "wasm32"))]
-    fn commit_created_entities(
-        &mut self,
-        token: Option<u64>,
-        assembly: &molex::Assembly,
-    ) {
+    fn commit_created_entities(&mut self, token: Option<u64>, assembly: &molex::Assembly) {
         if let Some(t) = token {
             if let Some((preview_id, _)) = self.creates_previews.remove(&t) {
                 let _ = self.store.remove_preview(preview_id);
@@ -510,18 +510,25 @@ impl App {
                 .store
                 .jump_checkpoint(id.into_inner())
                 .map(|_| HistoryOutcome::HeadMoved),
-            HistoryCommand::Undo => self.store.undo().map(|opt| if opt.is_some() { HistoryOutcome::HeadMoved } else {
-                log::info!("Undo: already at root");
-                HistoryOutcome::Noop
+            HistoryCommand::Undo => self.store.undo().map(|opt| {
+                if opt.is_some() {
+                    HistoryOutcome::HeadMoved
+                } else {
+                    log::info!("Undo: already at root");
+                    HistoryOutcome::Noop
+                }
             }),
-            HistoryCommand::Redo { branch } => {
-                self.store
-                    .redo(branch.map(foldit_gui::WireId::into_inner))
-                    .map(|opt| if opt.is_some() { HistoryOutcome::HeadMoved } else {
+            HistoryCommand::Redo { branch } => self
+                .store
+                .redo(branch.map(foldit_gui::WireId::into_inner))
+                .map(|opt| {
+                    if opt.is_some() {
+                        HistoryOutcome::HeadMoved
+                    } else {
                         log::info!("Redo: nowhere forward to go");
                         HistoryOutcome::Noop
-                    })
-            }
+                    }
+                }),
             HistoryCommand::LaneUndo { entity, target } => self
                 .store
                 .lane_undo(entity, target.into_inner())

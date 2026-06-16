@@ -2,80 +2,65 @@ use crate::app::App;
 
 impl App {
     /// Resolve a proto `entity_id` (`u64`) to a live molex `EntityId` against
-    /// the current session. Returns `None` when the id matches no current
-    /// entity (a panel can race a structure swap, leaving a stale id). The
-    /// same `id.raw()` lookup the dispatch and pull-drag paths use, widened to
-    /// the proto's `u64`.
+    /// the current session.
     #[cfg(not(target_arch = "wasm32"))]
     fn resolve_entity(&self, entity_id: u64) -> Option<molex::EntityId> {
         self.store.ids().find(|id| u64::from(id.raw()) == entity_id)
     }
 
-    /// Refresh the held rendering connections (hydrogen bonds + disulfides)
+    /// Refresh the held rendering connections (hbonds, disulfides, clashes)
     /// from the plugin's `connections` query and choose the per-publish
-    /// connection provider. Runs before the render projector publishes, on the
-    /// at-rest geometry gate, so the connections track the committed pose.
-    ///
-    /// Two outcomes, keyed wholesale on whether a plugin advertises the query
-    /// ([`crate::runner_client::RunnerClient::supports_query`]):
-    ///
-    /// - A plugin advertises `connections`: it is the live provider. Re-query
-    ///   the report, decode it against the head assembly into stable
-    ///   atom-index links ([`crate::viz::connections::connections_from_report`]), and store
-    ///   them as the held set. The projector is told to stamp this held set
-    ///   verbatim on every publish - molex's geometric fallback is NOT run.
-    /// - No plugin advertises it: drop any held set and tell the projector to
-    ///   fall back to molex geometry per publish (today's viewer behavior).
-    ///
-    /// The held set is decoded once against the current head; its `AtomId`
-    /// indices are stable across coord-only changes, so it survives
-    /// re-application across publishes. A topology change (new puzzle or an
-    /// entity joining/leaving) drops the held set before re-querying, so stale
-    /// ids from a prior load are never re-applied (entity ids can be reused
-    /// across loads). The map carries hydrogen bonds and disulfides only;
-    /// clash has its own path and never enters here.
-    ///
-    /// Self-gates on the engine being present (the projector publishes into
-    /// it). Until a plugin implements `connections` this leaves the projector
-    /// on the molex fallback, matching the prior behavior.
+    /// connection provider.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn refresh_connections(&mut self) {
         if self.engine.is_none() {
             return;
         }
-        // No plugin provides connections: drop any held set and put the
-        // projector on the molex geometric fallback (the viewer-only path).
+
+        // Connections are loaded into Foldit via a plugin query,
+        // namely from Rosetta- could eventually be done directly in molex
+        //
+        // Falls back to naive molex connection implementations in the case
+        // that the Rosetta plugin is not present
         if !self.runner_client.supports_query("connections") {
             self.held_connections = None;
             self.connections_topology_ids.clear();
             self.render_projector.set_publish_connections(None);
             return;
         }
-        // Plugin provider. Drop the held set on a topology change so stale ids
-        // from a prior load are never re-applied (ids can be reused).
-        let head_ids: std::collections::BTreeSet<molex::EntityId> =
-            self.store.head_assembly().entities().iter().map(|e| e.id()).collect();
+
+        // Collect entity ids from the current session's assembly
+        let head_ids: std::collections::BTreeSet<molex::EntityId> = self
+            .store
+            .head_assembly()
+            .entities()
+            .iter()
+            .map(|e| e.id())
+            .collect();
+
         if head_ids != self.connections_topology_ids {
             self.held_connections = None;
             self.connections_topology_ids = head_ids;
         }
-        // Re-query and decode against the current head. The query path
-        // swallows errors at `trace` level, so an at-rest miss never spams the
-        // log; empty / errored bytes decode to an empty map (no connections).
+
+        // Query Rosetta plugin for all connection data
         let bytes = self.runner_client.request_query_bytes("connections");
+
         let held = if bytes.is_empty() {
             std::collections::HashMap::new()
         } else {
             match <foldit_runner::proto::plugin::ConnectionReport as prost::Message>::decode(
                 bytes.as_slice(),
             ) {
-                Ok(report) => crate::viz::connections::connections_from_report(&report, &self.store.head_assembly()),
+                Ok(report) => crate::viz::connections::connections_from_report(
+                    &report,
+                    &self.store.head_assembly(),
+                ),
                 Err(_) => std::collections::HashMap::new(),
             }
         };
         self.held_connections = Some(held.clone());
-        // Stamp the held set verbatim on every publish; molex geometry is not
-        // run while the plugin is the provider.
+
         self.render_projector.set_publish_connections(Some(held));
     }
 
@@ -83,28 +68,12 @@ impl App {
     /// plugin's `voids` query. Runs after the render projector publishes, on
     /// the at-rest geometry gate (or a cavity-toggle flip), so the voids track
     /// the committed pose.
-    ///
-    /// Gated three ways and inert until all hold: the engine must be present
-    /// (like every engine-touching arm), the cavity display must be ON (the
-    /// external field is additive to the engine's built-in `show_cavities`
-    /// path, so there is nothing to show when cavities are hidden), and a
-    /// plugin must advertise the `voids` query
-    /// ([`crate::runner_client::RunnerClient::supports_query`]). When the
-    /// display is off, this clears any previously pushed external field so
-    /// toggling cavities off removes them.
-    ///
-    /// Decode is the pure [`crate::viz::voids::void_field_from_bytes`] helper; the
-    /// push is [`viso::VisoEngine::set_external_void_field`], which meshes
-    /// the field's isosurface directly (the host does not voxelize on this
-    /// path). An empty / errored / unsupported query yields a cleared field,
-    /// which clears the set. The query path swallows errors at `trace` level,
-    /// so an at-rest miss never spams the log; until the plugin implements
-    /// `voids` the whole path is an inert no-op.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn refresh_external_cavities(&mut self) {
         if self.engine.is_none() {
             return;
         }
+
         // Cavities hidden: clear any external field we pushed earlier and stop.
         if !self.view_options.display.show_cavities() {
             if let Some(engine) = self.engine.as_mut() {
@@ -112,13 +81,14 @@ impl App {
             }
             return;
         }
-        // Cavities shown but no plugin advertises `voids`: inert no-op. Do
-        // not clear here; an unrelated plugin lacking the query must not wipe
-        // a field another path established.
+
         if !self.runner_client.supports_query("voids") {
             return;
         }
+
+        // Run the voids query to the rosetta plugin
         let bytes = self.runner_client.request_query_bytes("voids");
+
         let field = crate::viz::voids::void_field_from_bytes(&bytes);
         if let Some(engine) = self.engine.as_mut() {
             engine.set_external_void_field(
@@ -135,25 +105,6 @@ impl App {
     /// query. Runs after the render projector publishes, on the at-rest
     /// geometry gate (or a clash-toggle flip), so the clashes track the
     /// committed pose.
-    ///
-    /// Gated three ways: the engine must be present (like every engine-touching
-    /// arm), the clash display must be ON, and a plugin must advertise the
-    /// `clashes` query
-    /// ([`crate::runner_client::RunnerClient::supports_query`]). When the
-    /// display is off this clears any previously pushed arcs and stops; when no
-    /// plugin advertises the query, this clears any previously pushed clash set
-    /// so a structure swap to a clash-less plugin removes stale arcs.
-    ///
-    /// Decode is the pure [`crate::viz::clashes::clashes_from_bytes`] helper; each
-    /// decoded endpoint's proto `entity_id` is mapped to a molex `EntityId`
-    /// against the live session, and a clash whose endpoint does not resolve to
-    /// a current entity is dropped. The push is
-    /// [`viso::VisoEngine::update_clashes`], which resolves the per-entity refs
-    /// itself and renders arcs (the host computes no flat residue index). An
-    /// empty / errored / unsupported query yields an empty set, which clears
-    /// the arcs. The query path swallows errors at `trace` level, so an
-    /// at-rest miss never spams the log; until the plugin implements `clashes`
-    /// the whole path is an inert no-op.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn refresh_clashes(&mut self) {
         if self.engine.is_none() {
@@ -182,10 +133,8 @@ impl App {
             // Map both endpoints; drop the whole clash if either endpoint's
             // entity_id does not resolve to a current entity (a panel can race
             // a structure swap, leaving a stale id).
-            let (Some(a), Some(b)) = (
-                self.clash_endpoint(&clash.a),
-                self.clash_endpoint(&clash.b),
-            ) else {
+            let (Some(a), Some(b)) = (self.clash_endpoint(&clash.a), self.clash_endpoint(&clash.b))
+            else {
                 continue;
             };
             infos.push(viso::ClashInfo {
@@ -218,23 +167,6 @@ impl App {
     /// loaded puzzle's design gating. The overlay desaturates locked
     /// residues toward white so the player can see which parts of the
     /// structure may not be mutated.
-    ///
-    /// Static per puzzle (the design mask is set at load, not per tick), so
-    /// this is cheap to re-run at the same seams as the other overlays. It
-    /// is driven off the puzzle's design gating, not a plugin query: there
-    /// is no view toggle and no plugin involvement.
-    ///
-    /// Gated on the engine being present and the loaded puzzle declaring
-    /// design gating ([`crate::session::Session::design_gating_active`]).
-    /// When gating is inactive (a free-edit / fold puzzle or free-form
-    /// session) this pushes an empty set, clearing any overlay a prior
-    /// design puzzle established so a structure swap renders normally.
-    ///
-    /// For each gated entity, the non-designable set is every residue in the
-    /// entity's full residue range (sourced from the head assembly) where
-    /// [`crate::session::Session::is_designable`] is false. viso owns the
-    /// flat residue order and re-derives the GPU bitset itself, so the host
-    /// passes only the per-entity residue indices.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn refresh_design_gating(&mut self) {
         use std::collections::{BTreeMap, BTreeSet};
@@ -242,19 +174,18 @@ impl App {
         if self.engine.is_none() {
             return;
         }
-        // No design gating: clear any overlay a prior design puzzle pushed
-        // and stop, so a swap to a non-design structure renders normally.
+
         if !self.store.design_gating_active() {
             if let Some(engine) = self.engine.as_mut() {
                 engine.set_non_designable(&BTreeMap::new());
             }
             return;
         }
+
         // Build the non-designable set per entity from the head assembly's
         // residue counts: every residue the session reports as not designable.
         let head = self.store.head_assembly();
-        let mut non_designable: BTreeMap<molex::EntityId, BTreeSet<u32>> =
-            BTreeMap::new();
+        let mut non_designable: BTreeMap<molex::EntityId, BTreeSet<u32>> = BTreeMap::new();
         for entity in head.entities() {
             let eid = entity.id();
             let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
@@ -265,6 +196,7 @@ impl App {
                 non_designable.insert(eid, locked);
             }
         }
+
         if let Some(engine) = self.engine.as_mut() {
             engine.set_non_designable(&non_designable);
         }
@@ -275,52 +207,19 @@ impl App {
     /// query. Runs after the render projector publishes, on the at-rest
     /// geometry gate (or an exposed-hydrophobic-toggle flip), so the flagged
     /// residues and the filter count track the committed pose.
-    ///
-    /// The query runs when EITHER the exposed-hydrophobic display is ON OR the
-    /// loaded puzzle declares an active native `ExposedCount` filter (and a
-    /// plugin advertises the query,
-    /// [`crate::runner_client::RunnerClient::supports_query`]).
-    /// Decoupling the query from the viz toggle keeps scoring correct when the
-    /// player hides the beads: the filter bonus is recomputed from the live
-    /// count regardless of the toggle. The viso bead push stays gated on the
-    /// display toggle ALONE - with the toggle off but the filter active,
-    /// the query runs for the count but no beads are drawn (an empty set is
-    /// pushed, clearing any stale beads).
-    ///
-    /// Gated three ways at the top: the engine must be present (like every
-    /// engine-touching arm); the display must be ON or an `ExposedCount`
-    /// filter active; and a plugin must advertise the query. When none of
-    /// those hold this clears any previously pushed beads, clears the
-    /// filter bonus, and stops.
-    ///
-    /// Decode is the pure [`crate::viz::exposed_hydrophobics::exposed_from_bytes`]
-    /// helper; each decoded residue's proto `entity_id` is mapped to a molex
-    /// `EntityId` against the live session, and a residue whose `entity_id`
-    /// does not resolve to a current entity is dropped. The push is
-    /// [`viso::VisoEngine::update_exposed_hydrophobics`], which resolves the
-    /// per-entity refs itself and renders the grease beads (the host computes
-    /// no flat residue index). An empty / errored / unsupported query yields
-    /// an empty set, which clears the beads and zeroes the bonus. The query
-    /// path swallows errors at `trace` level, so an at-rest miss never spams
-    /// the log; until the plugin implements `exposed_hydrophobics` the whole
-    /// path is an inert no-op.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn refresh_exposed_hydrophobics(&mut self) {
         if self.engine.is_none() {
             return;
         }
         let show = self.view_options.display.show_exposed_hydrophobics();
-        // The filter is active only when the loaded puzzle declares a native
-        // `ExposedCount` filter; that is what makes the query run even with
-        // the viz toggle off so the score still responds to burying.
+
         let filter_active = self.store.puzzle().is_some_and(|p| {
             p.filters
                 .iter()
                 .any(|f| f.kind == "ExposedCount" && f.plugin.is_none())
         });
-        // Neither the display nor a filter wants the query: clear any beads we
-        // pushed earlier, clear the bonus, and stop before any query work, so
-        // toggling the option off removes the beads.
+
         if !show && !filter_active {
             if let Some(engine) = self.engine.as_mut() {
                 engine.update_exposed_hydrophobics(Vec::new());
@@ -328,6 +227,7 @@ impl App {
             self.store.set_filter_bonus(Vec::new());
             return;
         }
+
         // No plugin advertises `exposed_hydrophobics`: clear any set we pushed
         // earlier, clear the bonus, and stop, so swapping to a detector-less
         // structure removes stale beads and drops a stale bonus.
@@ -338,38 +238,34 @@ impl App {
             self.store.set_filter_bonus(Vec::new());
             return;
         }
-        let bytes = self.runner_client.request_query_bytes("exposed_hydrophobics");
+
+        // Run the Rosetta query for exposed hydrophobics
+        let bytes = self
+            .runner_client
+            .request_query_bytes("exposed_hydrophobics");
+
         let report = crate::viz::exposed_hydrophobics::exposed_from_bytes(&bytes);
-        // Evaluate every active native `ExposedCount` filter on the loaded
-        // puzzle against the live count and store the met-bonus breakdown.
-        // Folded into the headline game score by the score path before the
-        // raw->game map. No puzzle (free-form) yields no filters -> empty
-        // breakdown. A zero bonus is stored as an empty breakdown too.
         let count = u32::try_from(report.exposed.len()).unwrap_or(u32::MAX);
         let bonus = self.store.puzzle().map_or(0.0, |p| {
             crate::app::score_apply::exposed_count_bonus(&p.filters, count)
         });
+
         if bonus == 0.0 {
             self.store.set_filter_bonus(Vec::new());
         } else {
             self.store
                 .set_filter_bonus(vec![("exposed_count".to_owned(), bonus)]);
         }
-        // Beads stay gated on the display toggle ALONE: with the filter
-        // active but the toggle off, push an empty set so no beads the player
-        // didn't ask for are drawn (and any stale set is cleared).
+
         if !show {
             if let Some(engine) = self.engine.as_mut() {
                 engine.update_exposed_hydrophobics(Vec::new());
             }
             return;
         }
-        let mut infos: Vec<viso::ExposedHydrophobicInfo> =
-            Vec::with_capacity(report.exposed.len());
+
+        let mut infos: Vec<viso::ExposedHydrophobicInfo> = Vec::with_capacity(report.exposed.len());
         for residue in &report.exposed {
-            // Map the residue; drop it if its entity_id does not resolve to a
-            // current entity (a panel can race a structure swap, leaving a
-            // stale id).
             let Some(entity) = self.resolve_entity(residue.entity_id) else {
                 continue;
             };

@@ -26,8 +26,9 @@ impl App {
 
         // Focus is pure session state; no engine borrow needed.
         if let AppCommand::SetFocus { entity_id } = command {
-            let focus =
-                entity_id.map_or(viso::Focus::All, |raw| viso::Focus::Entity(EntityId::from_raw(raw)));
+            let focus = entity_id.map_or(viso::Focus::All, |raw| {
+                viso::Focus::Entity(EntityId::from_raw(raw))
+            });
             self.store.set_focus(focus);
             return;
         }
@@ -70,11 +71,7 @@ impl App {
             AppCommand::SetViewOptions { options } => {
                 // A manual edit: store the App-owned options, clear the active
                 // preset (manually-set options no longer match a named preset),
-                // and latch the player-touched flag so future loads keep this
-                // choice instead of re-seeding from the puzzle/Default preset.
-                // The tick applies the options to the engine (+ raises VIEW) off
-                // the `ViewOptionsChanged` we note when something actually
-                // changed; an idempotent set is silent.
+                // and latch the player-touched flag
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
                     Ok(opts) => {
                         let changed = self.view_options != opts || self.active_preset.is_some();
@@ -108,7 +105,11 @@ impl App {
                 // Own the dir so the `&self.host` borrow is released before
                 // the disjoint `&mut self.engine` / `&mut self.frontend`
                 // borrows below.
-                if let Some(dir) = self.host.view_presets_dir().map(std::path::Path::to_path_buf) {
+                if let Some(dir) = self
+                    .host
+                    .view_presets_dir()
+                    .map(std::path::Path::to_path_buf)
+                {
                     if let Some(engine) = self.engine.as_mut() {
                         engine.save_preset(&name, &dir);
                     }
@@ -146,6 +147,7 @@ impl App {
                 for entity in entities {
                     let _ = self.store.load_entity_into_history(entity, &name);
                 }
+
                 // Free-form load: set the title and drop any puzzle
                 // add-on (filters + tutorial bubbles) through the create seam.
                 // `start` emits `PuzzleChanged` (via `clear_puzzle`) when
@@ -176,6 +178,7 @@ impl App {
                 false
             }
         };
+
         // Hand bring-up to the startup state-machine: it `Init`s every warm
         // plugin against the just-loaded structure, adopts each normalized
         // pose, runs the first score, then flips into the session (clearing
@@ -206,25 +209,12 @@ impl App {
         data: Result<crate::puzzle::PuzzleData, String>,
     ) {
         self.set_app_phase(AppPhase::LoadingSession);
-        // Entity display name for the loaded molecules: the outgoing
-        // session title (captured before `reset`, which leaves it intact).
+
         let title = self.store.title().to_owned();
         self.store.reset();
-        self.runner_client.reset_for_new_structure();
-        // Topology swap: `Session::reset` already cleared the selection
-        // (entity ids from the outgoing assembly can collide numerically
-        // with the incoming ones without referring to the same entities).
-        // Emit `SelectionChanged` explicitly so the tick re-pushes the
-        // now-empty highlight to viso and raises SELECTION dirty; `reset`
-        // itself only emits `HeadMoved`.
         self.store.clear_selection();
-        // viso's own per-entity score and appearance maps have an id-reuse
-        // hole: replace_assembly now preserves both across a swap (so a
-        // settling preview doesn't flash the survivors gray and user-authored
-        // per-entity appearance persists), reconciling membership by id. A
-        // puzzle reload restarts the entity allocator, so the new puzzle's ids
-        // collide with the outgoing ones and would inherit their colors and
-        // overrides; clear both viso maps explicitly here.
+        self.runner_client.reset_for_new_structure();
+
         if let Some(engine) = self.engine.as_mut() {
             engine.clear_scores();
             engine.clear_all_appearance();
@@ -232,26 +222,18 @@ impl App {
 
         let loaded = match data {
             Ok(puzzle_data) => {
-                // Install the puzzle (title + filters + tutorial bubbles)
-                // through the create seam. The tutorial sequence and its
-                // cursor move together: a non-empty sequence starts at index
-                // 0, an empty sequence is `None`. `start` emits
-                // `PuzzleChanged`, which the tick turns into PUZZLE dirty
-                // (the PUZZLE arm also pushes the current bubble).
                 let bubbles = if puzzle_data.bubbles.is_empty() {
                     None
                 } else {
                     Some(puzzle_data.bubbles)
                 };
+
                 let current_bubble = bubbles.as_ref().map(|_| 0);
                 let weight_patch = puzzle_data.weights.clone();
                 let filters = puzzle_data.filters.clone();
-                // Carry the puzzle's catalytic constraints + ligand asset
-                // bytes onto the session `Puzzle` so the session-init kick can
-                // deliver them to the worker. Taken here (the entities loop
-                // below consumes the rest of `puzzle_data`).
                 let constraints = puzzle_data.constraints.clone();
                 let ligands = puzzle_data.ligands.clone();
+
                 self.store.start(
                     puzzle_data.name.clone(),
                     Some(Puzzle {
@@ -264,8 +246,6 @@ impl App {
                         current_bubble,
                         constraints,
                         ligands,
-                        // Resolved + installed after the entity-load loop below
-                        // (the chain->EntityId mapping needs the loaded ids).
                         design_gating: None,
                     }),
                 );
@@ -273,16 +253,10 @@ impl App {
                 // Overlay the puzzle's scorefunction weight patch onto the
                 // host's display weight map so `weighted_total` includes the
                 // patched terms (e.g. `envsmooth`, weight-zero in stock
-                // ref2015_cart). Rebuild from the default base each puzzle load
-                // rather than insert-in-place: the base survives `reset`, so an
-                // earlier puzzle's patch would otherwise persist into a puzzle
-                // that declares none. On a base-load failure, fall back to
-                // overlaying the patch onto whatever weights are currently held
-                // (degraded, but the patched term still weights).
+                // ref2015_cart)
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let mut weights = match crate::scores::load_default_term_weights()
-                    {
+                    let mut weights = match crate::scores::load_default_term_weights() {
                         Ok(base) => base,
                         Err(e) => {
                             log::error!(
@@ -307,12 +281,7 @@ impl App {
                 }
 
                 // A puzzle may pin its own view preset; otherwise fall back to
-                // the Default preset so the view panel reflects the true state.
-                // Seed only on a fresh app; once the player has touched any view
-                // setting, skip the seed and keep their persisted choice. Either
-                // way the freshly-reset engine is given the persisted-or-seeded
-                // options. The tick(0.0) below drains the noted
-                // `ViewOptionsChanged` and re-applies them to the engine.
+                // the Default preset
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.view_settings_touched {
                     self.reapply_view_options_to_engine();
@@ -324,33 +293,26 @@ impl App {
 
                 let ss_override = puzzle_data.ss_override;
                 let cam = &puzzle_data.camera;
-                // GPU camera is f32; puzzle coords are f64.
                 #[allow(clippy::cast_possible_truncation)]
                 let cam_eye =
                     glam::Vec3::new(cam.eye[0] as f32, cam.eye[1] as f32, cam.eye[2] as f32);
-                // GPU camera is f32; puzzle coords are f64.
                 #[allow(clippy::cast_possible_truncation)]
                 let cam_up = glam::Vec3::new(cam.up[0] as f32, cam.up[1] as f32, cam.up[2] as f32);
 
-                // Load the entities into history and resolve + install the
-                // puzzle's per-chain design gating onto the loaded EntityIds.
                 let ids = self.load_puzzle_entities(
                     puzzle_data.entities,
                     &puzzle_data.design_masks,
                     &title,
                 );
 
-                // Defer the camera + SS to the bring-up terminal so they apply
-                // to the settled (post-normalize) geometry: the puzzle's saved
-                // pose instead of a focus fit, and its pinned SS after the
-                // cartoon rebake. The topology swap itself rides the
-                // `SessionUpdate` stream (tick's render projector picks
-                // `replace_assembly` because the id set differs from the
-                // post-reset empty publish).
-                self.startup_camera =
-                    StartupCamera::PuzzlePose { eye: cam_eye, up: cam_up };
-                self.startup_ss_override = ss_override
-                    .and_then(|ss| ids.first().map(|&first_id| (first_id.raw(), ss)));
+                self.startup_camera = StartupCamera::PuzzlePose {
+                    eye: cam_eye,
+                    up: cam_up,
+                };
+
+                self.startup_ss_override =
+                    ss_override.and_then(|ss| ids.first().map(|&first_id| (first_id.raw(), ss)));
+
                 true
             }
             Err(e) => {
@@ -358,6 +320,7 @@ impl App {
                 false
             }
         };
+
         // Hand bring-up to the startup state-machine (see handle_load_structure):
         // it `Init`s + normalizes + scores every warm plugin against the loaded
         // puzzle, then flips into the session. The puzzle's saved camera + SS
@@ -368,14 +331,6 @@ impl App {
     /// Load a puzzle's entities into history and install its per-chain design
     /// gating onto the resolved [`EntityId`]s. Returns the committed ids in
     /// load order.
-    ///
-    /// A polymer entity carries a single PDB chain byte (`pdb_chain_id`); when
-    /// that chain keys a mask in `design_masks`, the entity becomes designable
-    /// under that mask. A ligand / small molecule has no chain byte, so it
-    /// never matches and stays locked (secure-by-default). The chain is read
-    /// BEFORE `load_entity_into_history` consumes the entity. An empty
-    /// `design_masks` installs `None` (a free-edit / fold puzzle); otherwise
-    /// the EntityId-keyed map is the source the design overlay + edit gate read.
     fn load_puzzle_entities(
         &mut self,
         entities: Vec<molex::MoleculeEntity>,
@@ -383,8 +338,8 @@ impl App {
         name: &str,
     ) -> Vec<EntityId> {
         let mut ids: Vec<EntityId> = Vec::new();
-        let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> =
-            BTreeMap::new();
+        let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> = BTreeMap::new();
+
         for entity in entities {
             let chain_key = entity.pdb_chain_id().map(|b| (b as char).to_string());
             if let Some(id) = self.store.load_entity_into_history(entity, name) {
@@ -396,25 +351,19 @@ impl App {
                 }
             }
         }
+
         let design_gating = if design_masks.is_empty() {
             None
         } else {
             Some(gating)
         };
+
         self.store.set_puzzle_design_gating(design_gating);
         ids
     }
 
     /// Load a named view preset's options off disk and install them as the
-    /// App-owned active options + active preset. App owns the view state (so
-    /// it persists across a topology swap); the seed paths route through here
-    /// so the view panel reflects the true coloring rather than bare defaults
-    /// while the engine renders the boot preset, and the panel's whole-blob
-    /// option emit does not clobber the engine's coloring. When an engine is
-    /// attached it is synced immediately; the tick also re-applies the options
-    /// off the noted `ViewOptionsChanged`. A missing presets dir or an
-    /// unreadable preset file is logged and left as a no-op (the App keeps its
-    /// current options).
+    /// App-owned active options + active preset.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn apply_view_preset_to_session(&mut self, name: &str) {
         let Some(dir) = self.host.view_presets_dir() else {
@@ -430,20 +379,15 @@ impl App {
         };
         self.view_options = opts.clone();
         self.active_preset = Some(name.to_owned());
-        // Eager engine sync so the engine has the options before this load's
-        // `tick(0.0)`; the noted `ViewOptionsChanged` re-applies them through
-        // the tick seam too (idempotent).
+
+        // Eager engine sync
         if let Some(engine) = self.engine.as_mut() {
             engine.set_options(opts);
         }
         self.store.note_view_options_changed();
     }
 
-    /// Push the persisted App-owned view options to the (freshly-reset) engine
-    /// and note the change so the tick re-applies them. Used by the load paths
-    /// when the player has already touched a view setting, so the preset seed
-    /// is skipped but the engine still receives the persisted options on every
-    /// load. The eager set mirrors the funnel's own engine sync.
+    /// Push the persisted App-owned view options to a freshly-reset engine
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn reapply_view_options_to_engine(&mut self) {
         let opts = self.view_options.clone();
@@ -452,8 +396,6 @@ impl App {
         }
         self.store.note_view_options_changed();
     }
-
-    // ── Tutorial-bubble cursor ──
 
     /// Step the tutorial-bubble cursor on the session. The cursor lives on
     /// `Session` now; this forwards and the emitted `BubbleChanged` is
@@ -482,8 +424,7 @@ impl App {
 pub(in crate::app) enum StartupPhase {
     /// Not started; the host has not called `begin_startup` yet.
     Idle,
-    /// Full session bring-up: warming plugins, with the bootstrap structure
-    /// path stashed for the parse once every warm has connected.
+    /// Full session bring-up: warming plugins
     Warming {
         expected: std::collections::BTreeSet<String>,
         connected: std::collections::BTreeSet<String>,
@@ -494,8 +435,7 @@ pub(in crate::app) enum StartupPhase {
         expected: std::collections::BTreeSet<String>,
         adopted: std::collections::BTreeSet<String>,
     },
-    /// Per-plugin load-time normalize invokes in flight; accumulating
-    /// applied plugin ids.
+    /// Per-plugin load-time normalize invokes in flight
     Normalizing {
         expected: std::collections::BTreeSet<String>,
         applied: std::collections::BTreeSet<String>,
@@ -530,17 +470,6 @@ pub(in crate::app) enum StartupCamera {
 }
 
 /// Locate the runtime plugins directory.
-///
-/// Resolution order:
-///   1. `FOLDIT_PLUGINS_ROOT` environment override (production /
-///      bundled deployments point this at the bundle's plugins dir).
-///   2. `<exe_dir>/plugins/` if it exists (bundle layout).
-///   3. Walk up from `current_exe()` looking for
-///      `crates/foldit-runner/plugins/` (dev workflow under cargo).
-///
-/// Returns `None` if none of these resolve. The caller logs and skips
-/// plugin discovery in that case -- the desktop app degrades to viewer-
-/// only mode rather than failing the load.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
@@ -573,8 +502,8 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod preset_tests {
-    use crate::HostResources;
     use crate::app::App;
+    use crate::HostResources;
     use std::io;
     use std::path::{Path, PathBuf};
     use viso::options::ColorScheme;
@@ -607,19 +536,12 @@ mod preset_tests {
 
     /// After applying the Default preset through the funnel, the App-owned
     /// view options carry the preset's coloring (Score, not the bare-default
-    /// Entity) and record it as the active preset. The App is what the view
-    /// panel binds, so the menu shows the true state rather than a stale
-    /// default. The engine-attached re-sync and the full GPU load path are
-    /// exercised by the parent's runtime confirmation.
+    /// Entity) and record it as the active preset.
     #[test]
     fn default_preset_seeds_view_options() {
-        let presets_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let presets_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
 
-        // A fresh app is at the bare default (Entity coloring, no active
-        // preset, untouched) - the state the bug left the menu in while the
-        // engine rendered the boot preset.
         assert_eq!(
             app.view_options().display.backbone_color_scheme(),
             ColorScheme::Entity,
@@ -638,13 +560,10 @@ mod preset_tests {
     }
 
     /// The funnel records the preset name AND notes a single
-    /// `ViewOptionsChanged` on the `SessionUpdate` stream so the tick applies
-    /// the options to the engine and refreshes the VIEW panel. Coverage that
-    /// moved off the deleted `Session::apply_preset`.
+    /// `ViewOptionsChanged` on the `SessionUpdate` stream
     #[test]
     fn funnel_records_preset_and_notes_one_change() {
-        let presets_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let presets_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
         let _ = app.store.take_updates();
 
@@ -660,15 +579,10 @@ mod preset_tests {
         );
     }
 
-    /// The view options + active preset live on `App` and survive
-    /// `Session::reset` (a topology swap). This is the inverted reset
-    /// semantics: a player's display choices carry from one structure to the
-    /// next instead of zeroing per session. Coverage that moved off the
-    /// deleted `Session::reset` view-options block.
+    /// The view options + active preset live on `App` and survive `Session::reset`
     #[test]
     fn view_options_persist_across_session_reset() {
-        let presets_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
+        let presets_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
 
         app.view_options = mk_non_default_options();

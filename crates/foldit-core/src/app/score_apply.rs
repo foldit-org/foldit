@@ -146,8 +146,11 @@ impl App {
         // Two sources sum here: the native breakdown the exposed-hydro
         // coordinator stores on the session, and the forwarded breakdown the
         // plugin returned on this report.
-        let forwarded_bonus: f64 =
-            report.bonus_breakdown.iter().map(|(_, v)| f64::from(*v)).sum();
+        let forwarded_bonus: f64 = report
+            .bonus_breakdown
+            .iter()
+            .map(|(_, v)| f64::from(*v))
+            .sum();
         let filter_bonus = self.store.filter_bonus_total() + forwarded_bonus;
         // Attribution readout: list the native per-filter breakdown and the
         // forwarded per-filter breakdown alongside the summed bonus when any
@@ -216,8 +219,11 @@ impl App {
             // that feeds the whole-assembly path), so the composition score
             // carries it too. `raw` stays the true rosetta value; `0.0` outside
             // a puzzle.
-            let forwarded_bonus: f64 =
-                report.bonus_breakdown.iter().map(|(_, v)| f64::from(*v)).sum();
+            let forwarded_bonus: f64 = report
+                .bonus_breakdown
+                .iter()
+                .map(|(_, v)| f64::from(*v))
+                .sum();
             let game = crate::scores::rosetta_raw_to_game(
                 raw + self.store.filter_bonus_total() + forwarded_bonus,
             );
