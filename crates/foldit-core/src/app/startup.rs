@@ -173,26 +173,21 @@ impl App {
                 expected,
                 mut applied,
             } => {
-                for (plugin_id, normalized_bytes) in self.runner_client.poll_normalizes() {
-                    // Adopt the normalized assembly the same way the Init
-                    // bytes are adopted: a committed `PluginOp` checkpoint
-                    // (NOT a pending edit), so the head carries the
-                    // full-atom pose before the first score stamps it. The
-                    // op-id labels the checkpoint; re-read it from the
-                    // manifest (the poll drops the dispatch's request_id /
-                    // op-id, and the manifest read is stable).
-                    let op_id = self
-                        .runner_client
-                        .normalize_op_for(&plugin_id)
-                        .unwrap_or_else(|| String::from("_init_normalize"));
-                    self.apply_post_init(&plugin_id, &normalized_bytes, &op_id, "Init");
+                for (plugin_id, _normalized_bytes) in self.runner_client.poll_normalizes() {
+                    // Do NOT adopt the normalize reply onto the head: the
+                    // host head stays molex-canonical (both sides run the
+                    // same molex `new_normalized(HeavyOnly)`, so the reply is
+                    // a no-op for standard protein/NA). This phase is purely a
+                    // barrier: it waits for every kicked normalize to reply so
+                    // the bridge has built its pose + decoded weight patch +
+                    // filters before the first score queries it.
                     applied.insert(plugin_id);
                 }
                 if applied.is_superset(&expected) {
-                    // Normalize commits are done (committed above), so the
-                    // first score now stamps the normalized head. Kick it;
-                    // tick's at-rest gate may also fire, but `request_scores`
-                    // coalesces, so this overlap is harmless.
+                    // Every normalize has replied (pose + config ready), so
+                    // kick the first score. Tick's at-rest gate may also fire,
+                    // but `request_scores` coalesces, so this overlap is
+                    // harmless.
                     self.startup = self.kick_first_score_then_phase();
                 } else {
                     self.startup = StartupPhase::Normalizing { expected, applied };
@@ -258,9 +253,9 @@ impl App {
     /// method is shared with the in-session reload handlers, which fit the
     /// camera themselves; folding the fit in there would double-fit on
     /// reload. By the time any with-structure startup path reaches this seam,
-    /// the normalize-adopt has published the final geometry and the tick has
-    /// synced it, so `fit_camera_to_focus` frames what is actually displayed.
-    /// The Landing (no-structure) path never reaches here.
+    /// the molex-canonical head has been published and the tick has synced
+    /// it, so `fit_camera_to_focus` frames what is actually displayed. The
+    /// Landing (no-structure) path never reaches here.
     #[cfg(not(target_arch = "wasm32"))]
     fn enter_session_from_startup(&mut self) {
         self.enter_session();
@@ -392,10 +387,9 @@ impl App {
             }
         }
 
-        // Snapshot the just-loaded (pre-normalization) assembly and KICK each
-        // warm plugin's `Init` against it. Session-init uses this one
-        // snapshot for every plugin, so adopting rosetta's post-Init result
-        // later does not change what other plugins init against.
+        // Snapshot the just-loaded assembly and KICK each warm plugin's
+        // `Init` against it. Every plugin inits against this one molex-canonical
+        // snapshot.
         self.arm_plugin_bringup()
     }
 
