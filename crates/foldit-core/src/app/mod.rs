@@ -232,6 +232,17 @@ impl App {
         {
             self.poll_async_scores();
             self.poll_composition_scores();
+            // Apply any async overlay-query replies (voids, clashes,
+            // exposed-hydrophobics) that landed since the last tick. They
+            // arrive off the dispatch path a tick or two after their refresh
+            // fired the query, so this drains every tick regardless of whether
+            // this tick carries a session change; each applied reply marks the
+            // viz cache dirty for the push below.
+            let viz_results = self.runner_client.poll_query_results();
+            if !viz_results.is_empty() {
+                let opts = &self.view_options;
+                crate::viz::refresh::apply_query_results(&mut self.store, opts, viz_results);
+            }
         }
 
         // Drain the SessionUpdate stream once and route to projectors.
@@ -301,21 +312,27 @@ impl App {
             // RenderProjector consumes changes and engine receives view option updates
             if let Some(engine) = self.engine.as_mut() {
                 self.render_projector.consume(&changes, &self.store, engine);
-                // Push the structural-viz overlays from the viz cache in the
-                // same engine-borrow stage as the consume drain, gated on the
-                // cache being dirty (set by this tick's overlay refresh above).
-                // The projector is the single pusher; it reports back so we can
-                // clear the flag it cannot clear through its shared `&Session`.
-                #[cfg(not(target_arch = "wasm32"))]
-                if RenderProjector::push_overlays(&self.store, engine) {
-                    self.store.viz.viz_dirty = false;
-                }
                 if changes
                     .iter()
                     .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
                 {
                     engine.set_options(self.view_options.clone());
                 }
+            }
+        }
+
+        // Push the structural-viz overlays from the viz cache to the engine,
+        // gated on the cache being dirty. This runs EVERY tick (not behind the
+        // changes drain): an async voids/clashes reply can land on a tick that
+        // carries no session change, so the push must not be gated on
+        // `!changes.is_empty()`. `push_overlays` self-gates on `viz_dirty`,
+        // so it is a cheap no-op when the cache is clean. The projector is the
+        // single pusher; it reports back so we can clear the flag it cannot
+        // clear through its shared `&Session`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(engine) = self.engine.as_mut() {
+            if RenderProjector::push_overlays(&self.store, engine) {
+                self.store.viz.viz_dirty = false;
             }
         }
 

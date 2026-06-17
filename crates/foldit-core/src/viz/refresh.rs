@@ -58,11 +58,13 @@ pub fn refresh_connections(runner_client: &mut RunnerClient, store: &mut Session
     store.viz.held_connections = Some(held);
 }
 
-/// Refresh the cached external (host-supplied) void field from the
-/// plugin's `voids` query and mark the overlay cache dirty. Runs on the
-/// at-rest geometry gate (or a cavity-toggle flip), so the voids track the
-/// committed pose; the render projector pushes the cached field to the
-/// engine on the drain when the cache is dirty.
+/// Fire the plugin's `voids` query to refresh the cached external
+/// (host-supplied) void field. Runs on the at-rest geometry gate (or a
+/// cavity-toggle flip), so the voids track the committed pose. The query is
+/// async: the reply is decoded and stored by [`apply_query_results`] off the
+/// poll a tick or two later, which marks the overlay cache dirty for the
+/// render projector to push. The toggle-off and no-plugin clears stay
+/// synchronous (immediate) so removing the overlay never lags.
 pub fn refresh_external_cavities(
     runner_client: &mut RunnerClient,
     store: &mut Session,
@@ -80,18 +82,17 @@ pub fn refresh_external_cavities(
         return;
     }
 
-    // Run the voids query to the rosetta plugin
-    let bytes = runner_client.request_query_bytes("voids");
-
-    store.viz.void_field = crate::viz::voids::void_field_from_bytes(&bytes);
-    store.viz.viz_dirty = true;
+    // Fire async; the poll applies the decoded field.
+    runner_client.request_query("voids");
 }
 
-/// Refresh the cached steric-clash arcs from the plugin's `clashes`
-/// query and mark the overlay cache dirty. Runs on the at-rest geometry
-/// gate (or a clash-toggle flip), so the clashes track the committed pose;
-/// the render projector pushes the cached arcs to the engine on the drain
-/// when the cache is dirty.
+/// Fire the plugin's `clashes` query to refresh the cached steric-clash
+/// arcs. Runs on the at-rest geometry gate (or a clash-toggle flip), so the
+/// clashes track the committed pose. The query is async: the reply is
+/// decoded, endpoint-resolved, and stored by [`apply_query_results`] off the
+/// poll a tick or two later, which marks the overlay cache dirty for the
+/// render projector to push. The toggle-off and no-plugin clears stay
+/// synchronous (immediate) so removing the overlay never lags.
 pub fn refresh_clashes(
     runner_client: &mut RunnerClient,
     store: &mut Session,
@@ -111,25 +112,8 @@ pub fn refresh_clashes(
         store.viz.viz_dirty = true;
         return;
     }
-    let bytes = runner_client.request_query_bytes("clashes");
-    let report = crate::viz::clashes::clashes_from_bytes(&bytes);
-    let mut infos: Vec<viso::ClashInfo> = Vec::with_capacity(report.clashes.len());
-    for clash in &report.clashes {
-        // Map both endpoints; drop the whole clash if either endpoint's
-        // entity_id does not resolve to a current entity (a panel can race
-        // a structure swap, leaving a stale id).
-        let (Some(a), Some(b)) = (clash_endpoint(store, &clash.a), clash_endpoint(store, &clash.b))
-        else {
-            continue;
-        };
-        infos.push(viso::ClashInfo {
-            a,
-            b,
-            severity: clash.severity,
-        });
-    }
-    store.viz.clashes = infos;
-    store.viz.viz_dirty = true;
+    // Fire async; the poll decodes, resolves endpoints, and stores the arcs.
+    runner_client.request_query("clashes");
 }
 
 /// Map a decoded clash endpoint into a viso [`viso::ClashEndpoint`],
@@ -149,13 +133,92 @@ fn clash_endpoint(
     })
 }
 
-/// Refresh the cached exposed-hydrophobic grease beads and the loaded
-/// puzzle's met-filter bonus from the plugin's `exposed_hydrophobics`
-/// query. Runs on the at-rest geometry gate (or an
-/// exposed-hydrophobic-toggle flip), so the flagged residues and the
-/// filter count track the committed pose. The bead overlay is cached and
-/// marked dirty for the render projector to push on the drain; the
-/// met-filter bonus is a direct session write (it feeds scoring, not viz).
+/// Apply async query replies drained from the orchestrator into the viz
+/// cache, marking it dirty for the render projector to push. Decodes each
+/// `(query_id, bytes)` reply with the same decoder the synchronous refresh
+/// used and writes the result into the session's viz channels. The overlays
+/// that ride this async path are `voids`, `clashes`, and
+/// `exposed_hydrophobics`; the latter also recomputes the puzzle met-filter
+/// bonus (a score contribution), so it reads `view_options` to decide
+/// whether to rebuild the bead overlay. `connections` stays synchronous and
+/// any other id is ignored.
+pub fn apply_query_results(
+    store: &mut Session,
+    view_options: &ViewOptions,
+    results: Vec<(String, Vec<u8>)>,
+) {
+    for (id, bytes) in results {
+        match id.as_str() {
+            "voids" => {
+                store.viz.void_field = crate::viz::voids::void_field_from_bytes(&bytes);
+                store.viz.viz_dirty = true;
+            }
+            "clashes" => {
+                let report = crate::viz::clashes::clashes_from_bytes(&bytes);
+                let mut infos: Vec<viso::ClashInfo> = Vec::with_capacity(report.clashes.len());
+                for clash in &report.clashes {
+                    // Map both endpoints; drop the whole clash if either
+                    // endpoint's entity_id does not resolve to a current
+                    // entity (a panel can race a structure swap, leaving a
+                    // stale id).
+                    let (Some(a), Some(b)) =
+                        (clash_endpoint(store, &clash.a), clash_endpoint(store, &clash.b))
+                    else {
+                        continue;
+                    };
+                    infos.push(viso::ClashInfo {
+                        a,
+                        b,
+                        severity: clash.severity,
+                    });
+                }
+                store.viz.clashes = infos;
+                store.viz.viz_dirty = true;
+            }
+            "exposed_hydrophobics" => {
+                let report = crate::viz::exposed_hydrophobics::exposed_from_bytes(&bytes);
+                let count = u32::try_from(report.exposed.len()).unwrap_or(u32::MAX);
+                let bonus = store.puzzle().map_or(0.0, |p| {
+                    crate::app::score_apply::exposed_count_bonus(&p.filters, count)
+                });
+                if bonus == 0.0 {
+                    store.set_filter_bonus(Vec::new());
+                } else {
+                    store.set_filter_bonus(vec![("exposed_count".to_owned(), bonus)]);
+                }
+
+                if view_options.display.show_exposed_hydrophobics() {
+                    let mut infos: Vec<viso::ExposedHydrophobicInfo> =
+                        Vec::with_capacity(report.exposed.len());
+                    for residue in &report.exposed {
+                        let Some(entity) = store.resolve_entity(residue.entity_id) else {
+                            continue;
+                        };
+                        infos.push(viso::ExposedHydrophobicInfo {
+                            entity,
+                            residue: residue.residue_index,
+                        });
+                    }
+                    store.viz.exposed_hydrophobics = infos;
+                } else {
+                    store.viz.exposed_hydrophobics = Vec::new();
+                }
+                store.viz.viz_dirty = true;
+            }
+            other => log::trace!("apply_query_results: ignoring query id '{other}'"),
+        }
+    }
+}
+
+/// Fire the plugin's `exposed_hydrophobics` query to refresh the cached
+/// grease beads and the loaded puzzle's met-filter bonus. Runs on the
+/// at-rest geometry gate (or an exposed-hydrophobic-toggle flip), so the
+/// flagged residues and the filter count track the committed pose. The
+/// query is async: the reply is decoded, the bead overlay rebuilt, and the
+/// met-filter bonus recomputed by [`apply_query_results`] off the poll a
+/// tick or two later (the bonus feeds scoring, so it too lands deferred).
+/// The toggle-off/no-filter and no-plugin clears stay synchronous
+/// (immediate) so removing the overlay and dropping the bonus never lag.
 pub fn refresh_exposed_hydrophobics(
     runner_client: &mut RunnerClient,
     store: &mut Session,
@@ -186,39 +249,8 @@ pub fn refresh_exposed_hydrophobics(
         return;
     }
 
-    // Run the Rosetta query for exposed hydrophobics
-    let bytes = runner_client.request_query_bytes("exposed_hydrophobics");
-
-    let report = crate::viz::exposed_hydrophobics::exposed_from_bytes(&bytes);
-    let count = u32::try_from(report.exposed.len()).unwrap_or(u32::MAX);
-    let bonus = store.puzzle().map_or(0.0, |p| {
-        crate::app::score_apply::exposed_count_bonus(&p.filters, count)
-    });
-
-    if bonus == 0.0 {
-        store.set_filter_bonus(Vec::new());
-    } else {
-        store.set_filter_bonus(vec![("exposed_count".to_owned(), bonus)]);
-    }
-
-    if !show {
-        store.viz.exposed_hydrophobics = Vec::new();
-        store.viz.viz_dirty = true;
-        return;
-    }
-
-    let mut infos: Vec<viso::ExposedHydrophobicInfo> = Vec::with_capacity(report.exposed.len());
-    for residue in &report.exposed {
-        let Some(entity) = store.resolve_entity(residue.entity_id) else {
-            continue;
-        };
-        infos.push(viso::ExposedHydrophobicInfo {
-            entity,
-            residue: residue.residue_index,
-        });
-    }
-    store.viz.exposed_hydrophobics = infos;
-    store.viz.viz_dirty = true;
+    // Fire async; the poll decodes, recomputes the bonus, and rebuilds beads.
+    runner_client.request_query("exposed_hydrophobics");
 }
 
 /// Refresh the engine's per-residue non-designable overlay from the loaded

@@ -178,6 +178,30 @@ impl RunnerClient {
             }
         }
     }
+
+    /// Fire the query `id` non-blocking against the live session pose. The
+    /// reply lands on a stored receiver drained by
+    /// [`Self::poll_query_results`]; the caller decodes and applies it then.
+    /// Passes the default dispatch context (whole-assembly, like the sync
+    /// [`Self::request_query_bytes`]) and no params. No-op when no
+    /// orchestrator is installed; the orchestrator no-ops further when no
+    /// plugin advertises the query or one is already outstanding for `id`.
+    pub(crate) fn request_query(&mut self, id: &str) {
+        use foldit_runner::orchestrator::DispatchContext;
+        if let Some(orch) = self.orchestrator.as_mut() {
+            orch.request_query(id, &DispatchContext::default());
+        }
+    }
+
+    /// Drain whatever async query replies have arrived, each as
+    /// `(query_id, opaque_bytes)`. Non-blocking; empty when nothing is ready
+    /// or no orchestrator is installed.
+    pub(crate) fn poll_query_results(&mut self) -> Vec<(String, Vec<u8>)> {
+        self.orchestrator
+            .as_mut()
+            .map(foldit_runner::Orchestrator::poll_query_results)
+            .unwrap_or_default()
+    }
 }
 
 // ── Non-blocking two-phase bring-up: warm (startup) then session-init
