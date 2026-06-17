@@ -91,8 +91,8 @@ pub struct Puzzle {
     /// Optional per-puzzle scorefunction weight patch (`scoretype_name ->
     /// weight`) from the puzzle TOML's `[puzzle.weights]` table. `None` when
     /// the puzzle declares no patch. The host overlays it onto its display
-    /// weight map at load, and threads it to the bridge through the normalize
-    /// dispatch params so the patched terms ship and are optimized against.
+    /// weight map at load, and threads it to the bridge through the session-init
+    /// config params so the patched terms ship and are optimized against.
     pub weight_patch: Option<std::collections::HashMap<String, f32>>,
     /// Scored filters from the puzzle TOML's `[[puzzle.filter]]` tables.
     /// Empty when the puzzle declares none. The native `ExposedCount`

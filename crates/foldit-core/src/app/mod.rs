@@ -216,8 +216,8 @@ impl App {
     pub fn tick(&mut self, dt: f32) {
         // Advance the non-blocking startup state-machine. Runs before the
         // drain so a publish a startup step triggers (the structure parse,
-        // a committed normalize) lands in this frame's `changes` batch and
-        // is projected the same frame. Inert once bring-up is done.
+        // the committed post-Init adoption) lands in this frame's `changes`
+        // batch and is projected the same frame. Inert once bring-up is done.
         #[cfg(not(target_arch = "wasm32"))]
         self.advance_startup();
 
@@ -344,11 +344,11 @@ impl App {
         //    stamps its edit directly (in `apply_backend_updates`), so this query
         //    is not fired - it would only re-score a trailing frame. It is
         //    also held off until the startup machine settles: during bring-up
-        //    the machine drives the first score itself (kicked post-normalize,
-        //    once the scorer's pose is built), and firing here would race a
-        //    query into the pose-less window between a plugin's Init and its
-        //    normalize, which comes back empty. After `Done` the machine is
-        //    inert and this is the sole at-rest scorer again.
+        //    the machine drives the first score itself (kicked once every
+        //    plugin's Init has replied, so the scorer's pose is built), and
+        //    firing here would race a query into the pose-less window before a
+        //    plugin's Init replies, which comes back empty. After `Done` the
+        //    machine is inert and this is the sole at-rest scorer again.
         //    Fire-and-forget against the worker's already-built live pose (no
         //    per-frame pose rebuild); `request_scores` coalesces, so one
         //    outstanding query per provider is the most in flight.

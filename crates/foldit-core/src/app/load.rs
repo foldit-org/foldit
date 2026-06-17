@@ -180,7 +180,7 @@ impl App {
         };
 
         // Hand bring-up to the startup state-machine: it `Init`s every warm
-        // plugin against the just-loaded structure, adopts each normalized
+        // plugin against the just-loaded structure, adopts each plugin's
         // pose, runs the first score, then flips into the session (clearing
         // the loading screen and raising the full populate). Without this the
         // plugins stay session-less, the op registry is empty (no actions, no
@@ -322,7 +322,7 @@ impl App {
         };
 
         // Hand bring-up to the startup state-machine (see handle_load_structure):
-        // it `Init`s + normalizes + scores every warm plugin against the loaded
+        // it `Init`s + scores every warm plugin against the loaded
         // puzzle, then flips into the session. The puzzle's saved camera + SS
         // stashed above are applied by the terminal once the geometry settles.
         self.arm_session_bringup(loaded);
@@ -435,11 +435,6 @@ pub(in crate::app) enum StartupPhase {
         expected: std::collections::BTreeSet<String>,
         adopted: std::collections::BTreeSet<String>,
     },
-    /// Per-plugin load-time normalize invokes in flight
-    Normalizing {
-        expected: std::collections::BTreeSet<String>,
-        applied: std::collections::BTreeSet<String>,
-    },
     /// First score requested; waiting for the head breakdown to stamp.
     Scoring,
     /// No bootstrap structure: Landing is already shown and the warms are
@@ -454,18 +449,18 @@ pub(in crate::app) enum StartupPhase {
 }
 
 /// How the startup-machine terminal ([`App::enter_session_from_startup`])
-/// frames the camera once the geometry has settled (post-normalize). The
-/// launch and free-form structure paths fit on the focused geometry; a
-/// puzzle load stashes its saved pose so the terminal honors it instead of
-/// fitting. Consumed (reset to [`StartupCamera::Fit`]) when the terminal runs.
+/// frames the camera once the geometry has settled. The launch and free-form
+/// structure paths fit on the focused geometry; a puzzle load stashes its
+/// saved pose so the terminal honors it instead of fitting. Consumed (reset
+/// to [`StartupCamera::Fit`]) when the terminal runs.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 pub(in crate::app) enum StartupCamera {
     /// Frame on the focused geometry (launch + free-form structure load).
     #[default]
     Fit,
-    /// Apply a puzzle's saved eye/up anchored on the post-normalize
-    /// centroid; falls back to a focus fit when no centroid is available.
+    /// Apply a puzzle's saved eye/up anchored on the settled centroid;
+    /// falls back to a focus fit when no centroid is available.
     PuzzlePose { eye: glam::Vec3, up: glam::Vec3 },
 }
 

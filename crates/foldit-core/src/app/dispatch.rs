@@ -220,7 +220,7 @@ impl App {
             // commit a geometrically inconsistent pose). Filter to entities
             // with a committed lane - `begin_action` forks each lane from its
             // current head, and transient stubs (ambient / zero-residue) have
-            // none - mirroring the post-Init normalization path.
+            // none - mirroring the post-Init adoption path.
             let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
                 Ok(OpOutcome::Stream { scope, .. } | OpOutcome::Invoke { scope, .. }) => {
                     Some(self.lanes_for_scope(scope))
@@ -315,7 +315,7 @@ impl App {
     /// entity; an entity-scoped op spans its resolved set. Either way the
     /// result is filtered to entities that hold a committed lane - the only
     /// ones `begin_action` can fork a tentative from - matching the post-Init
-    /// normalization path's lane filter. Transient stubs (ambient /
+    /// adoption path's lane filter. Transient stubs (ambient /
     /// zero-residue entities) drop out silently.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn lanes_for_scope(&self, scope: &EditScope) -> Vec<EntityId> {

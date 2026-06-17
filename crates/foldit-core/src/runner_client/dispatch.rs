@@ -357,7 +357,7 @@ impl RunnerClient {
 
     /// Allocate a dispatch `request_id` from the orchestrator (the single
     /// id authority) for a host-internal action that opens an edit without
-    /// going through dispatch - e.g. seeding a post-Init normalized
+    /// going through dispatch - e.g. seeding a plugin's post-Init
     /// assembly. `None` when no orchestrator is wired up.
     pub(crate) fn alloc_request_id(&mut self) -> Option<u64> {
         self.orchestrator.as_mut().map(foldit_runner::Orchestrator::alloc_request_id)

@@ -1,8 +1,8 @@
 //! Non-blocking async-startup state machine for [`App`].
 //!
 //! These methods arm and advance the per-frame bring-up sequence (plugin
-//! warm, `Init`, normalize, first score) that runs while the host keeps
-//! rendering the loading screen; the phase enum itself lives in `super::load`.
+//! warm, `Init`, first score) that runs while the host keeps rendering the
+//! loading screen; the phase enum itself lives in `super::load`.
 
 use viso::VisoEngine;
 
@@ -13,7 +13,6 @@ use super::App;
 use super::load::{StartupCamera, StartupPhase, locate_plugins_root};
 use crate::history::CheckpointKind;
 use crate::render_projector::RenderProjector;
-use crate::runner_client::DispatchIntent;
 
 impl App {
     /// Attach a host-built `VisoEngine` to this App. Hosts are
@@ -40,10 +39,9 @@ impl App {
     /// - `Some(path)`: enter `LoadingSession` and stash the path for the
     ///   `Warming` step to parse once every plugin has connected.
     ///
-    /// Never blocks: the worker round-trips (warm connect, `Init`,
-    /// normalize, first score) are all kicked here / by `advance_startup` and
-    /// polled on later frames, so the host renders the loading screen
-    /// throughout.
+    /// Never blocks: the worker round-trips (warm connect, `Init`, first
+    /// score) are all kicked here / by `advance_startup` and polled on later
+    /// frames, so the host renders the loading screen throughout.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn begin_startup(&mut self) {
         if self.engine.is_none() {
@@ -116,17 +114,15 @@ impl App {
 
     /// Advance the non-blocking startup state-machine by one step. Called
     /// near the top of [`Self::tick`], before the `SessionUpdate` drain, so a
-    /// publish a step triggers (the structure parse, a normalize commit) is
-    /// drained + projected the same frame. Each step polls for whatever
-    /// worker replies arrived since the last frame, folds them into the
-    /// in-flight accumulator, and on completeness kicks the next phase. No
-    /// step blocks. Inert in `Idle` / `Done`.
+    /// publish a step triggers (the structure parse) is drained + projected
+    /// the same frame. Each step polls for whatever worker replies arrived
+    /// since the last frame, folds them into the in-flight accumulator, and
+    /// on completeness kicks the next phase. No step blocks. Inert in `Idle`
+    /// / `Done`.
     /// True once the startup state-machine has reached its terminal state.
-    /// The machine drives the first score itself (the post-normalize kick);
-    /// the tick's at-rest auto-rescore must hold off until then so it does
-    /// not fire a `score` query into the pose-less window between a plugin's
-    /// Init (session registered) and its normalize (pose built), which comes
-    /// back empty.
+    /// The machine drives the first score itself (the post-Init kick); the
+    /// tick's at-rest auto-rescore must hold off until then so it does not
+    /// fire a `score` query before the head breakdown has stamped.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) const fn startup_settled(&self) -> bool {
         matches!(self.startup, StartupPhase::Done)
@@ -164,33 +160,14 @@ impl App {
                     adopted.insert(plugin_id);
                 }
                 if adopted.is_superset(&expected) {
-                    self.startup = self.inits_done_kick_normalizes(&adopted);
-                } else {
-                    self.startup = StartupPhase::Initializing { expected, adopted };
-                }
-            }
-            StartupPhase::Normalizing {
-                expected,
-                mut applied,
-            } => {
-                for (plugin_id, _normalized_bytes) in self.runner_client.poll_normalizes() {
-                    // Do NOT adopt the normalize reply onto the head: the
-                    // host head stays molex-canonical (both sides run the
-                    // same molex `new_normalized(HeavyOnly)`, so the reply is
-                    // a no-op for standard protein/NA). This phase is purely a
-                    // barrier: it waits for every kicked normalize to reply so
-                    // the bridge has built its pose + decoded weight patch +
-                    // filters before the first score queries it.
-                    applied.insert(plugin_id);
-                }
-                if applied.is_superset(&expected) {
-                    // Every normalize has replied (pose + config ready), so
-                    // kick the first score. Tick's at-rest gate may also fire,
-                    // but `request_scores` coalesces, so this overlap is
-                    // harmless.
+                    // Every Init has replied: the bridge has built its pose
+                    // and decoded the puzzle config (weight patch + filters)
+                    // carried on the Init payload, so the first score can
+                    // query it. Tick's at-rest gate may also fire, but
+                    // `request_scores` coalesces, so this overlap is harmless.
                     self.startup = self.kick_first_score_then_phase();
                 } else {
-                    self.startup = StartupPhase::Normalizing { expected, applied };
+                    self.startup = StartupPhase::Initializing { expected, adopted };
                 }
             }
             StartupPhase::Scoring => {
@@ -247,7 +224,7 @@ impl App {
     }
 
     /// Enter the session from the startup state-machine: flip into the
-    /// session and frame the camera on the settled (post-normalize) geometry.
+    /// session and frame the camera on the settled geometry.
     ///
     /// The camera fit lives here rather than in `enter_session` because that
     /// method is shared with the in-session reload handlers, which fit the
@@ -288,7 +265,7 @@ impl App {
                 }
             }
             // Force a per-residue color re-push now that viso has fully synced
-            // the final (post-normalize) geometry. The first score may have
+            // the final geometry. The first score may have
             // pushed before viso created the entity's scene-local state, in
             // which case that push was silently dropped and the backbone would
             // render gray. Disjoint field borrow: `render_projector` and `store`
@@ -394,8 +371,8 @@ impl App {
     }
 
     /// Set [`Self::startup`] to drive plugin bring-up for an in-session load
-    /// (file / puzzle). When `loaded`, arms the same `Init` -> normalize ->
-    /// score -> `InSession` sequence the launch path runs (the plugins are
+    /// (file / puzzle). When `loaded`, arms the same `Init` -> score ->
+    /// `InSession` sequence the launch path runs (the plugins are
     /// already warm, so it enters at `Initializing`); when the load failed,
     /// flips straight into the session degraded so the loading screen still
     /// clears. The reload path's own reset already dropped the prior plugin
@@ -435,19 +412,27 @@ impl App {
         };
 
         // Source the puzzle-specific session payload (ligand asset bytes +
-        // catalytic constraints) from the loaded puzzle, mirroring how the
-        // normalize kick reads `weight_patch`. A free-form structure load has
-        // no puzzle, so both default empty. Cloned out of the puzzle to
-        // release the `self.store` borrow before the `&mut self.runner_client`
-        // kick below.
+        // catalytic constraints) from the loaded puzzle. A free-form
+        // structure load has no puzzle, so both default empty. Cloned out of
+        // the puzzle to release the `self.store` borrow before the
+        // `&mut self.runner_client` kick below.
         let (ligands, constraints) = self.store.puzzle().map_or_else(
             || (Vec::new(), Vec::new()),
             |p| (p.ligands.clone(), p.constraints.clone()),
         );
 
+        // Flatten the loaded puzzle's scorefunction weight patch and its
+        // rosetta-targeted objective filters into the generic config-param
+        // channel carried on the Init payload. The bridge stashes these on
+        // the session at Init and applies them at every scorefunction build,
+        // so weight-zero terms (e.g. `envsmooth`) ship and are optimized
+        // against, and each forwarded filter emits its per-filter bonus on
+        // the score report. Empty for a free-form load (no puzzle).
+        let config_params = self.build_init_config_params();
+
         let expected: std::collections::BTreeSet<String> = self
             .runner_client
-            .kick_inits(&initial_assembly, &ligands, &constraints)
+            .kick_inits(&initial_assembly, &ligands, &constraints, &config_params)
             .into_iter()
             .collect();
         if expected.is_empty() {
@@ -460,67 +445,54 @@ impl App {
         }
     }
 
-    /// Inits complete: for each adopted plugin that declares a load-time
-    /// normalize op, KICK a whole-structure normalize. Returns the next
-    /// phase (`Normalizing` over the kicked normalize set, or `Scoring` with
-    /// the first score already kicked when no plugin normalizes).
+    /// Build the loaded puzzle's generic config-param channel for the Init
+    /// payload: the scorefunction weight patch as `weight.<scoretype>` ->
+    /// `Float(weight)` entries, plus the rosetta-targeted objective filters
+    /// as `filter.<i>.*` String entries. Empty when the session carries no
+    /// puzzle (a free-form structure load) or the puzzle declares neither.
     ///
-    /// Whole-structure normalize: empty selection / no focus (the bridge
-    /// ignores selection for normalize). The params carry the loaded puzzle's
-    /// scorefunction weight patch as `weight.<scoretype>` entries (empty when
-    /// the puzzle declares no patch); see `weight_params` below. The
-    /// dispatch's own `request_id` / scope are discarded; `apply_post_init`
-    /// re-derives its target entities and mints its own checkpoint when the
-    /// reply lands.
+    /// Weight patch: one entry per patched term, so weight-zero terms (e.g.
+    /// `envsmooth`) ship and are optimized against.
+    ///
+    /// Filters: only those naming `plugin = "rosetta"` are forwarded; each
+    /// takes a contiguous index `i` over the forwarded filters, and the
+    /// bridge decodes `filter.<i>.type` for the filter kind and
+    /// `filter.<i>.<key>` for each flattened param, all String-typed. A
+    /// non-rosetta plugin is unsupported: warn (naming it) and skip rather
+    /// than forward to a bridge that cannot score it.
     #[cfg(not(target_arch = "wasm32"))]
-    fn inits_done_kick_normalizes(
-        &mut self,
-        adopted: &std::collections::BTreeSet<String>,
-    ) -> StartupPhase {
-        // Thread the loaded puzzle's scorefunction weight patch to the bridge
-        // through the normalize dispatch params, one `weight.<scoretype>` ->
-        // Float(weight) entry per patch entry. The bridge stashes these on the
-        // session at normalize and applies them at every scorefunction build,
-        // so weight-zero terms (e.g. `envsmooth`) ship and are optimized
-        // against. Empty when the session carries no puzzle or no patch.
-        let mut weight_params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
-            self.store
-                .puzzle()
-                .and_then(|p| p.weight_patch.as_ref())
-                .map(|patch| {
-                    patch
-                        .iter()
-                        .map(|(name, &w)| {
-                            (
-                                format!("weight.{name}"),
-                                foldit_gui::state::ParamValue::Float(w),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+    fn build_init_config_params(
+        &self,
+    ) -> std::collections::HashMap<String, foldit_gui::state::ParamValue> {
+        let mut params: std::collections::HashMap<String, foldit_gui::state::ParamValue> = self
+            .store
+            .puzzle()
+            .and_then(|p| p.weight_patch.as_ref())
+            .map(|patch| {
+                patch
+                    .iter()
+                    .map(|(name, &w)| {
+                        (
+                            format!("weight.{name}"),
+                            foldit_gui::state::ParamValue::Float(w),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Thread the loaded puzzle's forwarded filters (those naming
-        // `plugin = "rosetta"`) onto the same normalize param map so the bridge
-        // runs them at normalize and emits their per-filter bonuses on the
-        // score report's `bonus_breakdown`. Each selected filter takes a
-        // contiguous index `i` (over the forwarded filters only); the bridge
-        // decodes `filter.<i>.type` for the filter kind and `filter.<i>.<key>`
-        // for each flattened param entry, all String-typed. A non-rosetta
-        // plugin is unsupported here: warn (naming it) and skip rather than
-        // forward to a bridge that cannot score it.
         if let Some(filters) = self.store.puzzle().map(|p| p.filters.clone()) {
             let mut i = 0;
             for spec in &filters {
                 match spec.plugin.as_deref() {
                     None => {}
                     Some("rosetta") => {
-                        weight_params.insert(
+                        params.insert(
                             format!("filter.{i}.type"),
                             foldit_gui::state::ParamValue::String(spec.kind.clone()),
                         );
                         for (key, value) in &spec.params {
-                            weight_params.insert(
+                            params.insert(
                                 format!("filter.{i}.{key}"),
                                 foldit_gui::state::ParamValue::String(
                                     toml_value_to_plain_string(value),
@@ -540,32 +512,7 @@ impl App {
             }
         }
 
-        let mut expected = std::collections::BTreeSet::new();
-        for plugin_id in adopted {
-            let Some(op_id) = self.runner_client.normalize_op_for(plugin_id) else {
-                continue;
-            };
-            let intent = DispatchIntent {
-                selection: std::collections::BTreeMap::new(),
-                focused_entity_id: None,
-                op_id,
-                params: weight_params.clone(),
-            };
-            let store = &self.store;
-            self.runner_client
-                .kick_normalize(intent, plugin_id, |id| store.entity_type(id));
-            expected.insert(plugin_id.clone());
-        }
-        if expected.is_empty() {
-            // No plugin declares a normalize op: a pose-less Init already
-            // seeded the head (or there is no structural plugin), so go
-            // straight to the first score.
-            return self.kick_first_score_then_phase();
-        }
-        StartupPhase::Normalizing {
-            expected,
-            applied: std::collections::BTreeSet::new(),
-        }
+        params
     }
 
     /// Apply a plugin's post-Init normalized assembly (full-atom pose) so

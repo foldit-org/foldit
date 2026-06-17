@@ -6,8 +6,7 @@
 //! that touch only the orchestrator (`reset_for_new_structure`,
 //! `shutdown`). Plugin bring-up is non-blocking: the kick/poll twins
 //! ([`RunnerClient::kick_warms`]/[`RunnerClient::poll_warms`],
-//! [`RunnerClient::kick_inits`]/[`RunnerClient::poll_inits`],
-//! [`RunnerClient::kick_normalize`]/[`RunnerClient::poll_normalizes`])
+//! [`RunnerClient::kick_inits`]/[`RunnerClient::poll_inits`])
 //! let the startup state-machine on `App` drive bring-up one frame at a
 //! time so the host renders throughout.
 //! Inbound plugin traffic is drained here too: [`RunnerClient::drain_op_events`]
@@ -66,21 +65,6 @@ impl RunnerClient {
     /// borrow it disjointly from the peer `RunnerProjector` field on `App`.
     pub(crate) const fn orchestrator_mut(&mut self) -> Option<&mut foldit_runner::Orchestrator> {
         self.orchestrator.as_mut()
-    }
-
-    /// The op-id a plugin declares in its manifest as its load-time
-    /// normalize op, if any. Read off the discovered spawn descriptor via
-    /// the orchestrator. `None` when no orchestrator is installed, the
-    /// plugin isn't discovered, or its manifest omits `normalize_op`.
-    /// Bootstrap uses this to decide whether to invoke a canonicalizing op
-    /// after Init.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn normalize_op_for(&self, plugin_id: &str) -> Option<String> {
-        self.orchestrator
-            .as_ref()?
-            .plugin_descriptor(plugin_id)?
-            .normalize_op()
-            .map(String::from)
     }
 
     /// Resolve an op-id to its owning plugin id via the orchestrator's
@@ -300,13 +284,14 @@ impl RunnerClient {
         initial_assembly: &[u8],
         ligands: &[crate::puzzle::LigandAsset],
         constraints: &[crate::puzzle_setup::Constraint],
+        config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
     ) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
         };
         // Convert the core-side puzzle payload into the orchestrator's native
         // mirror types once; the per-plugin loop clones the payload per kick.
-        let payload = init_payload_from_puzzle(ligands, constraints);
+        let payload = init_payload_from_puzzle(ligands, constraints, config_params);
         let discovered = orch.discovered_plugin_ids();
         let mut kicked = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
@@ -356,101 +341,21 @@ impl RunnerClient {
         registered
     }
 
-    /// Kick a load-time normalize op WITHOUT blocking on the worker reply.
-    /// The non-blocking twin of the synchronous normalize dispatch: builds
-    /// the orchestrator `DispatchContext` from the core-shaped
-    /// [`DispatchIntent`] (same flatten as `dispatch_op`'s Invoke branch)
-    /// and forwards to `kick_invoke`. The op selection (whole-structure,
-    /// empty selection / no focus) and the intent construction stay in the
-    /// caller, exactly as the synchronous path builds them. The reply is
-    /// drained later by [`Self::poll_normalizes`]. Logs and degrades on a
-    /// kick failure (matching the synchronous normalize loop's
-    /// log-and-skip) without naming any `foldit_runner` error type.
-    pub(crate) fn kick_normalize(
-        &mut self,
-        intent: DispatchIntent,
-        plugin_id: &str,
-        entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
-    ) {
-        use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
-        let Some(orch) = self.orchestrator.as_mut() else {
-            return;
-        };
-        // Flatten the authoritative selection (molex ids) into the
-        // wire-shape `ResidueRef` list the orchestrator's context expects.
-        let selection: Vec<ResidueRef> = intent
-            .selection
-            .iter()
-            .flat_map(|(entity, residues)| {
-                let id = *entity;
-                residues.iter().map(move |&residue_index| ResidueRef {
-                    entity_id: id,
-                    residue_index,
-                })
-            })
-            .collect();
-        let ctx = DispatchContext {
-            focused_entity_id: intent.focused_entity_id,
-            selection,
-        };
-        let params: std::collections::HashMap<
-            String,
-            foldit_runner::orchestrator::ParamValue,
-        > = intent
-            .params
-            .into_iter()
-            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
-            .collect();
-        if let Err(e) = orch.kick_invoke(&intent.op_id, ctx, params, entity_type_of) {
-            log::warn!(
-                "[RunnerClient] kick_invoke('{plugin_id}', {:?}) failed: {e}; \
-                 skipping normalization apply",
-                intent.op_id
-            );
-        }
-    }
-
-    /// Drain whatever async normalize replies have arrived since the last
-    /// call. Non-blocking; a plugin whose normalize has not replied stays
-    /// pending. Returns the `(plugin_id, normalized_bytes)` pair for each
-    /// plugin whose normalize completed THIS poll, dropping the dispatch
-    /// `request_id` and resolved targets (the caller's `apply_post_init`
-    /// re-derives its target entities and mints its own checkpoint, so it
-    /// only needs the bytes). Logs each failure without naming any
-    /// `foldit_runner` error type. Empty when no orchestrator is wired up
-    /// or nothing completed this poll.
-    pub(crate) fn poll_normalizes(&mut self) -> Vec<(String, Vec<u8>)> {
-        let Some(orch) = self.orchestrator.as_mut() else {
-            return Vec::new();
-        };
-        let mut done = Vec::new();
-        for (plugin_id, result) in orch.poll_invokes() {
-            match result {
-                Ok((_request_id, bytes, _targets)) => {
-                    done.push((plugin_id, bytes));
-                }
-                Err(e) => log::warn!(
-                    "[RunnerClient] normalize for '{plugin_id}' failed: {e}; \
-                     skipping normalization apply"
-                ),
-            }
-        }
-        done
-    }
 }
 
 // ── Core-side puzzle payload -> orchestrator native mirror ──
 //
-// The session-init kick delivers the loaded puzzle's ligand assets +
-// catalytic constraints to the worker. These free functions convert core's
-// puzzle types into the orchestrator's native mirror types (the same pattern
-// `kick_normalize` uses to flatten selection / params); the orchestrator's
-// IPC boundary then encodes them to proto.
+// The session-init kick delivers the loaded puzzle's ligand assets,
+// catalytic constraints, and generic config params (weight patch + objective
+// filters) to the worker. These free functions convert core's puzzle types
+// into the orchestrator's native mirror types; the orchestrator's IPC
+// boundary then encodes them to proto.
 
 #[cfg(not(target_arch = "wasm32"))]
 fn init_payload_from_puzzle(
     ligands: &[crate::puzzle::LigandAsset],
     constraints: &[crate::puzzle_setup::Constraint],
+    config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
 ) -> foldit_runner::orchestrator::InitPayload {
     use foldit_runner::orchestrator::{InitPayload, PuzzleAsset};
 
@@ -473,6 +378,10 @@ fn init_payload_from_puzzle(
     InitPayload {
         assets,
         constraints: constraints.iter().map(constraint_to_runner).collect(),
+        params: config_params
+            .iter()
+            .map(|(k, v)| (k.clone(), crate::wire_params::param_value_from_wire(v.clone())))
+            .collect(),
     }
 }
 

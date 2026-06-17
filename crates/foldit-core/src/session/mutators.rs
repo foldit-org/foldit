@@ -28,7 +28,7 @@ impl Session {
     /// authority). Opens one tentative lane per entity, each forked from
     /// its own current lane head. Opens the edit under `request_id` (the
     /// caller already holds it). A single-entity action passes a
-    /// one-element set; the multi-entity post-Init normalization passes
+    /// one-element set; the multi-entity post-Init adoption passes
     /// the full touched set. Refused if any named entity has no committed
     /// lane or already holds an open tentative.
     pub fn begin_action(
@@ -410,7 +410,7 @@ impl Session {
     /// assembly. `action_update` fans the closure across every lane the edit
     /// locked, and each lane is rewritten only when the incoming assembly
     /// carries a matching entity id - so a single-entity edit rewrites its one
-    /// lane and a multi-entity edit (post-Init normalization) rewrites each of
+    /// lane and a multi-entity edit (post-Init adoption) rewrites each of
     /// its lanes that the stream touched. Score fields are propagated when the
     /// plugin embedded a total; per-residue / game scoring stay on their own
     /// refresh path.
