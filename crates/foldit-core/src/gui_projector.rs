@@ -19,7 +19,7 @@ use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
     CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, FrontendState, HistoryLiveUpdate,
-    HistorySection, TextBubbleButton, TextBubblePayload, WireId,
+    HistorySection, SegmentInfo, TextBubbleButton, TextBubblePayload, WireId,
 };
 use viso::{Focus, VisoEngine};
 
@@ -198,6 +198,10 @@ pub struct GuiSources<'a> {
     /// App-owned active preset name for the `VIEW` section, or `None` when the
     /// options were set manually.
     pub active_preset: Option<&'a str>,
+    /// Open segment-info target with its cached identity + SS, or `None`
+    /// when the panel is closed. App-owned (survives a topology swap until
+    /// the target stops resolving).
+    pub open_segment: Option<&'a crate::app::SegmentTarget>,
 }
 
 impl GuiProjector {
@@ -219,21 +223,29 @@ impl GuiProjector {
     /// every section once. There is no longer an App-side dirty residue: the
     /// mutations that used to raise flags at their App sites now produce the
     /// covering `SessionUpdate` variants, and those variants are mapped here.
+    ///
+    /// Returns `true` when the segment arm auto-closed (the cached target
+    /// no longer resolves): the App owns the open target, so it clears its
+    /// copy on this signal, mirroring the overlay-flag handshake.
     pub(crate) fn consume(
         &mut self,
         updates: &[SessionUpdate],
         full_populate: bool,
+        segment_dirty: bool,
         src: &GuiSources<'_>,
         frontend: &mut FrontendState,
-    ) {
+    ) -> bool {
         // FPS and selected count change every frame - always push them.
         frontend.set_fps(src.engine.fps());
         frontend.ui.selected_count = src.session.selection_total_count();
 
-        let dirty = compute_dirty(updates, full_populate);
+        let mut dirty = compute_dirty(updates, full_populate);
+        if segment_dirty {
+            dirty |= DirtyFlags::SEGMENT;
+        }
 
         if dirty.is_empty() {
-            return;
+            return false;
         }
 
         // PUZZLE before SCORE: a fresh `set_puzzle_*` resets `complete=false`,
@@ -260,8 +272,14 @@ impl GuiProjector {
         if dirty.contains(DirtyFlags::SCENE) {
             project_scene(src.session, src.engine, frontend);
         }
+        let auto_closed = if dirty.contains(DirtyFlags::SEGMENT) {
+            project_segment(src.open_segment, src.session, src.engine, frontend)
+        } else {
+            false
+        };
 
         sync_history(&mut self.history_sync, src.session, frontend);
+        auto_closed
     }
 }
 
@@ -276,7 +294,10 @@ fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
     };
     for update in updates {
         dirty |= match update {
-            SessionUpdate::ScoresChanged => DirtyFlags::SCORE,
+            // SEGMENT (not SELECTION): a score tick refreshes the open
+            // segment's energies. Identity + SS are cached on the target
+            // and never recomputed here, so no DSSP runs per tick.
+            SessionUpdate::ScoresChanged => DirtyFlags::SCORE | DirtyFlags::SEGMENT,
             SessionUpdate::Edit { tentative: true }
             | SessionUpdate::PreviewUpdated
             | SessionUpdate::EntityAppearanceChanged => DirtyFlags::SCENE,
@@ -332,6 +353,102 @@ fn project_score(session: &Session, frontend: &mut FrontendState) {
             }
         }
     }
+}
+
+/// Project the `SEGMENT` section: the per-residue info panel.
+///
+/// Identity and SS come from the cached `target`; only the energies and
+/// the screen anchor are rebuilt here, so a streaming score never re-runs
+/// DSSP. Returns `true` when the cached target no longer resolves (entity
+/// or residue gone): the section is cleared and the App drops its copy.
+fn project_segment(
+    target: Option<&crate::app::SegmentTarget>,
+    session: &Session,
+    engine: &VisoEngine,
+    frontend: &mut FrontendState,
+) -> bool {
+    let Some(target) = target else {
+        frontend.set_segment_info(None);
+        return false;
+    };
+
+    // Auto-close when the target stops resolving (topology swap, entity or
+    // residue removed). The cached identity is stale at that point.
+    let Some(entity) = session.entity(target.entity) else {
+        frontend.set_segment_info(None);
+        return true;
+    };
+    let still_present = entity
+        .residues()
+        .is_some_and(|r| target.residue < r.len());
+    if !still_present {
+        frontend.set_segment_info(None);
+        return true;
+    }
+
+    // Fresh energies: the raw per-term row for this residue zipped against
+    // the session term names, plus the weighted scalar. Empty / zero when
+    // no breakdown is stamped yet (right after load, or on wasm).
+    let term_names = session.term_names().to_vec();
+    let (term_values, weighted) = session.current_composition_breakdown().map_or_else(
+        || (Vec::new(), 0.0_f32),
+        |breakdown| {
+            let term_values = breakdown
+                .per_residue_terms
+                .iter()
+                .find(|rts| {
+                    rts.entity_id == target.entity
+                        && rts.residue_index as usize == target.residue
+                })
+                .map(|row| row.terms.clone())
+                .unwrap_or_default();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "the panel's weighted scalar is a display value; f32 precision suffices"
+            )]
+            let weighted = breakdown
+                .weighted_per_residue(session.term_names(), session.term_weights())
+                .into_iter()
+                .find(|(eid, res, _)| *eid == target.entity && *res as usize == target.residue)
+                .map_or(0.0, |(_, _, score)| score as f32);
+            (term_values, weighted)
+        },
+    );
+
+    // Fresh anchor: the residue's CA atom projected to the screen. `None`
+    // when off-screen / behind the camera (the panel hides its tail).
+    let anchor = ca_world_position(entity, target.residue)
+        .and_then(|world| engine.world_to_screen(world))
+        .map(|v| (v.x, v.y));
+
+    frontend.set_segment_info(Some(SegmentInfo {
+        residue_number: target.residue_number,
+        chain: target.chain.clone(),
+        aa_three: target.aa_three.clone(),
+        aa_one: target.aa_one.clone(),
+        ss_label: target.ss_label.clone(),
+        term_names,
+        term_values,
+        weighted,
+        anchor,
+    }));
+    false
+}
+
+/// World position of a residue's CA atom, or `None` for a non-protein
+/// entity or a residue with no CA in its atom range.
+pub fn ca_world_position(
+    entity: &molex::MoleculeEntity,
+    residue: usize,
+) -> Option<glam::Vec3> {
+    let protein = entity.as_protein()?;
+    let range = protein.residues.get(residue)?.atom_range.clone();
+    protein
+        .atoms
+        .get(range)?
+        .iter()
+        .find(|a| &a.name == b"CA  ")
+        .map(|a| a.position)
 }
 
 /// Project the `ACTIONS` section: the focus- + selection-aware op catalog.

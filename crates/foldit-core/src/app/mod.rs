@@ -41,6 +41,62 @@ use self::input::update_all_visualizations;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::load::locate_plugins_root;
 
+/// The open segment-info target plus the identity and secondary structure
+/// cached at the moment it was set.
+///
+/// Identity and SS are computed once (a single `recompute_ss()` over the
+/// head assembly) when the target opens and held here for its lifetime;
+/// the GUI projection rebuilds only the energies and the screen anchor on
+/// each score tick, so a streaming score never re-runs DSSP.
+pub(crate) struct SegmentTarget {
+    pub(crate) entity: molex::EntityId,
+    pub(crate) residue: usize,
+    pub(crate) residue_number: i32,
+    pub(crate) chain: String,
+    pub(crate) aa_three: String,
+    pub(crate) aa_one: String,
+    pub(crate) ss_label: String,
+}
+
+/// Last segment-panel tail tip projected to the screen, value-compared
+/// each frame so an unchanged tip pushes nothing.
+///
+/// The `Unset` arm is distinct from `Hidden`: at rest (no panel ever
+/// opened) the tip is `Unset`, and the off-screen path only emits a hide
+/// when a `Visible` tip preceded it. Without that distinction every idle
+/// frame would push a redundant hide.
+#[derive(Clone, Copy, PartialEq)]
+enum TailTip {
+    /// No tip has been projected yet (no panel opened this session).
+    Unset,
+    /// The panel is open but its residue is off-screen / behind the camera.
+    Hidden,
+    /// The residue's CA projects to this screen position (pixels, top-left).
+    Visible(f32, f32),
+}
+
+/// A tail-tip change the host should push to the webview this frame.
+///
+/// Returned by [`App::take_tail_update`] only when the tip changed since
+/// the last push; an unchanged tip yields `None` and the host pushes
+/// nothing.
+pub enum TailUpdate {
+    /// Move the tail tip to this screen position (pixels, origin top-left).
+    Position(f32, f32),
+    /// Hide the tail (the residue went off-screen, or the panel closed).
+    Hide,
+}
+
+/// Human-readable secondary-structure label for the segment panel.
+fn ss_label(ss: Option<molex::SSType>) -> String {
+    match ss {
+        Some(molex::SSType::Helix) => "Helix",
+        Some(molex::SSType::Sheet) => "Sheet",
+        Some(molex::SSType::Coil) | None => "Loop",
+    }
+    .to_owned()
+}
+
 /// Main application state - thin glue connecting the render engine,
 /// plugin driver, document, and the two projectors.
 ///
@@ -84,6 +140,22 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
     pub(in crate::app) needs_full_populate: bool,
+    /// Open segment-info target with its cached identity + SS, or `None`
+    /// when the panel is closed.
+    pub(in crate::app) open_segment: Option<SegmentTarget>,
+    /// One-shot signal that the open segment target changed (opened,
+    /// closed, or re-targeted). The tick takes it and forces the GUI
+    /// segment arm to reproject, mirroring `needs_full_populate`.
+    pub(in crate::app) needs_segment_dirty: bool,
+    /// Last tail tip pushed to the host, value-compared each frame so an
+    /// unchanged tip pushes nothing. The panel body is placed once and is
+    /// draggable; only its tail tip tracks the open residue's live screen
+    /// position as the camera moves.
+    pub(in crate::app) last_tail_tip: TailTip,
+    /// Pending tail-tip change for the host to pull this frame, set only
+    /// when the projected tip differed from `last_tail_tip`. The host takes
+    /// it each frame via [`App::take_tail_update`].
+    pub(in crate::app) pending_tail: Option<TailUpdate>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -125,6 +197,10 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             startup_ss_override: None,
             needs_full_populate: false,
+            open_segment: None,
+            needs_segment_dirty: false,
+            last_tail_tip: TailTip::Unset,
+            pending_tail: None,
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -141,6 +217,54 @@ impl App {
         self.frontend.set_score(0.0, true);
         self.frontend.set_score_title(self.store.title().to_owned());
         self.needs_full_populate = true;
+    }
+
+    /// Open the per-residue segment-info panel on `(eid, residue)`.
+    ///
+    /// Computes the residue identity (number, chain, amino acid) and its
+    /// secondary structure once, via a single `recompute_ss()` over the
+    /// head assembly, and caches them on the target. A no-op when the
+    /// entity or residue does not resolve. Marks the segment section dirty
+    /// so the GUI projection reprojects on the next tick.
+    pub(in crate::app) fn open_segment(&mut self, eid: molex::EntityId, residue: usize) {
+        let Some(entity) = self.store.entity(eid) else {
+            return;
+        };
+        let Some(residues) = entity.residues() else {
+            return;
+        };
+        let Some(res) = residues.get(residue) else {
+            return;
+        };
+        let residue_number = res.seq_id();
+        let chain = entity
+            .pdb_chain_id()
+            .map_or_else(String::new, |c| (c as char).to_string());
+        let aa = molex::chemistry::AminoAcid::from_code(res.name);
+        let aa_three = String::from_utf8_lossy(&res.name).trim().to_owned();
+        let aa_one = aa.map_or_else(String::new, |a| (a.one_letter() as char).to_string());
+
+        let mut assembly = self.store.head_assembly();
+        assembly.recompute_ss();
+        let ss_label = ss_label(assembly.ss_types(eid).get(residue).copied());
+
+        self.open_segment = Some(SegmentTarget {
+            entity: eid,
+            residue,
+            residue_number,
+            chain,
+            aa_three,
+            aa_one,
+            ss_label,
+        });
+        self.needs_segment_dirty = true;
+    }
+
+    /// Close the segment-info panel. Marks the segment section dirty so the
+    /// GUI projection clears it on the next tick.
+    pub(in crate::app) fn close_segment(&mut self) {
+        self.open_segment = None;
+        self.needs_segment_dirty = true;
     }
 
     /// Advance the App-lifetime phase and mirror it to the frontend
@@ -212,7 +336,54 @@ impl App {
             .map(|v| v.to_string().into_bytes())
     }
 
+    /// Take the pending segment-panel tail-tip change for the host to push,
+    /// or `None` when the tip did not move since the last push. `Some` is
+    /// returned at most once per change: `tick` sets it only on a value
+    /// change and this clears it. The host distinguishes a position update
+    /// from a hide via the [`TailUpdate`] variant.
+    pub const fn take_tail_update(&mut self) -> Option<TailUpdate> {
+        self.pending_tail.take()
+    }
+
+    /// Project the open segment target's CA to the screen and stage a
+    /// tail-tip change when it differs from the last pushed tip. A closed
+    /// panel or an off-screen residue resolves to `Hidden`; a hide is
+    /// staged only when a `Visible` tip preceded it, so an idle frame with
+    /// no panel pushes nothing.
+    fn update_tail_tip(&mut self) {
+        let current = match (self.open_segment.as_ref(), self.engine.as_ref()) {
+            (Some(target), Some(engine)) => self
+                .store
+                .entity(target.entity)
+                .and_then(|entity| crate::gui_projector::ca_world_position(entity, target.residue))
+                .and_then(|world| engine.world_to_screen(world))
+                .map_or(TailTip::Hidden, |v| TailTip::Visible(v.x, v.y)),
+            _ => TailTip::Hidden,
+        };
+
+        if current == self.last_tail_tip {
+            return;
+        }
+
+        match current {
+            TailTip::Visible(x, y) => self.pending_tail = Some(TailUpdate::Position(x, y)),
+            // Only emit a hide when something visible preceded it; the
+            // initial `Unset` -> `Hidden` transition records state silently.
+            TailTip::Hidden => {
+                if matches!(self.last_tail_tip, TailTip::Visible(..)) {
+                    self.pending_tail = Some(TailUpdate::Hide);
+                }
+            }
+            TailTip::Unset => {}
+        }
+        self.last_tail_tip = current;
+    }
+
     // App::tick is the per-frame drive loop
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the per-frame drive loop sequences every subsystem; splitting it would scatter the frame order that must stay readable in one place"
+    )]
     pub fn tick(&mut self, dt: f32) {
         // Advance the non-blocking startup state-machine. Runs before the
         // drain so a publish a startup step triggers (the structure parse,
@@ -369,6 +540,10 @@ impl App {
             update_all_visualizations(engine, pull);
         }
 
+        // Tail tip: runs after `engine.update` (camera settled this frame)
+        // and stages a tip change only when it moved.
+        self.update_tail_tip();
+
         // The InSession flip is no longer a tick-stage: every load path calls
         // `enter_session` at its done-loading point, so the frontend routes to
         // the in-puzzle UI the moment loading completes, with the score
@@ -383,6 +558,8 @@ impl App {
         if let Some(engine) = self.engine.as_ref() {
             let full_populate = self.needs_full_populate;
             self.needs_full_populate = false;
+            let segment_dirty = self.needs_segment_dirty;
+            self.needs_segment_dirty = false;
             let src = GuiSources {
                 session: &self.store,
                 engine,
@@ -390,9 +567,18 @@ impl App {
                 host: self.host.as_ref(),
                 view_options: &self.view_options,
                 active_preset: self.active_preset.as_deref(),
+                open_segment: self.open_segment.as_ref(),
             };
-            self.gui_projector
-                .consume(&changes, full_populate, &src, &mut self.frontend);
+            let segment_auto_closed = self.gui_projector.consume(
+                &changes,
+                full_populate,
+                segment_dirty,
+                &src,
+                &mut self.frontend,
+            );
+            if segment_auto_closed {
+                self.open_segment = None;
+            }
         }
     }
 }

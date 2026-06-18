@@ -184,6 +184,34 @@ impl AppRunner {
         }
     }
 
+    /// Ship the segment panel's live tail-tip position to the webview on a
+    /// new `window.__onTailUpdate` channel. `App::take_tail_update` returns
+    /// a change at most once per frame (and `None` for an unmoved tip), so a
+    /// position update fires `__onTailUpdate(x, y)`, an off-screen / closed
+    /// transition fires `__onTailUpdate(null)`, and an unchanged tip pushes
+    /// nothing. Guarded like the `__onStateUpdate` push above so it is a
+    /// no-op until the JS listener exists.
+    fn push_tail_to_webview(&mut self) {
+        if !self.webview_ready {
+            return;
+        }
+        let Some(update) = self.app.take_tail_update() else {
+            return;
+        };
+        let Some(ref webview) = self.webview else {
+            return;
+        };
+        let script = match update {
+            foldit_core::TailUpdate::Position(x, y) => {
+                format!("if(window.__onTailUpdate)window.__onTailUpdate({x},{y})")
+            }
+            foldit_core::TailUpdate::Hide => {
+                "if(window.__onTailUpdate)window.__onTailUpdate(null)".to_owned()
+            }
+        };
+        let _ = webview.evaluate_script(&script);
+    }
+
     /// Resize the webview to match a new window size (physical pixels).
     fn resize_webview(&self, new_size: winit::dpi::PhysicalSize<u32>) {
         if let Some(ref webview) = &self.webview {
@@ -310,6 +338,10 @@ impl AppRunner {
 
         // Ship any dirty frontend bytes to the webview.
         self.push_dirty_state_to_webview();
+
+        // Ship the segment panel's live tail-tip position (no-op when the
+        // tip did not move this frame).
+        self.push_tail_to_webview();
 
         // Request next frame
         if let Some(window) = &self.window {

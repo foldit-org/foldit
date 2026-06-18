@@ -20,6 +20,7 @@ pub(crate) mod render_projector;
 pub(crate) mod wire_params;
 
 pub use app::App;
+pub use app::TailUpdate;
 #[cfg(not(target_arch = "wasm32"))]
 pub use app::locate_plugins_root;
 pub use host_resources::HostResources;

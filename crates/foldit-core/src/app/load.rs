@@ -57,6 +57,14 @@ impl App {
             return;
         }
 
+        // Closing the segment panel is pure session state (drops the
+        // open-segment target); handled before the engine-presence guard
+        // like focus.
+        if let AppCommand::CloseSegment = command {
+            self.close_segment();
+            return;
+        }
+
         if self.engine.is_none() {
             return;
         }
@@ -124,7 +132,8 @@ impl App {
             | AppCommand::AdvanceBubble { .. }
             | AppCommand::SetFocus { .. }
             | AppCommand::SetEntityAppearance { .. }
-            | AppCommand::ClearEntityAppearance { .. } => {
+            | AppCommand::ClearEntityAppearance { .. }
+            | AppCommand::CloseSegment => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `AppCommand`: a new variant
                 // without a handler is a compile error.

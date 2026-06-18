@@ -99,6 +99,18 @@ impl App {
             return false;
         };
 
+        // Tab over a residue drives the segment-info panel instead of
+        // cycling focus: resolve the hovered residue while the engine is
+        // borrowed, then act past the borrow (the panel toggle needs
+        // `&mut self`). Tab over empty space / an atom, and Backquote
+        // always, fall through to the focus cycle below.
+        if key_str == "Tab" {
+            if let Some((eid, res)) = hovered_segment_target(engine, &self.store) {
+                self.toggle_segment(eid, res);
+                return true;
+            }
+        }
+
         // Focus is foldit-core session state: intercept the focus gestures
         // before viso's keybinding table and mutate the session. The tick's
         // `FocusChanged` reaction pushes viso's camera mirror, reframes, and
@@ -149,6 +161,18 @@ impl App {
         }
     }
 
+    /// Toggle the segment-info panel for `(eid, res)`: close it when it is
+    /// already open for this exact residue, otherwise open / re-target it
+    /// (re-tabbing a different residue closes the old target and opens the
+    /// new one in a single press).
+    fn toggle_segment(&mut self, eid: EntityId, res: usize) {
+        if self.open_segment.as_ref().map(|t| (t.entity, t.residue)) == Some((eid, res)) {
+            self.close_segment();
+        } else {
+            self.open_segment(eid, res);
+        }
+    }
+
     // ── Viewport input (from webview) ──
 
     /// Route a viewport input event from the webview into viso and the
@@ -192,6 +216,9 @@ impl App {
         // cancel-only - it never touches the selection - so the deferred
         // block is unconditional and needs no live state read.
         let mut pending_escape = false;
+        // A Tab over a residue: the segment-info panel toggle, deferred
+        // past the `engine` borrow because it needs `&mut self`.
+        let mut pending_segment_toggle: Option<(EntityId, usize)> = None;
 
         let Some(engine) = &mut self.engine else {
             return;
@@ -272,6 +299,7 @@ impl App {
                         &self.runner_client,
                     );
                     pending_escape = out.escape;
+                    pending_segment_toggle = out.segment_toggle;
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         pending_hotkey_op = out.hotkey_op;
@@ -295,6 +323,7 @@ impl App {
         self.apply_deferred_viewport_actions(
             pending_click,
             pending_escape,
+            pending_segment_toggle,
             #[cfg(not(target_arch = "wasm32"))]
             pending_hotkey_op,
         );
@@ -302,13 +331,15 @@ impl App {
 
     /// Apply the viewport-input actions deferred past the `engine` borrow:
     /// a classified click (a left-release that picked a residue / empty
-    /// background) updates the selection; ESC cancels the in-flight op;
-    /// and a resolved plugin hotkey op dispatches. Run after the trailing
-    /// visualization update so `&mut self` is free.
+    /// background) updates the selection; a Tab over a residue toggles the
+    /// segment-info panel; ESC cancels the in-flight op; and a resolved
+    /// plugin hotkey op dispatches. Run after the trailing visualization
+    /// update so `&mut self` is free.
     fn apply_deferred_viewport_actions(
         &mut self,
         pending_click: Option<ClickEvent>,
         pending_escape: bool,
+        pending_segment_toggle: Option<(EntityId, usize)>,
         #[cfg(not(target_arch = "wasm32"))] pending_hotkey_op: Option<String>,
     ) {
         // Apply any pending click (a left-release that classified as a
@@ -316,6 +347,10 @@ impl App {
         // residue hit selects.
         if let Some(click) = pending_click {
             self.apply_click_to_selection(&click);
+        }
+
+        if let Some((eid, res)) = pending_segment_toggle {
+            self.toggle_segment(eid, res);
         }
 
         if pending_escape {
@@ -469,10 +504,27 @@ const fn decode_mouse_button(button: u8) -> Option<viso::MouseButton> {
     }
 }
 
+/// Resolve the residue currently under the cursor to its session
+/// `(EntityId, residue)`, or `None` when the hover is empty / an atom or the
+/// flat index does not map to a live entity (before the first rebuild, or out
+/// of range). The raw entity id is mapped to the session [`EntityId`] the same
+/// way the pull-drag path does, matching on `id.raw()`.
+fn hovered_segment_target(engine: &VisoEngine, store: &Session) -> Option<(EntityId, usize)> {
+    let viso::PickTarget::Residue(flat) = engine.hovered_target() else {
+        return None;
+    };
+    let (raw_entity, local_residue) = engine.flat_to_entity_residue(flat)?;
+    let eid = store.ids().find(|id| id.raw() == raw_entity)?;
+    Some((eid, local_residue as usize))
+}
+
 /// Deferred results of a viewport `Key` press that must be applied after the
 /// `engine` borrow ends: ESC cancel and (native) a resolved plugin hotkey op.
 struct KeyOutcome {
     escape: bool,
+    /// A Tab press over a residue: the segment-info panel toggle, applied
+    /// past the `engine` borrow because it needs `&mut self`.
+    segment_toggle: Option<(EntityId, usize)>,
     #[cfg(not(target_arch = "wasm32"))]
     hotkey_op: Option<String>,
 }
@@ -493,6 +545,7 @@ fn handle_viewport_key(
 ) -> KeyOutcome {
     let mut outcome = KeyOutcome {
         escape: false,
+        segment_toggle: None,
         #[cfg(not(target_arch = "wasm32"))]
         hotkey_op: None,
     };
@@ -521,8 +574,15 @@ fn handle_viewport_key(
         // tick's `FocusChanged` reaction pushes viso's camera
         // mirror, reframes, and raises the projector dirty.
         "Tab" => {
-            let next = next_focus(store.focus(), &engine.focusable_entities());
-            store.set_focus(next);
+            // Tab over a residue drives the segment-info panel (deferred,
+            // since the toggle needs `&mut self`); over empty space / an
+            // atom it falls through to the focus cycle.
+            if let Some(target) = hovered_segment_target(engine, store) {
+                outcome.segment_toggle = Some(target);
+            } else {
+                let next = next_focus(store.focus(), &engine.focusable_entities());
+                store.set_focus(next);
+            }
         }
         "Backquote" => {
             store.set_focus(Focus::All);
