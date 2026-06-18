@@ -483,6 +483,20 @@ impl ApplicationHandler for AppRunner {
             _ => (),
         }
     }
+
+    /// On Windows, `WM_PAINT` (which winit maps to `RedrawRequested`) is a
+    /// low-priority message that can be starved when the WebView2 child window
+    /// keeps the message queue busy. The `request_redraw()` →
+    /// `RedrawRequested` chain then stalls, freezing the frame loop until an
+    /// external event (resize, move) forces a repaint. Requesting a redraw
+    /// from `about_to_wait` — called on every event-loop iteration under
+    /// `ControlFlow::Poll` — guarantees continuous frame generation regardless
+    /// of Windows message priority.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
 }
 
 #[cfg(debug_assertions)]
