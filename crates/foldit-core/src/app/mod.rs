@@ -147,6 +147,38 @@ pub struct App {
     /// closed, or re-targeted). The tick takes it and forces the GUI
     /// segment arm to reproject, mirroring `needs_full_populate`.
     pub(in crate::app) needs_segment_dirty: bool,
+    /// Panels currently shown (by string id). A panel absent from the set
+    /// is closed. Backend-authoritative so visibility survives a reload.
+    pub(in crate::app) open_panels: std::collections::BTreeSet<String>,
+    /// Per-panel dragged top-left position (pixels, origin top-left). A
+    /// panel without an entry renders at its layout default.
+    pub(in crate::app) panel_positions: std::collections::BTreeMap<String, (f32, f32)>,
+    /// One-shot signal that the panel set or a panel position changed. The
+    /// tick takes it and forces the GUI panels arm to reproject, mirroring
+    /// `needs_segment_dirty`.
+    pub(in crate::app) needs_panels_dirty: bool,
+    /// Puzzle high-score progress: best recorded display score per puzzle id
+    /// (monotonic max). Backend-authoritative; the tick records into it when
+    /// a loaded puzzle's display score improves on its current best.
+    pub(in crate::app) progress: std::collections::BTreeMap<u32, f64>,
+    /// One-shot signal that `progress` changed. The tick takes it and forces
+    /// the GUI progress arm to reproject, mirroring `needs_panels_dirty`.
+    pub(in crate::app) needs_progress_dirty: bool,
+    /// Whether the tutorial-hint bubble is shown. Backend-authoritative so
+    /// the toggle survives a reload.
+    pub(in crate::app) hints_visible: bool,
+    /// Whether the window is in OS fullscreen. Backend-authoritative mirror;
+    /// the desktop host pulls `take_fullscreen_change` and drives the winit
+    /// window.
+    pub(in crate::app) fullscreen: bool,
+    /// One-shot signal that a UI flag (`hints_visible` / `fullscreen`)
+    /// changed. The tick takes it and forces the GUI ui arm to reproject,
+    /// mirroring `needs_panels_dirty`.
+    pub(in crate::app) needs_ui_dirty: bool,
+    /// Pending fullscreen change for the desktop host to pull this frame,
+    /// staged only when `set_fullscreen` actually flipped the flag. The host
+    /// takes it via [`App::take_fullscreen_change`].
+    pub(in crate::app) pending_fullscreen: Option<bool>,
     /// Last tail tip pushed to the host, value-compared each frame so an
     /// unchanged tip pushes nothing. The panel body is placed once and is
     /// draggable; only its tail tip tracks the open residue's live screen
@@ -199,6 +231,15 @@ impl App {
             needs_full_populate: false,
             open_segment: None,
             needs_segment_dirty: false,
+            open_panels: std::collections::BTreeSet::new(),
+            panel_positions: std::collections::BTreeMap::new(),
+            needs_panels_dirty: false,
+            progress: std::collections::BTreeMap::new(),
+            needs_progress_dirty: false,
+            hints_visible: true,
+            fullscreen: false,
+            needs_ui_dirty: false,
+            pending_fullscreen: None,
             last_tail_tip: TailTip::Unset,
             pending_tail: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -265,6 +306,85 @@ impl App {
     pub(in crate::app) fn close_segment(&mut self) {
         self.open_segment = None;
         self.needs_segment_dirty = true;
+    }
+
+    /// Show or hide a panel by id. Marks the panels section dirty so the
+    /// GUI projection reprojects on the next tick.
+    #[allow(dead_code)]
+    pub(in crate::app) fn set_panel_visible(&mut self, panel: String, visible: bool) {
+        if visible {
+            self.open_panels.insert(panel);
+        } else {
+            self.open_panels.remove(&panel);
+        }
+        self.needs_panels_dirty = true;
+    }
+
+    /// Record a panel's dragged top-left position. Marks the panels section
+    /// dirty so the GUI projection reprojects on the next tick.
+    #[allow(dead_code)]
+    pub(in crate::app) fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
+        self.panel_positions.insert(panel, (x, y));
+        self.needs_panels_dirty = true;
+    }
+
+    /// Record the loaded puzzle's display score against its high-score
+    /// progress. Monotonic max: only writes (and marks the progress section
+    /// dirty) when a puzzle is loaded, the score is positive, and it beats
+    /// the puzzle's current best. A puzzle counts as complete once its best
+    /// is positive, so this is the sole gate the menu's unlock math reads.
+    fn record_progress(&mut self) {
+        let Some(puzzle_id) = self.store.puzzle().map(|p| p.id) else {
+            return;
+        };
+        let Some(score) = self.store.display_score() else {
+            return;
+        };
+        if score <= 0.0 {
+            return;
+        }
+        let best = self.progress.entry(puzzle_id).or_insert(f64::NEG_INFINITY);
+        if score > *best {
+            *best = score;
+            self.needs_progress_dirty = true;
+        }
+    }
+
+    /// Wipe all recorded high-score progress. Marks the progress section
+    /// dirty so the GUI projection reprojects the now-empty map.
+    pub(in crate::app) fn clear_progress(&mut self) {
+        if self.progress.is_empty() {
+            return;
+        }
+        self.progress.clear();
+        self.needs_progress_dirty = true;
+    }
+
+    /// Show or hide the tutorial-hint bubble. Marks the ui section dirty so
+    /// the GUI projection reprojects `ui.hints_visible` on the next tick.
+    pub(in crate::app) fn set_hints_visible(&mut self, v: bool) {
+        self.hints_visible = v;
+        self.needs_ui_dirty = true;
+    }
+
+    /// Enter or leave OS fullscreen. Marks the ui section dirty so the GUI
+    /// projection reprojects `ui.fullscreen`, and stages a value-gated change
+    /// for the desktop host to pull and apply to the winit window. Only the
+    /// false->true / true->false transition stages, so re-setting the same
+    /// value pushes nothing to the host.
+    pub(in crate::app) fn set_fullscreen(&mut self, v: bool) {
+        if self.fullscreen != v {
+            self.fullscreen = v;
+            self.pending_fullscreen = Some(v);
+        }
+        self.needs_ui_dirty = true;
+    }
+
+    /// Take the pending fullscreen change for the desktop host to apply to
+    /// the winit window, or `None` when it did not change since the last
+    /// pull. Returned at most once per change.
+    pub const fn take_fullscreen_change(&mut self) -> Option<bool> {
+        self.pending_fullscreen.take()
     }
 
     /// Advance the App-lifetime phase and mirror it to the frontend
@@ -416,6 +536,11 @@ impl App {
             }
         }
 
+        // Record the loaded puzzle's display score into high-score progress.
+        // Runs after the score polls above so it sees this tick's applied
+        // score; the monotonic-max gate inside is a cheap read at rest.
+        self.record_progress();
+
         // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();
 
@@ -560,6 +685,12 @@ impl App {
             self.needs_full_populate = false;
             let segment_dirty = self.needs_segment_dirty;
             self.needs_segment_dirty = false;
+            let panels_dirty = self.needs_panels_dirty;
+            self.needs_panels_dirty = false;
+            let ui_dirty = self.needs_ui_dirty;
+            self.needs_ui_dirty = false;
+            let progress_dirty = self.needs_progress_dirty;
+            self.needs_progress_dirty = false;
             let src = GuiSources {
                 session: &self.store,
                 engine,
@@ -568,11 +699,19 @@ impl App {
                 view_options: &self.view_options,
                 active_preset: self.active_preset.as_deref(),
                 open_segment: self.open_segment.as_ref(),
+                open_panels: &self.open_panels,
+                panel_positions: &self.panel_positions,
+                progress: &self.progress,
+                hints_visible: self.hints_visible,
+                fullscreen: self.fullscreen,
             };
             let segment_auto_closed = self.gui_projector.consume(
                 &changes,
                 full_populate,
                 segment_dirty,
+                panels_dirty,
+                ui_dirty,
+                progress_dirty,
                 &src,
                 &mut self.frontend,
             );

@@ -65,6 +65,36 @@ impl App {
             return;
         }
 
+        // Panel visibility / position is pure UI state (drives the
+        // backend-owned open set + positions); handled before the
+        // engine-presence guard like the other UI-state commands.
+        if let AppCommand::SetPanelVisible { panel, visible } = command {
+            self.set_panel_visible(panel, visible);
+            return;
+        }
+        if let AppCommand::SetPanelPosition { panel, x, y } = command {
+            self.set_panel_position(panel, x, y);
+            return;
+        }
+
+        // Hint visibility and fullscreen are pure UI state; handled before
+        // the engine-presence guard like the other UI-state commands.
+        if let AppCommand::SetHintsVisible { visible } = command {
+            self.set_hints_visible(visible);
+            return;
+        }
+        if let AppCommand::SetFullscreen { value } = command {
+            self.set_fullscreen(value);
+            return;
+        }
+
+        // Clearing high-score progress is pure backend state; handled before
+        // the engine-presence guard like the other UI-state commands.
+        if let AppCommand::ClearProgress = command {
+            self.clear_progress();
+            return;
+        }
+
         if self.engine.is_none() {
             return;
         }
@@ -133,7 +163,12 @@ impl App {
             | AppCommand::SetFocus { .. }
             | AppCommand::SetEntityAppearance { .. }
             | AppCommand::ClearEntityAppearance { .. }
-            | AppCommand::CloseSegment => {
+            | AppCommand::CloseSegment
+            | AppCommand::SetPanelVisible { .. }
+            | AppCommand::SetPanelPosition { .. }
+            | AppCommand::SetHintsVisible { .. }
+            | AppCommand::SetFullscreen { .. }
+            | AppCommand::ClearProgress => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `AppCommand`: a new variant
                 // without a handler is a compile error.

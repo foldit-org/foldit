@@ -19,7 +19,8 @@ use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
     CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, FrontendState, HistoryLiveUpdate,
-    HistorySection, SegmentInfo, TextBubbleButton, TextBubblePayload, WireId,
+    HistorySection, PanelPosition, PanelsSection, ProgressEntry, ProgressSection, SegmentInfo,
+    TextBubbleButton, TextBubblePayload, WireId,
 };
 use viso::{Focus, VisoEngine};
 
@@ -202,6 +203,18 @@ pub struct GuiSources<'a> {
     /// when the panel is closed. App-owned (survives a topology swap until
     /// the target stops resolving).
     pub open_segment: Option<&'a crate::app::SegmentTarget>,
+    /// Panels currently shown (by string id). App-owned so visibility
+    /// survives a topology swap.
+    pub open_panels: &'a std::collections::BTreeSet<String>,
+    /// Per-panel dragged top-left positions. App-owned.
+    pub panel_positions: &'a std::collections::BTreeMap<String, (f32, f32)>,
+    /// Puzzle high-score progress: best display score per puzzle id.
+    /// App-owned so it survives a topology swap.
+    pub progress: &'a std::collections::BTreeMap<u32, f64>,
+    /// Backend-authoritative tutorial-hint visibility for the `UI` section.
+    pub hints_visible: bool,
+    /// Backend-authoritative fullscreen flag for the `UI` section.
+    pub fullscreen: bool,
 }
 
 impl GuiProjector {
@@ -232,6 +245,9 @@ impl GuiProjector {
         updates: &[SessionUpdate],
         full_populate: bool,
         segment_dirty: bool,
+        panels_dirty: bool,
+        ui_dirty: bool,
+        progress_dirty: bool,
         src: &GuiSources<'_>,
         frontend: &mut FrontendState,
     ) -> bool {
@@ -242,6 +258,15 @@ impl GuiProjector {
         let mut dirty = compute_dirty(updates, full_populate);
         if segment_dirty {
             dirty |= DirtyFlags::SEGMENT;
+        }
+        if panels_dirty {
+            dirty |= DirtyFlags::PANELS;
+        }
+        if ui_dirty {
+            dirty |= DirtyFlags::UI;
+        }
+        if progress_dirty {
+            dirty |= DirtyFlags::PROGRESS;
         }
 
         if dirty.is_empty() {
@@ -277,6 +302,16 @@ impl GuiProjector {
         } else {
             false
         };
+        if dirty.contains(DirtyFlags::PANELS) {
+            project_panels(src.open_panels, src.panel_positions, frontend);
+        }
+        if dirty.contains(DirtyFlags::PROGRESS) {
+            project_progress(src.progress, frontend);
+        }
+        if dirty.contains(DirtyFlags::UI) {
+            frontend.ui.hints_visible = src.hints_visible;
+            frontend.ui.fullscreen = src.fullscreen;
+        }
 
         sync_history(&mut self.history_sync, src.session, frontend);
         auto_closed
@@ -449,6 +484,41 @@ pub fn ca_world_position(
         .iter()
         .find(|a| &a.name == b"CA  ")
         .map(|a| a.position)
+}
+
+/// Project the `PANELS` section: the backend-authoritative open set and
+/// per-panel positions, built from the App-owned state.
+fn project_panels(
+    open_panels: &std::collections::BTreeSet<String>,
+    panel_positions: &std::collections::BTreeMap<String, (f32, f32)>,
+    frontend: &mut FrontendState,
+) {
+    let open = open_panels.iter().cloned().collect();
+    let positions = panel_positions
+        .iter()
+        .map(|(panel, (x, y))| PanelPosition {
+            panel: panel.clone(),
+            x: *x,
+            y: *y,
+        })
+        .collect();
+    frontend.set_panels(PanelsSection { open, positions });
+}
+
+/// Project the `PROGRESS` section: the per-puzzle high-score map, built
+/// from the App-owned progress state.
+fn project_progress(
+    progress: &std::collections::BTreeMap<u32, f64>,
+    frontend: &mut FrontendState,
+) {
+    let entries = progress
+        .iter()
+        .map(|(&puzzle_id, &high_score)| ProgressEntry {
+            puzzle_id,
+            high_score,
+        })
+        .collect();
+    frontend.set_progress(ProgressSection { entries });
 }
 
 /// Project the `ACTIONS` section: the focus- + selection-aware op catalog.

@@ -212,6 +212,25 @@ impl AppRunner {
         let _ = webview.evaluate_script(&script);
     }
 
+    /// Apply a pending backend fullscreen change to the winit window. The
+    /// desktop window is the source of truth for OS fullscreen here (the
+    /// in-webview DOM fullscreen API does not own the native window), so the
+    /// backend mirror is pulled and enacted on the actual window each frame.
+    /// `App::take_fullscreen_change` returns a change at most once per
+    /// transition, so an unchanged flag is a no-op.
+    fn apply_fullscreen_change(&mut self) {
+        let Some(value) = self.app.take_fullscreen_change() else {
+            return;
+        };
+        if let Some(window) = &self.window {
+            window.set_fullscreen(if value {
+                Some(winit::window::Fullscreen::Borderless(None))
+            } else {
+                None
+            });
+        }
+    }
+
     /// Resize the webview to match a new window size (physical pixels).
     fn resize_webview(&self, new_size: winit::dpi::PhysicalSize<u32>) {
         if let Some(ref webview) = &self.webview {
@@ -342,6 +361,10 @@ impl AppRunner {
         // Ship the segment panel's live tail-tip position (no-op when the
         // tip did not move this frame).
         self.push_tail_to_webview();
+
+        // Apply any backend fullscreen change to the winit window (no-op when
+        // the flag did not flip this frame).
+        self.apply_fullscreen_change();
 
         // Request next frame
         if let Some(window) = &self.window {
