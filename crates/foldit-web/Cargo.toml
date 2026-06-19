@@ -43,6 +43,10 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # viso's pipeline processor parallelizes via rayon-on-web-workers and
 # requires the pool to exist before any RenderContext is constructed.
 wasm-bindgen-rayon = { version = "1", features = ["no-bundler"] }
+# Origin Private File System: persists the puzzle high-score progress map to
+# the origin-private OPFS root. Brings its own web-sys OPFS bindings, so no
+# web-sys feature additions are needed below.
+opfs = "0.2.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"

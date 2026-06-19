@@ -5,7 +5,9 @@
 
 use foldit_core::App;
 use foldit_gui::IpcMessage;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -32,6 +34,16 @@ pub struct AppRunner {
     init_deadline: Option<Instant>,
     /// Shared log buffer from `tee_logger` (drained each frame into frontend state)
     log_buffer: crate::tee_logger::LogBuffer,
+    /// Async runtime that owns the puzzle-progress disk I/O. opfs reads/writes
+    /// run on its worker threads, never on the event-loop thread.
+    progress_runtime: tokio::runtime::Runtime,
+    /// Receiver for the one-shot startup load of the persisted progress map.
+    /// `tick_frame` drains it; `Some(bytes)` is the on-disk map, and the
+    /// channel staying empty (or closing on a first-run miss) means no merge.
+    progress_load_rx: Receiver<Vec<u8>>,
+    /// Sender half handed to the startup load task; held so the receiver does
+    /// not see a premature disconnect before the task runs.
+    progress_load_tx: Option<Sender<Vec<u8>>>,
     // `pub(crate)` so the dev-server methods in `webview_assets` can drive them.
     #[cfg(debug_assertions)]
     pub(crate) dev_server: Option<std::process::Child>,
@@ -40,7 +52,20 @@ pub struct AppRunner {
 }
 
 impl AppRunner {
+    /// Filename under `~/.foldit/` for the persisted high-score progress map.
+    const PROGRESS_FILE: &'static str = "progress.json";
+
+    #[allow(
+        clippy::expect_used,
+        reason = "the progress runtime is built once at binary startup; a failure to spawn worker threads is unrecoverable and should abort loudly"
+    )]
     fn new(app: App, log_buffer: crate::tee_logger::LogBuffer) -> Self {
+        let progress_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("Failed to build progress runtime");
+        let (progress_load_tx, progress_load_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         Self {
             app,
             window: None,
@@ -52,11 +77,117 @@ impl AppRunner {
             init_pending: false,
             init_deadline: None,
             log_buffer,
+            progress_runtime,
+            progress_load_rx,
+            progress_load_tx: Some(progress_load_tx),
             #[cfg(debug_assertions)]
             dev_server: None,
             #[cfg(debug_assertions)]
             dev_server_available: false,
         }
+    }
+
+    /// Resolve the `~/.foldit/` data directory, creating it if needed. Returns
+    /// `None` when the home directory cannot be located or the directory
+    /// cannot be created, in which case progress persistence is skipped.
+    fn foldit_data_dir() -> Option<PathBuf> {
+        let dir = dirs::home_dir()?.join(".foldit");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("Could not create {}: {e}", dir.display());
+            return None;
+        }
+        Some(dir)
+    }
+
+    /// Spawn the one-shot startup read of the persisted progress map onto the
+    /// runtime's worker thread. On success the bytes are sent through
+    /// `progress_load_rx`; a missing file (first run) or any read error sends
+    /// nothing, leaving the live map untouched. Called once when the App is
+    /// ready to merge.
+    fn spawn_progress_load(&mut self) {
+        let Some(tx) = self.progress_load_tx.take() else {
+            return;
+        };
+        let Some(dir) = Self::foldit_data_dir() else {
+            return;
+        };
+        self.progress_runtime.spawn(async move {
+            use opfs::persistent::DirectoryHandle as DirHandle;
+            use opfs::{DirectoryHandle as _, FileHandle as _, GetFileHandleOptions};
+
+            let handle = DirHandle::from(dir);
+            let opts = GetFileHandleOptions { create: false };
+            let file = match handle
+                .get_file_handle_with_options(Self::PROGRESS_FILE, &opts)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(e) => {
+                    log::warn!("Could not open progress file: {e}");
+                    return;
+                }
+            };
+            match file.read().await {
+                Ok(bytes) => {
+                    let _ = tx.send(bytes);
+                }
+                Err(e) => log::warn!("Could not read progress file: {e}"),
+            }
+        });
+    }
+
+    /// Merge a freshly loaded progress map (once, on the first frame the load
+    /// task has a result) and fire-and-forget any pending save. The opfs write
+    /// runs on a runtime worker thread, so the frame is never blocked on disk.
+    /// Mirrors `apply_fullscreen_change`: a per-frame pull of host-owned effect
+    /// state from `App`.
+    fn apply_progress_persistence(&mut self) {
+        if let Ok(bytes) = self.progress_load_rx.try_recv() {
+            self.app.import_progress(&bytes);
+        }
+
+        let Some(bytes) = self.app.take_progress_to_persist() else {
+            return;
+        };
+        let Some(dir) = Self::foldit_data_dir() else {
+            return;
+        };
+        self.progress_runtime.spawn(async move {
+            use opfs::persistent::DirectoryHandle as DirHandle;
+            use opfs::{
+                CreateWritableOptions, DirectoryHandle as _, FileHandle as _,
+                GetFileHandleOptions, WritableFileStream as _,
+            };
+
+            let handle = DirHandle::from(dir);
+            let get_opts = GetFileHandleOptions { create: true };
+            let mut file = match handle
+                .get_file_handle_with_options(Self::PROGRESS_FILE, &get_opts)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("Could not open progress file for write: {e}");
+                    return;
+                }
+            };
+            let write_opts = CreateWritableOptions { keep_existing_data: false };
+            let mut writer = match file.create_writable_with_options(&write_opts).await {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("Could not open progress writer: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = writer.write_at_cursor_pos(&bytes).await {
+                log::warn!("Could not write progress: {e}");
+                return;
+            }
+            if let Err(e) = writer.close().await {
+                log::warn!("Could not flush progress: {e}");
+            }
+        });
     }
 
     /// Drain IPC messages from the webview and dispatch them.
@@ -318,6 +449,9 @@ impl AppRunner {
                 // per-frame `app.tick` drives the warm connect, plugin Init,
                 // normalize, and first score across frames.
                 self.app.begin_startup();
+                // Kick the async read of persisted progress; its result is
+                // merged in `apply_progress_persistence` once it lands.
+                self.spawn_progress_load();
                 // Fall through to tick + render this frame.
             } else {
                 // Webview still loading. Present the engine's empty scene so the
@@ -365,6 +499,10 @@ impl AppRunner {
         // Apply any backend fullscreen change to the winit window (no-op when
         // the flag did not flip this frame).
         self.apply_fullscreen_change();
+
+        // Merge any landed progress load and fire-and-forget a pending save
+        // (no-op when neither happened this frame).
+        self.apply_progress_persistence();
 
         // Request next frame
         if let Some(window) = &self.window {

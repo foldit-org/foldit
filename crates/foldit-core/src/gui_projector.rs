@@ -231,11 +231,11 @@ impl GuiProjector {
     ///
     /// Per-section dirtiness is derived entirely from the drained `updates`
     /// batch - each `SessionUpdate` variant maps to the GUI sections it
-    /// invalidates - plus a one-shot `full_populate` flag the tick raises on
-    /// session birth (the Loading → `InSession` flip and every reload) to push
-    /// every section once. There is no longer an App-side dirty residue: the
-    /// mutations that used to raise flags at their App sites now produce the
-    /// covering `SessionUpdate` variants, and those variants are mapped here.
+    /// invalidates - OR'd with the App-side `pending` accumulator. The
+    /// accumulator carries the App-owned dirty bits the `updates` batch cannot
+    /// express (segment / panels / ui / progress), plus the full-populate seed
+    /// (`DirtyFlags::all()`) the tick raises on session birth (the Loading →
+    /// `InSession` flip and every reload) to push every section once.
     ///
     /// Returns `true` when the segment arm auto-closed (the cached target
     /// no longer resolves): the App owns the open target, so it clears its
@@ -243,11 +243,7 @@ impl GuiProjector {
     pub(crate) fn consume(
         &mut self,
         updates: &[SessionUpdate],
-        full_populate: bool,
-        segment_dirty: bool,
-        panels_dirty: bool,
-        ui_dirty: bool,
-        progress_dirty: bool,
+        pending: DirtyFlags,
         src: &GuiSources<'_>,
         frontend: &mut FrontendState,
     ) -> bool {
@@ -255,19 +251,7 @@ impl GuiProjector {
         frontend.set_fps(src.engine.fps());
         frontend.ui.selected_count = src.session.selection_total_count();
 
-        let mut dirty = compute_dirty(updates, full_populate);
-        if segment_dirty {
-            dirty |= DirtyFlags::SEGMENT;
-        }
-        if panels_dirty {
-            dirty |= DirtyFlags::PANELS;
-        }
-        if ui_dirty {
-            dirty |= DirtyFlags::UI;
-        }
-        if progress_dirty {
-            dirty |= DirtyFlags::PROGRESS;
-        }
+        let dirty = compute_dirty(updates) | pending;
 
         if dirty.is_empty() {
             return false;
@@ -318,15 +302,10 @@ impl GuiProjector {
     }
 }
 
-/// Derive the dirty section set for this batch: the one-shot `full_populate`
-/// seed plus the per-variant fold mapping each `SessionUpdate` to the GUI
-/// sections it invalidates.
-fn compute_dirty(updates: &[SessionUpdate], full_populate: bool) -> DirtyFlags {
-    let mut dirty = if full_populate {
-        DirtyFlags::all()
-    } else {
-        DirtyFlags::empty()
-    };
+/// Derive the dirty section set for this batch: the per-variant fold mapping
+/// each `SessionUpdate` to the GUI sections it invalidates.
+fn compute_dirty(updates: &[SessionUpdate]) -> DirtyFlags {
+    let mut dirty = DirtyFlags::empty();
     for update in updates {
         dirty |= match update {
             // SEGMENT (not SELECTION): a score tick refreshes the open

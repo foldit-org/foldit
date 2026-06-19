@@ -17,7 +17,7 @@
 //! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
 //!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
 
-use foldit_gui::{AppPhase, FrontendState};
+use foldit_gui::{AppPhase, DirtyFlags, FrontendState};
 use viso::{KeyBindings, VisoEngine};
 
 use crate::gui_projector::{GuiProjector, GuiSources};
@@ -139,31 +139,32 @@ pub struct App {
     pub(in crate::app) startup_camera: self::load::StartupCamera,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
-    pub(in crate::app) needs_full_populate: bool,
+    /// One-shot accumulator of App-owned GUI dirty bits the `SessionUpdate`
+    /// batch cannot express (segment / panels / ui / progress), plus the
+    /// full-populate seed (`DirtyFlags::all()`) raised on session birth. The
+    /// tick drains it once and ORs it into the GUI consumer's batch-derived
+    /// set.
+    pub(in crate::app) pending_dirty: DirtyFlags,
     /// Open segment-info target with its cached identity + SS, or `None`
     /// when the panel is closed.
     pub(in crate::app) open_segment: Option<SegmentTarget>,
-    /// One-shot signal that the open segment target changed (opened,
-    /// closed, or re-targeted). The tick takes it and forces the GUI
-    /// segment arm to reproject, mirroring `needs_full_populate`.
-    pub(in crate::app) needs_segment_dirty: bool,
     /// Panels currently shown (by string id). A panel absent from the set
     /// is closed. Backend-authoritative so visibility survives a reload.
     pub(in crate::app) open_panels: std::collections::BTreeSet<String>,
     /// Per-panel dragged top-left position (pixels, origin top-left). A
     /// panel without an entry renders at its layout default.
     pub(in crate::app) panel_positions: std::collections::BTreeMap<String, (f32, f32)>,
-    /// One-shot signal that the panel set or a panel position changed. The
-    /// tick takes it and forces the GUI panels arm to reproject, mirroring
-    /// `needs_segment_dirty`.
-    pub(in crate::app) needs_panels_dirty: bool,
     /// Puzzle high-score progress: best recorded display score per puzzle id
     /// (monotonic max). Backend-authoritative; the tick records into it when
     /// a loaded puzzle's display score improves on its current best.
     pub(in crate::app) progress: std::collections::BTreeMap<u32, f64>,
-    /// One-shot signal that `progress` changed. The tick takes it and forces
-    /// the GUI progress arm to reproject, mirroring `needs_panels_dirty`.
-    pub(in crate::app) needs_progress_dirty: bool,
+    /// One-shot signal that `progress` changed and must be flushed to disk.
+    /// Separate from the `PROGRESS` dirty bit (which drives the GUI reproject):
+    /// the desktop host pulls the serialized map via
+    /// [`App::take_progress_to_persist`] and writes it off the event-loop
+    /// thread. Set only by a real in-session record/clear, never by a load
+    /// import, so a load does not trigger a save back.
+    pub(in crate::app) progress_persist_pending: bool,
     /// Whether the tutorial-hint bubble is shown. Backend-authoritative so
     /// the toggle survives a reload.
     pub(in crate::app) hints_visible: bool,
@@ -171,10 +172,6 @@ pub struct App {
     /// the desktop host pulls `take_fullscreen_change` and drives the winit
     /// window.
     pub(in crate::app) fullscreen: bool,
-    /// One-shot signal that a UI flag (`hints_visible` / `fullscreen`)
-    /// changed. The tick takes it and forces the GUI ui arm to reproject,
-    /// mirroring `needs_panels_dirty`.
-    pub(in crate::app) needs_ui_dirty: bool,
     /// Pending fullscreen change for the desktop host to pull this frame,
     /// staged only when `set_fullscreen` actually flipped the flag. The host
     /// takes it via [`App::take_fullscreen_change`].
@@ -228,17 +225,14 @@ impl App {
             startup_camera: self::load::StartupCamera::Fit,
             #[cfg(not(target_arch = "wasm32"))]
             startup_ss_override: None,
-            needs_full_populate: false,
+            pending_dirty: DirtyFlags::empty(),
             open_segment: None,
-            needs_segment_dirty: false,
             open_panels: std::collections::BTreeSet::new(),
             panel_positions: std::collections::BTreeMap::new(),
-            needs_panels_dirty: false,
             progress: std::collections::BTreeMap::new(),
-            needs_progress_dirty: false,
+            progress_persist_pending: false,
             hints_visible: true,
             fullscreen: false,
-            needs_ui_dirty: false,
             pending_fullscreen: None,
             last_tail_tip: TailTip::Unset,
             pending_tail: None,
@@ -257,7 +251,7 @@ impl App {
         self.set_app_phase(AppPhase::InSession);
         self.frontend.set_score(0.0, true);
         self.frontend.set_score_title(self.store.title().to_owned());
-        self.needs_full_populate = true;
+        self.pending_dirty |= DirtyFlags::all();
     }
 
     /// Open the per-residue segment-info panel on `(eid, residue)`.
@@ -298,34 +292,32 @@ impl App {
             aa_one,
             ss_label,
         });
-        self.needs_segment_dirty = true;
+        self.pending_dirty |= DirtyFlags::SEGMENT;
     }
 
     /// Close the segment-info panel. Marks the segment section dirty so the
     /// GUI projection clears it on the next tick.
     pub(in crate::app) fn close_segment(&mut self) {
         self.open_segment = None;
-        self.needs_segment_dirty = true;
+        self.pending_dirty |= DirtyFlags::SEGMENT;
     }
 
     /// Show or hide a panel by id. Marks the panels section dirty so the
     /// GUI projection reprojects on the next tick.
-    #[allow(dead_code)]
     pub(in crate::app) fn set_panel_visible(&mut self, panel: String, visible: bool) {
         if visible {
             self.open_panels.insert(panel);
         } else {
             self.open_panels.remove(&panel);
         }
-        self.needs_panels_dirty = true;
+        self.pending_dirty |= DirtyFlags::PANELS;
     }
 
     /// Record a panel's dragged top-left position. Marks the panels section
     /// dirty so the GUI projection reprojects on the next tick.
-    #[allow(dead_code)]
     pub(in crate::app) fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
         self.panel_positions.insert(panel, (x, y));
-        self.needs_panels_dirty = true;
+        self.pending_dirty |= DirtyFlags::PANELS;
     }
 
     /// Record the loaded puzzle's display score against its high-score
@@ -346,7 +338,8 @@ impl App {
         let best = self.progress.entry(puzzle_id).or_insert(f64::NEG_INFINITY);
         if score > *best {
             *best = score;
-            self.needs_progress_dirty = true;
+            self.pending_dirty |= DirtyFlags::PROGRESS;
+            self.progress_persist_pending = true;
         }
     }
 
@@ -357,14 +350,15 @@ impl App {
             return;
         }
         self.progress.clear();
-        self.needs_progress_dirty = true;
+        self.pending_dirty |= DirtyFlags::PROGRESS;
+        self.progress_persist_pending = true;
     }
 
     /// Show or hide the tutorial-hint bubble. Marks the ui section dirty so
     /// the GUI projection reprojects `ui.hints_visible` on the next tick.
     pub(in crate::app) fn set_hints_visible(&mut self, v: bool) {
         self.hints_visible = v;
-        self.needs_ui_dirty = true;
+        self.pending_dirty |= DirtyFlags::UI;
     }
 
     /// Enter or leave OS fullscreen. Marks the ui section dirty so the GUI
@@ -377,7 +371,7 @@ impl App {
             self.fullscreen = v;
             self.pending_fullscreen = Some(v);
         }
-        self.needs_ui_dirty = true;
+        self.pending_dirty |= DirtyFlags::UI;
     }
 
     /// Take the pending fullscreen change for the desktop host to apply to
@@ -385,6 +379,43 @@ impl App {
     /// pull. Returned at most once per change.
     pub const fn take_fullscreen_change(&mut self) -> Option<bool> {
         self.pending_fullscreen.take()
+    }
+
+    /// Take the serialized high-score progress map for the host to persist to
+    /// disk, or `None` when it has not changed since the last pull. Returned
+    /// at most once per change. The host owns the storage backend and the
+    /// async I/O; foldit-core only hands over the bytes.
+    pub fn take_progress_to_persist(&mut self) -> Option<Vec<u8>> {
+        if !self.progress_persist_pending {
+            return None;
+        }
+        self.progress_persist_pending = false;
+        serde_json::to_vec(&self.progress).ok()
+    }
+
+    /// Merge a persisted high-score progress map (as written by
+    /// [`App::take_progress_to_persist`]) back into the live map. Monotonic
+    /// max per puzzle so any record made in-session before the async load
+    /// completed is not clobbered by a stale on-disk best. Marks the GUI
+    /// progress section dirty so the merged map projects, but deliberately
+    /// does not set the persist-pending flag, so a load does not bounce back
+    /// out as a save.
+    pub fn import_progress(&mut self, bytes: &[u8]) {
+        let Ok(loaded) = serde_json::from_slice::<std::collections::BTreeMap<u32, f64>>(bytes)
+        else {
+            return;
+        };
+        let mut changed = false;
+        for (puzzle_id, score) in loaded {
+            let best = self.progress.entry(puzzle_id).or_insert(f64::NEG_INFINITY);
+            if score > *best {
+                *best = score;
+                changed = true;
+            }
+        }
+        if changed {
+            self.pending_dirty |= DirtyFlags::PROGRESS;
+        }
     }
 
     /// Advance the App-lifetime phase and mirror it to the frontend
@@ -675,22 +706,14 @@ impl App {
         // flowing in asynchronously via steps 2 + 5.
 
         // 8. Frontend projection: the GUI consumer derives its dirty set
-        //    entirely from this tick's `changes` batch, plus the one-shot
-        //    `needs_full_populate` signal (session birth). The signal is
-        //    consumed (taken + cleared) only when the engine is present and
-        //    the consumer runs; with no engine attached yet it persists to a
-        //    later tick, so the birth populate is never dropped.
+        //    entirely from this tick's `changes` batch, OR'd with the App-side
+        //    `pending_dirty` accumulator (the segment / panels / ui / progress
+        //    bits plus the session-birth full-populate seed). The accumulator
+        //    is drained only when the engine is present and the consumer runs;
+        //    with no engine attached yet it persists to a later tick, so the
+        //    birth populate is never dropped.
         if let Some(engine) = self.engine.as_ref() {
-            let full_populate = self.needs_full_populate;
-            self.needs_full_populate = false;
-            let segment_dirty = self.needs_segment_dirty;
-            self.needs_segment_dirty = false;
-            let panels_dirty = self.needs_panels_dirty;
-            self.needs_panels_dirty = false;
-            let ui_dirty = self.needs_ui_dirty;
-            self.needs_ui_dirty = false;
-            let progress_dirty = self.needs_progress_dirty;
-            self.needs_progress_dirty = false;
+            let pending = std::mem::take(&mut self.pending_dirty);
             let src = GuiSources {
                 session: &self.store,
                 engine,
@@ -705,16 +728,9 @@ impl App {
                 hints_visible: self.hints_visible,
                 fullscreen: self.fullscreen,
             };
-            let segment_auto_closed = self.gui_projector.consume(
-                &changes,
-                full_populate,
-                segment_dirty,
-                panels_dirty,
-                ui_dirty,
-                progress_dirty,
-                &src,
-                &mut self.frontend,
-            );
+            let segment_auto_closed =
+                self.gui_projector
+                    .consume(&changes, pending, &src, &mut self.frontend);
             if segment_auto_closed {
                 self.open_segment = None;
             }

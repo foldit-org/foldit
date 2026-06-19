@@ -71,6 +71,15 @@ pub fn init() {
 type AppHandle = Rc<RefCell<App>>;
 type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
 
+/// Single-threaded handoff for the async OPFS progress load. The startup
+/// `spawn_local` task stashes the read bytes here; the rAF loop drains it
+/// once and merges via `App::import_progress`. No cross-thread channel is
+/// needed because wasm is single-threaded.
+type ProgressLoadCell = Rc<RefCell<Option<Vec<u8>>>>;
+
+/// Filename under the origin-private OPFS root for the persisted progress map.
+const PROGRESS_FILE: &str = "progress.json";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FolditApp — JS-facing handle
 // ─────────────────────────────────────────────────────────────────────────────
@@ -143,9 +152,15 @@ impl FolditApp {
 
         self.app.borrow_mut().attach_engine(engine);
 
+        // Kick the one-shot async read of the persisted progress map. The
+        // result is stashed into the shared cell and merged by the rAF loop
+        // once it lands (a missing file on first run leaves the cell empty).
+        let progress_load: ProgressLoadCell = Rc::new(RefCell::new(None));
+        spawn_progress_load(progress_load.clone());
+
         // rAF loop. Self-rescheduling closure that drives App::tick
         // once per frame and pushes any serialized dirty state to JS.
-        spawn_render_loop(self.app.clone(), self.state_cb.clone());
+        spawn_render_loop(self.app.clone(), self.state_cb.clone(), progress_load);
 
         Ok(())
     }
@@ -265,7 +280,7 @@ impl bridge::Transport for WebTransport {
 // state callback.
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn spawn_render_loop(app: AppHandle, state_cb: JsCallback) {
+fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: ProgressLoadCell) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => {
@@ -297,6 +312,17 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback) {
                     }
                 }
             }
+
+            // Merge any landed progress load (once) and fire-and-forget a
+            // pending save. The OPFS I/O runs on spawned tasks, so the frame
+            // is never blocked on it. Mirrors the desktop host's
+            // `apply_progress_persistence`.
+            if let Some(bytes) = progress_load.borrow_mut().take() {
+                app.import_progress(&bytes);
+            }
+            if let Some(bytes) = app.take_progress_to_persist() {
+                spawn_progress_save(bytes);
+            }
         }
 
         // Re-arm.
@@ -310,4 +336,87 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback) {
     let _ = window.request_animation_frame(
         g.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPFS progress persistence: origin-private read at startup, fire-and-forget
+// write when the live map changes. Both run as `spawn_local` tasks off the rAF
+// frame. The OPFS error type is `JsValue` (no `io::ErrorKind`), so a missing
+// file on first run surfaces as a rejected open and is treated as "no saved
+// progress" rather than an error.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read the persisted progress map from the OPFS root and stash the bytes into
+/// the shared cell. A first-run miss (the file does not exist) leaves the cell
+/// empty and is not logged as an error.
+fn spawn_progress_load(cell: ProgressLoadCell) {
+    wasm_bindgen_futures::spawn_local(async move {
+        use opfs::persistent::{app_specific_dir, DirectoryHandle as DirHandle};
+        use opfs::{DirectoryHandle as _, FileHandle as _, GetFileHandleOptions};
+
+        let dir: DirHandle = match app_specific_dir().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open OPFS root: {e:?}");
+                return;
+            }
+        };
+        let opts = GetFileHandleOptions { create: false };
+        let file = match dir.get_file_handle_with_options(PROGRESS_FILE, &opts).await {
+            Ok(f) => f,
+            // A rejected open with `create: false` is the first-run "no file"
+            // signal; treat any error here as "no saved progress".
+            Err(_) => return,
+        };
+        match file.read().await {
+            Ok(bytes) => *cell.borrow_mut() = Some(bytes),
+            Err(e) => log::warn!("[foldit-web] could not read progress file: {e:?}"),
+        }
+    });
+}
+
+/// Write the serialized progress map to the OPFS root, fire-and-forget. Errors
+/// are logged and dropped; the next change re-attempts the save.
+fn spawn_progress_save(bytes: Vec<u8>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        use opfs::persistent::{app_specific_dir, DirectoryHandle as DirHandle};
+        use opfs::{
+            CreateWritableOptions, DirectoryHandle as _, FileHandle as _, GetFileHandleOptions,
+            WritableFileStream as _,
+        };
+
+        let dir: DirHandle = match app_specific_dir().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open OPFS root for write: {e:?}");
+                return;
+            }
+        };
+        let get_opts = GetFileHandleOptions { create: true };
+        let mut file = match dir
+            .get_file_handle_with_options(PROGRESS_FILE, &get_opts)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open progress file for write: {e:?}");
+                return;
+            }
+        };
+        let write_opts = CreateWritableOptions { keep_existing_data: false };
+        let mut writer = match file.create_writable_with_options(&write_opts).await {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open progress writer: {e:?}");
+                return;
+            }
+        };
+        if let Err(e) = writer.write_at_cursor_pos(&bytes).await {
+            log::warn!("[foldit-web] could not write progress: {e:?}");
+            return;
+        }
+        if let Err(e) = writer.close().await {
+            log::warn!("[foldit-web] could not flush progress: {e:?}");
+        }
+    });
 }

@@ -45,6 +45,13 @@ rfd = "0.15"
 # Serialization for IPC and FrontendState
 serde_json = "1"
 
+# Host-owned puzzle-progress persistence. The host owns the async runtime and
+# drives opfs file I/O off the event-loop thread; foldit-core only serializes
+# and accepts bytes.
+opfs = "0.2.0"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs"] }
+dirs = "6.0.0"
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3.10"
