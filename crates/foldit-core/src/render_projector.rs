@@ -300,13 +300,10 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
             .iter()
             .any(|c| matches!(c, SessionUpdate::ScoresChanged));
         // SS is opt-in on molex `Assembly` construction (`ss_types` starts
-        // empty); restore it only on committed geometry (a `HeadMoved`: action
-        // commit, load, reset), never on a streaming tentative `Edit`. DSSP is
-        // expensive, so running it per streamed frame was the wiggle/shake
-        // stall; a coord-only streaming publish leaves `ss_types` empty and
-        // viso falls back to its cached SS, so the cartoon does not flatten
-        // mid-edit. (Topology-changing publishes also recompute below, to seed
-        // SS for newly loaded / created entities.)
+        // empty); recompute it (DSSP) only on committed geometry (a `HeadMoved`:
+        // action commit, load, reset) or a topology change, never per streamed
+        // frame (that was the wiggle/shake stall). A streaming tentative `Edit`
+        // instead overlays the last committed SS from `last_ss` below.
         let committed_geometry = changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::HeadMoved));
@@ -322,28 +319,27 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
 
             // SS is opt-in on molex construction (`ss_types` starts empty). On a
             // committed / topology-changing publish (load, action commit, entity
-            // create) recompute it and cache the SS-bearing assembly. On a
-            // streaming tentative `Edit` frame, carry that cached SS forward onto
-            // the fresh coords instead of re-running DSSP per frame (the
-            // wiggle/shake stall): molex preserves `ss_types` across
-            // `SetEntityCoords`, so the cartoon keeps its SS during the drag
-            // rather than flattening to loops. (viso re-derives loops from an
-            // empty `ss_types` on a coord-only publish, so we must carry it.)
+            // create) recompute it and cache the SS-bearing assembly. A streaming
+            // tentative `Edit` frame publishes the head assembly's real identity
+            // and coords (so mid-stream mutations animate) with the last
+            // committed secondary structure overlaid from `last_ss`: SS is
+            // per-residue metadata independent of atom positions, carried forward
+            // by residue count without re-running DSSP (which per streamed frame
+            // was the wiggle/shake stall), so the cartoon keeps its helices and
+            // sheets during streaming. With no cached SS yet (`last_ss` is None)
+            // the head publishes as-is and the cartoon flattens to coil until the
+            // first committed publish.
             let mut asm = if committed_geometry || topology_changed {
                 let mut a = head;
                 a.recompute_ss();
                 self.last_ss = Some(a.clone());
                 a
             } else if let Some(prev) = self.last_ss.as_ref() {
-                let mut a = prev.clone();
-                for e in head.entities() {
-                    let _ = a.apply_edit(
-                        &molex::ops::edit::AssemblyEdit::SetEntityCoords {
-                            entity: e.id(),
-                            coords: e.positions(),
-                        },
-                    );
-                }
+                // `head` is the freshly built coord snapshot (owned here);
+                // overlay the cached committed SS onto it in place. `prev`
+                // (the cached committed assembly) is borrowed and left intact.
+                let mut a = head;
+                a.carry_ss_from(prev);
                 a
             } else {
                 head

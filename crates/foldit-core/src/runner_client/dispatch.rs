@@ -265,9 +265,25 @@ impl RunnerClient {
             })
             .collect();
 
+        // Flatten the puzzle's design mask the same way: the residues the
+        // plugin may redesign, carried alongside the selection so the engine
+        // can gate identity changes.
+        let designable: Vec<ResidueRef> = intent
+            .designable
+            .iter()
+            .flat_map(|(entity, residues)| {
+                let id = *entity;
+                residues.iter().map(move |&residue_index| ResidueRef {
+                    entity_id: id,
+                    residue_index,
+                })
+            })
+            .collect();
+
         let ctx = DispatchContext {
             focused_entity_id: intent.focused_entity_id,
             selection,
+            designable,
         };
         let params: std::collections::HashMap<
             String,
@@ -347,6 +363,8 @@ impl RunnerClient {
                 entity_id: intent.focused_entity,
                 residue_index: intent.residue_in_entity,
             }],
+            // Pull-drag moves geometry, never redesigns identity.
+            designable: Vec::new(),
         };
         let params = crate::pull_drag::build_start_params(
             intent.op_id,

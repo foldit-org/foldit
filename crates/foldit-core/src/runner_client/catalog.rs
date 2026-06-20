@@ -61,6 +61,10 @@ impl RunnerClient {
         let ctx = DispatchContext {
             focused_entity_id: focus,
             selection: flat,
+            // Availability resolution never reaches a plugin, so the design
+            // mask is not transmitted here; the host-side design gate is
+            // folded into `enabled` below instead.
+            designable: Vec::new(),
         };
 
         orch.actions_catalog(&ctx, entity_type_of)

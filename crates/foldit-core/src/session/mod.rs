@@ -593,10 +593,9 @@ impl Session {
     }
 
     /// Whether the loaded puzzle gates design per entity (its `design_gating`
-    /// is `Some`). Distinguishes a design puzzle (overlay the lock visuals)
-    /// from a free-edit fold puzzle or free-form session (no gating). Consumed
-    /// by the design overlay (a later pass); currently only exercised by tests.
-    #[allow(dead_code)]
+    /// is `Some`). Distinguishes a design puzzle from a free-edit fold puzzle
+    /// or free-form session (no gating); gates whether the design mask is sent
+    /// to the plugin and drives the design overlay.
     #[must_use]
     pub fn design_gating_active(&self) -> bool {
         self.puzzle

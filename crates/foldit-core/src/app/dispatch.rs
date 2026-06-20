@@ -188,6 +188,7 @@ impl App {
             // `dispatch_op` now, so this path names no orchestrator type.
             let intent = DispatchIntent {
                 selection: self.store.selection().clone(),
+                designable: self.designable_residues(),
                 focused_entity_id,
                 op_id: op.op_id.clone(),
                 params: op.params,
@@ -322,6 +323,33 @@ impl App {
         {
             let _ = op;
         }
+    }
+
+    /// Per-entity set of residues the loaded puzzle permits redesign at, read
+    /// off the session's design mask over the live head entities. Empty when
+    /// no design gating is active (free-form session, fold puzzle). Carried on
+    /// the [`DispatchIntent`] so the plugin can gate identity changes; the
+    /// engine intersects it with the resolved selection, so computing it over
+    /// every live protein entity is sufficient.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn designable_residues(
+        &self,
+    ) -> std::collections::BTreeMap<EntityId, std::collections::BTreeSet<u32>> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut designable: BTreeMap<EntityId, BTreeSet<u32>> = BTreeMap::new();
+        if !self.store.design_gating_active() {
+            return designable;
+        }
+        for entity in self.store.head_assembly().entities() {
+            let eid = entity.id();
+            let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
+            let residues: BTreeSet<u32> =
+                (0..count).filter(|&res| self.store.is_designable(eid, res)).collect();
+            if !residues.is_empty() {
+                let _ = designable.insert(eid, residues);
+            }
+        }
+        designable
     }
 
     /// Resolve a dispatch's [`EditScope`] into the concrete set of lanes the

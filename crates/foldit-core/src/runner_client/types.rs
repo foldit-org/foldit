@@ -21,6 +21,15 @@ pub struct DispatchIntent {
         molex::entity::molecule::id::EntityId,
         std::collections::BTreeSet<u32>,
     >,
+    /// Residues the plugin may redesign (change identity at), the puzzle's
+    /// design mask read off the session. Carried alongside the selection
+    /// and flattened the same way at dispatch time so the engine can gate
+    /// identity changes; orthogonal to `selection`, which says where to
+    /// operate.
+    pub designable: std::collections::BTreeMap<
+        molex::entity::molecule::id::EntityId,
+        std::collections::BTreeSet<u32>,
+    >,
     /// The focused entity, a molex `EntityId` sourced from the session
     /// focus; passed straight through into the orchestrator's
     /// `DispatchContext`, no wrapping needed.
