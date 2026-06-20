@@ -546,6 +546,26 @@ impl Session {
         self.apply(SessionUpdate::EntityAppearanceChanged);
     }
 
+    /// Set (or clear) an entity's `provisional` appearance override directly,
+    /// without going through the JSON field path: `provisional` is
+    /// host-internal transient render state (a discardable preview ghost),
+    /// not a GUI-editable appearance field, so it has no `apply_json_field`
+    /// arm. Clones the entity's current overrides (or the default when none),
+    /// sets `provisional` to `Some(true)` when `on`, else `None`, leaving the
+    /// other override fields intact, then stores the result back or removes
+    /// the entry when it left nothing set. Emits exactly one
+    /// [`SessionUpdate::EntityAppearanceChanged`].
+    pub fn set_entity_provisional(&mut self, id: EntityId, on: bool) {
+        let mut ovr = self.appearance.get(&id).cloned().unwrap_or_default();
+        ovr.provisional = on.then_some(true);
+        if ovr.is_empty() {
+            self.appearance.remove(&id);
+        } else {
+            self.appearance.insert(id, ovr);
+        }
+        self.apply(SessionUpdate::EntityAppearanceChanged);
+    }
+
     /// Remove an entity's whole appearance override entry, reverting it to
     /// inherited/global appearance. Emits exactly one
     /// [`SessionUpdate::EntityAppearanceChanged`] only when an entry was

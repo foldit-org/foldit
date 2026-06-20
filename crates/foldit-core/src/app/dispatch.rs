@@ -46,6 +46,7 @@ impl App {
                         assembly,
                         score,
                         creates_entities,
+                        preview,
                     } => {
                         if creates_entities {
                             // Entity-creating op: stream the diffusion frame
@@ -53,6 +54,10 @@ impl App {
                             // frame, updated in place after) so the viewport
                             // animates the binder forming. Promoted at commit.
                             self.stream_preview_frame(token, &assembly);
+                        } else if preview {
+                            // Preview-style op: the frame animates the
+                            // discardable ghost, never the frozen lane.
+                            self.stream_inplace_preview_frame(token, &assembly);
                         } else {
                             let applied =
                                 self.store.apply_streaming_assembly(&assembly, None, token);
@@ -73,57 +78,36 @@ impl App {
                             }
                         }
                     }
+                    OpEvent::Promote {
+                        token,
+                        assembly,
+                        score,
+                        creates_entities,
+                        preview,
+                    } => {
+                        // A checkpoint commits an accepted candidate to the
+                        // real lane and re-opens the edit for the next segment;
+                        // the stream keeps running and the leading ghost is
+                        // untouched. Only a preview op drives this loop; a
+                        // checkpoint for any other op (no open edit, no stash)
+                        // is a safe no-op so it never commits a stray lane.
+                        if preview && !creates_entities {
+                            self.promote_inplace_checkpoint(token, &assembly, score);
+                        }
+                    }
                     OpEvent::Commit {
                         token,
                         assembly,
                         score,
                         creates_entities,
-                    } => {
-                        if creates_entities {
-                            // Entity-creating op (e.g. RFdiffusion3 design):
-                            // no edit was opened over the focused target. If a
-                            // live preview animated the stream, snap it to the
-                            // final geometry and promote it in place; else
-                            // adopt the terminal assembly fresh. Either way the
-                            // focused target is untouched.
-                            self.commit_created_entities(token, &assembly);
-                            if let Some(token) = token {
-                                let _ = self.score_targets.remove(&token);
-                            }
-                        } else if let Some(token) = token {
-                            // Capture sole-open-ness while the edit is still
-                            // pending: the commit below clears it.
-                            let sole = self.store.sole_pending_request_id() == Some(token);
-                            if self.store.apply_streaming_assembly(&assembly, None, token) {
-                                // Stream finished: commit the tentative so the
-                                // partial result becomes a permanent undo
-                                // entry. A sole open edit's terminal frame
-                                // already carries this checkpoint's score, so
-                                // stamp it directly. With a peer edit still
-                                // open the live pose is a blend, so re-score
-                                // the committed union for correct attribution.
-                                match self.store.commit_action(token) {
-                                    Ok(ckpt) => match score.filter(|_| sole) {
-                                        Some(report) => {
-                                            let (raw, game, breakdown) =
-                                                self.prepare_score_stamp(report);
-                                            self.store.set_checkpoint_scores(
-                                                ckpt,
-                                                Some(raw),
-                                                Some(game),
-                                                Some(breakdown),
-                                            );
-                                        }
-                                        None => self.score_committed_checkpoint(ckpt),
-                                    },
-                                    Err(e) => log::warn!("commit_action failed: {e}"),
-                                }
-                                // The edit's correlation id is now spent;
-                                // drop any lingering composition target.
-                                let _ = self.score_targets.remove(&token);
-                            }
-                        }
-                    }
+                        preview,
+                    } => self.apply_commit_event(
+                        token,
+                        &assembly,
+                        score,
+                        creates_entities,
+                        preview,
+                    ),
                     OpEvent::Abort { token, reason } => {
                         // Spontaneous failure: never commits; aborts
                         // exactly the edit this stream owns. A terminal
@@ -131,10 +115,14 @@ impl App {
                         // committed, is a no-op.
                         if let Some(token) = token {
                             // Discard any in-progress creates-entities preview
-                            // this stream was animating.
+                            // or in-place ghost this stream was animating.
                             if let Some((preview_id, _)) = self.creates_previews.remove(&token) {
                                 let _ = self.store.remove_preview(preview_id);
                             }
+                            if let Some((preview_id, _)) = self.inplace_previews.remove(&token) {
+                                let _ = self.store.remove_preview(preview_id);
+                            }
+                            let _ = self.inplace_edits.remove(&token);
                             if self.store.is_pending(token) {
                                 if let Err(e) = self.store.abort_action(token) {
                                     log::warn!("abort_action failed: {e}");
@@ -239,25 +227,41 @@ impl App {
             // `begin_action` leaves the focused target untouched (streaming
             // frames then no-op for want of an open edit under their token).
             let creates_entities = self.runner_client.op_creates_entities(&op.op_id);
+            // A preview-style op opens its in-place edit normally but renders
+            // its stream as a discardable ghost; the real lane advances only
+            // on a commit (a non-terminal checkpoint commits an accepted
+            // segment and re-opens; the terminal commits the last). It is NOT
+            // a create, so it is not in the `begin_action`-skip condition
+            // below.
+            let preview = self.runner_client.op_preview(&plugin_id, &op.op_id);
 
             // Open the edit under the dispatch id over the resolved lane set.
             // Skipped on dispatch failure (any open tentative belongs to a
             // prior op), when the resolved set has no editable lane, or for a
-            // creates-entities op (handled via adoption at commit).
+            // creates-entities op (handled via adoption at commit). For a
+            // preview op the edit opens as usual; `edit_token` also carries the
+            // first resolved lane so the ghost can clone its geometry.
             let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
                 if creates_entities || lanes.is_empty() {
                     return None;
                 }
+                let seed_lane = lanes.first().copied();
                 let kind = CheckpointKind::PluginOp {
                     plugin_id: plugin_id.clone(),
                     op_id: op.op_id.clone(),
                     display: display.clone(),
                 };
-                match self
-                    .store
-                    .begin_action(lanes, kind, display.clone(), request_id)
-                {
-                    Ok(()) => Some(request_id),
+                // A preview op re-opens this edit on each checkpoint, so
+                // retain the begin args. Cloned because `begin_action` below
+                // consumes both lanes and kind, and the re-open needs them.
+                let stash = preview.then(|| (lanes.clone(), kind.clone(), display.clone()));
+                match self.store.begin_action(lanes, kind, display.clone(), request_id) {
+                    Ok(()) => {
+                        if let Some(s) = stash {
+                            let _ = self.inplace_edits.insert(request_id, s);
+                        }
+                        Some((request_id, seed_lane))
+                    }
                     Err(e) => {
                         log::trace!(
                             "handle_dispatch_op({:?}): begin_action skipped: {e}",
@@ -267,6 +271,16 @@ impl App {
                     }
                 }
             });
+
+            // Seed the discardable ghost for a preview op once its edit is
+            // open: the stream's frames update this ghost, not the frozen
+            // lane, and it is removed at the terminal.
+            if preview {
+                if let Some((token, Some(lane_id))) = edit_token {
+                    self.seed_inplace_preview(token, lane_id, display);
+                }
+            }
+            let edit_token = edit_token.map(|(request_id, _)| request_id);
 
             match dispatch_outcome {
                 Ok(OpOutcome::Stream { .. }) => {
@@ -361,6 +375,203 @@ impl App {
                 let id = self.insert_design_preview(payload);
                 let _ = self.creates_previews.insert(token, (id, atoms));
             }
+        }
+    }
+
+    /// Seed a preview-style op's discardable ghost from the target `lane_id`:
+    /// clone that lane's geometry into a transient preview marked provisional
+    /// (viso renders a provisional entity as a flat gray tube), name it after
+    /// the op, and track it under `token` so the stream's frames update the
+    /// ghost while the real lane stays frozen. Rebuild edits a single entity;
+    /// when an op resolves to several lanes, only the first carries a ghost.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn seed_inplace_preview(&mut self, token: u64, lane_id: EntityId, name: String) {
+        // Clone the lane geometry to seed an independent preview entity that
+        // animates without touching the real lane.
+        let Some(clone) = self.store.entity(lane_id).cloned() else {
+            return;
+        };
+        let preview_id =
+            self.store
+                .insert_preview(clone, name, crate::session::EntityOrigin::Generated);
+        self.store.set_entity_provisional(preview_id, true);
+        let atom_count = self
+            .store
+            .entity(preview_id)
+            .map_or(0, molex::MoleculeEntity::atom_count);
+        let _ = self.inplace_previews.insert(token, (preview_id, atom_count));
+    }
+
+    /// Apply a terminal [`OpEvent::Commit`]: drop a preview ghost, adopt an
+    /// entity-creating op's terminal entities, or commit the open edit to the
+    /// real lane and score the resulting checkpoint. For a checkpoint-driven
+    /// preview op this commits the final segment (earlier segments already
+    /// committed); the retained begin args are dropped here.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_commit_event(
+        &mut self,
+        token: Option<u64>,
+        assembly: &molex::Assembly,
+        score: Option<crate::scores::ScoreReport>,
+        creates_entities: bool,
+        preview: bool,
+    ) {
+        if preview {
+            // Preview-style op: drop the ghost. The terminal then applies to
+            // the real lane via the ordinary edit-commit path below
+            // (committing the final segment; for a checkpoint-driven op the
+            // earlier segments already committed); the ghost is never
+            // promoted. Both effects land in this one drain so the projector
+            // sees the lane update and the ghost removal together.
+            if let Some(token) = token {
+                if let Some((preview_id, _)) = self.inplace_previews.remove(&token) {
+                    let _ = self.store.remove_preview(preview_id);
+                }
+                // The checkpoint-driven re-open ends here; drop the retained
+                // begin args for this edit.
+                let _ = self.inplace_edits.remove(&token);
+            }
+        }
+        if creates_entities {
+            // Entity-creating op (e.g. RFdiffusion3 design): no edit was
+            // opened over the focused target. If a live preview animated the
+            // stream, snap it to the final geometry and promote it in place;
+            // else adopt the terminal assembly fresh. Either way the focused
+            // target is untouched.
+            self.commit_created_entities(token, assembly);
+            if let Some(token) = token {
+                let _ = self.score_targets.remove(&token);
+            }
+        } else if let Some(token) = token {
+            // Capture sole-open-ness while the edit is still pending: the
+            // commit below clears it.
+            let sole = self.store.sole_pending_request_id() == Some(token);
+            if self.store.apply_streaming_assembly(assembly, None, token) {
+                // Stream finished: commit the tentative so the partial result
+                // becomes a permanent undo entry. A sole open edit's terminal
+                // frame already carries this checkpoint's score, so stamp it
+                // directly. With a peer edit still open the live pose is a
+                // blend, so re-score the committed union for correct
+                // attribution.
+                match self.store.commit_action(token) {
+                    Ok(ckpt) => match score.filter(|_| sole) {
+                        Some(report) => {
+                            let (raw, game, breakdown) = self.prepare_score_stamp(report);
+                            self.store.set_checkpoint_scores(
+                                ckpt,
+                                Some(raw),
+                                Some(game),
+                                Some(breakdown),
+                            );
+                        }
+                        None => self.score_committed_checkpoint(ckpt),
+                    },
+                    Err(e) => log::warn!("commit_action failed: {e}"),
+                }
+                // The edit's correlation id is now spent; drop any lingering
+                // composition target.
+                let _ = self.score_targets.remove(&token);
+            }
+        }
+    }
+
+    /// Commit one accepted candidate of a preview-style op to the real lane,
+    /// then re-open the same edit for the next segment. Driven by a
+    /// non-terminal checkpoint: the leading ghost keeps animating the
+    /// in-flight preview (untouched here) while each accept mints a history
+    /// checkpoint on the lane, so the lane advances accept-by-accept and the
+    /// stream stays open.
+    ///
+    /// Scoring mirrors the terminal commit: a sole open edit's candidate
+    /// already carries this checkpoint's score, so stamp it directly; with a
+    /// peer edit open the live pose is a blend, so re-score the committed
+    /// union. The re-`begin_action` reuses the same token (the commit freed
+    /// the lane and dropped the token; the re-open re-forks from the now-
+    /// committed head under that token). A non-preview op or one with no open
+    /// edit / no retained begin args never reaches here as a commit: it logs
+    /// and skips so it cannot disturb a lane it does not own.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn promote_inplace_checkpoint(
+        &mut self,
+        token: u64,
+        assembly: &molex::Assembly,
+        score: Option<crate::scores::ScoreReport>,
+    ) {
+        let Some((lanes, kind, display)) = self.inplace_edits.get(&token).cloned() else {
+            log::trace!("promote checkpoint rid={token}: no open in-place edit, skipped");
+            return;
+        };
+        let sole = self.store.sole_pending_request_id() == Some(token);
+        if !self.store.apply_streaming_assembly(assembly, None, token) {
+            return;
+        }
+        match self.store.commit_action(token) {
+            Ok(ckpt) => match score.filter(|_| sole) {
+                Some(report) => {
+                    let (raw, game, breakdown) = self.prepare_score_stamp(report);
+                    self.store.set_checkpoint_scores(
+                        ckpt,
+                        Some(raw),
+                        Some(game),
+                        Some(breakdown),
+                    );
+                }
+                None => self.score_committed_checkpoint(ckpt),
+            },
+            Err(e) => {
+                log::warn!("promote checkpoint rid={token}: commit_action failed: {e}");
+                return;
+            }
+        }
+        // Re-open the edit under the same token for the next segment; it
+        // re-forks each lane from its just-committed head.
+        if let Err(e) = self
+            .store
+            .begin_action(lanes, kind, display, token)
+        {
+            log::warn!("promote checkpoint rid={token}: re-begin_action failed: {e}");
+            let _ = self.inplace_edits.remove(&token);
+        }
+    }
+
+    /// Apply one streaming frame of a preview-style op to its discardable
+    /// ghost. The ghost is seeded at dispatch (a provisional clone of the
+    /// target lane); this updates it in place from the frame's first entity,
+    /// leaving the real lane untouched. No-op when no ghost is tracked for the
+    /// token (a streaming frame never moves the lane; only a commit does).
+    ///
+    /// The frame carries the op's full fixed topology (unlike the backbone-
+    /// only diffusion frames `stream_preview_frame` continuous-rebuilds), so
+    /// the payload is used as-is. A same-atom-count frame updates in place
+    /// (the override persists across `update_preview`: the id is unchanged); a
+    /// changed atom count - not expected for a fixed-topology rebuild, but
+    /// guarded - rebuilds under a fresh id so the render projector does a
+    /// topology `replace_assembly`, then re-marks it provisional.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stream_inplace_preview_frame(&mut self, token: u64, assembly: &molex::Assembly) {
+        let Some((preview_id, prev_atoms)) = self.inplace_previews.get(&token).copied() else {
+            return;
+        };
+        let Some(entity) = assembly.entities().first() else {
+            return;
+        };
+        let payload: molex::MoleculeEntity = (**entity).clone();
+        let atoms = payload.atom_count();
+        if prev_atoms == atoms {
+            let _ = self.store.update_preview(preview_id, payload);
+        } else {
+            let name = self
+                .store
+                .metadata(preview_id)
+                .map_or_else(String::new, |m| m.name.clone());
+            let _ = self.store.remove_preview(preview_id);
+            let id = self.store.insert_preview(
+                payload,
+                name,
+                crate::session::EntityOrigin::Generated,
+            );
+            self.store.set_entity_provisional(id, true);
+            let _ = self.inplace_previews.insert(token, (id, atoms));
         }
     }
 

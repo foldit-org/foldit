@@ -189,6 +189,20 @@ pub struct App {
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) creates_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
+    /// Live in-place preview ghosts keyed by edit token, each `(ghost entity
+    /// id, last atom count)`. A preview-style op opens its in-place edit
+    /// normally (the lane stays frozen) and animates a discardable gray clone
+    /// here; the ghost is removed at the terminal, never promoted. Kept
+    /// separate from `creates_previews` so the commit fork stays unambiguous.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) inplace_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
+    /// `begin_action` args (`lanes`, `kind`, `display`) retained per edit
+    /// token for preview ops so a non-terminal checkpoint can re-open the
+    /// same edit for the next segment. Populated where the edit is first
+    /// opened, removed at the terminal alongside `inplace_previews`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) inplace_edits:
+        std::collections::HashMap<u64, (Vec<molex::EntityId>, crate::history::CheckpointKind, String)>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
@@ -240,6 +254,10 @@ impl App {
             score_targets: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             creates_previews: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            inplace_previews: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            inplace_edits: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_pull_origin: None,
         }

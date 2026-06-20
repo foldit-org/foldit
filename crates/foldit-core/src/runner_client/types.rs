@@ -172,6 +172,29 @@ pub enum OpEvent {
         /// frames stream into a transient preview entity instead of an
         /// edit on an existing lane.
         creates_entities: bool,
+        /// True when the originating op declared `preview`. Such frames
+        /// update a discardable ghost clone of the target lane; the lane
+        /// itself moves only on a commit (a checkpoint or the terminal).
+        preview: bool,
+    },
+    /// Non-terminal accepted intermediate, keyed by the dispatch
+    /// `request_id`. The runner delivers it from a `Checkpoint` update: an
+    /// accepted candidate the host commits to the real lane while the stream
+    /// keeps running. For a preview op `App` commits the candidate (minting a
+    /// history checkpoint) and re-opens the edit for the next segment; the
+    /// stream and its locks survive. Carries the same `preview` /
+    /// `creates_entities` flags as `Update` / `Commit`.
+    Promote {
+        token: u64,
+        assembly: Assembly,
+        /// Warm score of this candidate's geometry, absent for non-scoring
+        /// plugins.
+        score: Option<crate::scores::ScoreReport>,
+        /// True when the originating op declared `creates_entities`.
+        creates_entities: bool,
+        /// True when the originating op declared `preview`. Only a preview
+        /// op commits-and-re-opens on this event; otherwise it is a no-op.
+        preview: bool,
     },
     /// Terminal success. The runner's distinct `Final` and `Cancelled`
     /// terminals collapse here because core commits either identically.
@@ -189,6 +212,10 @@ pub enum OpEvent {
         /// assembly's entities as new entities instead of committing an
         /// edit under `token`.
         creates_entities: bool,
+        /// True when the originating op declared `preview`. `App` applies
+        /// the terminal to the real lane (the existing edit commit) and
+        /// removes the ghost; the ghost is never promoted.
+        preview: bool,
     },
     /// Terminal failure. `token` is the dispatch `request_id`; `App`
     /// aborts the edit open under it (gated on `is_pending`), or accounts
@@ -231,4 +258,9 @@ pub struct ActiveStreamEntry {
     /// onto the terminal [`OpEvent::Commit`] so `App` routes to the
     /// entity-adoption path instead of an edit commit.
     pub(crate) creates_entities: bool,
+    /// Whether the originating op declared `preview`. Stamped onto every
+    /// [`OpEvent::Update`] / [`OpEvent::Commit`] this stream produces so
+    /// `App` routes the frames to a discardable ghost and removes it at
+    /// the terminal.
+    pub(crate) preview: bool,
 }

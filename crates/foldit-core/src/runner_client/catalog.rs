@@ -109,4 +109,18 @@ impl RunnerClient {
             .find(|e| e.plugin_id == plugin_id && e.op_id == op_id)
             .map(|e| e.display)
     }
+
+    /// Whether `(plugin_id, op_id)` declares `preview`: the op's stream is a
+    /// discardable ghost rather than a mutation of the target lane. Reads the
+    /// op catalog (manifest-authored), like [`Self::op_display`], not the
+    /// lock-meta the create-entities flag rides. `false` when no orchestrator
+    /// is wired up or the op isn't a manifest button.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn op_preview(&self, plugin_id: &str, op_id: &str) -> bool {
+        self.orchestrator.as_ref().is_some_and(|orch| {
+            orch.ops_catalog()
+                .into_iter()
+                .any(|e| e.plugin_id == plugin_id && e.op_id == op_id && e.preview)
+        })
+    }
 }

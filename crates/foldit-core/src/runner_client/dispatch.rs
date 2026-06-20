@@ -54,66 +54,69 @@ impl RunnerClient {
                     };
                     // The dispatch id is the edit token. `App` no-ops the
                     // frame if no edit is open under it; for a
-                    // creates-entities op it streams into a preview instead.
-                    let creates_entities = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .is_some_and(|e| e.creates_entities);
+                    // creates-entities op it streams into a preview instead,
+                    // and for a preview op it updates a discardable ghost.
+                    let (creates_entities, preview) = self.stream_flags(request_id);
                     events.push(OpEvent::Update {
                         token: request_id,
                         assembly,
                         score: score.map(Into::into),
                         creates_entities,
+                        preview,
+                    });
+                }
+                PluginUpdate::Checkpoint {
+                    request_id,
+                    latest_assembly,
+                    progress,
+                    stage,
+                    score,
+                } => {
+                    let Some(assembly) = latest_assembly else {
+                        log::trace!(
+                            "plugin update Checkpoint rid={request_id} \
+                             progress={progress:?} stage={stage:?} \
+                             (skipped: no assembly)"
+                        );
+                        continue;
+                    };
+                    // An accepted intermediate: commit it to the lane and
+                    // re-open the edit, but the stream is NOT terminal. Stamp
+                    // the same flags as Update / Commit; do not release the
+                    // stream entry or its locks - more checkpoints or a
+                    // terminal still follow under this id.
+                    let (creates_entities, preview) = self.stream_flags(request_id);
+                    events.push(OpEvent::Promote {
+                        token: request_id,
+                        assembly,
+                        score: score.map(Into::into),
+                        creates_entities,
+                        preview,
                     });
                 }
                 PluginUpdate::Cancelled {
                     request_id,
                     assembly,
                     score,
-                } => {
-                    let entities = assembly.entities().len();
-                    let creates_entities = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .is_some_and(|e| e.creates_entities);
-                    events.push(OpEvent::Commit {
-                        token: Some(request_id),
-                        assembly,
-                        score: score.map(Into::into),
-                        creates_entities,
-                    });
-                    // Free the table entry / dispatch lock / pull-drag
-                    // regardless of whether an edit was open.
-                    let _ = self.release_terminal_stream(request_id);
-                    log::info!(
-                        "plugin update Cancelled rid={request_id} entities={entities}"
-                    );
-                }
+                } => self.commit_terminal(
+                    &mut events,
+                    "Cancelled",
+                    request_id,
+                    assembly,
+                    score,
+                ),
                 PluginUpdate::Final {
                     request_id,
                     assembly,
                     score,
                     ..
-                } => {
-                    let entities = assembly.entities().len();
-                    let creates_entities = self
-                        .stream_host
-                        .active_streams
-                        .get(&request_id)
-                        .is_some_and(|e| e.creates_entities);
-                    events.push(OpEvent::Commit {
-                        token: Some(request_id),
-                        assembly,
-                        score: score.map(Into::into),
-                        creates_entities,
-                    });
-                    let _ = self.release_terminal_stream(request_id);
-                    log::info!(
-                        "plugin update Final rid={request_id} entities={entities}"
-                    );
-                }
+                } => self.commit_terminal(
+                    &mut events,
+                    "Final",
+                    request_id,
+                    assembly,
+                    score,
+                ),
                 PluginUpdate::Error {
                     request_id,
                     message,
@@ -130,6 +133,45 @@ impl RunnerClient {
             }
         }
         events
+    }
+
+    /// Push a terminal [`OpEvent::Commit`] for `rid` (the runner's `Final`
+    /// and `Cancelled` collapse here because core commits either
+    /// identically), then run the terminal stream cleanup so the entry and
+    /// its locks are freed regardless of whether an edit was open. `kind`
+    /// names the runner terminal for the log line.
+    fn commit_terminal(
+        &mut self,
+        events: &mut Vec<OpEvent>,
+        kind: &str,
+        rid: u64,
+        assembly: molex::Assembly,
+        score: Option<impl Into<crate::scores::ScoreReport>>,
+    ) {
+        let entities = assembly.entities().len();
+        let (creates_entities, preview) = self.stream_flags(rid);
+        events.push(OpEvent::Commit {
+            token: Some(rid),
+            assembly,
+            score: score.map(Into::into),
+            creates_entities,
+            preview,
+        });
+        let _ = self.release_terminal_stream(rid);
+        log::info!("plugin update {kind} rid={rid} entities={entities}");
+    }
+
+    /// Read the `(creates_entities, preview)` flags stamped on the stream
+    /// entry for `rid`, defaulting both to false when no entry exists. Every
+    /// inbound arm stamps these onto its [`OpEvent`] so `App` routes the
+    /// frame (lane edit vs preview ghost vs entity adoption) without a
+    /// re-lookup.
+    fn stream_flags(&self, rid: u64) -> (bool, bool) {
+        let entry = self.stream_host.active_streams.get(&rid);
+        (
+            entry.is_some_and(|e| e.creates_entities),
+            entry.is_some_and(|e| e.preview),
+        )
     }
 
     /// Terminal stream cleanup (Cancelled / Final / Error): remove the
@@ -187,6 +229,10 @@ impl RunnerClient {
         use foldit_runner::orchestrator::{
             DispatchContext, OpKind, ResidueRef,
         };
+        // Read the manifest `preview` flag off the catalog before the mutable
+        // orchestrator borrow below; it is stamped onto the stream entry so
+        // the terminal arm routes the frames to a discardable ghost.
+        let preview = self.op_preview(&plugin_id, &intent.op_id);
         let Some(orch) = self.orchestrator.as_mut() else {
             return Err(DispatchError::Failed(String::from(
                 "orchestrator not initialized",
@@ -254,6 +300,7 @@ impl RunnerClient {
                         handle,
                         plugin_id,
                         creates_entities: cached.lock_meta.creates_entities,
+                        preview,
                     },
                 );
                 Ok(OpOutcome::Stream {
@@ -316,8 +363,9 @@ impl RunnerClient {
                 handle,
                 plugin_id: plugin_id.clone(),
                 // Pull-drag is an edit on an existing entity, never a
-                // create.
+                // create and never a preview.
                 creates_entities: false,
+                preview: false,
             },
         );
         Ok((rid, plugin_id))
