@@ -104,6 +104,7 @@ fn ss_label(ss: Option<molex::SSType>) -> String {
 /// state-machine and the GUI projection both live on the same side of
 /// the host seam) and the `AppPhase` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
+#[allow(clippy::struct_excessive_bools, reason = "App holds four independent state flags (view-preset latch, progress-persist signal, hint-bubble visibility, fullscreen mirror) across separate subsystems; grouping them into a sub-struct would be arbitrary and add indirection for no semantic gain")]
 pub struct App {
     // Session encapsulates all state that shares a lifecycle with
     // a structure or puzzle that is loaded into the client.
@@ -825,6 +826,13 @@ impl foldit_gui::Dispatcher for App {
                 #[cfg(target_arch = "wasm32")]
                 let panels: Vec<foldit_gui::state::PanelInfo> = Vec::new();
                 Ok(serde_json::to_value(panels).map_err(|e| e.to_string())?)
+            }
+            RequestKind::SettingsCatalog => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let tabs = self.runner_client.settings_catalog();
+                #[cfg(target_arch = "wasm32")]
+                let tabs: Vec<foldit_gui::state::SettingsTabInfo> = Vec::new();
+                Ok(serde_json::to_value(tabs).map_err(|e| e.to_string())?)
             }
         }
     }

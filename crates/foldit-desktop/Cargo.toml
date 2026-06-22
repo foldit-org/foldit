@@ -50,7 +50,7 @@ serde_json = "1"
 # and accepts bytes.
 opfs = "0.2.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs"] }
-dirs = "6.0.0"
+dirs = "5"
 
 [dev-dependencies]
 proptest = "1"

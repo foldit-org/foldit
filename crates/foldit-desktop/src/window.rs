@@ -678,7 +678,7 @@ impl ApplicationHandler for AppRunner {
     }
 
     /// On Windows, `WM_PAINT` (which winit maps to `RedrawRequested`) is a
-    /// low-priority message that can be starved when the WebView2 child window
+    /// low-priority message that can be starved when the `WebView2` child window
     /// keeps the message queue busy. The `request_redraw()` →
     /// `RedrawRequested` chain then stalls, freezing the frame loop until an
     /// external event (resize, move) forces a repaint. Requesting a redraw

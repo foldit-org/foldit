@@ -35,6 +35,7 @@
 use anyhow::{bail, Context, Result};
 use foldit_core::puzzle::{levels_root, FilterSpec};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
@@ -150,11 +151,29 @@ pub fn transcribe_filters() -> Result<()> {
                 .iter()
                 .map(|m| format!("{}({} range(s))", m.chain, m.ranges().len()))
                 .collect();
-            report.push_str(&format!(", design mask -> {}", chains.join(", ")));
+            let _ = write!(report, ", design mask -> {}", chains.join(", "));
         }
         println!("{report}");
     }
 
+    print_transcription_summary(
+        levels_transcribed,
+        blocks_written,
+        mask_blocks_written,
+        &unmatched,
+    );
+
+    Ok(())
+}
+
+/// Print the closing transcription tally and any legacy sources that matched no
+/// curated level.
+fn print_transcription_summary(
+    levels_transcribed: usize,
+    blocks_written: usize,
+    mask_blocks_written: usize,
+    unmatched: &BTreeSet<&String>,
+) {
     println!(
         "transcribe-filters: {levels_transcribed} level(s) transcribed, \
          {blocks_written} filter block(s), {mask_blocks_written} design-mask \
@@ -173,8 +192,6 @@ pub fn transcribe_filters() -> Result<()> {
                 .join(", ")
         );
     }
-
-    Ok(())
 }
 
 /// Parse the full `.ir_puzzle.filters` body into the [`FilterSpec`]s it
@@ -428,13 +445,13 @@ fn toml_value_to_edit(v: &toml::Value) -> toml_edit::Value {
 /// Render a source string value as the most specific `toml::Value` it parses
 /// as: integer, else float, else a string.
 fn render_value(s: &str) -> toml::Value {
-    if let Ok(i) = s.parse::<i64>() {
-        toml::Value::Integer(i)
-    } else if let Ok(f) = s.parse::<f64>() {
-        toml::Value::Float(f)
-    } else {
-        toml::Value::String(s.to_owned())
-    }
+    s.parse::<i64>().map_or_else(
+        |_| {
+            s.parse::<f64>()
+                .map_or_else(|_| toml::Value::String(s.to_owned()), toml::Value::Float)
+        },
+        toml::Value::Integer,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,13 +479,11 @@ impl ChainMask {
         };
         let mut prev = start;
         for r in iter {
-            if r == prev + 1 {
-                prev = r;
-            } else {
+            if r != prev + 1 {
                 ranges.push((start, prev));
                 start = r;
-                prev = r;
             }
+            prev = r;
         }
         ranges.push((start, prev));
         ranges
@@ -480,7 +495,7 @@ impl ChainMask {
     fn can_design(&self) -> String {
         let mut out = String::new();
         for (start, end) in self.ranges() {
-            out.push_str(&format!("{start}-{end}||"));
+            let _ = write!(out, "{start}-{end}||");
         }
         out
     }

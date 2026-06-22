@@ -60,7 +60,7 @@ impl App {
         // Closing the segment panel is pure session state (drops the
         // open-segment target); handled before the engine-presence guard
         // like focus.
-        if let AppCommand::CloseSegment = command {
+        if matches!(command, AppCommand::CloseSegment) {
             self.close_segment();
             return;
         }
@@ -90,7 +90,7 @@ impl App {
 
         // Clearing high-score progress is pure backend state; handled before
         // the engine-presence guard like the other UI-state commands.
-        if let AppCommand::ClearProgress = command {
+        if matches!(command, AppCommand::ClearProgress) {
             self.clear_progress();
             return;
         }
@@ -99,9 +99,17 @@ impl App {
             return;
         }
 
-        // Engine borrow is taken per-arm now (LoadStructure / LoadPuzzle
-        // need to release the borrow before `self.tick(0.0)`, which is
-        // how the render projector republishes after a load).
+        self.handle_engine_command(command);
+    }
+
+    // Dispatch the engine-dependent commands. Reached only after the
+    // engine-presence guard, so an engine is present. The borrow is taken
+    // per-arm (LoadStructure / LoadPuzzle need to release it before
+    // `self.tick(0.0)`, which is how the render projector republishes after
+    // a load).
+    fn handle_engine_command(&mut self, command: foldit_gui::AppCommand) {
+        use foldit_gui::AppCommand;
+
         match command {
             AppCommand::LoadStructure { path } => self.handle_load_structure(&path),
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),

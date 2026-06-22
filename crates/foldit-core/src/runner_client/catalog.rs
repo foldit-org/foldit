@@ -146,6 +146,31 @@ impl RunnerClient {
             .collect()
     }
 
+    /// Project the orchestrator's settings-tab catalog into the GUI's
+    /// [`SettingsTabInfo`] shape. One entry per plugin-declared
+    /// `[[settings]]` row; empty when no orchestrator is wired up. Served
+    /// on demand through the one-shot request path, like
+    /// [`Self::panels_catalog`]. The `App` names no runner catalog type.
+    ///
+    /// [`SettingsTabInfo`]: foldit_gui::state::SettingsTabInfo
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn settings_catalog(&self) -> Vec<foldit_gui::state::SettingsTabInfo> {
+        use foldit_gui::state::SettingsTabInfo;
+
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return vec![];
+        };
+        orch.settings_catalog()
+            .into_iter()
+            .map(|e| SettingsTabInfo {
+                plugin_id: e.plugin_id,
+                name: e.name,
+                schema_asset_path: e.schema_asset_path.to_string_lossy().into_owned(),
+                on_update_op: e.on_update_op,
+            })
+            .collect()
+    }
+
     /// Resolve a manifest hotkey string to its `(plugin_id, op_id)` via the
     /// static op catalog. `None` when no catalog button binds the key.
     /// Static identity only: no focus/selection/lock state involved.

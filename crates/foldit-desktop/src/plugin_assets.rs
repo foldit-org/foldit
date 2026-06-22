@@ -107,6 +107,7 @@ fn plugin_asset_mime(ext: &str) -> Option<&'static str> {
         "css" => Some("text/css"),
         "woff2" => Some("font/woff2"),
         "ttf" => Some("font/ttf"),
+        "json" => Some("application/json"),
         // Plugin-shipped UI modules. The MIME table alone serves nothing
         // executable: `.mjs` is additionally gated in `serve` against the
         // manifest-declared entrypoint allowlist, so only the entry a
@@ -181,6 +182,26 @@ mod tests {
         };
         assert_eq!(bytes, b"PNG_BYTES");
         assert_eq!(mime, "image/png");
+    }
+
+    #[test]
+    fn serves_schema_json() {
+        let td = tempdir();
+        let root = td.path().to_path_buf();
+        write(&root, "rosetta/settings/wiggle.schema.json", b"{}");
+
+        // canonicalize().extension() yields the final dotted component
+        // (`json`), so `.schema.json` matches the json arm.
+        let r = serve(
+            "/plugins/rosetta/settings/wiggle.schema.json",
+            &root,
+            &no_modules(),
+        );
+        let AssetResponse::Ok { bytes, mime } = r else {
+            panic!("expected Ok");
+        };
+        assert_eq!(bytes, b"{}");
+        assert_eq!(mime, "application/json");
     }
 
     #[test]
