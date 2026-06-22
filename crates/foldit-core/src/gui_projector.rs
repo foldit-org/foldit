@@ -521,7 +521,8 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut Fron
         selection_designable,
         |id| session.entity_type(id),
     );
-    frontend.set_actions(actions);
+    let groups = driver.plugin_groups();
+    frontend.set_actions(actions, groups);
 }
 
 /// Project the `VIEW` section: view options, the static schema, and the

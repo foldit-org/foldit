@@ -90,6 +90,31 @@ impl RunnerClient {
             .collect()
     }
 
+    /// Project the orchestrator's per-plugin group metadata into the GUI's
+    /// [`PluginGroupInfo`] shape. One entry per discovered plugin (the
+    /// orchestrator emits a row whether or not the plugin has buttons; the
+    /// frontend joins on `plugin_id` and ignores rows with no buttons).
+    /// Empty when no orchestrator is wired up. The `App` names no runner
+    /// catalog type — the forward lives here, like [`Self::actions_catalog`].
+    ///
+    /// [`PluginGroupInfo`]: foldit_gui::state::PluginGroupInfo
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn plugin_groups(&self) -> Vec<foldit_gui::state::PluginGroupInfo> {
+        use foldit_gui::state::PluginGroupInfo;
+
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return vec![];
+        };
+        orch.plugin_groups()
+            .into_iter()
+            .map(|entry| PluginGroupInfo {
+                plugin_id: entry.plugin_id,
+                name: entry.name,
+                order: entry.order,
+            })
+            .collect()
+    }
+
     /// Resolve a manifest hotkey string to its `(plugin_id, op_id)` via the
     /// static op catalog. `None` when no catalog button binds the key.
     /// Static identity only: no focus/selection/lock state involved.
