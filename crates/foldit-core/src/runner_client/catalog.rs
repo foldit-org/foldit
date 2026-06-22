@@ -115,6 +115,37 @@ impl RunnerClient {
             .collect()
     }
 
+    /// Project the orchestrator's custom-panel catalog into the GUI's
+    /// [`PanelInfo`] shape. One entry per plugin-declared `[[panels]]`
+    /// row; empty when no orchestrator is wired up. Served on demand
+    /// through the one-shot request path, not pushed via the projector.
+    /// The `App` names no runner catalog type — the forward lives here,
+    /// like [`Self::plugin_groups`].
+    ///
+    /// [`PanelInfo`]: foldit_gui::state::PanelInfo
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn panels_catalog(&self) -> Vec<foldit_gui::state::PanelInfo> {
+        use foldit_gui::state::PanelInfo;
+
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return vec![];
+        };
+        orch.panels_catalog()
+            .into_iter()
+            .map(|e| PanelInfo {
+                plugin_id: e.plugin_id,
+                id: e.id,
+                title: e.title,
+                width: e.width,
+                position_x: e.position_x,
+                position_y: e.position_y,
+                entry: e.entry.to_string_lossy().into_owned(),
+                icon_path: e.icon_path.to_string_lossy().into_owned(),
+                tooltip: e.tooltip,
+            })
+            .collect()
+    }
+
     /// Resolve a manifest hotkey string to its `(plugin_id, op_id)` via the
     /// static op catalog. `None` when no catalog button binds the key.
     /// Static identity only: no focus/selection/lock state involved.

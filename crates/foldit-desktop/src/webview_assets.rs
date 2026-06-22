@@ -326,6 +326,9 @@ impl AppRunner {
             // closure (Fn, called many times) captures a cheap clone
             // rather than re-walking on every request.
             let plugins_root = crate::plugin_assets::resolve_plugins_root();
+            // Manifest-declared `[[panels]]` entrypoints; the only `.mjs`
+            // paths the protocol will serve in release (dev has no such gate).
+            let ui_entrypoints = foldit_core::locate_plugin_ui_entrypoints();
             let gui_root = Self::resolve_gui_root();
             if gui_root.is_none() {
                 log::error!(
@@ -351,7 +354,7 @@ impl AppRunner {
                                 .body(Cow::Borrowed(b"Not Found" as &[u8]))
                                 .unwrap();
                         };
-                        return match crate::plugin_assets::serve(request_path, root) {
+                        return match crate::plugin_assets::serve(request_path, root, &ui_entrypoints) {
                             crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
                                 wry::http::Response::builder()
                                     .status(200)

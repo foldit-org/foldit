@@ -39,7 +39,7 @@ mod tests;
 
 use self::input::update_all_visualizations;
 #[cfg(not(target_arch = "wasm32"))]
-pub use self::load::locate_plugins_root;
+pub use self::load::{locate_plugin_ui_entrypoints, locate_plugins_root};
 
 /// The open segment-info target plus the identity and secondary structure
 /// cached at the moment it was set.
@@ -818,6 +818,13 @@ impl foldit_gui::Dispatcher for App {
                 Err(format!(
                     "server request not implemented (endpoint={endpoint})"
                 ))
+            }
+            RequestKind::PanelsCatalog => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let panels = self.runner_client.panels_catalog();
+                #[cfg(target_arch = "wasm32")]
+                let panels: Vec<foldit_gui::state::PanelInfo> = Vec::new();
+                Ok(serde_json::to_value(panels).map_err(|e| e.to_string())?)
             }
         }
     }
