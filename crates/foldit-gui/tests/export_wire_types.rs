@@ -66,8 +66,7 @@ fn export_wire_types_to_ts() {
         .ancestors()
         .find(|dir| {
             std::fs::read_to_string(dir.join("Cargo.toml"))
-                .map(|toml| toml.contains("[workspace]"))
-                .unwrap_or(false)
+                .is_ok_and(|toml| toml.contains("[workspace]"))
         })
         .expect("workspace root (Cargo.toml with [workspace]) not found above the crate");
     let path = workspace_root.join("webview/src/generated/wire.ts");
