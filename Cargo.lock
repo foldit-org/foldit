@@ -1377,7 +1377,6 @@ dependencies = [
  "anyhow",
  "foldit-runner",
  "log",
- "molex",
  "prost",
  "pyo3",
  "windows-sys 0.59.0",
