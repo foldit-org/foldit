@@ -95,7 +95,7 @@ foldit/
 ## Features
 
 - **GPU-accelerated rendering** via wgpu
-- **ML structure prediction** via foldit-runner (SimpleFold, RFdiffusion, ESMFold)
+- **ML structure prediction** via foldit-runner (SimpleFold, RFdiffusion)
 - **Zero-copy IPC** between main app and ML workers via Iceoryx2 shared memory
 - **Rosetta integration** (optional, requires separate Rosetta installation)
 - **Cross-platform**: macOS (Apple Silicon), Linux, Windows

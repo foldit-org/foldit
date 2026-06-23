@@ -313,7 +313,7 @@ fn build_molex() -> Result<()> {
     // molex is an editable maturin path dep composed into every plugin
     // env (pixi.toml's `molex-local` feature). `pixi reinstall <pkg>`
     // re-runs maturin to recompile the extension from the local crate.
-    for env in ["dummy", "foundry", "esmfold", "simplefold"] {
+    for env in ["dummy", "foundry", "simplefold"] {
         println!("  Reinstalling molex into the {env} environment...");
         let status = Command::new("pixi")
             .args(["reinstall", "-e", env, "molex"])
@@ -531,7 +531,7 @@ fn assemble() -> Result<()> {
     copy_rosetta_plugin()?;
 
     // 4. Python plugins: TEMPORARILY DISABLED for a Rosetta-only demo build.
-    //    To restore foundry/esmfold/simplefold, re-add the pixi bundler step in
+    //    To restore foundry/simplefold, re-add the pixi bundler step in
     //    place of this skip: `pixi run bundle --output <abs STAGING>` run in
     //    crates/foldit-runner (canonicalize STAGING first; bail on non-zero exit).
     println!("Skipping Python plugins (Rosetta-only demo build).");
