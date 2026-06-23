@@ -381,6 +381,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     let molex_include = canonical_clean("crates/molex/include")?;
     let molex_lib = canonical_clean(format!("{molex_release_dir}/libmolex.a"))?;
     let proto_dir = canonical_clean("crates/foldit-runner/proto")?;
+    let abi_include = canonical_clean("crates/foldit-runner/include")?;
 
     // Delegate the cmake configure + build (and the make.py /
     // make_database.py preprocessing) to rosetta-interactive's own
@@ -419,6 +420,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
         .env("MOLEX_INCLUDE_DIR", molex_include.as_os_str())
         .env("MOLEX_STATIC_LIB", molex_lib.as_os_str())
         .env("FOLDIT_PROTO_DIR", proto_dir.as_os_str())
+        .env("FOLDIT_ABI_INCLUDE_DIR", abi_include.as_os_str())
         .current_dir(&rosetta_path)
         .status()?;
     if !status.success() {
