@@ -50,4 +50,23 @@ pub struct VizState {
     /// flag stays clear).
     #[cfg(not(target_arch = "wasm32"))]
     pub viz_dirty: bool,
+    /// Entity-id set of the last published assembly, as a membership set.
+    /// The render projector compares the next drain's id set against this to
+    /// choose between `set_assembly` (same membership) and `replace_assembly`
+    /// (an id joined or left). A per-session diff baseline owned here so
+    /// [`super::Session::reset`] clears it: a new puzzle reusing the outgoing
+    /// puzzle's entity ids must not inherit a stale membership set.
+    pub last_published_ids: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// Entity ids whose appearance overrides were last pushed to the engine
+    /// working copy. The render projector uses it to detect an entry the
+    /// session dropped since the last push so the engine can clear the
+    /// now-stale override. A per-session diff baseline owned here so
+    /// [`super::Session::reset`] clears it on a topology swap.
+    pub last_pushed_appearance: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// The last SS-bearing published assembly (the one a `recompute_ss` ran
+    /// on), cached so a streaming tentative frame can carry its secondary
+    /// structure forward onto the new coords without re-running DSSP. `None`
+    /// until the first committed / load publish. A per-session diff baseline
+    /// owned here so [`super::Session::reset`] clears it on a topology swap.
+    pub last_ss: Option<molex::Assembly>,
 }

@@ -276,7 +276,7 @@ impl App {
             // startup geometry baked gray (it published before the first score
             // arrived). Force a full-rebuild republish now that the scores are
             // populated so the backbone mesh re-bakes colored.
-            self.render_projector.rebake_geometry(&self.store, engine);
+            self.render_projector.rebake_geometry(&mut self.store, engine);
             // Apply any puzzle-pinned SS override AFTER the rebake: it calls
             // `replace_assembly`, which rebuilds the cartoon from the
             // assembly's own (loop) SS, so an override set earlier would be

@@ -652,12 +652,12 @@ impl App {
         if !changes.is_empty() {
             // RunnerProjector consumes changes, see `RunnerProjector`
             if let Some(orch) = self.runner_client.orchestrator_mut() {
-                self.runner_projector.consume(&changes, &self.store, orch);
+                self.runner_projector.consume(&changes, &mut self.store, orch);
             }
 
             // RenderProjector consumes changes and engine receives view option updates
             if let Some(engine) = self.engine.as_mut() {
-                self.render_projector.consume(&changes, &self.store, engine);
+                self.render_projector.consume(&changes, &mut self.store, engine);
                 if changes
                     .iter()
                     .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))

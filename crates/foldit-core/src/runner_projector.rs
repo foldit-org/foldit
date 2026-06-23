@@ -72,7 +72,7 @@ impl SessionUpdateConsumer<foldit_runner::Orchestrator> for RunnerProjector {
     fn consume(
         &mut self,
         changes: &[SessionUpdate],
-        doc: &Session,
+        doc: &mut Session,
         orch: &mut foldit_runner::Orchestrator,
     ) {
         if !changes.iter().any(Self::is_observable) {
@@ -267,20 +267,20 @@ mod tests {
     #[test]
     fn broadcast_ignores_tentative_only_batch() {
         let changes = vec![SessionUpdate::Edit { tentative: true }];
-        let doc = Session::new();
+        let mut doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();
-        bc.consume(&changes, &doc, &mut orch);
+        bc.consume(&changes, &mut doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 0, "tentative-only batch broadcasts nothing");
         assert!(bc.last_published.is_none());
     }
 
     #[test]
     fn broadcast_ignores_empty_batch() {
-        let doc = Session::new();
+        let mut doc = Session::new();
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();
-        bc.consume(&[], &doc, &mut orch);
+        bc.consume(&[], &mut doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 0);
     }
 
@@ -295,7 +295,7 @@ mod tests {
         let changes = doc.take_updates(); // [PreviewAdded]
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();
-        bc.consume(&changes, &doc, &mut orch);
+        bc.consume(&changes, &mut doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 1, "observable batch broadcasts once");
         assert!(bc.last_published.is_some(), "projector adopts the new snapshot");
     }

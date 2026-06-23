@@ -118,6 +118,9 @@ impl SessionUpdate {
 /// trait object.
 pub trait SessionUpdateConsumer<Sink> {
     /// React to the drained `updates` batch by re-deriving payload from
-    /// `session` and writing it to `sink`.
-    fn consume(&mut self, updates: &[SessionUpdate], session: &Session, sink: &mut Sink);
+    /// `session` and writing it to `sink`. Takes `&mut session` so a
+    /// consumer can update its own per-session diff baselines on the
+    /// session's `VizState` (the render projector does); most consumers
+    /// only read.
+    fn consume(&mut self, updates: &[SessionUpdate], session: &mut Session, sink: &mut Sink);
 }
