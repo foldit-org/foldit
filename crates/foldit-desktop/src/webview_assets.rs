@@ -71,12 +71,12 @@ impl AppRunner {
         }
     }
 
-    /// Resolve the absolute path to `crates/foldit-gui/js`. Tries
+    /// Resolve the absolute path to `webview`. Tries
     /// (in order):
     ///
     ///   1. `FOLDIT_FRONTEND_DIR` env override.
     ///   2. Walk up from `CARGO_MANIFEST_DIR` (= this crate's dir at
-    ///      compile time) looking for `crates/foldit-gui/js`.
+    ///      compile time) looking for `webview`.
     ///   3. Walk up from `current_exe()` looking for the same.
     ///
     /// Returns `None` if none resolve. Used by the dev server spawn
@@ -96,7 +96,7 @@ impl AppRunner {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let mut cursor = std::path::PathBuf::from(manifest_dir);
         loop {
-            let candidate = cursor.join("crates/foldit-gui/js");
+            let candidate = cursor.join("webview");
             if candidate.is_dir() {
                 return Some(candidate);
             }
@@ -107,7 +107,7 @@ impl AppRunner {
         let exe = std::env::current_exe().ok()?;
         let mut cursor = exe.parent()?.to_path_buf();
         loop {
-            let candidate = cursor.join("crates/foldit-gui/js");
+            let candidate = cursor.join("webview");
             if candidate.is_dir() {
                 return Some(candidate);
             }
@@ -162,7 +162,7 @@ impl AppRunner {
         let Some(frontend_dir) = Self::locate_frontend_dir() else {
             log::warn!(
                 "Frontend directory not found (looked next to executable + \
-                 walked up from CARGO_MANIFEST_DIR for crates/foldit-gui/js); \
+                 walked up from CARGO_MANIFEST_DIR for webview); \
                  skipping dev server"
             );
             return;

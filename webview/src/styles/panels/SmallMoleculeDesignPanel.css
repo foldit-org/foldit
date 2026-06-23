@@ -1,0 +1,255 @@
+.small-molecule-design-content {
+  padding: 0;
+}
+
+.design-tabs {
+  @apply pb-2;
+}
+
+.design-tabs .tabs {
+  @apply flex flex-row justify-center;
+}
+
+.design-tabs .tabs .container {
+  @apply relative flex bg-neutral-800 rounded-full p-1 w-full max-w-[300px];
+}
+
+.design-tabs .tab {
+  @apply z-10 relative w-1/2 py-1 text-sm font-medium rounded-full transition-colors duration-300;
+}
+
+.design-tabs .overlay {
+  @apply absolute top-0 left-0 h-full w-1/2 bg-white rounded-full transition-transform duration-300;
+}
+
+/* Tab Content */
+.fragment-selection-tab,
+.atom-selection-tab {
+  @apply pt-2;
+  min-height: 300px;
+}
+
+.section {
+  margin-bottom: 20px;
+}
+
+.section h3 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+}
+
+.stub-text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-bottom: 16px;
+  font-style: italic;
+}
+
+/* Fragment Selection Styles */
+
+/* Category Selection Buttons */
+.category-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.category-button {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  height: auto;
+  display: flex;
+  justify-content: center;
+}
+
+.category-button:hover {
+  transform: translateY(-2px) scale(1.05);
+  filter: brightness(1.2);
+}
+
+.category-button.active {
+  filter: brightness(1.3) drop-shadow(0 0 8px rgba(59, 130, 246, 0.6));
+}
+
+.category-button img {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  max-width: 100px;
+}
+
+/* Fragment Items */
+.fragment-section {
+  margin-top: 16px;
+}
+
+.section-label,
+.group-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+  display: block;
+}
+
+.fragment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.fragment-item {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  height: auto;
+  display: flex;
+  justify-content: center;
+}
+
+.fragment-item:hover {
+  transform: translateY(-2px) scale(1.05);
+  filter: brightness(1.2);
+}
+
+.fragment-item img {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  max-width: 80px;
+}
+
+/* Atom Selection Styles */
+.atom-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.atom-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.atom-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.atom-button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.atom-button:hover:not(.disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.atom-button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Element-specific colors (subtle tints) */
+.atom-button.carbon { background: rgba(64, 64, 64, 0.3); }
+.atom-button.nitrogen { background: rgba(48, 80, 248, 0.2); }
+.atom-button.oxygen { background: rgba(255, 13, 13, 0.2); }
+.atom-button.sulfur { background: rgba(255, 255, 48, 0.2); }
+.atom-button.phosphorus { background: rgba(255, 128, 0, 0.2); }
+.atom-button.hydrogen { background: rgba(255, 255, 255, 0.1); }
+.atom-button.fluorine { background: rgba(144, 224, 80, 0.2); }
+.atom-button.chlorine { background: rgba(31, 240, 31, 0.2); }
+.atom-button.bromine { background: rgba(166, 41, 41, 0.2); }
+.atom-button.iodine { background: rgba(148, 0, 148, 0.2); }
+
+/* Bond Section */
+.bond-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bond-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.bond-button {
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.bond-button:hover:not(.disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.bond-button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Cleanup Section */
+.cleanup-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cleanup-button {
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cleanup-button:hover:not(.disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.cleanup-button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

@@ -123,7 +123,7 @@ enum Commands {
         debug: bool,
     },
     /// Build the foldit-web cdylib + run wasm-bindgen, emit JS glue to
-    /// `crates/foldit-gui/js/public/pkg/`. Requires nightly toolchain.
+    /// `webview/public/pkg/`. Requires nightly toolchain.
     BuildWeb {
         /// Build in debug mode (default: release)
         #[arg(long)]
@@ -226,7 +226,7 @@ fn build_web(debug: bool) -> Result<()> {
         anyhow::bail!("expected wasm artifact missing: {}", wasm_path.display());
     }
 
-    let pkg_dir = Path::new("crates/foldit-gui/js/public/pkg");
+    let pkg_dir = Path::new("webview/public/pkg");
     std::fs::create_dir_all(pkg_dir)?;
 
     println!("Running wasm-bindgen → {}", pkg_dir.display());
@@ -244,14 +244,14 @@ fn build_web(debug: bool) -> Result<()> {
         anyhow::bail!("wasm-bindgen step failed");
     }
 
-    println!("✓ foldit-web wasm built; JS glue at crates/foldit-gui/js/public/pkg/");
+    println!("✓ foldit-web wasm built; JS glue at webview/public/pkg/");
     Ok(())
 }
 
 fn package_web() -> Result<()> {
     build_web(false)?;
 
-    let js_dir = Path::new("crates/foldit-gui/js");
+    let js_dir = Path::new("webview");
     println!("Running bun run build:web in {}...", js_dir.display());
     let status = Command::new("bun")
         .args(["run", "build:web"])
@@ -261,7 +261,7 @@ fn package_web() -> Result<()> {
         anyhow::bail!("bun run build:web failed");
     }
 
-    println!("✓ web build ready at crates/foldit-gui/js/dist/");
+    println!("✓ web build ready at webview/dist/");
     Ok(())
 }
 
@@ -741,7 +741,7 @@ fn build_host(debug: bool) -> Result<()> {
 }
 
 fn build_gui() -> Result<()> {
-    let gui_src_dir = "crates/foldit-gui/js";
+    let gui_src_dir = "webview";
 
     println!("Installing GUI dependencies...");
     // `bun` is a single native executable on every platform, so Command

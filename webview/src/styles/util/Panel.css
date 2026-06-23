@@ -1,0 +1,30 @@
+.panel-container {
+	@apply absolute rounded-2xl pointer-events-auto;
+	@apply bg-neutral-900/80 backdrop-blur-md;
+	@apply ring-1 ring-white/10;
+	@apply shadow-[0_10px_20px_-10px_rgba(0,0,0,0.8)];
+	@apply transition-opacity duration-200 ease-in-out transform;
+	@apply pointer-events-auto;
+}
+
+.panel-container-svg {
+	@apply absolute pointer-events-auto;
+	@apply transition-opacity duration-200 ease-in-out transform;
+	@apply pointer-events-auto;
+}
+
+.panel-container-visible { @apply opacity-100 scale-100 translate-y-0 pointer-events-auto; }
+.panel-container-hidden  { @apply opacity-0   scale-95  translate-y-2 pointer-events-none; }
+
+.panel-container .header,
+.panel-container-svg .header {
+	@apply top-0 py-2 rounded-t-2xl;
+	@apply border-b border-white/10;
+	@apply text-white font-semibold text-sm tracking-wide select-none cursor-pointer;
+}
+
+.panel-container .body,
+.panel-container-svg .body {
+	@apply text-white/90 w-full px-3 py-2.5 max-h-[55vh] overflow-y-auto overflow-x-hidden;
+}
+

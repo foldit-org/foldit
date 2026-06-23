@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Generated/served artifacts under public/
+public/game_web.*
+public/foldit.*
+public/database.*
+public/resources.*
+
+# wasm-bindgen bundle, emitted by `cargo xtask build-web`. Regenerable.
+public/pkg/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

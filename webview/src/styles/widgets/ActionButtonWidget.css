@@ -1,0 +1,20 @@
+.action-button-widget {
+	/* Anchored bottom-left starting past the SideBar; the right inset gives
+	   the wrapping flex a finite width so group boxes wrap at the viewport
+	   edge instead of overflowing off-screen. */
+	@apply absolute bottom-4 left-[150px] right-4;
+	@apply flex flex-row flex-wrap-reverse items-end justify-start;
+}
+
+.action-group {
+	@apply flex flex-col items-stretch;
+	@apply mx-[4px] my-[5px] px-2 pt-1 pb-0;
+	@apply bg-black bg-opacity-50 rounded-md;
+	@apply border border-gray-400 border-opacity-40;
+}
+
+.action-group-title {
+	@apply text-gray-300 text-xs font-semibold uppercase tracking-wide;
+	@apply px-1 pb-0.5;
+	@apply select-none;
+}

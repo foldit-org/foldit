@@ -1,0 +1,82 @@
+{
+  "puzzles": [
+    {"id": 10001, "title": "Intro to Foldit", "description": "Learn about amino acids and the basic building blocks of proteins.", "categoryId": 1},
+    {"id": 10002, "title": "Swing It Around", "description": "Get comfortable with the mechanics of playing Foldit.", "categoryId": 1},
+    {"id": 10003, "title": "Hide the Hydrophobics", "description": "Learn about sidechains and their impact on protein folding.", "categoryId": 1},
+
+    {"id": 10005, "title": "Hydrogen Bonds", "description": "See how nitrogen and oxygen form hydrogen bonds that stabilize proteins.", "categoryId": 2},
+    {"id": 10007, "title": "Disulfide Bonds", "description": "Learn about a bond stronger than hydrogen bonds that certain sidechains can form.", "categoryId": 2},
+
+    {"id": 10004, "title": "Intro to Design", "description": "Visualize proteins as a string of amino acid building blocks.", "categoryId": 3},
+    {"id": 10006, "title": "Swappin' Sidechains", "description": "Experiment with the placement of sidechains and their different properties.", "categoryId": 3},
+    {"id": 10040, "title": "COVID-19 Spike Binder", "description": "See a real-world relevant example of how different sidechains make a difference.", "categoryId": 3},
+    {"id": 10008, "title": "Primary Structure", "description": "Design the amino acid sequence of a protein to make the best version!", "categoryId": 3},
+
+    {"id": 10009, "title": "Shake", "description": "Find the best positions and lowest energy for the sidechains.", "categoryId": 4},
+    {"id": 10010, "title": "Wiggle", "description": "Find the best positions and lowest energy for the backbone.", "categoryId": 4},
+    {"id": 10042, "title": "Wiggle Power", "description": "Experiment with automation tool settings.", "categoryId": 4},
+
+    {"id": 10011, "title": "Alpha Helix", "description": "See the bonds present in spiraling backbones called alpha helices.", "categoryId": 5},
+    {"id": 10012, "title": "Sheets Together", "description": "See how the backbone forms H-bonds to stabilize the protein in beta sheets. ", "categoryId": 5},
+    {"id": 10028, "title": "Band Together", "description": "Learn how to use a new tool that will help you make beta sheets for effective protein folding.", "categoryId": 5},
+    {"id": 10013, "title": "Lonely Sheets", "description": "See how your knowledge of proteins can help you use the tools at your disposal for successful folding!", "categoryId": 5},
+
+    {"id": 10014, "title": "Sheets and Ladders", "description": "Practice lining up beta sheets to form new H-bonds.", "categoryId": 6},
+    {"id": 10015, "title": "Lock and Lower", "description": "Learn to use a new tool to control how automating tools impact your fold.", "categoryId": 6},
+    {"id": 10041, "title": "Freeze and Bond", "description": "Focus on the biochemistry influencing your score!", "categoryId": 6},
+    {"id": 10050, "title": "Parallel and Anti-Parallel", "description": "Experiment with different ways to align beta sheets.", "categoryId": 6},
+    {"id": 10049, "title": "Exploring the Rama Map", "description": "Explore the importance of backbone angles.", "categoryId": 6},
+    {"id": 10016, "title": "Idealizing Structure Angles", "description": "Visualize the impact of angles on protein structures.", "categoryId": 6},
+    {"id": 10017, "title": "Sequence Preference", "description": "Explore how different sidechains benefit or inhibit different secondary structures.", "categoryId": 6},
+
+    {"id": 10018, "title": "Backbones Collide", "description": "Experiment with moving the backbone of a protein.", "categoryId": 7},
+    {"id": 10029, "title": "Movin' Along", "description": "Try to line up your protein fold with a guide.", "categoryId": 7},
+    {"id": 10030, "title": "Cut and Move", "description": "Practice using a new tool that can help you approach protein folding one piece at a time.", "categoryId": 7},
+    {"id": 10020, "title": "Basic Threading", "description": "Visualize proteins as strings of amino acids and learn about the similarities between certain residues.", "categoryId": 7},
+    {"id": 10021, "title": "Alignin' Sequences", "description": "Practice using known protein folds and similarities between sequences to fold a new protein!", "categoryId": 7},
+    {"id": 10048, "title": "Blueprint", "description": "Experiment with common structure sequences to fold the protein.", "categoryId": 7},
+
+    {"id": 10022, "title": "Quest to the Native", "description": "Try folding a protein with the help of a guide.", "categoryId": 8},
+    {"id": 10023, "title": "Tertiary Structure", "description": "Try folding a protein without a guide.", "categoryId": 8},
+    {"id": 10044, "title": "Third Time's the Charm", "description": "Practice your skills a little more to prepare you for the levels to come!", "categoryId": 8},
+    {"id": 10043, "title": "Barrel Through", "description": "Learn about a less common, but still important, kind of secondary structure!", "categoryId": 8},
+    {"id": 10024, "title": "Hydrophobic Disaster", "description": "Use your knowledge from previous puzzles to fold this protein!", "categoryId": 8},
+
+    {"id": 10025, "title": "Folding Pathway I", "description": "Learn about the energy that’s influencing your score.", "categoryId": 9},
+    {"id": 10026, "title": "Folding Pathway II", "description": "Experiment with taking a protein from an intermediate to its final fold!", "categoryId": 9},
+    {"id": 10045, "title": "Ligand Debut", "description": "Learn about the role of proteins and protein binding in drug design.", "categoryId": 9},
+    {"id": 10046, "title": "Inside the Pocket", "description": "Practice designing a ligand to fit to a protein!", "categoryId": 9},
+    {"id": 10047, "title": "Ligand Constraints", "description": "Explore the factors that impact ligand binding.", "categoryId": 9},
+		{"id": 10051, "title":"Electron Density", "description": "Discover how X-Ray Crystallography is used to solve protein structures.", "categoryId": 9},
+    {"id": 10027, "title": "DNA and Protein", "description": "See how proteins can interact with DNA!", "categoryId": 9},
+
+    {"id": 10032, "title": "Collagen", "description": "Fold the most abundant protein in the human body!", "categoryId": 10},
+    {"id": 10033, "title": "Insulin", "description": "Try to fold this metabolism regulating protein!", "categoryId": 10},
+    {"id": 10034, "title": "Ubiquitin", "description": "Fold this protein important in regulating protein folding itself!", "categoryId": 10},
+    {"id": 10035, "title": "Fibrin", "description": "Experiment with folding this blood clotting protein!", "categoryId": 10},
+
+    {"id": 10031, "title": "Coronavirus", "description": "Use your knowledge of ligand binding!", "categoryId": 11},
+    {"id": 10036, "title": "Ebola", "description": "Flex your ligand binding skills!", "categoryId": 11},
+    {"id": 10037, "title": "HIV Protease", "description": "Try folding a protein involved in HIV replication.", "categoryId": 11},
+    {"id": 10038, "title": "E. Coli", "description": "Fold this protein found in bacteria you may have encountered!", "categoryId": 11},
+    {"id": 10039, "title": "Mason-Pfizer Monkey Virus", "description": "Try your hand at the puzzle that helped make Foldit famous!", "categoryId": 11},
+
+		{"id": 10052, "title": "Sequence Design with Machine Learning", "description": "Learn how to use the ProteinMPNN model for sequence design", "categoryId": 12}
+  ],
+  "categories": [
+    {"id": 1, "title": "Sidechains and Amino Acids", "description": "Welcome to Foldit, let’s get started with the basics!"},
+    {"id": 2, "title": "Properties of Amino Acid Sidechains", "description": "Learn about the special bonds that hold proteins together."},
+    {"id": 3, "title": "Primary Structures", "description": "Let’s learn about protein design and basic structure!"},
+    {"id": 4, "title": "Automation Tools", "description": "These helpful Foldit tools make it easier to get the best score possible!"},
+    {"id": 5, "title": "Intro to Secondary Structures", "description": "Move from amino acids to bigger structure blocks."},
+    {"id": 6, "title": "Forming Secondary Structures", "description": "Explore factors that influence the stability of secondary structures and proteins!"},
+    {"id": 7, "title": "From Primary to Tertiary Structure", "description": "Let’s learn more about how proteins fold!"},
+    {"id": 8, "title": "Forming Tertiary Structure", "description": "Use your skills to fully fold proteins to their tertiary structure!"},
+    {"id": 9, "title": "Proteins in Nature", "description": "Learn about the real-world aspects of protein folding and protein design."},
+
+    {"id": 10, "title": "Popular Proteins", "description": "Try folding some proteins that you may have heard of before!"},
+    {"id": 11, "title": "Bacteria and Viruses", "description": "See how protein folding works with some pathogens you may know about!"},
+		{"id": 12, "title": "Machine Learning", "description": "Learn how cutting edge Machine Learning tools can be used to design proteins!"}
+  ]
+}
+

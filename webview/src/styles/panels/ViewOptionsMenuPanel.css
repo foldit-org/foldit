@@ -1,0 +1,48 @@
+.view-options-tabs .tabs {
+	@apply flex flex-row justify-center mb-2;
+}
+
+.view-options-tabs .container {
+	@apply relative flex bg-neutral-800 rounded-full p-1 w-full;
+}
+
+.view-options-tabs .tab {
+	@apply z-10 relative w-1/4 py-1 text-xs font-medium rounded-full transition-colors duration-300;
+}
+
+.view-options-tabs .overlay {
+	@apply absolute top-0 left-0 h-full bg-white rounded-full transition-transform duration-300;
+}
+
+.view-options-dropdown {
+	@apply mb-2 relative;
+}
+
+.view-options-dropdown select {
+	@apply w-full appearance-none bg-neutral-800 border border-neutral-700;
+	@apply text-sm rounded px-3 py-2 pr-10;
+}
+
+.view-options-dropdown ListboxOption {
+	@apply text-sm bg-neutral-800;
+}
+
+.view-options-dropdown ListboxOption .selected {
+	@apply bg-neutral-700;
+}
+
+.view-options-dropdown label {
+	@apply block mb-1 text-sm font-medium;
+}
+
+.view-options-checkbox-list h3 {
+	@apply text-[15px] font-semibold text-white;
+}
+
+.view-options-checkbox {
+	@apply flex items-center space-x-2;
+}
+
+.view-options-checkbox input[type="checkbox"] {
+	@apply accent-white w-4 h-4 rounded cursor-pointer;
+}

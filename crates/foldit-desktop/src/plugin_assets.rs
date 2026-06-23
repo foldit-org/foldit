@@ -3,7 +3,7 @@
 //!
 //! Wired alongside the GUI-bundle branch of the wry custom-protocol
 //! handler (release builds) and mirrored by a Vite middleware in
-//! `crates/foldit-gui/js/vite.config.ts` for dev builds, so the
+//! `webview/vite.config.ts` for dev builds, so the
 //! frontend can render plugin-shipped icons via plain `<img src>`
 //! regardless of mode.
 //!

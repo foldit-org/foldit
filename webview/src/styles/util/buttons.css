@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+	.foldit-button {
+		@apply flex items-center justify-center relative;
+		@apply overflow-hidden;
+		@apply text-white;
+		font-family: "Varela Round", sans-serif;
+		letter-spacing: "0.8px";
+	}
+}
+
+.pill-button {
+	@apply foldit-button rounded-full;
+	@apply translate-y-0;
+	@apply p-1;
+}
+
+.hover-scale:hover {
+	@apply scale-105;
+}
+
+.active-translate:active {
+	@apply translate-y-1;
+}
+
+.block-button {
+	@apply foldit-button rounded-md;
+}
+
+.button-green {
+	@apply bg-[#8ab83d];
+}
+
+.button-gray {
+	@apply bg-gray-500;
+}
+
+.button-dark-gray {
+	@apply bg-gray-800;
+}
+
+.button-transparent {
+	@apply bg-transparent;
+}

@@ -1,0 +1,17 @@
+.error-page {
+	@apply min-h-screen bg-black text-white;
+	@apply flex flex-col pt-[30vh] items-center justify-start;
+}
+
+.warning-message {
+	@apply bg-yellow-700 bg-opacity-50;
+	@apply rounded-md p-2 text-center text-sm;
+	@apply w-3/4 max-w-xl mb-[1%];
+}
+
+.error-block {
+	@apply bg-red-700 bg-opacity-50;
+	@apply max-w-xl max-h-[300px];
+	@apply overflow-auto;
+	@apply rounded-md p-4;
+}

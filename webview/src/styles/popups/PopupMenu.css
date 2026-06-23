@@ -1,0 +1,78 @@
+@tailwind components;
+
+@layer components {
+  .ingame-popup-menu,
+  .landing-popup-menu {
+    @apply fixed inset-0 flex items-center justify-center z-50;
+  }
+
+  .ingame-popup-menu {
+    @apply bg-black/60;
+  }
+
+  .landing-popup-menu {
+    @apply bg-gray-900/60;
+  }
+
+  .popup-menu-content {
+    @apply relative flex flex-col rounded-xl items-center justify-between text-gray-100 shadow-lg
+  }
+
+	.landing-popup-menu .popup-menu-content {
+		@apply bg-gray-900;
+	}
+
+	.ingame-popup-menu .popup-menu-content {
+		@apply bg-black;
+	}
+
+  .popup-menu-content form {
+    @apply w-full h-full flex flex-col justify-between;
+  }
+
+  .popup-menu-content h2 {
+    @apply text-2xl font-semibold flex justify-center items-center h-[30%];
+  }
+
+	.popup-menu-content h3 {
+    @apply text-xl font-semibold flex justify-center items-center h-full;
+  }
+
+  .landing-menu-list-item,
+  .ingame-menu-list-item {
+    @apply cursor-pointer;
+  }
+
+  .landing-menu-list-item:hover {
+    @apply bg-gray-800;
+  }
+  .ingame-menu-list-item:hover {
+    background-color: #111111;
+  }
+
+  .ingame-menu-list-item h4,
+  .landing-menu-list-item h4 {
+    @apply text-lg font-semibold text-gray-100 my-2 mr-4;
+  }
+
+  .category-progress-bar {
+    @apply border-gray-300 border-[1px] my-2 rounded-full h-[12px] w-[150px] overflow-hidden;
+  }
+
+  .menu-body {
+    @apply flex flex-col items-center justify-between w-full;
+  }
+
+  .form-item {
+    @apply mx-4 mb-6;
+  }
+  .form-item label {
+    @apply block text-sm font-medium mb-1 ml-1;
+  }
+
+  .form-item input {
+    @apply w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-gray-100
+           focus:outline-none focus:ring-2 focus:ring-blue-500;
+  }
+}
+

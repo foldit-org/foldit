@@ -1,0 +1,17 @@
+.blueprint-panel .header {
+  @apply cursor-pointer h-[40px] mb-2 flex flex-row items-center;
+}
+
+.blueprint-body {
+	@apply cursor-pointer;
+	@apply flex flex-row;
+}
+
+.blueprint-sequence {
+	@apply relative flex flex-row w-[500px] mx-3 overflow-x-scroll;
+}
+
+.blueprint-block {
+	@apply h-[20px] w-[14px] flex items-center justify-center text-[12px] text-white;
+	text-shadow: 0 0 2px black, 0 0 2px black, 2px 2px 2px black;
+}

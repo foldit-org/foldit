@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+}
+
+@keyframes spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+html, body {
+	height: 100%;
+	background: transparent;
+}
+
+#root, #app-container {
+	width: 100%;
+	height: 100%;
+	position: relative;
+}
+
+body {
+	overflow: hidden;
+	overscroll-behavior: none;
+	user-select: none;
+	-webkit-user-drag: none;
+
+	font-family: 'Noto Sans', sans-serif;
+}
+
+img {
+	-webkit-user-drag: none;
+	user-select: none;
+	pointer-events: none;
+}
+
+#ui-overlay {
+	pointer-events: none;
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+
+	--menu-bg-color: #1f2937;
+	--menu-hover-bg-color: #374151;
+
+	--bright-green: rgba(178, 252, 81, 1.0);
+	--dull-green: rgba(138, 184, 61, 1.0);
+	--bright-purple: rgba(126, 18, 148, 1.0);
+	--pale-gray: rgba(74, 73, 70, 1.0);
+}
+
+/* Interactive containers within the overlay opt-in to pointer events.
+   Children inherit from their container — hidden containers (pointer-events: none)
+   will properly prevent their children from receiving events. */
+#ui-overlay .pointer-events-auto,
+#ui-overlay .ingame-popup-menu,
+#ui-overlay .landing-popup-menu {
+	pointer-events: auto;
+}
+
+pre {
+	font-family: inherit;
+	white-space: pre-wrap;
+}
+
+button.exit,
+button.back {
+	@apply p-2 font-bold absolute text-gray-400 hover:text-gray-200;
+}
+
+button.exit { @apply top-1 right-1; }
+button.back { @apply left-1; }
+
+/* scrollbar stuff */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+	background: transparent;
+	@apply rounded-md;
+}
+
+::-webkit-scrollbar-track {
+	background-color: #1f2937; /* matches Tailwind gray-800 */
+	@apply rounded-md;
+}
+
+::-webkit-scrollbar-thumb {
+	background-color: #374151; /* matches Tailwind gray-700 */
+	border-radius: 4px;
+	border: 2px solid #1f2937;
+}
+
+* {
+	scrollbar-width: thin;
+	scrollbar-color: #374151 #1f2937;
+}
+
+*:focus {
+	outline: none !important;
+	box-shadow: none !important;
+}
+

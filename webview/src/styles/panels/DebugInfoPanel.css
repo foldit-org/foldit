@@ -1,0 +1,141 @@
+.debug-row {
+	@apply mb-1 text-sm;
+}
+
+.debug-label {
+	color: rgba(255, 255, 255, 0.4);
+	@apply mr-1.5;
+}
+
+.debug-value {
+	color: rgba(255, 255, 255, 0.85);
+	@apply font-medium;
+}
+
+.debug-detail {
+	color: rgba(255, 255, 255, 0.35);
+	@apply font-normal text-xs;
+}
+
+.debug-status-row {
+	@apply flex items-center justify-between;
+}
+
+/* Copy log button */
+.log-copy-btn {
+	@apply text-xs rounded px-2 py-0.5 cursor-pointer;
+	@apply transition-colors duration-150;
+	background: rgba(255, 255, 255, 0.08);
+	color: rgba(255, 255, 255, 0.5);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.log-copy-btn:hover {
+	background: rgba(255, 255, 255, 0.14);
+	color: rgba(255, 255, 255, 0.7);
+}
+
+/* Log container with its own scrollbar and darker inset background */
+.debug-log-container {
+	@apply mt-2 rounded-lg px-3 py-2;
+	@apply overflow-y-auto overflow-x-hidden;
+	@apply text-xs leading-relaxed;
+	max-height: 240px;
+	background: rgba(0, 0, 0, 0.35);
+	font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace;
+}
+
+/* Thin custom scrollbar */
+.debug-log-container::-webkit-scrollbar {
+	width: 5px;
+}
+.debug-log-container::-webkit-scrollbar-track {
+	background: transparent;
+}
+.debug-log-container::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.15);
+	border-radius: 3px;
+}
+.debug-log-container::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.25);
+}
+
+/* Log line */
+.log-line {
+	@apply py-px;
+	color: rgba(255, 255, 255, 0.55);
+}
+
+/* Tag (module/channel name) */
+.log-tag {
+	@apply font-medium mr-1.5;
+	opacity: 0.7;
+}
+.log-tag::after {
+	content: '\203A';
+	@apply ml-1 opacity-50;
+}
+
+/* Level badge */
+.log-badge {
+	@apply inline-block rounded font-semibold mr-1.5 text-center;
+	font-size: 9px;
+	width: 28px;
+	padding: 1px 0;
+	opacity: 0.9;
+}
+
+/* Level colors */
+.log-level-error {
+	color: #f87171;
+}
+.log-level-error .log-tag {
+	color: #fca5a5;
+}
+.log-badge.log-level-error {
+	background: rgba(239, 68, 68, 0.25);
+	color: #fca5a5;
+}
+
+.log-level-warn {
+	color: #fbbf24;
+}
+.log-level-warn .log-tag {
+	color: #fde68a;
+}
+.log-badge.log-level-warn {
+	background: rgba(245, 158, 11, 0.25);
+	color: #fde68a;
+}
+
+.log-level-info {
+	color: rgba(255, 255, 255, 0.8);
+}
+.log-level-info .log-tag {
+	color: #93c5fd;
+}
+.log-badge.log-level-info {
+	background: rgba(96, 165, 250, 0.2);
+	color: #93c5fd;
+}
+
+.log-level-debug {
+	color: rgba(255, 255, 255, 0.5);
+}
+.log-level-debug .log-tag {
+	color: rgba(255, 255, 255, 0.4);
+}
+.log-badge.log-level-debug {
+	background: rgba(255, 255, 255, 0.08);
+	color: rgba(255, 255, 255, 0.45);
+}
+
+.log-level-trace {
+	color: rgba(255, 255, 255, 0.35);
+}
+.log-level-trace .log-tag {
+	color: rgba(255, 255, 255, 0.25);
+}
+.log-badge.log-level-trace {
+	background: rgba(255, 255, 255, 0.05);
+	color: rgba(255, 255, 255, 0.3);
+}

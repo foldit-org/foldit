@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+	.effect {
+		@apply absolute top-0 left-0 w-full h-full;
+		@apply transition-transform duration-1000 ease-out;
+	}
+}
+
+.gleam-effect {
+	@apply effect;
+	background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.3), transparent);
+	transform: translateX(-100%);
+}
+
+.pill-button:hover .gleam-effect {
+	animation: gleam 0.8s ease-out forwards;
+}
+
+@keyframes gleam {
+	0% {
+		transform: translateX(-100%);
+	}
+	100% {
+		transform: translateX(100%);
+	}
+}
+
+.fog-effect {
+	@apply effect;
+}
+
+.block-button:hover .fog-effect {
+	background-opacity: 0.0;
+	animation: fog 0.8s ease-in-out alternate infinite;
+}
+
+@keyframes fog {
+	0% {
+		background-color: rgba(255, 255, 255, 0.00);
+	}
+	100% {
+		background-color: rgba(255, 255, 255, 0.05);
+	}
+}

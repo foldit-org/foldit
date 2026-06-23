@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="" href="/foldit_logo.ico" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Varela+Round&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Foldit (web)</title>
+    <style>
+      html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #111; }
+      #foldit-canvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; }
+      #root { position: absolute; inset: 0; pointer-events: none; }
+      #root > * { pointer-events: auto; }
+    </style>
+    <!-- COOP/COEP fallback for hosts that can't set the headers themselves
+         (e.g. GitHub Pages). Required for SharedArrayBuffer (wasm-bindgen-rayon).
+         Harmless when the headers are already set by the dev server. -->
+    <script src="/coi-serviceworker.js"></script>
+  </head>
+  <body>
+    <canvas id="foldit-canvas"></canvas>
+    <div id="root"></div>
+    <script type="module" src="/src/main-web.tsx"></script>
+  </body>
+</html>

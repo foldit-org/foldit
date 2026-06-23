@@ -1,0 +1,13 @@
+.rama-canvas {
+	@apply bg-neutral-100 cursor-pointer;
+}
+
+.rama-footer {
+  @apply flex flex-row w-full relative h-[20px] mt-2 items-center justify-between text-gray-200;
+}
+
+.resize-handle {
+	@apply absolute w-4 h-4 bottom-0 right-0;
+	@apply bg-gray-100 bg-opacity-10 border-t border-l border-gray-800;
+	@apply cursor-nwse-resize;
+}

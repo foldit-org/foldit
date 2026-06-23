@@ -1,0 +1,76 @@
+.puzzle-complete-widget-container {
+	@apply absolute z-10 bottom-20 left-20 w-[300px];
+	@apply bg-black bg-opacity-80 rounded-md shadow-lg shadow-black;
+	@apply text-white;
+	@apply pointer-events-auto;
+}
+
+.puzzle-complete-widget-contents {
+	@apply flex flex-col items-center justify-center p-4;
+}
+
+.puzzle-complete-widget-contents h2 {
+	@apply text-lg w-full text-center pb-4 mb-4 font-semibold border-b border-gray-500 cursor-pointer;
+}
+
+.puzzle-complete-widget-buttons {
+	@apply flex w-full items-center gap-5;
+}
+
+.border-effect-wrapper {
+	@apply relative flex flex-row items-center justify-center;
+	@apply p-0 m-0;
+}
+
+.border-effect-wrapper:before,
+.border-effect-wrapper:after {
+	content: "";
+	position: absolute;
+	left: -3px;
+	top: -3px;
+	filter: blur(20px);
+	background: conic-gradient(#f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+	background-size: 150%;
+	width: calc(100% + 6px);
+	height: calc(100% + 6px);
+	z-index: -1;
+	animation: steam 10s linear infinite;
+	opacity: 0.3;
+}
+
+@keyframes steam {
+	0% {
+		background-position: 0 0;
+	}
+	50% {
+		background-position: 200% 0;
+	}
+	100% {
+		background-position: 0 0;
+	}
+}
+
+.puzzle-complete-stat {
+	@apply flex flex-row;
+	@apply mb-5;
+}
+
+.puzzle-complete-stat h6 {
+	@apply font-semibold mr-10;
+}
+
+.puzzle-complete-menu .border-effect-wrapper {
+	animation: puzzleCompleteMenuFadeIn 1s ease-out forwards;
+	opacity: 0;
+}
+
+@keyframes puzzleCompleteMenuFadeIn {
+	0% {
+		opacity: 0;
+		transform: scale(0.9) translateY(20px);
+	}
+	100% {
+		opacity: 1;
+		transform: scale(1) translateY(0);
+	}
+}

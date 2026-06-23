@@ -1,0 +1,23 @@
+.tooltip-wrapper {
+	@apply relative inline-block;
+}
+
+.tooltip {
+	@apply absolute z-50;
+	font-family: 'Noto Sans', sans-serif;
+	@apply rounded-md;
+	@apply max-w-xs;
+	@apply text-white;
+	@apply pointer-events-none;
+}
+
+.tooltip-content {
+	@apply p-2;
+	@apply text-sm;
+	@apply text-center;
+	/* Wrap within `.tooltip`'s max-width (20rem) instead of forcing
+	   one unbounded line that overflows the bubble. */
+	white-space: normal;
+	overflow-wrap: break-word;
+}
+
