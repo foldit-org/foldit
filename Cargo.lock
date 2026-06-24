@@ -1371,10 +1371,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "foldit-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "molex",
+ "prost",
+ "prost-build",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "foldit-python-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "foldit-plugin-sdk",
  "foldit-runner",
  "log",
  "prost",
@@ -1387,10 +1399,10 @@ name = "foldit-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cbindgen",
  "chrono",
  "dirs",
  "env_logger",
+ "foldit-plugin-sdk",
  "iceoryx2",
  "interprocess",
  "libc",
@@ -1398,7 +1410,6 @@ dependencies = [
  "log",
  "molex",
  "prost",
- "prost-build",
  "reqwest",
  "serde",
  "serial_test",
@@ -2967,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "molex"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "flate2",
  "glam",
