@@ -7,3 +7,6 @@
 [submodule "crates/viso"]
 	path = crates/viso
 	url = https://github.com/foldit-org/viso
+[submodule "crates/foldit-plugin-sdk"]
+	path = crates/foldit-plugin-sdk
+	url = https://github.com/foldit-org/foldit-plugin-sdk
