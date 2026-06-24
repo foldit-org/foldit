@@ -71,7 +71,7 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
             variants: Vec::new(),
         });
     }
-    MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, b'A', None))
+    MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, "A".to_owned()))
 }
 
 /// A plugin-op checkpoint kind standing in for a streaming action.
@@ -1079,7 +1079,7 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
         let is_ligand = entity
             .as_small_molecule()
             .is_some_and(|sm| &sm.residue_name == b"LG1");
-        let chain_key = entity.pdb_chain_id().map(|b| (b as char).to_string());
+        let chain_key = entity.pdb_chain_id().map(str::to_owned);
         if let Some(id) = store.load_entity_into_history(entity, "BglB") {
             if let Some(key) = chain_key {
                 if let Some(mask) = data.design_masks.get(&key) {

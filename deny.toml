@@ -80,6 +80,13 @@ skip = [
     # getrandom mid-ecosystem-transition: 0.3 via rand 0.9 (viso + proptest), 0.4
     # via tempfile. Converges upstream; no first-party action unifies it now.
     { crate = "getrandom@0.3.4", reason = "0.3 via rand 0.9 (viso/proptest), 0.4 via tempfile; ecosystem transition, no first-party fix" },
+    # protox 0.7 / protox-parse (protobuf build-dep of foldit-plugin-sdk) pin
+    # thiserror 1 + unicode-width 0.1; the rest of the tree is on thiserror 2
+    # (foldit-core via encase/glam, molex) and unicode-width 0.2 (naga /
+    # codespan-reporting). Clears when protox/miette bump their pins.
+    { crate = "thiserror@1.0.69", reason = "protox/protox-parse (protobuf build-dep of foldit-plugin-sdk) on thiserror 1; rest of tree on thiserror 2. Clears with a protox bump" },
+    { crate = "thiserror-impl@1.0.69", reason = "rides thiserror 1 (see thiserror)" },
+    { crate = "unicode-width@0.1.14", reason = "miette 7.6 <- protox/prost-reflect (protobuf build-dep) on unicode-width 0.1; naga/codespan-reporting on 0.2. Clears with a protox/miette bump" },
 ]
 
 [sources]

@@ -18,7 +18,7 @@ workspace = true
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
 viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
-molex = { version = "0.5.2", features = ["serde", "specta"] }
+molex = { version = "0.6.0", features = ["serde", "specta"] }
 
 # Core
 glam = "0.30"

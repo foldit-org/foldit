@@ -393,7 +393,7 @@ impl App {
         let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> = BTreeMap::new();
 
         for entity in entities {
-            let chain_key = entity.pdb_chain_id().map(|b| (b as char).to_string());
+            let chain_key = entity.pdb_chain_id().map(str::to_owned);
             if let Some(id) = self.store.load_entity_into_history(entity, name) {
                 ids.push(id);
                 if let Some(key) = chain_key {

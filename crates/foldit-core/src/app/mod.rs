@@ -293,7 +293,7 @@ impl App {
         let residue_number = res.seq_id();
         let chain = entity
             .pdb_chain_id()
-            .map_or_else(String::new, |c| (c as char).to_string());
+            .map_or_else(String::new, str::to_owned);
         let aa = molex::chemistry::AminoAcid::from_code(res.name);
         let aa_three = String::from_utf8_lossy(&res.name).trim().to_owned();
         let aa_one = aa.map_or_else(String::new, |a| (a.one_letter() as char).to_string());

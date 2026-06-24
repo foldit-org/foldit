@@ -199,7 +199,7 @@ mod tests {
         let mut atoms = cys_atoms();
         atoms.extend(cys_atoms());
         let residues = vec![residue(*b"CYS", 1, 0..6), residue(*b"CYS", 2, 6..12)];
-        let entity = ProteinEntity::new(id, atoms, residues, b'A', None);
+        let entity = ProteinEntity::new(id, atoms, residues, "A".to_owned());
         let asm = molex::Assembly::new(vec![MoleculeEntity::Protein(entity)]);
         (asm, id)
     }
