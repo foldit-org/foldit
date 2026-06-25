@@ -90,7 +90,7 @@ async function loadApp(): Promise<FolditApp> {
   return appPromise;
 }
 
-// ── Subscribe (state push) ────────────────────────────────────────────────────
+// Subscribe (state push)
 
 export function subscribe(callback: (sections: Partial<FrontendState>) => void): () => void {
   let cancelled = false;
@@ -121,7 +121,7 @@ export function subscribe(callback: (sections: Partial<FrontendState>) => void):
   };
 }
 
-// ── Outbound IPC ──────────────────────────────────────────────────────────────
+// Outbound IPC
 
 export function viewportInput(input: ViewportInput): void {
   loadApp().then(app => app.viewportInput(JSON.stringify(input)));
@@ -156,7 +156,7 @@ export function setSelection(entries: EntitySelection[]): void {
   loadApp().then(app => app.setSelection(JSON.stringify(entries)));
 }
 
-// ── Async request channel ─────────────────────────────────────────────────────
+// Async request channel
 
 const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextWishId = 0;

@@ -1,9 +1,3 @@
-/**
- * LogoDropdown Component
- * 
- * SolidJS logo dropdown component.
- */
-
 import { Component, createMemo, For } from 'solid-js';
 import '../../styles/widgets/LogoDropdown.css';
 import logo_simple from '../../assets/logo_simple.svg';

@@ -1,15 +1,9 @@
 /**
- * Tabs Component
- * 
  * SolidJS tabs implementation
  */
 
 import { Component, createSignal, createMemo, For } from 'solid-js';
 import '../../styles/util/Tabs.css';
-
-// ============================================================================
-// Tabs Component
-// ============================================================================
 
 export interface TabData {
   name: string;

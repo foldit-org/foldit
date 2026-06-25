@@ -29,9 +29,7 @@ import SelectDropdown from './SelectDropdown';
 import Slider from './Slider';
 import { controlKind, extractEnumValues, isGroupOfGroups, resolveFieldSchema } from './settingsSchema';
 
-// ---------------------------------------------------------------------------
 // Props
-// ---------------------------------------------------------------------------
 
 export interface SettingsPanelProps {
 	schema: any;
@@ -41,9 +39,7 @@ export interface SettingsPanelProps {
 	footer?: JSX.Element;
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 function getByPath(obj: any, path: string[]): any {
 	let cur = obj;
@@ -70,9 +66,7 @@ function formatLabel(value: string): string {
 // extraction, control-kind decisions) lives in settingsSchema.ts so it is
 // unit-testable without rendering components.
 
-// ---------------------------------------------------------------------------
 // Schema field renderer
-// ---------------------------------------------------------------------------
 
 // Exported so panels rendering a flat (sectionless) schema can reuse the
 // exact control renderer without going through the section-dropdown layout.
@@ -174,9 +168,7 @@ export function SchemaField(props: {
 	);
 }
 
-// ---------------------------------------------------------------------------
 // Fields list for a single section
-// ---------------------------------------------------------------------------
 
 function SchemaFields(props: {
 	schema: any;
@@ -228,9 +220,7 @@ function SchemaFields(props: {
 	);
 }
 
-// ---------------------------------------------------------------------------
 // Main component
-// ---------------------------------------------------------------------------
 
 const SettingsPanel: Component<SettingsPanelProps> = (props) => {
 	// Optimistic local state — gives instant UI feedback while IPC round-trips.

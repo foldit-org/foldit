@@ -1,9 +1,3 @@
-/**
- * SideBar Component
- * 
- * SolidJS sidebar component.
- */
-
 import { Component, createMemo, For } from 'solid-js';
 import { RotateCcw, Eye, Activity } from '../../utils/iconMapping';
 import '../../styles/widgets/SideBar.css';

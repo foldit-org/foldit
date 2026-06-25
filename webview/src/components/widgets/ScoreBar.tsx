@@ -1,6 +1,4 @@
 /**
- * ScoreBar Component
- *
  * SolidJS score bar component with gradient colors and progress display.
  */
 

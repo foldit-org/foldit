@@ -1,6 +1,4 @@
 /**
- * CalloutBubble Component
- * 
  * SolidJS callout bubble with SVG background and optional tail.
  */
 

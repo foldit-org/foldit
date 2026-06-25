@@ -1,6 +1,4 @@
 /**
- * TextBubble Component
- * 
  * SolidJS text bubble component with translation support and dragging.
  */
 

@@ -1,7 +1,4 @@
 /**
- * ImageFromFS Component
- * 
- * SolidJS image loader component.
  * Loads images from the filesystem via the backend.
  */
 

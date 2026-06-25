@@ -1,7 +1,3 @@
-/**
- * SolidJS debug info panel component.
- */
-
 import { Component, createMemo, createSignal } from 'solid-js';
 
 // state imports

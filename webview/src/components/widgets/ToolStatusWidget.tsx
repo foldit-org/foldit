@@ -1,9 +1,3 @@
-/**
- * ToolStatusWidget Component
- * 
- * SolidJS tool status widget component.
- */
-
 import { Component, createSignal, createMemo, createEffect, onCleanup, Show } from 'solid-js';
 import { useBackendData } from '../../services/adapters';
 

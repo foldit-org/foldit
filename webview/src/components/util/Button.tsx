@@ -1,6 +1,4 @@
 /**
- * Button Component
- * 
  * SolidJS button component with various styling options.
  */
 

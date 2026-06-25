@@ -1,16 +1,8 @@
-/**
- * ButtonListWidget Component
- * 
- * SolidJS button list widget component.
- */
-
 import { Component, For, Show } from 'solid-js';
 import "../../styles/util/ButtonListWidget.css";
 import ImageFromFS from "./ImageFromFS";
 
-// ============================================================================
 // Types
-// ============================================================================
 
 export interface ButtonListItem {
   id: string;
@@ -28,12 +20,8 @@ interface ButtonListWidgetProps {
   className?: string;
 }
 
-// ============================================================================
-// ButtonListWidget Component
-// ============================================================================
-
 const ButtonListWidget: Component<ButtonListWidgetProps> = (props) => {
-  // Don't destructure `props` — it breaks reactivity for live `items`.
+  // Don't destructure `props` - it breaks reactivity for live `items`.
   return (
     <div class={`button-list-widget ${props.className ?? ''}`}>
       <For each={props.items}>

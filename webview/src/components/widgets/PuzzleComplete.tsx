@@ -1,6 +1,4 @@
 /**
- * PuzzleComplete Component
- *
  * Stack of two surfaces sharing the `puzzle.complete` latch from the
  * backend, rebuilt from the production bundle on play.fold.it:
  *

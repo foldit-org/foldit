@@ -173,11 +173,8 @@ export function useInputForwarding() {
 			// so a panel control retaining focus no longer swallows hotkeys.
 			if (isOverGuiElement(cursorX, cursorY)) return;
 
-			// Action hotkeys (W/S/P/M/D etc) used to map to a fixed
-			// integer action-id table. With the catalog-driven dispatch
-			// path, that table no longer exists -- per-plugin hotkey
-			// declarations need to ride on the manifest. Until then,
-			// keys flow straight to the engine.
+			// Per-plugin hotkey declarations are not yet on the manifest,
+			// so all keys flow straight to the engine.
 
 			// Forward all other keys to Rust backend
 			viewportInput({

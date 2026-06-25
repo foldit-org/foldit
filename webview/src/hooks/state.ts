@@ -27,9 +27,7 @@ function dual<F extends (...args: any[]) => any>(fn: F): F {
 	return ((...args: any[]) => args.length ? fn(...args) : fn) as any;
 }
 
-// ============================================================================
 // App screen derivation from loading state
-// ============================================================================
 
 export type AppScreen =
 	| 'DOWNLOADING'
@@ -61,9 +59,7 @@ function deriveAppScreen(): AppScreen {
 	}
 }
 
-// ============================================================================
 // GUI-only local state
-// ============================================================================
 
 // Bubble drag position (GUI-local). `null` = use the component's default
 // anchor (20%/20% of viewport); set by the drag handler in TextBubble.tsx.
@@ -98,9 +94,7 @@ export function panelVisibilityKey(id: string): string {
 	return id.replace(/-(\w)/g, (_, c) => c.toUpperCase());
 }
 
-// ============================================================================
 // Hook: useFrontendState()
-// ============================================================================
 
 // Backend's `puzzle.mode` is a lowercase tag ("game" / "scientist"). The
 // rest of the codebase keys off the GameMode enum string values
@@ -142,9 +136,7 @@ export function useFrontendState(selector?: (s: any) => any) {
 	return selector ? selector(data) : data;
 }
 
-// ============================================================================
 // Hook: useBackendData()
-// ============================================================================
 
 function _buildBackendData() {
 	return {
@@ -193,9 +185,7 @@ export function useBackendData(selector?: (s: any) => any) {
 	return selector ? selector(data) : data;
 }
 
-// ============================================================================
 // Hook: useUI()
-// ============================================================================
 
 function _buildUI() {
 	return {
@@ -244,9 +234,7 @@ export function useUI(selector?: (s: any) => any) {
 	return selector ? selector(data) : data;
 }
 
-// ============================================================================
 // Hook: useGameProgress()
-// ============================================================================
 
 // Backend-authoritative puzzle high-score progress: `state.progress.entries`
 // is the best display score recorded per puzzle id, projected each tick. A
@@ -277,9 +265,7 @@ export function useGameProgress(selector?: (s: any) => any) {
 	return selector ? selector(data) : data;
 }
 
-// ============================================================================
 // Hook: useBackendOptions()
-// ============================================================================
 
 const [behaviorOptions, setBehaviorOptions] = createSignal({
 	clashing: 1.0,
@@ -305,9 +291,7 @@ export function useBackendOptions(selector?: (s: any) => any) {
 	return selector ? selector(data) : data;
 }
 
-// ============================================================================
 // Direct state access for non-component code
-// ============================================================================
 
 export const getUIState = () => ({
 	textBubble: state.ui.text_bubble,

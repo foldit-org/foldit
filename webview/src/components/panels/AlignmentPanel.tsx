@@ -1,7 +1,3 @@
-/**
- * SolidJS alignment panel component.
- */
-
 import { Component } from 'solid-js';
 import { useBackendData } from '../../services/adapters';
 import '../../styles/panels/AlignmentPanel.css';

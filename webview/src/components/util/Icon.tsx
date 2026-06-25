@@ -1,6 +1,4 @@
 /**
- * Icon Component
- * 
  * Wrapper around solid-icons providing a simple interface for rendering
  * icons by name string.
  * 

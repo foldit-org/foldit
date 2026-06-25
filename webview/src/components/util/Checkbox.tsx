@@ -7,10 +7,6 @@
 import { Component } from 'solid-js';
 import '../../styles/util/Checkbox.css';
 
-// ============================================================================
-// Checkbox Component
-// ============================================================================
-
 export interface CheckboxProps {
   label: string;
   checked: boolean;

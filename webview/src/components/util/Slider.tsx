@@ -1,6 +1,4 @@
 /**
- * Slider Component
- *
  * Custom SolidJS slider with draggable thumb and visual track fill.
  */
 

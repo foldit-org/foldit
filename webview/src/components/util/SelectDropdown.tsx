@@ -8,10 +8,6 @@ import { Component, For } from 'solid-js';
 import { ChevronDown } from '../../utils/iconMapping';
 import '../../styles/util/SelectDropdown.css';
 
-// ============================================================================
-// SelectDropdown Component
-// ============================================================================
-
 export interface SelectDropdownProps {
   title: string;
   options: string[];

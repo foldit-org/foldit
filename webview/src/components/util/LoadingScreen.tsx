@@ -1,9 +1,3 @@
-/**
- * LoadingScreen Component
- * 
- * SolidJS loading screen component.
- */
-
 import { Component, createSignal, createMemo, Show } from 'solid-js';
 import logo_simple from '../../assets/logo_simple.svg';
 import { useFrontendState } from '../../hooks/state';

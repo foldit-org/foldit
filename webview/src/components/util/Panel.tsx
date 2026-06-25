@@ -1,6 +1,4 @@
 /**
- * Panel Component
- * 
  * SolidJS panel component with drag support.
  */
 

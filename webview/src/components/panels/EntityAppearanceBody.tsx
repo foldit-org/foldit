@@ -17,9 +17,7 @@ import { Component, For, JSX, Show, createMemo } from 'solid-js';
 import { SchemaField } from '../util/SettingsPanel';
 import { controlKind } from '../util/settingsSchema';
 
-// ---------------------------------------------------------------------------
 // Props
-// ---------------------------------------------------------------------------
 
 export interface EntityAppearanceBodyProps {
 	schema: any;
@@ -34,9 +32,7 @@ export interface EntityAppearanceBodyProps {
 	footer?: JSX.Element;
 }
 
-// ---------------------------------------------------------------------------
 // Curation
-// ---------------------------------------------------------------------------
 
 // Palette fields are global-scope only; never shown in the per-entity body.
 const HIDDEN_FIELDS = new Set([
@@ -57,10 +53,6 @@ const SECTION_LAYOUT: { label: string; fields: string[] }[] = [
 	{ label: 'Surface', fields: ['surface_kind', 'surface_opacity', 'show_cavities'] },
 	{ label: 'Visibility', fields: ['show_hydrogens'] },
 ];
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
 
 const EntityAppearanceBody: Component<EntityAppearanceBodyProps> = (props) => {
 	// Build the rendered sections from the schema's actual properties, honoring
