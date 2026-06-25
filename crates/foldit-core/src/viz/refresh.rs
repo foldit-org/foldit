@@ -7,6 +7,11 @@
 //! the session's [`crate::session::VizState`] (marking it dirty for the render
 //! projector to push). Each assumes a present engine; gating is the caller's
 //! responsibility.
+//!
+//! The overlay queries (voids, clashes, `exposed_hydrophobics`) fire async: the
+//! reply is decoded and stored by [`apply_query_results`] off the poll a tick
+//! or two later. The toggle-off, no-filter, and no-plugin clears stay
+//! synchronous (immediate) so removing an overlay never lags.
 
 use crate::runner_client::RunnerClient;
 use crate::session::Session;
@@ -17,18 +22,14 @@ type ViewOptions = viso::options::VisoOptions;
 /// from the plugin's `connections` query and choose the per-publish
 /// connection provider.
 pub fn refresh_connections(runner_client: &mut RunnerClient, store: &mut Session) {
-    // Connections are loaded into Foldit via a plugin query,
-    // namely from Rosetta- could eventually be done directly in molex
-    //
-    // Falls back to naive molex connection implementations in the case
-    // that the Rosetta plugin is not present
+    // Connections come from the plugin `connections` query; when no plugin
+    // advertises it, the held set is cleared.
     if !runner_client.supports_query("connections") {
         store.viz.held_connections = None;
         store.viz.connections_topology_ids.clear();
         return;
     }
 
-    // Collect entity ids from the current session's assembly
     let head_ids: std::collections::BTreeSet<molex::EntityId> = store
         .head_assembly()
         .entities()
@@ -41,7 +42,6 @@ pub fn refresh_connections(runner_client: &mut RunnerClient, store: &mut Session
         store.viz.connections_topology_ids = head_ids;
     }
 
-    // Query Rosetta plugin for all connection data
     let bytes = runner_client.request_query_bytes("connections");
 
     let held = if bytes.is_empty() {
@@ -60,11 +60,7 @@ pub fn refresh_connections(runner_client: &mut RunnerClient, store: &mut Session
 
 /// Fire the plugin's `voids` query to refresh the cached external
 /// (host-supplied) void field. Runs on the at-rest geometry gate (or a
-/// cavity-toggle flip), so the voids track the committed pose. The query is
-/// async: the reply is decoded and stored by [`apply_query_results`] off the
-/// poll a tick or two later, which marks the overlay cache dirty for the
-/// render projector to push. The toggle-off and no-plugin clears stay
-/// synchronous (immediate) so removing the overlay never lags.
+/// cavity-toggle flip), so the voids track the committed pose.
 pub fn refresh_external_cavities(
     runner_client: &mut RunnerClient,
     store: &mut Session,
@@ -88,11 +84,7 @@ pub fn refresh_external_cavities(
 
 /// Fire the plugin's `clashes` query to refresh the cached steric-clash
 /// arcs. Runs on the at-rest geometry gate (or a clash-toggle flip), so the
-/// clashes track the committed pose. The query is async: the reply is
-/// decoded, endpoint-resolved, and stored by [`apply_query_results`] off the
-/// poll a tick or two later, which marks the overlay cache dirty for the
-/// render projector to push. The toggle-off and no-plugin clears stay
-/// synchronous (immediate) so removing the overlay never lags.
+/// clashes track the committed pose.
 pub fn refresh_clashes(
     runner_client: &mut RunnerClient,
     store: &mut Session,
@@ -213,12 +205,7 @@ pub fn apply_query_results(
 /// Fire the plugin's `exposed_hydrophobics` query to refresh the cached
 /// grease beads and the loaded puzzle's met-filter bonus. Runs on the
 /// at-rest geometry gate (or an exposed-hydrophobic-toggle flip), so the
-/// flagged residues and the filter count track the committed pose. The
-/// query is async: the reply is decoded, the bead overlay rebuilt, and the
-/// met-filter bonus recomputed by [`apply_query_results`] off the poll a
-/// tick or two later (the bonus feeds scoring, so it too lands deferred).
-/// The toggle-off/no-filter and no-plugin clears stay synchronous
-/// (immediate) so removing the overlay and dropping the bonus never lag.
+/// flagged residues and the filter count track the committed pose.
 pub fn refresh_exposed_hydrophobics(
     runner_client: &mut RunnerClient,
     store: &mut Session,

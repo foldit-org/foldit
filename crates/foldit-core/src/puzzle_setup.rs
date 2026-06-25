@@ -8,8 +8,6 @@
 
 use std::ops::RangeInclusive;
 
-// -- Catalytic constraints --
-
 /// A single atom reference inside a constraint: an atom name plus the
 /// residue it belongs to (residue number + chain). The ligand is referred
 /// to by its own chain (e.g. `1X` = resnum 1, chain X).
@@ -163,8 +161,6 @@ fn parse_func(tokens: &[&str]) -> Result<ConstraintFunc, String> {
         other => Err(format!("unknown penalty function '{other}'")),
     }
 }
-
-// -- Design mask --
 
 /// The set of residues a designer is permitted to mutate.
 ///

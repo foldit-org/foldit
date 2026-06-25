@@ -19,8 +19,6 @@ use super::{
 };
 
 impl History {
-    // ── record dispatch arms ──────────────────────────────────────────
-
     // `expect` resolves a lane whose presence the caller established above.
     #[allow(clippy::expect_used)]
     pub(super) fn do_begin(
@@ -382,8 +380,6 @@ impl History {
         }
         self.move_checkpoint_head_to(id)
     }
-
-    // ── Helpers used by the dispatch arms ─────────────────────────────
 
     /// Push a `LaneUndo` checkpoint mirroring the new lane head, with
     /// `entity_heads` cloned from the current graph head and `entity`'s

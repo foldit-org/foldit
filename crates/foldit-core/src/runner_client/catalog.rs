@@ -47,7 +47,6 @@ impl RunnerClient {
             return vec![];
         };
 
-        // Same flatten dispatch_op does: molex ids -> wire-shape refs.
         let flat: Vec<ResidueRef> = selection
             .iter()
             .flat_map(|(entity, residues)| {
@@ -74,8 +73,6 @@ impl RunnerClient {
                 plugin_id: entry.plugin_id,
                 display: entry.display,
                 icon_path: entry.icon_path.to_string_lossy().into_owned(),
-                // Fold the host-side design gate into the orchestrator's
-                // lock/selection `enabled` for design-gated ops only.
                 enabled: entry.enabled
                     && (!entry.requires_designable || selection_designable),
                 active: false,
@@ -94,8 +91,7 @@ impl RunnerClient {
     /// [`PluginGroupInfo`] shape. One entry per discovered plugin (the
     /// orchestrator emits a row whether or not the plugin has buttons; the
     /// frontend joins on `plugin_id` and ignores rows with no buttons).
-    /// Empty when no orchestrator is wired up. The `App` names no runner
-    /// catalog type — the forward lives here, like [`Self::actions_catalog`].
+    /// Empty when no orchestrator is wired up.
     ///
     /// [`PluginGroupInfo`]: foldit_gui::state::PluginGroupInfo
     #[cfg(not(target_arch = "wasm32"))]
@@ -119,8 +115,6 @@ impl RunnerClient {
     /// [`PanelInfo`] shape. One entry per plugin-declared `[[panels]]`
     /// row; empty when no orchestrator is wired up. Served on demand
     /// through the one-shot request path, not pushed via the projector.
-    /// The `App` names no runner catalog type — the forward lives here,
-    /// like [`Self::plugin_groups`].
     ///
     /// [`PanelInfo`]: foldit_gui::state::PanelInfo
     #[cfg(not(target_arch = "wasm32"))]
@@ -150,7 +144,7 @@ impl RunnerClient {
     /// [`SettingsTabInfo`] shape. One entry per plugin-declared
     /// `[[settings]]` row; empty when no orchestrator is wired up. Served
     /// on demand through the one-shot request path, like
-    /// [`Self::panels_catalog`]. The `App` names no runner catalog type.
+    /// [`Self::panels_catalog`].
     ///
     /// [`SettingsTabInfo`]: foldit_gui::state::SettingsTabInfo
     #[cfg(not(target_arch = "wasm32"))]

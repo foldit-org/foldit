@@ -17,9 +17,7 @@ use smallvec::SmallVec;
 
 use super::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus};
 
-// ── Storage structs ────────────────────────────────────────────────────
-
-/// Memory cap policy. Two budgets, two policies (per strategy doc § Eviction).
+/// Memory cap policy. Two budgets, two policies.
 #[derive(Debug, Clone, Copy)]
 pub struct HistoryBudget {
     /// Maximum live checkpoints before eviction kicks in.

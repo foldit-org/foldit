@@ -1,11 +1,4 @@
 //! Plugin projection of the `SessionUpdate` stream.
-//!
-//! `RunnerProjector` holds its own last-published `Assembly` snapshot and
-//! diffs it against the authoritative `Session` to fan Full/Delta
-//! `UpdateAssembly` broadcasts out to peer plugins. It is the third
-//! consumer of the `SessionUpdate` batch, alongside the render and GUI
-//! projectors, and is cross-platform: the broadcast decision is the same
-//! on native and wasm.
 
 use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
@@ -187,8 +180,6 @@ mod tests {
         (alloc.allocate(), alloc.allocate())
     }
 
-    // ── encode_payload: the Full vs Delta decision ──
-
     #[test]
     fn encode_payload_no_prior_is_full() {
         let (a, _) = two_ids();
@@ -247,8 +238,6 @@ mod tests {
         );
     }
 
-    // ── is_observable: tentative edits are filtered ──
-
     #[test]
     fn is_observable_filters_tentative() {
         assert!(RunnerProjector::is_observable(&SessionUpdate::PreviewAdded));
@@ -260,8 +249,6 @@ mod tests {
             tentative: true,
         }));
     }
-
-    // ── broadcast: gating + snapshot bookkeeping end-to-end ──
 
     #[test]
     fn broadcast_ignores_tentative_only_batch() {

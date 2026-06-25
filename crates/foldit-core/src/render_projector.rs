@@ -1,15 +1,5 @@
-//! App-owned viso projection.
-//!
-//! Consumes the [`SessionUpdate`] stream and rebuilds the head `Assembly`
-//! once per drain to publish to viso. Owns the app-scoped
-//! publish-generation counter; the per-session diff baselines it routes on
-//! (last-published id set, last-pushed appearance ids, last SS-bearing
-//! assembly) live on the session's `VizState` so they reset with the
-//! session. The id-set baseline picks between `set_assembly` (steady-state
-//! coord update or same-membership reorder) and `replace_assembly`
-//! (topology swap: an entity actually joined or left, tearing down
-//! per-entity scene-local state). Both stamp a fresh `publish_seq` so
-//! viso's `poll_assembly` gate sees a different number on every publish.
+//! App-owned viso projection: consumes the [`SessionUpdate`] stream and
+//! rebuilds the head `Assembly` once per drain to publish to viso.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -19,16 +9,15 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 /// every published `Assembly` is stamped with. The per-session diff
 /// baselines used to route publishes (last-published id set, last-pushed
 /// appearance ids, last SS-bearing assembly) live on the session's
-/// `VizState`, not here, so `Session::reset` clears them. The seq counter
-/// is **deliberately** app-scoped (not reset on `Session::reset`): a fresh
-/// post-reset publish still advances it, and viso never sees the
-/// generation go backwards.
+/// `VizState`, not here, so `Session::reset` clears them.
 pub struct RenderProjector {
     /// Monotonic counter stamped onto every published `Assembly`.
     /// Incremented on every `project` that actually publishes. Without
     /// a fresh generation per publish, viso's `poll_assembly` gate
     /// would skip the second-and-subsequent publishes (a freshly built
-    /// `Assembly` always starts at generation 0).
+    /// `Assembly` always starts at generation 0). Deliberately app-scoped:
+    /// not reset on `Session::reset`, so a fresh post-reset publish still
+    /// advances it and viso never sees the generation go backwards.
     publish_seq: u64,
 }
 
@@ -278,11 +267,6 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
         let has_scores = changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::ScoresChanged));
-        // SS is opt-in on molex `Assembly` construction (`ss_types` starts
-        // empty); recompute it (DSSP) only on committed geometry (a `HeadMoved`:
-        // action commit, load, reset) or a topology change, never per streamed
-        // frame (that was the wiggle/shake stall). A streaming tentative `Edit`
-        // instead overlays the last committed SS from `last_ss` below.
         let committed_geometry = changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::HeadMoved));
@@ -343,11 +327,10 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
     }
 }
 
-/// Build a focus description from focus + entity names. Was
-/// `Session::focus_description`; moved here to keep `Session`
-/// viso-free. The `All` arm reports `doc.count()` (live committed +
-/// preview membership) rather than the metadata side table, which is
-/// never GC'd and so over-reports the live entity count.
+/// Build a focus description from focus + entity names. The `All` arm
+/// reports `doc.count()` (live committed + preview membership) rather than
+/// the metadata side table, which is never GC'd and so over-reports the
+/// live entity count.
 pub fn focus_description(doc: &Session, focus: viso::Focus) -> String {
     match focus {
         viso::Focus::All => {

@@ -50,11 +50,10 @@ impl History {
     /// new checkpoint, no new snapshot. Idempotent on `(None, None)`.
     ///
     /// This is the right call for cycle-zero scoring during session init
-    /// (Rosetta streams a score before the user takes any action). It
-    /// avoids the pre-fix behavior where every init cycle pushed a fresh
-    /// checkpoint on top of root + `AddEntity`. Returns `true` when a value
-    /// was actually written (so the caller can emit a score-changed signal
-    /// only on a real change); `false` on the `(None, None)` no-op.
+    /// (Rosetta streams a score before the user takes any action). Returns
+    /// `true` when a value was actually written (so the caller can emit a
+    /// score-changed signal only on a real change); `false` on the
+    /// `(None, None)` no-op.
     // The head checkpoint id is a maintained invariant; it always resolves.
     #[allow(clippy::expect_used)]
     pub fn set_head_scores(

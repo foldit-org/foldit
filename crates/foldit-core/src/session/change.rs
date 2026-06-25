@@ -1,18 +1,14 @@
 //! The typed change-event stream.
 //!
-//! [`SessionUpdate`] is the single event type emitted by the `Document`
-//! mutation funnel and consumed by the three projectors: render, plugin
-//! broadcast, and GUI (live cursor). Every
-//! observable mutation produces exactly one `SessionUpdate`; the
-//! projectors decide independently how (or whether) to react to each
-//! variant.
+//! [`SessionUpdate`] is the single event type emitted by the `Session`
+//! mutation funnel and consumed by the projectors. Every observable
+//! mutation produces exactly one `SessionUpdate`; the projectors decide
+//! independently how (or whether) to react to each variant.
 //!
 //! The enum is signal-only: it names *what changed*, not the payload.
-//! Each projector re-derives whatever it needs from the [`Document`]
-//! (render rebuilds the whole `Assembly` from arcs, broadcaster diffs
-//! its last published snapshot, GUI polls `live_version`). Carrying
-//! payloads here would duplicate state that the projectors are already
-//! reading from `Document` and invite drift.
+//! Each projector re-derives whatever it needs from the [`Session`].
+//! Carrying payloads here would duplicate state that the projectors are
+//! already reading from `Session` and invite drift.
 
 use super::Session;
 
@@ -36,52 +32,22 @@ pub enum SessionUpdate {
     PreviewUpdated,
     /// A preview (transient) entity was discarded from the overlay.
     PreviewDiscarded,
-    /// A head / edit / checkpoint score *value* changed. Signal-only,
-    /// like the rest of the enum: the score numbers live on the
-    /// `Document`, and consumers re-read them (the GUI score widget from
-    /// the head/composition score; the history panel from its live
-    /// cursor). A score is not a scene mutation, so the render projector
-    /// and the plugin broadcaster ignore it.
+    /// A head / edit / checkpoint score *value* changed.
     ScoresChanged,
-    /// The residue selection changed. Signal-only: the selected residues
-    /// live on the `Document`, and consumers re-read them (the GUI
-    /// selection mirror + selection-gated action catalog; viso's
-    /// per-entity highlight). A selection is ambient, not a geometry
-    /// mutation, so the render projector and the plugin broadcaster
-    /// ignore it.
+    /// The residue selection changed.
     SelectionChanged,
-    /// The session focus changed (Tab-cycle / reset). Signal-only: the
-    /// focus value lives on the `Document`, and consumers re-read it (the
-    /// GUI focused-entity + focus-gated action catalog; viso's camera
-    /// framing mirror). Focus is ambient, not a geometry mutation, so the
-    /// render projector and the plugin broadcaster ignore it.
+    /// The session focus changed (Tab-cycle / reset).
     FocusChanged,
     /// The active puzzle's tutorial-bubble cursor advanced or stepped back.
-    /// Signal-only: the bubble sequence and cursor live inside the loaded
-    /// puzzle on the `Document`, and the GUI re-reads them to push the
-    /// current bubble. Bubbles are ambient tutorial flow, not a geometry
-    /// mutation, so the render projector and the plugin broadcaster ignore
-    /// it.
     BubbleChanged,
     /// The loaded puzzle changed (a puzzle loaded, or a free-form structure
-    /// load dropped the objective). Signal-only: the puzzle add-on lives on
-    /// the `Document`, and the GUI re-reads it to push the puzzle panel +
-    /// score view. It is not a geometry mutation, so the render projector
-    /// and the plugin broadcaster ignore it.
+    /// load dropped the objective).
     PuzzleChanged,
     /// The active view options or the active preset changed (a render
-    /// option toggled, or a preset applied). Signal-only: the options and
-    /// the active-preset name live on the `Document`, and consumers re-read
-    /// them (the GUI view panel; viso applies the options to the engine).
-    /// View options are not a geometry mutation, so the plugin broadcaster
-    /// ignores it.
+    /// option toggled, or a preset applied).
     ViewOptionsChanged,
     /// A per-entity ambient appearance override changed (a field merged into
-    /// or removed from an entity's overrides). Signal-only: the authoritative
-    /// per-entity overrides live on the `Document`, and the render projector
-    /// re-reads them to reconcile the engine's working copy. An appearance
-    /// override is not a geometry mutation, so the plugin broadcaster ignores
-    /// it.
+    /// or removed from an entity's overrides).
     EntityAppearanceChanged,
 }
 

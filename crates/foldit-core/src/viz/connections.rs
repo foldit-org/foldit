@@ -1,43 +1,15 @@
-//! Plugin-sourced rendering connections.
-//!
-//! The `connections` query returns a plugin's detected structural
-//! connections as a proto `ConnectionReport`: a list of typed atom-atom
-//! (or atom-anchor) links. This module turns that report into the molex
-//! `AtomLink` map the assembly carries and viso resolves to rendered atom
-//! positions, keeping the proto-decode in one pure place.
-//!
-//! Only `HBond` and `Disulfide` are decoded here. `Clash` has its own
-//! independent path (the `clashes` query + `viz/refresh.rs::refresh_clashes`),
-//! and `Band` has no producer yet; both proto types are skipped so the
-//! connections map this module produces carries hydrogen bonds and disulfides
-//! only.
+//! Plugin-sourced rendering connections: the `connections` query's proto
+//! `ConnectionReport` decoded into the molex `AtomLink` map the assembly
+//! carries. The proto type is named only here.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
 /// Decode a proto `ConnectionReport` into the molex `AtomLink` map an
-/// `Assembly` carries, resolving each endpoint against `asm`.
-///
-/// Type mapping: proto `Hbond` -> [`molex::ConnectionType::HBond`],
-/// `Disulfide` -> [`molex::ConnectionType::Disulfide`]. `Clash`, `Band`,
-/// and `Unspecified` are skipped (clash has its own path; band has no
-/// producer); they never enter the returned map.
-///
-/// Each `AtomEnd` resolves as follows. The `atom` variant maps the proto
-/// `entity_id` (`u64`) to a molex `EntityId` (`u64::from(id.raw()) ==
-/// entity_id`, the same widening lookup the clash and pull-drag paths
-/// use), finds that entity, indexes its `residues()[residue_index]`, and
-/// scans that residue's `atom_range` for the atom whose trimmed name
-/// matches the (already-trimmed) wire `atom_name`. The match trims the
-/// space/NUL padding off molex's `[u8; 4]` name and compares the bytes to
-/// the wire string's bytes; the wire name carries no padding, so this is a
-/// trimmed-vs-trimmed byte compare. The `anchor` variant builds a fixed
-/// [`molex::AtomEnd::Anchor`].
-///
-/// A connection whose endpoint cannot be resolved (entity / residue / atom
-/// not found, or a `None` `end`) is skipped: no half-resolved link is
-/// emitted. `magnitude` is carried through (it is `None` for hbond and
-/// disulfide today, but the plumbing stays).
+/// `Assembly` carries, resolving each endpoint against `asm`. Only `HBond`
+/// and `Disulfide` are kept (`Clash`, `Band`, `Unspecified` skipped). A
+/// connection whose endpoint cannot be resolved is skipped, so no
+/// half-resolved link is emitted. `magnitude` is carried through.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn connections_from_report(

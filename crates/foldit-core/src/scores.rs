@@ -1,8 +1,6 @@
 //! Core-owned score types. Mirror what a plugin score report carries: the
-//! RAW (unweighted) per-term energies (whole-pose and per-residue), the
-//! term-name alignment key, and nothing else. The runner facade converts
-//! the wire/proto report into these at the `RunnerClient` boundary so the
-//! rest of the core never names the runner's proto types.
+//! RAW (unweighted) per-term energies (whole-pose and per-residue) plus the
+//! term-name alignment key.
 //!
 //! Core owns the weighting: it multiplies the raw per-term energies by a
 //! session-held weight map ([`Session::term_weights`]) to produce the
@@ -46,19 +44,9 @@ pub struct ResidueTermScores {
     pub terms: Vec<f32>,
 }
 
-/// The RAW (unweighted) per-term breakdown retained on a history node
-/// (a [`crate::history::Checkpoint`] or in-flight `PendingEdit`) as the
-/// session-owned source of truth for per-residue coloring. Mirrors the
-/// energy half of a [`ScoreReport`] minus `term_names`: the alignment key
-/// lives once on the [`crate::session::Session`] (its `term_names`),
-/// shared by every stored breakdown, rather than being duplicated on each
-/// node. The render projector re-derives the displayed per-residue colors
-/// from the current composition node's breakdown × the session weights on
-/// every `ScoresChanged`.
-///
-/// Cross-platform like the rest of this module: stamped only on the native
-/// score path today, but the type and its weighting helper build on every
-/// target (the breakdown is simply `None` on every node on wasm).
+/// The RAW (unweighted) per-term breakdown retained on a history node, the
+/// session-owned source of truth for per-residue coloring: whole-pose and
+/// per-residue energies aligned to the session's `term_names`.
 #[derive(Debug, Clone)]
 pub struct StoredBreakdown {
     /// Raw (unweighted) whole-pose energy per term, aligned to the

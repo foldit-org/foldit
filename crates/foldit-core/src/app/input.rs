@@ -12,8 +12,8 @@ use crate::session::Session;
 /// Advance focus one step through `focusable`, wrapping back to
 /// [`Focus::All`] after the last entity. `All` advances to the first
 /// focusable entity (or stays `All` when none are focusable). The
-/// Tab-cycle step, owned by foldit-core now that focus is session state;
-/// `focusable` is viso's eligibility list (`engine.focusable_entities()`).
+/// Tab-cycle step, owned by foldit-core; `focusable` is viso's
+/// eligibility list (`engine.focusable_entities()`).
 fn next_focus(current: Focus, focusable: &[EntityId]) -> Focus {
     match current {
         Focus::All => focusable
@@ -27,8 +27,6 @@ fn next_focus(current: Focus, focusable: &[EntityId]) -> Focus {
 }
 
 impl App {
-    // ── Keybinding dispatch ──
-
     /// Catalog hotkey fallback. Runs only after a viso built-in
     /// `handle_key_press` *miss*, so built-ins always win. On a match
     /// against a plugin manifest `[[buttons]]` hotkey, dispatch the op
@@ -81,10 +79,7 @@ impl App {
                 return true;
             }
             "Escape" => {
-                // ESC is cancel-only: drop in-flight streams + the
-                // current operation's previews. It never clears the
-                // selection (which is ambient); the only selection
-                // clearer is the empty-background click.
+                // ESC is cancel-only.
                 #[cfg(not(target_arch = "wasm32"))]
                 self.runner_client.cancel_all_active_streams();
                 self.cancel_operations();
@@ -172,8 +167,6 @@ impl App {
             self.open_segment(eid, res);
         }
     }
-
-    // ── Viewport input (from webview) ──
 
     /// Route a viewport input event from the webview into viso and the
     /// pull-drag system.
@@ -354,10 +347,7 @@ impl App {
         }
 
         if pending_escape {
-            // ESC is cancel-only: drop in-flight streams + the current
-            // operation's previews. The selection is ambient and left
-            // untouched (the only selection clearer is the empty-click
-            // path in `apply_click_to_selection`).
+            // ESC is cancel-only.
             #[cfg(not(target_arch = "wasm32"))]
             self.runner_client.cancel_all_active_streams();
             self.cancel_operations();
@@ -376,8 +366,6 @@ impl App {
             });
         }
     }
-
-    // ── Native input (when webview is not ready) ──
 
     pub fn handle_native_mouse_input(&mut self, button: viso::MouseButton, pressed: bool) {
         let pending_click = self.engine.as_mut().and_then(|engine| {
@@ -411,8 +399,6 @@ impl App {
             engine.feed_modifiers(shift);
         }
     }
-
-    // ── Per-frame visual updates ──
 
     pub fn update_frame_visuals(&mut self) {
         // Pre-snapshot pull info under an immutable borrow so the
@@ -547,8 +533,6 @@ fn handle_viewport_key(
         #[cfg(not(target_arch = "wasm32"))]
         hotkey_op: None,
     };
-    // foldit-specific overrides land first; viso's
-    // generic table picks up the rest.
     match code {
         // Drop viso's R-binding for turntable auto-rotate;
         // we don't expose a rotate keybinding in foldit.
@@ -561,10 +545,8 @@ fn handle_viewport_key(
             }
         }
         "Escape" => {
-            // ESC cancels the in-flight action only; it
-            // never clears the selection. Resolved in the
-            // deferred block below, past the last `engine`
-            // use. Mirrors the `handle_keybinding` ESC arm.
+            // ESC is cancel-only. Resolved in the deferred
+            // block below, past the last `engine` use.
             outcome.escape = true;
         }
         // Focus is foldit-core session state: mutate the

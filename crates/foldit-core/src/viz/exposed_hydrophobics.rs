@@ -1,11 +1,6 @@
-//! Exposed-hydrophobic decode.
-//!
-//! The `exposed_hydrophobics` query returns a plugin's detected
-//! solvent-exposed hydrophobic residues as opaque bytes: a proto
-//! `ExposedHydrophobicReport`, a list of flagged residues. This module turns
-//! those bytes into the per-entity structural refs the viso engine resolves
-//! directly, keeping the proto-decode in one pure place `viz/refresh.rs`
-//! calls. The proto type is named only here; the rest of the core sees
+//! Exposed-hydrophobic decode: the `exposed_hydrophobics` query's proto
+//! `ExposedHydrophobicReport` bytes decoded into per-residue structural refs.
+//! The proto type is named only here; the rest of the core sees
 //! [`ExposedHydroData`].
 
 /// One flagged residue: the proto-side `entity_id` (orchestrator scope,
@@ -19,11 +14,7 @@ pub struct ExposedResidue {
     pub residue_index: u32,
 }
 
-/// A decoded exposed-hydrophobic report, ready for the trigger to map entity
-/// ids and hand to [`viso::VisoEngine::update_exposed_hydrophobics`].
-///
-/// An empty/cleared report (empty bytes or undecodable bytes) maps to an
-/// empty `exposed`, which viso reads as the signal to clear the set.
+/// A decoded exposed-hydrophobic report.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExposedHydroData {
@@ -31,7 +22,7 @@ pub struct ExposedHydroData {
 }
 
 /// Decode opaque `exposed_hydrophobics`-query bytes into an
-/// [`ExposedHydroData`] the trigger maps and feeds the viso engine.
+/// [`ExposedHydroData`].
 ///
 /// Returns an empty report when the bytes are empty (the query came back with
 /// no payload) or fail to decode. The empty result is the caller's signal to

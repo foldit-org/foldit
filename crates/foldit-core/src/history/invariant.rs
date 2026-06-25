@@ -9,8 +9,6 @@ use molex::entity::molecule::id::EntityId;
 use super::{EntitySnapshotId, History};
 
 impl History {
-    // ── Cross-DAG invariant ──────────────────────────────────────
-
     /// Walk both DAGs and assert the cross-DAG invariant. Called at the
     /// tail of every public DAG-bearing mutation under
     /// `debug_assertions`. CI runs debug builds → bug becomes a test

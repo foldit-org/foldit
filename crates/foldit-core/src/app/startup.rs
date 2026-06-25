@@ -112,13 +112,6 @@ impl App {
         }
     }
 
-    /// Advance the non-blocking startup state-machine by one step. Called
-    /// near the top of [`Self::tick`], before the `SessionUpdate` drain, so a
-    /// publish a step triggers (the structure parse) is drained + projected
-    /// the same frame. Each step polls for whatever worker replies arrived
-    /// since the last frame, folds them into the in-flight accumulator, and
-    /// on completeness kicks the next phase. No step blocks. Inert in `Idle`
-    /// / `Done`.
     /// True once the startup state-machine has reached its terminal state.
     /// The machine drives the first score itself (the post-Init kick); the
     /// tick's at-rest auto-rescore must hold off until then so it does not

@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-// Top level puzzle struct
 #[derive(Debug, Deserialize)]
 pub struct PuzzleLevel {
     pub puzzle: PuzzleMeta,
@@ -18,7 +17,6 @@ pub struct PuzzleLevel {
     pub game_event: Vec<GameEvent>,
 }
 
-// Puzzle metadata
 #[derive(Debug, Deserialize)]
 pub struct PuzzleMeta {
     pub title: String,
@@ -136,8 +134,6 @@ pub struct DesignMaskEntry {
     /// Inclusive `start-end` ranges separated by `||` (trailing `||` ok).
     pub can_design: String,
 }
-
-// -- Bubbles --
 
 #[derive(Debug, Deserialize)]
 pub struct Bubble {

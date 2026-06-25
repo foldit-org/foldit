@@ -10,8 +10,6 @@ use molex::entity::molecule::id::EntityId;
 use super::{CheckpointId, EntitySnapshotId, FilterStatus, History};
 
 impl History {
-    // ── Linear-undo prune ─────────────────────────────────────────────
-
     /// Drop every checkpoint that isn't an ancestor of the current
     /// `head`, and every snapshot that isn't an ancestor of its lane's
     /// `head`. Called after a push mutation so the resulting history
@@ -83,8 +81,6 @@ impl History {
         }
     }
 
-    // ── Eviction ──────────────────────────────────────────────────────
-
     /// Evict checkpoints and snapshots until both budgets are satisfied.
     /// Called from `record` exactly once after each event.
     // `expect`s here resolve ids picked by the eviction pass just above.
@@ -120,7 +116,8 @@ impl History {
         }
     }
 
-    /// Pick a checkpoint to evict per the policy in the strategy doc.
+    /// Pick a checkpoint to evict: the oldest, excluding root, the head
+    /// path, pinned, and the best cursors.
     pub(super) fn pick_checkpoint_eviction(&self) -> Option<CheckpointId> {
         let head_path = self.checkpoint_head_path();
         self.checkpoints
@@ -179,8 +176,6 @@ impl History {
         }
         path
     }
-
-    // ── Best cursor recompute ─────────────────────────────────────────
 
     /// Recompute `best` and `best_that_counts` cursors.
     /// `best` = highest `raw_score` across non-tentative, non-excluded

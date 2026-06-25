@@ -1,24 +1,6 @@
 //! Runner client: owns the orchestrator handle and the native stream
-//! bookkeeping that drives plugin operations.
-//!
-//! `RunnerClient` holds the `Orchestrator` and (on native builds) the
-//! in-flight `StreamHost` state, plus the orchestrator-lifecycle handlers
-//! that touch only the orchestrator (`reset_for_new_structure`,
-//! `shutdown`). Plugin bring-up is non-blocking: the kick/poll twins
-//! ([`RunnerClient::kick_warms`]/[`RunnerClient::poll_warms`],
-//! [`RunnerClient::kick_inits`]/[`RunnerClient::poll_inits`])
-//! let the startup state-machine on `App` drive bring-up one frame at a
-//! time so the host renders throughout.
-//! Inbound plugin traffic is drained here too: [`RunnerClient::drain_op_events`]
-//! consumes the orchestrator's raw `PluginUpdate`s and the stream table,
-//! resolving each into a core-side [`OpEvent`] keyed by the edit token so
-//! `App` applies them without naming orchestrator types or touching the
-//! stream bookkeeping.
-//!
-//! `App::handle_dispatch_op` still interleaves orchestrator I/O with store
-//! mutations (it begins the edit only after the dispatch succeeds), so it
-//! stays on `App` and reaches into `self.runner_client` for the orchestrator
-//! and stream state it needs.
+//! bookkeeping that drives plugin operations. Plugin bring-up is
+//! non-blocking, driven through the kick/poll pairs.
 
 mod dispatch;
 mod catalog;
@@ -33,9 +15,7 @@ pub use types::{
 /// Owns the orchestrator handle and the native-only stream bookkeeping.
 /// `App` holds one of these and reaches into its fields by direct path so
 /// the orchestrator and stream state can be borrowed disjointly (the
-/// dispatch methods on `App` rely on this). The `SessionUpdate` stream's
-/// plugin projection lives separately in `RunnerProjector`, a peer `App`
-/// field, so the two can be borrowed disjointly across the tick seam.
+/// dispatch methods on `App` rely on this).
 pub struct RunnerClient {
     orchestrator: Option<foldit_runner::Orchestrator>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -69,8 +49,7 @@ impl RunnerClient {
 
     /// Resolve an op-id to its owning plugin id via the orchestrator's
     /// plugin registry. Returns `None` when no orchestrator is installed or
-    /// the op-id is unknown to the registry. Encapsulates the registry lookup
-    /// so the dispatch path names no orchestrator type.
+    /// the op-id is unknown to the registry.
     pub(crate) fn resolve_op_plugin_id(&self, op_id: &str) -> Option<String> {
         self.orchestrator
             .as_ref()?
@@ -81,8 +60,7 @@ impl RunnerClient {
 
     /// Whether `op_id` declares `creates_entities` (its output is a NEW
     /// entity to adopt, not an edit of an existing lane). `false` for an
-    /// unknown op-id. Lets the dispatch path skip `begin_action` for
-    /// entity-creating ops without naming an orchestrator type.
+    /// unknown op-id.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn op_creates_entities(&self, op_id: &str) -> bool {
         self.orchestrator
@@ -115,15 +93,7 @@ impl RunnerClient {
     }
 }
 
-// ── Generic raw-bytes plugin queries ──
-//
-// The at-rest viz coordinators (clashes, voids, exposed-hydrophobics) each
-// forward a well-known query id to the orchestrator over the generic
-// raw-bytes dispatch and decode the opaque reply themselves; the payload
-// goes to the viso engine, not an orchestrator score merge, so it stays on
-// this generic query path rather than the score-specialized one. The
-// support gate keeps each path an inert no-op until a plugin advertises the
-// query.
+// Each query stays an inert no-op until a plugin advertises it.
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
@@ -187,9 +157,6 @@ impl RunnerClient {
             .unwrap_or_default()
     }
 }
-
-// ── Non-blocking two-phase bring-up: warm (startup) then session-init
-//    (file-load), each a kick + poll pair ──
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
@@ -343,8 +310,6 @@ impl RunnerClient {
 
 }
 
-// ── Core-side puzzle payload -> orchestrator native mirror ──
-//
 // The session-init kick delivers the loaded puzzle's ligand assets,
 // catalytic constraints, and generic config params (weight patch + objective
 // filters) to the worker. These free functions convert core's puzzle types
@@ -359,8 +324,6 @@ fn init_payload_from_puzzle(
 ) -> foldit_runner::orchestrator::InitPayload {
     use foldit_runner::orchestrator::{InitPayload, PuzzleAsset};
 
-    // Each ligand contributes its `.params` asset and, when present, its
-    // conformer PDB as a second asset.
     let mut assets: Vec<PuzzleAsset> = Vec::new();
     for lig in ligands {
         assets.push(PuzzleAsset {

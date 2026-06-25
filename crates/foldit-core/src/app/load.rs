@@ -12,19 +12,18 @@ impl App {
     pub fn handle_app_command(&mut self, command: foldit_gui::AppCommand) {
         use foldit_gui::AppCommand;
 
-        // History-side commands take &mut self (no engine borrow held).
+        // These commands need no engine, so they dispatch ahead of the
+        // `if self.engine.is_none()` guard below.
         if let AppCommand::History { cmd } = command {
             self.run_history_command(&cmd);
             return;
         }
 
-        // Bubble cursor advance is engine-independent.
         if let AppCommand::AdvanceBubble { back } = command {
             self.advance_bubble(back);
             return;
         }
 
-        // Focus is pure session state; no engine borrow needed.
         if let AppCommand::SetFocus { entity_id } = command {
             let focus = entity_id.map_or(viso::Focus::All, |raw| {
                 viso::Focus::Entity(EntityId::from_raw(raw))
@@ -35,8 +34,7 @@ impl App {
 
         // Per-entity appearance is authoritative on the session; the render
         // projector pushes it into the engine working copy on the emitted
-        // `EntityAppearanceChanged`. No engine borrow needed here, so it is
-        // handled before the engine-presence guard like focus.
+        // `EntityAppearanceChanged`.
         if let AppCommand::SetEntityAppearance {
             entity_id,
             field,
@@ -48,26 +46,17 @@ impl App {
             return;
         }
 
-        // Clearing an entity's whole appearance override is likewise pure
-        // session state; handled before the engine-presence guard for the
-        // same reason as the per-field merge above.
         if let AppCommand::ClearEntityAppearance { entity_id } = command {
             self.store
                 .clear_entity_appearance(EntityId::from_raw(entity_id));
             return;
         }
 
-        // Closing the segment panel is pure session state (drops the
-        // open-segment target); handled before the engine-presence guard
-        // like focus.
         if matches!(command, AppCommand::CloseSegment) {
             self.close_segment();
             return;
         }
 
-        // Panel visibility / position is pure UI state (drives the
-        // backend-owned open set + positions); handled before the
-        // engine-presence guard like the other UI-state commands.
         if let AppCommand::SetPanelVisible { panel, visible } = command {
             self.set_panel_visible(panel, visible);
             return;
@@ -77,8 +66,6 @@ impl App {
             return;
         }
 
-        // Hint visibility and fullscreen are pure UI state; handled before
-        // the engine-presence guard like the other UI-state commands.
         if let AppCommand::SetHintsVisible { visible } = command {
             self.set_hints_visible(visible);
             return;
@@ -88,8 +75,6 @@ impl App {
             return;
         }
 
-        // Clearing high-score progress is pure backend state; handled before
-        // the engine-presence guard like the other UI-state commands.
         if matches!(command, AppCommand::ClearProgress) {
             self.clear_progress();
             return;
@@ -103,10 +88,7 @@ impl App {
     }
 
     // Dispatch the engine-dependent commands. Reached only after the
-    // engine-presence guard, so an engine is present. The borrow is taken
-    // per-arm (LoadStructure / LoadPuzzle need to release it before
-    // `self.tick(0.0)`, which is how the render projector republishes after
-    // a load).
+    // engine-presence guard, so an engine is present.
     fn handle_engine_command(&mut self, command: foldit_gui::AppCommand) {
         use foldit_gui::AppCommand;
 
@@ -185,9 +167,7 @@ impl App {
     }
 
     /// Free-form file load (Scientist mode). Ingest entities, set
-    /// metadata, then tick + fit the camera (tick is how the render
-    /// projector republishes - the `SessionUpdate` stream carries `PreviewAdded`s and
-    /// `HeadMoved`s from `load_entity_into_history`).
+    /// metadata, then hand to bring-up.
     fn handle_load_structure(&mut self, path: &str) {
         self.set_app_phase(AppPhase::LoadingSession);
         // Drop any prior plugin sessions (warm workers stay up) so the
@@ -241,7 +221,7 @@ impl App {
     }
 
     /// Tutorial / campaign puzzle load (Game mode). Ingest entities and
-    /// metadata, then tick + snap + apply the puzzle's saved pose.
+    /// metadata, then hand to bring-up.
     fn handle_load_puzzle(&mut self, puzzle_id: u32) {
         let data = crate::puzzle::load_puzzle_structure(puzzle_id);
         self.load_puzzle_from_data(puzzle_id, data);

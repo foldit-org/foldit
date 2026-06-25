@@ -67,8 +67,6 @@ use pending::PendingEdit;
 mod error;
 pub use error::HistoryError;
 
-// ── History (the public type) ──────────────────────────────────────────
-
 /// Two-layer history: per-entity timelines plus a unified checkpoint
 /// graph. Owns both DAGs; enforces the cross-DAG invariant; funnels every
 /// checkpoint-bearing event through a single private root.
@@ -233,8 +231,6 @@ impl History {
         history
     }
 
-    // ── Read accessors ─────────────────────────────────────────────────
-
     /// Read access to the checkpoint graph.
     #[must_use]
     pub const fn checkpoints(&self) -> &CheckpointGraph {
@@ -286,8 +282,6 @@ impl History {
     pub fn snapshot(&self, entity: EntityId, id: EntitySnapshotId) -> Option<&EntitySnapshot> {
         self.lanes.get(&entity)?.snapshot(id)
     }
-
-    // ── Public surface - thin shims over record ───────────────────────
 
     /// Begin a streaming action over `entities` under the caller-supplied
     /// `request_id` (allocated by the orchestrator, the single id
@@ -510,8 +504,8 @@ impl History {
 
     /// Introduce a new entity (and its lane) into history. Pushes a
     /// fresh checkpoint whose `entity_heads` is the parent's plus
-    /// `entity_id → root_snapshot`. Refused while `Active` (the running
-    /// action freezes the assembly per § Lock semantics).
+    /// `entity_id → root_snapshot`. Refused while an action is in flight
+    /// (the committed head is frozen).
     ///
     /// Used by [`crate::session::Session::promote_preview`] to
     /// move a previously-transient entity into history.
@@ -549,8 +543,6 @@ mod dispatch;
 mod eviction;
 mod invariant;
 mod record;
-
-// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests;

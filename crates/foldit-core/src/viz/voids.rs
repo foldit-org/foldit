@@ -1,20 +1,10 @@
-//! Packing-void decode.
-//!
-//! The `voids` query returns a plugin's detected packing voids as opaque
-//! bytes: a proto `VoidField`, a void distance field sampled on a regular
-//! grid. This module turns those bytes into the dims/origin/spacing/phi the
-//! viso engine meshes directly, keeping the proto-decode in one pure place
-//! `viz/refresh.rs` calls. The proto type is named only here; the rest of the
-//! core sees [`VoidFieldData`].
+//! Packing-void decode: the `voids` query's proto `VoidField` bytes decoded
+//! into the dims/origin/spacing/phi grid the viso engine meshes. The proto
+//! type is named only here; the rest of the core sees [`VoidFieldData`].
 
-/// A decoded void distance field, ready to hand to
-/// [`viso::VisoEngine::set_external_void_field`]. Carries the grid `dims`
-/// (from nx/ny/nz), the world-space `origin` of cell (0,0,0), the per-axis
-/// `spacing`, the row-major x-major `phi` samples, and the iso `threshold`.
-///
-/// An empty/cleared field (empty bytes, undecodable bytes, or a `None`
-/// origin) maps to zero `dims` and an empty `phi`, which viso reads as the
-/// signal to clear the external set.
+/// A decoded void distance field: the grid `dims` (from nx/ny/nz), the
+/// world-space `origin` of cell (0,0,0), the per-axis `spacing`, the
+/// row-major x-major `phi` samples, and the iso `threshold`.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoidFieldData {
@@ -49,8 +39,7 @@ impl Default for VoidFieldData {
     }
 }
 
-/// Decode opaque `voids`-query bytes into a [`VoidFieldData`] the viso
-/// engine meshes directly.
+/// Decode opaque `voids`-query bytes into a [`VoidFieldData`].
 ///
 /// Returns a cleared field when the bytes are empty (the query came back
 /// with no payload), fail to decode, or carry no grid origin (the

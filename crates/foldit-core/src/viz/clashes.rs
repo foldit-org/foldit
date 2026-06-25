@@ -1,11 +1,6 @@
-//! Steric-clash decode.
-//!
-//! The `clashes` query returns a plugin's detected steric clashes as opaque
-//! bytes: a proto `ClashReport`, a list of atom-atom clashes. This module
-//! turns those bytes into the per-endpoint structural refs the viso engine
-//! resolves directly, keeping the proto-decode in one pure place
-//! `viz/refresh.rs` calls. The proto type is named only here; the rest of the
-//! core sees [`ClashData`].
+//! Steric-clash decode: the `clashes` query's proto `ClashReport` bytes
+//! decoded into per-endpoint structural refs. The proto type is named only
+//! here; the rest of the core sees [`ClashData`].
 
 /// One endpoint of a decoded clash: the proto-side `entity_id` (orchestrator
 /// scope, mapped to a molex `EntityId` by the trigger), the entity-local
@@ -29,19 +24,14 @@ pub struct DecodedClash {
     pub severity: f32,
 }
 
-/// A decoded clash report, ready for the trigger to map entity ids and hand
-/// to [`viso::VisoEngine::update_clashes`].
-///
-/// An empty/cleared report (empty bytes or undecodable bytes) maps to an
-/// empty `clashes`, which viso reads as the signal to clear the set.
+/// A decoded clash report.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ClashData {
     pub clashes: Vec<DecodedClash>,
 }
 
-/// Decode opaque `clashes`-query bytes into a [`ClashData`] the trigger maps
-/// and feeds the viso engine.
+/// Decode opaque `clashes`-query bytes into a [`ClashData`].
 ///
 /// Returns an empty report when the bytes are empty (the query came back with
 /// no payload) or fail to decode. A clash whose `a`/`b` atom or that atom's

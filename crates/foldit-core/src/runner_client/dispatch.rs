@@ -52,10 +52,7 @@ impl RunnerClient {
                         );
                         continue;
                     };
-                    // The dispatch id is the edit token. `App` no-ops the
-                    // frame if no edit is open under it; for a
-                    // creates-entities op it streams into a preview instead,
-                    // and for a preview op it updates a discardable ghost.
+                    // The dispatch id is the edit token.
                     let (creates_entities, preview) = self.stream_flags(request_id);
                     events.push(OpEvent::Update {
                         token: request_id,
@@ -135,11 +132,8 @@ impl RunnerClient {
         events
     }
 
-    /// Push a terminal [`OpEvent::Commit`] for `rid` (the runner's `Final`
-    /// and `Cancelled` collapse here because core commits either
-    /// identically), then run the terminal stream cleanup so the entry and
-    /// its locks are freed regardless of whether an edit was open. `kind`
-    /// names the runner terminal for the log line.
+    /// Push the terminal [`OpEvent::Commit`] for `rid` and run the stream
+    /// cleanup; `kind` names the terminal for the log line.
     fn commit_terminal(
         &mut self,
         events: &mut Vec<OpEvent>,
@@ -162,10 +156,7 @@ impl RunnerClient {
     }
 
     /// Read the `(creates_entities, preview)` flags stamped on the stream
-    /// entry for `rid`, defaulting both to false when no entry exists. Every
-    /// inbound arm stamps these onto its [`OpEvent`] so `App` routes the
-    /// frame (lane edit vs preview ghost vs entity adoption) without a
-    /// re-lookup.
+    /// entry for `rid`, defaulting both to false when no entry exists.
     fn stream_flags(&self, rid: u64) -> (bool, bool) {
         let entry = self.stream_host.active_streams.get(&rid);
         (
@@ -251,8 +242,6 @@ impl RunnerClient {
         };
         let kind = cached.kind;
 
-        // Flatten the authoritative selection (molex ids) into the
-        // wire-shape `ResidueRef` list the orchestrator's context expects.
         let selection: Vec<ResidueRef> = intent
             .selection
             .iter()
@@ -326,8 +315,6 @@ impl RunnerClient {
             }
         }
     }
-
-    // ── Pull-drag dispatch ──────────────────────────────────────────────
 
     /// Pull-drag dispatch: take the core-shaped [`StreamStartIntent`],
     /// resolve the plugin id off the registry, build the `DispatchContext`
@@ -485,8 +472,6 @@ fn map_dispatch_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── map_dispatch_error: runner refusal → core shape ──
 
     /// A runner lock-refusal must surface as the core `EntityLocked`
     /// variant carrying the bare entity id, so `App` can treat a busy

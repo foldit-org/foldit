@@ -177,13 +177,9 @@ pub enum OpEvent {
         /// Warm score of this frame's geometry, absent for non-scoring
         /// plugins.
         score: Option<crate::scores::ScoreReport>,
-        /// True when the originating op declared `creates_entities`. Such
-        /// frames stream into a transient preview entity instead of an
-        /// edit on an existing lane.
+        /// True when the originating op declared `creates_entities`.
         creates_entities: bool,
-        /// True when the originating op declared `preview`. Such frames
-        /// update a discardable ghost clone of the target lane; the lane
-        /// itself moves only on a commit (a checkpoint or the terminal).
+        /// True when the originating op declared `preview`.
         preview: bool,
     },
     /// Non-terminal accepted intermediate, keyed by the dispatch
@@ -201,8 +197,7 @@ pub enum OpEvent {
         score: Option<crate::scores::ScoreReport>,
         /// True when the originating op declared `creates_entities`.
         creates_entities: bool,
-        /// True when the originating op declared `preview`. Only a preview
-        /// op commits-and-re-opens on this event; otherwise it is a no-op.
+        /// True when the originating op declared `preview`.
         preview: bool,
     },
     /// Terminal success. The runner's distinct `Final` and `Cancelled`
@@ -216,14 +211,9 @@ pub enum OpEvent {
         /// Warm score of this frame's geometry, absent for non-scoring
         /// plugins.
         score: Option<crate::scores::ScoreReport>,
-        /// True when the originating op declared `creates_entities`. Such
-        /// ops do not edit an existing lane; `App` adopts the terminal
-        /// assembly's entities as new entities instead of committing an
-        /// edit under `token`.
+        /// True when the originating op declared `creates_entities`.
         creates_entities: bool,
-        /// True when the originating op declared `preview`. `App` applies
-        /// the terminal to the real lane (the existing edit commit) and
-        /// removes the ghost; the ghost is never promoted.
+        /// True when the originating op declared `preview`.
         preview: bool,
     },
     /// Terminal failure. `token` is the dispatch `request_id`; `App`
@@ -263,13 +253,14 @@ pub struct StreamHost {
 pub struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
-    /// Whether the originating op declared `creates_entities`. Stamped
-    /// onto the terminal [`OpEvent::Commit`] so `App` routes to the
+    /// Whether the originating op declared `creates_entities`: its output is
+    /// new entities to adopt, not an edit of an existing lane. Stamped onto
+    /// every [`OpEvent`] this stream produces so `App` routes to the
     /// entity-adoption path instead of an edit commit.
     pub(crate) creates_entities: bool,
-    /// Whether the originating op declared `preview`. Stamped onto every
-    /// [`OpEvent::Update`] / [`OpEvent::Commit`] this stream produces so
-    /// `App` routes the frames to a discardable ghost and removes it at
-    /// the terminal.
+    /// Whether the originating op declared `preview`: its frames update a
+    /// discardable ghost clone of the target lane, and the lane itself moves
+    /// only on a commit (a checkpoint or the terminal). Stamped onto every
+    /// [`OpEvent`] this stream produces.
     pub(crate) preview: bool,
 }

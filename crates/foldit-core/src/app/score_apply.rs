@@ -62,7 +62,7 @@ impl App {
     /// async whole-assembly and composition score paths; no-op on an empty
     /// report set. Stamping emits `ScoresChanged`; the render projector
     /// re-derives the displayed per-residue colors from the session-owned
-    /// breakdown on that signal (no direct viso push here anymore).
+    /// breakdown on that signal.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn apply_score_reports(
         &mut self,

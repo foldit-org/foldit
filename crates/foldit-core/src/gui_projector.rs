@@ -1,19 +1,9 @@
 //! GUI projection state for the third `SessionUpdate` consumer.
 //!
 //! `GuiProjector` is the state half of the GUI consumer: a single
-//! history-version debounce cursor. Its `consume` method - the projection
-//! that mirrors `Session` / `VisoEngine` / `RunnerClient` state into
-//! `FrontendState` - lives here, alongside the projection
-//! helpers it calls ([`Session::display_score`](crate::session::Session::display_score),
-//! `project_history`, `bubble_to_payload`).
-//! The scoring-mode display policy, tutorial-bubble flow, and puzzle
-//! objective live on [`crate::session::Session`] and reach the consumer
-//! through their own `SessionUpdate` variants.
-//!
-//! Unlike [`crate::render_projector::RenderProjector`] and the plugin
-//! broadcaster, the GUI consumer also reads the History cursor below: the
-//! history channel picks up score-driven `live_version` bumps through the
-//! cursor's debounce rather than reprojecting the whole panel each tick.
+//! history-version debounce cursor. Its `consume` method projects
+//! `Session` / `VisoEngine` / `RunnerClient` state into `FrontendState`
+//! and additionally reads the History cursor.
 
 use web_time::{Instant, UNIX_EPOCH};
 
@@ -542,13 +532,11 @@ fn project_view(
     display_dense.display = display_dense.display.with_resolved_overrides();
     frontend.view.options = serde_json::to_value(&display_dense).unwrap_or_default();
 
-    // Schema is static - only set once
     if frontend.view.options_schema.is_null() {
         frontend.view.options_schema =
             serde_json::to_value(viso::options::VisoOptions::json_schema()).unwrap_or_default();
     }
 
-    // Per-entity appearance schema is likewise static - only set once.
     if frontend.view.appearance_schema.is_null() {
         frontend.view.appearance_schema =
             serde_json::to_value(viso::DisplayOverrides::json_schema()).unwrap_or_default();

@@ -1,5 +1,3 @@
-// xtask is a developer-facing CLI / build tool: writing build progress and
-// results straight to stdout / stderr is its primary job, not a debug leak.
 #![allow(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -18,10 +16,7 @@ fn rosetta_interactive_path() -> String {
     "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_owned()
 }
 
-/// Canonicalize to an absolute path, stripping Windows' `\\?\` verbatim
-/// prefix. `std::fs::canonicalize` emits verbatim paths on Windows, which
-/// some build tools (e.g. protoc) reject as invalid filenames. On non-Windows
-/// the prefix is absent, so this just canonicalizes.
+/// Canonicalize to an absolute path, stripping Windows' `\\?\`
 fn canonical_clean(path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
     let canonical = std::fs::canonicalize(path)?;
     let s = canonical.to_string_lossy();
@@ -50,10 +45,7 @@ const fn rosetta_lib_name() -> &'static str {
     }
 }
 
-/// Intermediate staging dir where `assemble` lays out the full payload (host
-/// binaries + python-host dylib + plugins + assets) that `cargo packager` then
-/// wraps into the installers in `dist/`. Lives under `target/` so it is already
-/// git-ignored and clearly a build artifact, not a deliverable.
+/// Intermediate staging dir where `assemble` lays out the full payload
 const STAGING: &str = "target/staging";
 
 /// Platform-canonical file name for the python-host cdylib. The worker
@@ -339,17 +331,7 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     }
 
     // Build the molex static lib first; the bridge dylib links against
-    // it for assembly IO and Assembly walks. Invoke via
-    // --manifest-path so cargo treats this as a standalone build,
-    // bypassing the workspace resolver. crates/molex is workspace-
-    // excluded; the workspace itself pins published molex ^0.5.1 for
-    // foldit-core, which does not resolve against the in-tree 0.4.x.
-    // Running outside the workspace sidesteps that conflict.
-    // rustc's Windows host target is MSVC, but the Rosetta C++ is linked by
-    // zig in MinGW/GNU mode (toolchains/zig.cmake). An MSVC-ABI molex can't
-    // link into a MinGW binary (mismatched CRT / unwinding / RTTI), so on
-    // Windows build molex for the GNU target to match the link; other
-    // platforms build for the host. A GNU-ABI staticlib is named libmolex.a.
+    // it for assembly IO and Assembly walks.
     #[cfg(target_os = "windows")]
     let molex_target = Some("x86_64-pc-windows-gnu");
     #[cfg(not(target_os = "windows"))]
@@ -385,17 +367,17 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
 
     // Delegate the cmake configure + build (and the make.py /
     // make_database.py preprocessing) to rosetta-interactive's own
-    // build.sh. Molex paths flow through env vars that build.sh
-    // appends to its CMAKE_ARGS. This avoids drift between the
-    // canonical script and a parallel xtask reimplementation; any
-    // future build-flag change in build.sh propagates automatically.
-    // build.sh (Unix) and build.ps1 (Windows) are the rosetta-interactive
-    // repo's own scripts; both read the molex/proto paths from these env
-    // vars and append them as -D defines to their cmake invocation.
+    // build.sh
     #[cfg(target_os = "windows")]
     let mut cmd = {
         let mut c = Command::new("powershell.exe");
-        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"]);
+        c.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "build.ps1",
+        ]);
         if clean {
             c.arg("-Clean");
         }
@@ -427,10 +409,15 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
         anyhow::bail!("rosetta-interactive {build_script} failed");
     }
 
-    // Copy the dylib into the plugin directory. That's the single
-    // sink: `Orchestrator::discover_plugins` + `spawn_native_worker`
-    // dlopen it from there. No host-binary link path; the foldit-
-    // plugin-vtable contract is the only surface.
+    install_rosetta_plugin_artifacts(&cmake_dir)?;
+
+    println!("Rosetta build complete.");
+    Ok(())
+}
+
+/// Copy the freshly built bridge dylib and the compact database out of the
+/// cmake release tree into the rosetta plugin directory.
+fn install_rosetta_plugin_artifacts(cmake_dir: &str) -> Result<()> {
     let lib_src = format!("{}/release/bin/{}", cmake_dir, rosetta_lib_name());
     if !Path::new(&lib_src).exists() {
         anyhow::bail!("Built library not found at {lib_src}");
@@ -442,10 +429,6 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
     std::fs::copy(&lib_src, &lib_dst_plugin)?;
     println!("Copied {lib_src} -> {lib_dst_plugin}");
 
-    // Copy compact database into the plugin's own assets dir, alongside
-    // the dylib. Bridge `find_rosetta_database` walks up from the plugin
-    // dir looking for `assets/database/`, so this is exactly where it
-    // wants to find it.
     let db_src = format!("{cmake_dir}/cmp-database/database");
     if Path::new(&db_src).exists() {
         let db_dst = format!("{plugin_dir}/assets/database");
@@ -463,7 +446,6 @@ fn build_rosetta_interactive(clean: bool) -> Result<()> {
         );
     }
 
-    println!("Rosetta build complete.");
     Ok(())
 }
 
@@ -606,9 +588,7 @@ fn package(formats: Option<&str>, skip_assembly: bool) -> Result<()> {
     }
 
     // Pass the config's CONTENTS as the raw `-c` argument (it starts with
-    // `{`, so cargo-packager parses it inline). This skips the tree-walking
-    // `**/packager.toml` glob discovery and keeps relative paths resolving from
-    // the workspace root (no chdir to a manifest/config dir).
+    // `{`, so cargo-packager parses it inline).
     let config = std::fs::read_to_string("packager.json")
         .map_err(|e| anyhow::anyhow!("read packager.json: {e}"))?;
 
@@ -627,9 +607,7 @@ fn package(formats: Option<&str>, skip_assembly: bool) -> Result<()> {
 
     // cargo-packager only code-signs when a `signingIdentity` is configured.
     // For the default (ad-hoc) path, seal each produced .app so it has a valid
-    // bundle signature (Apple Silicon also requires signed code to run at all).
-    // A real `signingIdentity` means cargo-packager already signed properly, so
-    // leave it untouched rather than clobber it with an ad-hoc signature.
+    // bundle signature
     #[cfg(target_os = "macos")]
     if !config.contains("\"signingIdentity\"") {
         adhoc_seal_apps("dist")?;
@@ -640,9 +618,7 @@ fn package(formats: Option<&str>, skip_assembly: bool) -> Result<()> {
 }
 
 /// Ad-hoc code-sign each `*.app` in `out_dir` (`codesign --sign -`). Used for
-/// the default unsigned-distribution path; sealing works because the bundled
-/// conda envs live under `Contents/Resources/` (codesign hashes them as
-/// resources rather than trying to sign them as nested code).
+/// the default unsigned-distribution path
 #[cfg(target_os = "macos")]
 fn adhoc_seal_apps(out_dir: &str) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(out_dir) else {
@@ -665,11 +641,6 @@ fn adhoc_seal_apps(out_dir: &str) -> Result<()> {
 
 /// Copy the Rosetta native plugin into `<staging>/plugins/rosetta`, mirroring
 /// the dev-tree layout the orchestrator's `discover_plugins` scans
-/// (`plugins/<id>/{plugin.toml, <dylib>, assets/}`). The plugin dir is the
-/// source of truth, written by `build-rosetta-interactive`. We deliberately
-/// do NOT copy `deps/` (the rosetta-interactive C++ source submodule + cmake
-/// build tree). Missing artifacts warn rather than fail, so a dev without
-/// Rosetta built can still stage the Python plugins.
 fn copy_rosetta_plugin() -> Result<()> {
     let rosetta_plugin_src = "crates/foldit-runner/plugins/rosetta";
     let rosetta_lib = rosetta_lib_name();
@@ -697,22 +668,14 @@ fn copy_rosetta_plugin() -> Result<()> {
     if Path::new(&assets_src).exists() {
         copy_dir(&assets_src, &format!("{rosetta_plugin_dst}/assets"))?;
     } else {
-        println!(
-            "Warning: Rosetta assets not found at {assets_src} (icons + database)"
-        );
+        println!("Warning: Rosetta assets not found at {assets_src} (icons + database)");
         println!("  Run 'cargo xtask build-rosetta-interactive' first");
     }
     Ok(())
 }
 
 /// Build the backend host artifacts into `target/<profile>/` so they sit
-/// next to the foldit-desktop exe that `cargo run` produces. `cargo run`
-/// builds only foldit-desktop and its linked deps; the worker is a separate
-/// (workspace-excluded) bin and the python-host is a cdylib that is dlopened
-/// rather than linked, so neither is rebuilt and both go stale silently. The
-/// classic symptom is a plugin ABI-version mismatch: a fresh worker (built
-/// from current source) dlopens a months-old python-host dylib reporting an
-/// older ABI, and plugin load fails. This refreshes both in one shot.
+/// next to the foldit-desktop exe that `cargo run` produces.
 fn build_host(debug: bool) -> Result<()> {
     let profile_flag: &[&str] = if debug { &[] } else { &["--release"] };
     let profile = if debug { "debug" } else { "release" };
@@ -746,8 +709,6 @@ fn build_gui() -> Result<()> {
     let gui_src_dir = "webview";
 
     println!("Installing GUI dependencies...");
-    // `bun` is a single native executable on every platform, so Command
-    // resolves it directly (no cmd /c shim dance like pnpm needed on Windows).
     let install_status = Command::new("bun")
         .arg("install")
         .current_dir(gui_src_dir)
@@ -772,13 +733,7 @@ fn build_gui() -> Result<()> {
         anyhow::bail!("GUI dist directory not found at {dist_dir}");
     }
 
-    // Remove old assets/gui if it exists. We deliberately do NOT
-    // create_dir_all(gui_dir) afterwards: `copy_dir` shells out to
-    // `cp -r dist assets/gui`, and `cp` nests the source *inside* the
-    // destination when the destination already exists (yielding
-    // assets/gui/dist/index.html, which the release webview can't find
-    // -- it serves assets/gui/index.html). With gui_dir absent, `cp -r`
-    // creates it as a copy of dist's contents, which is what we want.
+    // Remove old assets/gui if it exists.
     if Path::new(gui_dir).exists() {
         std::fs::remove_dir_all(gui_dir)?;
     }

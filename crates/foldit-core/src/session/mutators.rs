@@ -21,8 +21,6 @@ use crate::history::{
 use super::{EntityMetadata, EntityOrigin, Puzzle, Session, SessionError, SessionUpdate};
 
 impl Session {
-    // ── Action lifecycle (typed mutation intent) ──────────────────
-
     /// Begin a streaming action over `entities` under the caller-supplied
     /// `request_id` (allocated by the orchestrator, the single id
     /// authority). Opens one tentative lane per entity, each forked from
@@ -62,9 +60,6 @@ impl Session {
     ) -> Result<(), SessionError> {
         self.history
             .action_update(request_id, raw_score, game_score, filter_status, mutate)?;
-        // A tentative live frame: render projector picks it up via the
-        // `SessionUpdate` stream and rebuilds from `head_assembly`. Payload-less because
-        // the projectors re-derive from `Session` anyway.
         self.apply(SessionUpdate::Edit { tentative: true });
         Ok(())
     }
@@ -86,9 +81,6 @@ impl Session {
         self.apply(SessionUpdate::HeadMoved);
         Ok(())
     }
-
-    // ── Navigation (the action-lock half is enforced one layer down by
-    //    `History`) ──────────────────────────────────────────────────
 
     /// Move checkpoint head to its parent. Returns the new head id, or
     /// `None` if already at root (in which case nothing is emitted).
@@ -162,19 +154,14 @@ impl Session {
         Ok(ckpt)
     }
 
-    // ── Curation ──────────────────────────────────────────────────────
-
-    /// Pin a checkpoint as user-marked best.
     pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
         Ok(self.history.pin_checkpoint(id)?)
     }
 
-    /// Unpin a checkpoint.
     pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
         Ok(self.history.unpin_checkpoint(id)?)
     }
 
-    /// Set the "exclude from best" flag.
     pub fn set_exclude_from_best(
         &mut self,
         id: CheckpointId,
@@ -268,8 +255,6 @@ impl Session {
         }
     }
 
-    // ── Preview API - transient, never in history ─────────────────────
-
     /// Insert a new preview entity. Allocates a fresh id, sets the
     /// entity's id to it, and stores it in `transient` plus
     /// `metadata`. Bypasses history.
@@ -354,7 +339,7 @@ impl Session {
                 // before failing - but the only failure modes are
                 // ActiveActionInProgress and EntityAlreadyExists, both
                 // of which are caller-fixable; rebuilding the payload
-                // from a re-snapshotted entity is a section-4 concern.
+                // from a re-snapshotted entity is out of scope here.
                 Err(SessionError::History(e))
             }
         }
@@ -436,20 +421,10 @@ impl Session {
         applied
     }
 
-    // ── Selection ─────────────────────────────────────────────────────
-    //
-    // Ambient residue selection (not history-versioned). Invariant
-    // maintained across every mutator: per-entity sets are never left
-    // empty in the outer map. Removing the last residue on an entity
-    // removes the entity entry, so `selected_entities` yields only
-    // entities that currently have at least one selected residue. Each
-    // mutator that changes the selection emits exactly one
-    // [`SessionUpdate::SelectionChanged`] through the funnel.
+    // Selection: ambient residue selection (not history-versioned).
 
     /// Mark a single residue on `entity` as selected. Idempotent:
-    /// re-selecting an already-selected residue is a no-op (but still
-    /// emits, matching the prior behavior where the mutator raised its
-    /// dirty bits unconditionally).
+    /// re-selecting an already-selected residue is a no-op (still emits).
     pub fn select_residue(&mut self, entity: EntityId, residue_index: u32) {
         self.selection
             .entry(entity)
@@ -512,12 +487,7 @@ impl Session {
         now_selected
     }
 
-    // ── Per-entity appearance ─────────────────────────────────────────
-    //
-    // Ambient per-entity render overrides (not history-versioned).
-    // Authoritative on the session; the render projector pushes them into
-    // the engine's working copy. Each successful merge emits exactly one
-    // [`SessionUpdate::EntityAppearanceChanged`].
+    // Per-entity appearance: ambient render overrides (not history-versioned).
 
     /// Merge a single appearance override field into an entity's overrides.
     /// Clones the entity's current overrides (or the default when none),
@@ -578,11 +548,7 @@ impl Session {
         }
     }
 
-    // ── Focus ─────────────────────────────────────────────────────────
-    //
-    // Ambient session focus (not history-versioned). Mutating it emits
-    // exactly one [`SessionUpdate::FocusChanged`], and only when the value
-    // actually changes - an idempotent re-focus is silent.
+    // Focus: ambient session focus (not history-versioned).
 
     /// Set the session focus. Emits exactly one
     /// [`SessionUpdate::FocusChanged`] when the value changes; an
@@ -594,14 +560,7 @@ impl Session {
         }
     }
 
-    // ── Puzzle add-on + tutorial bubbles ──────────────────────────────
-    //
-    // Ambient session state (not history-versioned). The puzzle add-on
-    // carries the target energies and the tutorial-bubble cursor. A
-    // puzzle load installs it; a free-form load clears it. Installing or
-    // clearing the puzzle emits exactly one
-    // [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
-    // exactly one [`SessionUpdate::BubbleChanged`].
+    // Puzzle add-on + tutorial bubbles: ambient session state (not history-versioned).
 
     /// Install a puzzle add-on (a puzzle load). Always emits
     /// [`SessionUpdate::PuzzleChanged`].
@@ -624,9 +583,10 @@ impl Session {
     /// Install the resolved per-entity design gating on the loaded puzzle.
     /// Called by the load path after the chain->EntityId mapping is known
     /// (the entities must already be in history). Silent (no `SessionUpdate`):
-    /// it is load-time state set once before the first projection, and DG-C
-    /// reads it by query at projection time rather than off a change signal.
-    /// A no-op when no puzzle is installed (free-form load).
+    /// it is load-time state set once before the first projection, and the
+    /// design-gating projector reads it by query at projection time rather
+    /// than off a change signal. A no-op when no puzzle is installed
+    /// (free-form load).
     pub(crate) fn set_puzzle_design_gating(
         &mut self,
         gating: Option<
@@ -683,8 +643,6 @@ impl Session {
         self.apply(SessionUpdate::BubbleChanged);
     }
 
-    // ── Score-term weights ────────────────────────────────────────────
-
     /// Install the score-term weight map. Silent (no `SessionUpdate`): the
     /// weights change only at load, before the first score, so no consumer
     /// needs a change signal. Called once at App init; survives reloads
@@ -702,8 +660,6 @@ impl Session {
         self.term_names = names;
     }
 
-    // ── Reset ─────────────────────────────────────────────────────────
-
     /// Drop the entire history graph, clear metadata and transient.
     /// After `reset`, the store is back to the empty initial state;
     /// callers populate it via the preview API + `promote_preview`, which
@@ -714,56 +670,28 @@ impl Session {
         self.transient.clear();
         self.allocator = EntityIdAllocator::new();
         self.history = History::new(std::iter::empty(), PathBuf::new());
-        // Selection keys are entity ids from the outgoing assembly; the
-        // incoming one may reuse those ids without referring to the same
-        // entities (the allocator restarts), so a stale selection must be
-        // dropped on every topology swap. Co-located here so both load
-        // paths (puzzle + free-form structure) clear it.
-        self.selection.clear();
-        // Per-entity appearance overrides are keyed by entity id from the
-        // outgoing assembly; the incoming one may reuse those ids (the
-        // allocator restarts), so a stale override must be dropped on every
-        // topology swap. Cleared silently (no emit): the engine's working
-        // copy is wiped separately at the load seam, and the reset's own
+        // Everything below is ambient session state tied to the outgoing
+        // structure: the entity-id-keyed maps (selection, appearance, viz)
+        // would alias the incoming assembly's reused ids (the allocator
+        // restarts), and the rest (focus, puzzle, filter_bonus) belongs to
+        // the structure being dropped. Cleared silently; the reset's own
         // `HeadMoved` below stands in for the topology swap.
+        self.selection.clear();
         self.appearance.clear();
-        // Focus is ambient session state; a topology swap returns it to
-        // the all-entities view. Set silently (no `FocusChanged`): viso
-        // independently resets its mirror to `All` on the assembly
-        // replace, and the reset's `HeadMoved` below drives the reframe.
         self.focus = Focus::default();
-        // The puzzle add-on (filters + tutorial bubbles) is ambient
-        // session state tied to the outgoing structure. Clear it silently
-        // here (the load path that follows a reset re-installs it via the
-        // `start` create seam, whose `PuzzleChanged` drives the panel); the
-        // reset's own `HeadMoved` below stands in for the topology swap.
-        // `title` is left untouched: the following load's `start` overwrites
-        // it, and nothing reads it between the reset and that overwrite.
-        // `term_weights` is likewise left untouched: the load re-sets it via
-        // the App-init seam, so it carries across the topology swap.
         self.puzzle = None;
-        // The met-filter RAW bonus breakdown is derived from the outgoing
-        // puzzle's filters; clear it on the topology swap so a free-form load
-        // (or a puzzle with no filters) starts empty. The following puzzle
-        // load re-derives it from its own filters via the exposed-hydro
-        // coordinator once the scene settles.
         self.filter_bonus.clear();
-        // The derived viz cache (plugin-provided connections + the topology
-        // id set they were queried for) is keyed by entity ids from the
-        // outgoing assembly; the incoming one may reuse those ids, so a stale
-        // held set must be dropped on the topology swap. The App's
-        // `refresh_connections` re-derives it from the new structure.
         self.viz = crate::session::VizState::default();
-        // View options + active preset are not reset here: they live on `App`
-        // and persist across a topology swap, so a player's display choices
-        // carry from one structure to the next. The load path re-applies the
-        // persisted-or-seeded options to the freshly-reset engine itself.
+        // `title`, `term_weights`, and the view options + active preset are
+        // left untouched: the following load re-sets the first two via the
+        // `start` / App-init seams, and view state lives on `App` and persists
+        // there, so each carries across the swap.
         // Drop any changes emitted before the reset - they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
-        // so that change survives. The runner projector's published snapshot is
-        // intentionally NOT cleared (it lives on `RunnerProjector`): the
-        // post-reset empty-assembly diff still advances the host's gen
-        // counter, so plugins never see `from_gen` go backwards.
+        // so that change survives. The runner projector's published snapshot
+        // is intentionally NOT cleared: the post-reset empty-assembly diff
+        // still advances the host's gen counter, so plugins never see
+        // `from_gen` go backwards.
         self.pending_updates.clear();
         self.apply(SessionUpdate::HeadMoved);
     }

@@ -24,6 +24,7 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 mod dispatch;
 pub(crate) mod input;
 mod load;
+mod preview;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod score_apply;
 mod startup;
@@ -91,7 +92,8 @@ fn ss_label(ss: Option<molex::SSType>) -> String {
 }
 
 /// Main application state - thin glue connecting the render engine,
-/// plugin driver, document, and the two projectors.
+/// plugin driver, the `Session` store, and the three projectors
+/// (`RunnerProjector`, `RenderProjector`, `GuiProjector`).
 ///
 /// `App` also owns the host-bound [`FrontendState`] mirror (so the load
 /// state-machine and the GUI projection both live on the same side of
@@ -108,12 +110,10 @@ pub struct App {
     pub(crate) engine: Option<VisoEngine>,
     pub(crate) runner_client: RunnerClient,
 
-    // Frontend state/input handling fields
     pub(in crate::app) frontend: FrontendState,
     pub(in crate::app) keybindings: KeyBindings,
     pub(in crate::app) lifecycle: AppPhase,
 
-    // Viso option fields
     pub(in crate::app) view_options: viso::options::VisoOptions,
     pub(in crate::app) active_preset: Option<String>,
     pub(in crate::app) view_settings_touched: bool,
@@ -135,9 +135,7 @@ pub struct App {
     pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
     /// One-shot accumulator of App-owned GUI dirty bits the `SessionUpdate`
     /// batch cannot express (segment / panels / ui / progress), plus the
-    /// full-populate seed (`DirtyFlags::all()`) raised on session birth. The
-    /// tick drains it once and ORs it into the GUI consumer's batch-derived
-    /// set.
+    /// full-populate seed (`DirtyFlags::all()`) raised on session birth.
     pub(in crate::app) pending_dirty: DirtyFlags,
     /// Open segment-info target with its cached identity + SS, or `None`
     /// when the panel is closed.
@@ -149,35 +147,25 @@ pub struct App {
     /// panel without an entry renders at its layout default.
     pub(in crate::app) panel_positions: std::collections::BTreeMap<String, (f32, f32)>,
     /// Puzzle high-score progress: best recorded display score per puzzle id
-    /// (monotonic max). Backend-authoritative; the tick records into it when
-    /// a loaded puzzle's display score improves on its current best.
+    /// (monotonic max). Backend-authoritative.
     pub(in crate::app) progress: std::collections::BTreeMap<u32, f64>,
     /// One-shot signal that `progress` changed and must be flushed to disk.
-    /// Separate from the `PROGRESS` dirty bit (which drives the GUI reproject):
-    /// the desktop host pulls the serialized map via
-    /// [`App::take_progress_to_persist`] and writes it off the event-loop
-    /// thread. Set only by a real in-session record/clear, never by a load
-    /// import, so a load does not trigger a save back.
+    /// Set only by a real in-session record/clear, never by a load import, so
+    /// a load does not trigger a save back.
     pub(in crate::app) progress_persist_pending: bool,
     /// Whether the tutorial-hint bubble is shown. Backend-authoritative so
     /// the toggle survives a reload.
     pub(in crate::app) hints_visible: bool,
-    /// Whether the window is in OS fullscreen. Backend-authoritative mirror;
-    /// the desktop host pulls `take_fullscreen_change` and drives the winit
-    /// window.
+    /// Whether the window is in OS fullscreen. Backend-authoritative mirror.
     pub(in crate::app) fullscreen: bool,
-    /// Pending fullscreen change for the desktop host to pull this frame,
-    /// staged only when `set_fullscreen` actually flipped the flag. The host
-    /// takes it via [`App::take_fullscreen_change`].
+    /// Pending fullscreen change for the host to pull this frame, staged only
+    /// when `set_fullscreen` actually flipped the flag.
     pub(in crate::app) pending_fullscreen: Option<bool>,
     /// Last tail tip pushed to the host, value-compared each frame so an
-    /// unchanged tip pushes nothing. The panel body is placed once and is
-    /// draggable; only its tail tip tracks the open residue's live screen
-    /// position as the camera moves.
+    /// unchanged tip pushes nothing.
     pub(in crate::app) last_tail_tip: TailTip,
-    /// Pending tail-tip change for the host to pull this frame, set only
-    /// when the projected tip differed from `last_tail_tip`. The host takes
-    /// it each frame via [`App::take_tail_update`].
+    /// Pending tail-tip change for the host to pull this frame, set only when
+    /// the projected tip differed from `last_tail_tip`.
     pub(in crate::app) pending_tail: Option<TailUpdate>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
@@ -208,10 +196,10 @@ impl App {
             engine: None,
             keybindings: {
                 let mut kb = KeyBindings::default();
-                // Focus is foldit-core session state now: neutralize viso's
-                // Tab/Backquote focus bindings on this instance so viso no
-                // longer owns focus. The core key paths intercept these keys
-                // before any dispatch and drive `Session::set_focus` instead.
+                // Focus is foldit-core session state: neutralize viso's
+                // Tab/Backquote focus bindings on this instance so the core
+                // key paths intercept these keys before any dispatch and drive
+                // `Session::set_focus` instead.
                 kb.insert("Tab".to_owned(), Box::new(|_: &mut VisoEngine| {}));
                 kb.insert("Backquote".to_owned(), Box::new(|_: &mut VisoEngine| {}));
                 kb
@@ -271,8 +259,7 @@ impl App {
     /// Computes the residue identity (number, chain, amino acid) and its
     /// secondary structure once, via a single `recompute_ss()` over the
     /// head assembly, and caches them on the target. A no-op when the
-    /// entity or residue does not resolve. Marks the segment section dirty
-    /// so the GUI projection reprojects on the next tick.
+    /// entity or residue does not resolve. Marks the segment section dirty.
     pub(in crate::app) fn open_segment(&mut self, eid: molex::EntityId, residue: usize) {
         let Some(entity) = self.store.entity(eid) else {
             return;
@@ -307,15 +294,13 @@ impl App {
         self.pending_dirty |= DirtyFlags::SEGMENT;
     }
 
-    /// Close the segment-info panel. Marks the segment section dirty so the
-    /// GUI projection clears it on the next tick.
+    /// Close the segment-info panel. Marks the segment section dirty.
     pub(in crate::app) fn close_segment(&mut self) {
         self.open_segment = None;
         self.pending_dirty |= DirtyFlags::SEGMENT;
     }
 
-    /// Show or hide a panel by id. Marks the panels section dirty so the
-    /// GUI projection reprojects on the next tick.
+    /// Show or hide a panel by id. Marks the panels section dirty.
     pub(in crate::app) fn set_panel_visible(&mut self, panel: String, visible: bool) {
         if visible {
             self.open_panels.insert(panel);
@@ -325,8 +310,8 @@ impl App {
         self.pending_dirty |= DirtyFlags::PANELS;
     }
 
-    /// Record a panel's dragged top-left position. Marks the panels section
-    /// dirty so the GUI projection reprojects on the next tick.
+    /// Record a panel's dragged top-left position, marking the panels section
+    /// dirty.
     pub(in crate::app) fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
         self.panel_positions.insert(panel, (x, y));
         self.pending_dirty |= DirtyFlags::PANELS;
@@ -355,8 +340,8 @@ impl App {
         }
     }
 
-    /// Wipe all recorded high-score progress. Marks the progress section
-    /// dirty so the GUI projection reprojects the now-empty map.
+    /// Wipe all recorded high-score progress, marking the progress section
+    /// dirty.
     pub(in crate::app) fn clear_progress(&mut self) {
         if self.progress.is_empty() {
             return;
@@ -366,18 +351,16 @@ impl App {
         self.progress_persist_pending = true;
     }
 
-    /// Show or hide the tutorial-hint bubble. Marks the ui section dirty so
-    /// the GUI projection reprojects `ui.hints_visible` on the next tick.
+    /// Show or hide the tutorial-hint bubble. Marks the ui section dirty.
     pub(in crate::app) fn set_hints_visible(&mut self, v: bool) {
         self.hints_visible = v;
         self.pending_dirty |= DirtyFlags::UI;
     }
 
-    /// Enter or leave OS fullscreen. Marks the ui section dirty so the GUI
-    /// projection reprojects `ui.fullscreen`, and stages a value-gated change
-    /// for the desktop host to pull and apply to the winit window. Only the
-    /// false->true / true->false transition stages, so re-setting the same
-    /// value pushes nothing to the host.
+    /// Enter or leave OS fullscreen. Marks the ui section dirty and stages a
+    /// value-gated change for the desktop host to pull. Only the false->true /
+    /// true->false transition stages, so re-setting the same value pushes
+    /// nothing to the host.
     pub(in crate::app) fn set_fullscreen(&mut self, v: bool) {
         if self.fullscreen != v {
             self.fullscreen = v;
@@ -395,8 +378,7 @@ impl App {
 
     /// Take the serialized high-score progress map for the host to persist to
     /// disk, or `None` when it has not changed since the last pull. Returned
-    /// at most once per change. The host owns the storage backend and the
-    /// async I/O; foldit-core only hands over the bytes.
+    /// at most once per change.
     pub fn take_progress_to_persist(&mut self) -> Option<Vec<u8>> {
         if !self.progress_persist_pending {
             return None;
@@ -439,9 +421,7 @@ impl App {
         self.frontend.set_app_state(self.lifecycle);
     }
 
-    /// The active view options. App-owned so they persist across a reload;
-    /// the view panel binds these and the render projection re-applies them
-    /// to the engine on each `ViewOptionsChanged`.
+    /// The active view options. App-owned so they persist across a reload.
     #[must_use]
     pub const fn view_options(&self) -> &viso::options::VisoOptions {
         &self.view_options
@@ -453,8 +433,6 @@ impl App {
     pub fn active_preset(&self) -> Option<&str> {
         self.active_preset.as_deref()
     }
-
-    // ── Engine-only delegation ──
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if let Some(engine) = &mut self.engine {
@@ -481,19 +459,16 @@ impl App {
             }
         }
     }
-    // ── Frontend state sync ──
 
-    /// Set the host log mirror on the owned frontend. Hosts call this
-    /// to ship the latest log buffer (drained from their own tee).
+    /// Set the host log mirror on the owned frontend.
     pub fn set_frontend_log(&mut self, log: String) {
         self.frontend.set_log(log);
     }
 
     /// Serialize whatever sections of the owned [`FrontendState`] are
-    /// currently dirty into a JSON byte string suitable for an IPC
-    /// push, and clear the dirty bits. Returns `None` when nothing
-    /// changed since the last drain. The host pipes the bytes straight
-    /// into its webview / `wasm-bindgen` callback.
+    /// currently dirty into a JSON byte string suitable for an IPC push, and
+    /// clear the dirty bits. Returns `None` when nothing changed since the
+    /// last drain.
     pub fn serialize_frontend_dirty(&mut self) -> Option<Vec<u8>> {
         foldit_gui::bridge::push::serialize_dirty(&mut self.frontend)
             .map(|v| v.to_string().into_bytes())
@@ -502,8 +477,7 @@ impl App {
     /// Take the pending segment-panel tail-tip change for the host to push,
     /// or `None` when the tip did not move since the last push. `Some` is
     /// returned at most once per change: `tick` sets it only on a value
-    /// change and this clears it. The host distinguishes a position update
-    /// from a hide via the [`TailUpdate`] variant.
+    /// change and this clears it.
     pub const fn take_tail_update(&mut self) -> Option<TailUpdate> {
         self.pending_tail.take()
     }
@@ -542,7 +516,6 @@ impl App {
         self.last_tail_tip = current;
     }
 
-    // App::tick is the per-frame drive loop
     #[allow(
         clippy::too_many_lines,
         reason = "the per-frame drive loop sequences every subsystem; splitting it would scatter the frame order that must stay readable in one place"
@@ -643,12 +616,10 @@ impl App {
         }
 
         if !changes.is_empty() {
-            // RunnerProjector consumes changes, see `RunnerProjector`
             if let Some(orch) = self.runner_client.orchestrator_mut() {
                 self.runner_projector.consume(&changes, &mut self.store, orch);
             }
 
-            // RenderProjector consumes changes and engine receives view option updates
             if let Some(engine) = self.engine.as_mut() {
                 self.render_projector.consume(&changes, &mut self.store, engine);
                 if changes
@@ -675,22 +646,22 @@ impl App {
             }
         }
 
-        // 5. Fire the NEXT async rescore, the AT-REST rescore only. Scores go
-        //    stale only on an assembly change (every mutation emits a
-        //    SessionUpdate, including those from non-scoring plugins), so this
-        //    gates on this tick's geometry change. It fires only when no edit is
-        //    open: while a stream runs, each frame carries its own warm score and
-        //    stamps its edit directly (in `apply_backend_updates`), so this query
-        //    is not fired - it would only re-score a trailing frame. It is
-        //    also held off until the startup machine settles: during bring-up
-        //    the machine drives the first score itself (kicked once every
-        //    plugin's Init has replied, so the scorer's pose is built), and
-        //    firing here would race a query into the pose-less window before a
-        //    plugin's Init replies, which comes back empty. After `Done` the
-        //    machine is inert and this is the sole at-rest scorer again.
-        //    Fire-and-forget against the worker's already-built live pose (no
-        //    per-frame pose rebuild); `request_scores` coalesces, so one
-        //    outstanding query per provider is the most in flight.
+        // Fire the NEXT async rescore, the AT-REST rescore only. Scores go
+        // stale only on an assembly change (every mutation emits a
+        // SessionUpdate, including those from non-scoring plugins), so this
+        // gates on this tick's geometry change. It fires only when no edit is
+        // open: while a stream runs, each frame carries its own warm score and
+        // stamps its edit directly (in `apply_backend_updates`), so this query
+        // is not fired - it would only re-score a trailing frame. It is
+        // also held off until the startup machine settles: during bring-up
+        // the machine drives the first score itself (kicked once every
+        // plugin's Init has replied, so the scorer's pose is built), and
+        // firing here would race a query into the pose-less window before a
+        // plugin's Init replies, which comes back empty. After `Done` the
+        // machine is inert and this is the sole at-rest scorer again.
+        // Fire-and-forget against the worker's already-built live pose (no
+        // per-frame pose rebuild); `request_scores` coalesces, so one
+        // outstanding query per provider is the most in flight.
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.startup_settled() && has_geometry && !self.store.has_pending() {
@@ -698,7 +669,7 @@ impl App {
             }
         }
 
-        // 6. Engine update + 7. visualization overlay.
+        // Engine update + visualization overlay.
         #[cfg(not(target_arch = "wasm32"))]
         let pull = self.runner_client.pull_drag_pull_info();
         #[cfg(target_arch = "wasm32")]
@@ -714,15 +685,15 @@ impl App {
 
         // Each load path calls `enter_session` at its done-loading point, so
         // the frontend routes to the in-puzzle UI the moment loading
-        // completes, with the score flowing in asynchronously via steps 2 + 5.
+        // completes, with the score flowing in asynchronously.
 
-        // 8. Frontend projection: the GUI consumer derives its dirty set
-        //    entirely from this tick's `changes` batch, OR'd with the App-side
-        //    `pending_dirty` accumulator (the segment / panels / ui / progress
-        //    bits plus the session-birth full-populate seed). The accumulator
-        //    is drained only when the engine is present and the consumer runs;
-        //    with no engine attached yet it persists to a later tick, so the
-        //    birth populate is never dropped.
+        // Frontend projection: the GUI consumer derives its dirty set
+        // entirely from this tick's `changes` batch, OR'd with the App-side
+        // `pending_dirty` accumulator (the segment / panels / ui / progress
+        // bits plus the session-birth full-populate seed). The accumulator
+        // is drained only when the engine is present and the consumer runs;
+        // with no engine attached yet it persists to a later tick, so the
+        // birth populate is never dropped.
         if let Some(engine) = self.engine.as_ref() {
             let pending = std::mem::take(&mut self.pending_dirty);
             let src = GuiSources {
@@ -749,10 +720,7 @@ impl App {
     }
 }
 
-/// The foldit app implements the `foldit_gui::Dispatcher` trait
-///
-/// This essentially just denotes the App as the struct that processes
-/// frontend -> backend commands dispatched by the gui
+/// `App` is the sink for frontend -> backend commands dispatched by the GUI.
 impl foldit_gui::Dispatcher for App {
     fn on_ready(&mut self) {
         self.frontend.mark_all_dirty();

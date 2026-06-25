@@ -9,8 +9,6 @@ use molex::MoleculeType;
 
 use super::EntitySnapshotId;
 
-// ── Domain enums ───────────────────────────────────────────────────────
-
 /// User-visible action across the whole assembly. Carried on a
 /// [`Checkpoint`].
 ///

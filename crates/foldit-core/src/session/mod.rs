@@ -24,10 +24,7 @@
 //! state change, then emits exactly one [`SessionUpdate`] (or none, where
 //! the change is unobservable) through the [`Self::apply`] funnel. The
 //! `Session` holds no projection logic - it neither serializes
-//! assemblies nor knows about plugins or viso. `App` drains the emitted
-//! changes via [`Self::take_updates`] and routes them to the
-//! projectors (the `RunnerProjector` owns the Full/Delta plugin
-//! fan-out; the render + GUI projectors follow). Because `pending_updates`
+//! assemblies nor knows about plugins or viso. Because `pending_updates`
 //! is private and `apply` is its sole pusher, "one emit per mutator" is a
 //! structural invariant, not a runtime assertion.
 //!
@@ -56,8 +53,6 @@ mod mutators;
 mod viz;
 pub use viz::VizState;
 
-// ── Errors ─────────────────────────────────────────────────────────────
-
 /// Error returned by every fallible [`Session`] operation.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -69,8 +64,6 @@ pub enum SessionError {
     #[error("{} is not a transient preview", id.raw())]
     NotAPreview { id: EntityId },
 }
-
-// ── Puzzle ─────────────────────────────────────────────────────────────
 
 /// Puzzle-shaped session add-on. `None` on the [`Session`] is the default
 /// free-form ("scientist") session with no puzzle goal; `Some` is a loaded
@@ -132,8 +125,6 @@ impl Puzzle {
     }
 }
 
-// ── Session ───────────────────────────────────────────────────────────
-
 /// Authoritative document over the whole scene.
 pub struct Session {
     /// Per-entity metadata. `Arc`-shared so unchanged entries alias
@@ -156,22 +147,16 @@ pub struct Session {
     /// so iterating yields only entities that currently have at least one
     /// selected residue. [`Self::reset`] clears it on a topology swap.
     selection: BTreeMap<EntityId, BTreeSet<u32>>,
-    /// Ambient per-entity render overrides, keyed by entity. A first-class
-    /// scene field beside `selection`, and likewise *not* history-versioned:
-    /// undo / redo / jump leave it untouched. Authoritative and
-    /// session-scoped (entity ids are session-specific and reused across
-    /// puzzles), so [`Self::reset`] clears it on a topology swap for id-reuse
-    /// safety. The render projector reads it via [`Self::appearance`] and
-    /// pushes it into the viso engine, which holds the resolved working copy
-    /// the GUI reads back. Empty override entries are never stored - merging
-    /// a field that leaves an entry empty removes the entity entry.
+    /// Ambient per-entity render overrides, keyed by entity. Not
+    /// history-versioned: undo / redo / jump leave it untouched.
+    /// Session-scoped (entity ids are reused across puzzles), so
+    /// [`Self::reset`] clears it on a topology swap for id-reuse safety.
+    /// Empty override entries are never stored - merging a field that
+    /// leaves an entry empty removes the entity entry.
     appearance: BTreeMap<EntityId, viso::DisplayOverrides>,
-    /// Ambient session focus (Tab-cycle target), a first-class scene
-    /// field beside `selection`. Not history-versioned: undo / redo / jump
-    /// leave it untouched. [`Self::reset`] returns it to [`Focus::All`] on
-    /// a topology swap. viso keeps a mirror for camera framing only (focus
-    /// drives no GPU highlight); the `App` tick pushes the mirror on each
-    /// [`SessionUpdate::FocusChanged`].
+    /// Ambient session focus (Tab-cycle target). Not history-versioned:
+    /// undo / redo / jump leave it untouched. [`Self::reset`] returns it
+    /// to [`Focus::All`] on a topology swap.
     focus: Focus,
     /// Display title for the current session: the file stem on a free-form
     /// load, the puzzle name on a puzzle load. Plain session state derived
@@ -208,30 +193,20 @@ pub struct Session {
     /// Labeled breakdown of the RAW score bonus from the loaded puzzle's met
     /// filters: each entry is `(filter label, bonus value)` in RAW score
     /// units (e.g. the native `ExposedCount` filter contributes
-    /// `("exposed_count", bonus)` when the exposed-hydrophobic count is below
-    /// its threshold). The summed total is a RAW delta folded into the headline game
-    /// score before the raw->game map, so a met filter can push the displayed
-    /// score across `completion_score`; the breakdown is also surfaced to the
-    /// dev readout. Ambient session state, not history-versioned and never on
-    /// the `SessionUpdate` stream: the exposed-hydro coordinator recomputes it
-    /// at rest each geometry change. Empty by default; [`Self::reset`] clears
-    /// it on a topology swap (a new puzzle re-derives it from its own filters).
+    /// `("exposed_count", bonus)`). Ambient session state, not
+    /// history-versioned. Empty by default; [`Self::reset`] clears it on a
+    /// topology swap.
     filter_bonus: Vec<(String, f64)>,
     /// Session-scoped DERIVED viz cache: the plugin-provided rendering
     /// connections plus the topology id set they were queried for, and the
     /// three structural-viz overlay payloads (cavities, clashes,
-    /// exposed-hydrophobics) with their dirty flag. Not history-versioned and
-    /// never on the `SessionUpdate` stream (it is regenerated from the
-    /// structure via plugin queries). [`Self::reset`] clears it on a topology
-    /// swap so a new puzzle reusing the same entity ids does not inherit a
-    /// stale held set. The App's overlay refreshes write it; the render
-    /// projector reads the connections per publish and pushes the overlays on
-    /// the drain when the cache is dirty.
+    /// exposed-hydrophobics) with their dirty flag. Not history-versioned;
+    /// regenerated from the structure via plugin queries. [`Self::reset`]
+    /// clears it on a topology swap so a new puzzle reusing the same entity
+    /// ids does not inherit a stale held set.
     pub(crate) viz: VizState,
     /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
-    /// through [`Self::apply`]. `App` drains it once per tick via
-    /// [`Self::take_updates`] and routes the batch to the
-    /// projectors. Always empty in steady state.
+    /// through [`Self::apply`]. Always empty in steady state.
     pending_updates: Vec<SessionUpdate>,
 }
 
@@ -264,8 +239,6 @@ impl Session {
             pending_updates: Vec::new(),
         }
     }
-
-    // ── Read accessors ────────────────────────────────────────────────
 
     /// Build the current view of the assembly: the lane heads of every
     /// entity in the checkpoint head's `entity_heads` (in canonical
@@ -401,8 +374,6 @@ impl Session {
         self.history.has_pending()
     }
 
-    // ── Score + composition reads ─────────────────────────────────────
-
     /// Read the `(raw, game)` score of the current composition node (first
     /// open pending edit if any, else the committed head). The live-score
     /// read surface for the score widget.
@@ -459,8 +430,6 @@ impl Session {
             .map(Assembly::from_arcs)
     }
 
-    // ── Selection reads ───────────────────────────────────────────────
-    //
     // Ambient residue selection (not history-versioned); the mutators live
     // in [`mutators`]. Invariant maintained across every mutator: per-entity
     // sets are never left empty in the outer map, so `selected_entities`
@@ -527,15 +496,11 @@ impl Session {
         self.selection.values().map(std::collections::BTreeSet::len).sum()
     }
 
-    // ── Focus read ────────────────────────────────────────────────────
-
     /// The current session focus.
     #[must_use]
     pub const fn focus(&self) -> Focus {
         self.focus
     }
-
-    // ── Session title ─────────────────────────────────────────────────
 
     /// Display title for the current session (file stem on a free-form
     /// load, puzzle name on a puzzle load). Always a real string; set by
@@ -544,8 +509,6 @@ impl Session {
     pub fn title(&self) -> &str {
         &self.title
     }
-
-    // ── Puzzle read ───────────────────────────────────────────────────
 
     /// The loaded puzzle, or `None` in the default free-form session.
     #[must_use]
@@ -628,8 +591,6 @@ impl Session {
         self.filter_bonus = breakdown;
     }
 
-    // ── Score-term weight reads ───────────────────────────────────────
-
     /// The active score-term weight map core multiplies raw per-term
     /// energies by. Empty until the App loads the default at init.
     #[must_use]
@@ -645,8 +606,6 @@ impl Session {
     }
 
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests;

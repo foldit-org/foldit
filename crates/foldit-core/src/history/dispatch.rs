@@ -6,8 +6,6 @@ use molex::entity::molecule::id::EntityId;
 use super::{History, HistoryError, HistoryEvent, HistoryEventOutcome};
 
 impl History {
-    // ── Action-lock helpers ───────────────────────────────────────────
-
     /// Whether `entity`'s lane head snapshot is an open tentative (i.e.
     /// the lane already belongs to an in-flight action). `false` for an
     /// unknown entity (`do_begin` reports `UnknownEntity` for that).
@@ -32,8 +30,6 @@ impl History {
             .expect("first_pending_entity called with empty pending map")
     }
 
-    // ── Private root: every DAG-bearing event funnels here ──────
-
     /// The single root through which every checkpoint- or lane-DAG-
     /// bearing event passes. Validates the action-lock
     /// preconditions, performs the mutation, updates `checkpoint_refs`,
@@ -47,13 +43,11 @@ impl History {
         &mut self,
         event: HistoryEvent,
     ) -> Result<HistoryEventOutcome, HistoryError> {
-        // ── Action-lock pre-check ─────────────────────────────────────
-        // Reframed off the pending-edit map. While any action is open
-        // the committed graph head is frozen (each commit composes from
-        // it), so navigation and immediate-commit mutations are refused.
-        // A new action may still begin on a *free* lane (multi-lane
-        // fan-out); only a lane that already has an open tentative
-        // refuses begin.
+        // Keyed off the pending-edit map: while any action is open the
+        // committed graph head is frozen (each commit composes from it), so
+        // navigation and immediate-commit mutations are refused. A new
+        // action may still begin on a *free* lane (multi-lane fan-out); only
+        // a lane that already has an open tentative refuses begin.
         if !self.pending.is_empty() {
             match &event {
                 // Commit / Abort resolve their own request_id in the arm.
