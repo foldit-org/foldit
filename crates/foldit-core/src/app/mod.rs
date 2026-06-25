@@ -7,15 +7,8 @@
 //! - The cross-cutting bookkeeping
 //!   (Puzzle metadata, viso engine handle, dirty-flags, history-version trackers).
 //!
-//! Both the desktop (`foldit-desktop`) and web (`foldit-web`) builds
-//! wrap this in their host-specific lifecycle:
-//!
-//! - desktop: `window::AppRunner` holds the wry webview + winit window
-//!   alongside `App`; winit events are converted to host-agnostic
-//!   types before being forwarded to `App`'s methods.
-//!
-//! - web: `foldit_web::FolditApp` holds `App` plus the canvas and JS
-//!   callbacks; DOM events are forwarded as `ViewportInput` JSON.
+//! Host crates wrap this in their own lifecycle, forwarding host-agnostic
+//! input types to `App`'s methods.
 
 use foldit_gui::{AppPhase, DirtyFlags, FrontendState};
 use viso::{KeyBindings, VisoEngine};
@@ -719,10 +712,9 @@ impl App {
         // and stages a tip change only when it moved.
         self.update_tail_tip();
 
-        // The InSession flip is no longer a tick-stage: every load path calls
-        // `enter_session` at its done-loading point, so the frontend routes to
-        // the in-puzzle UI the moment loading completes, with the score
-        // flowing in asynchronously via steps 2 + 5.
+        // Each load path calls `enter_session` at its done-loading point, so
+        // the frontend routes to the in-puzzle UI the moment loading
+        // completes, with the score flowing in asynchronously via steps 2 + 5.
 
         // 8. Frontend projection: the GUI consumer derives its dirty set
         //    entirely from this tick's `changes` batch, OR'd with the App-side

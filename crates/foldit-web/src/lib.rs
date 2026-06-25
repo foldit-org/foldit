@@ -4,7 +4,7 @@
 //! `requestAnimationFrame` loop, and exposes the [`FolditApp`] surface to
 //! JavaScript via `wasm-bindgen`. The IPC envelope is the same one used
 //! by the wry desktop transport (see `foldit_gui::bridge`); only the
-//! delivery mechanism changes — JS calls Rust functions directly via
+//! delivery mechanism changes; JS calls Rust functions directly via
 //! `wasm-bindgen` instead of round-tripping JSON through `window.ipc`.
 //!
 //! All host-agnostic state and dispatch logic lives in `foldit_core::App`
@@ -53,20 +53,11 @@ use foldit_gui::{
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// One-shot init: panic hook + console_log. Call once before constructing
-// any FolditApp.
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[wasm_bindgen]
 pub fn init() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared handles
-// ─────────────────────────────────────────────────────────────────────────────
 
 type AppHandle = Rc<RefCell<App>>;
 type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
@@ -79,10 +70,6 @@ type ProgressLoadCell = Rc<RefCell<Option<Vec<u8>>>>;
 
 /// Filename under the origin-private OPFS root for the persisted progress map.
 const PROGRESS_FILE: &str = "progress.json";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FolditApp — JS-facing handle
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// JS-facing application handle. Owns the host-agnostic [`App`] (which
 /// in turn owns the orchestrator, entity store, and history) plus the
@@ -158,14 +145,11 @@ impl FolditApp {
         let progress_load: ProgressLoadCell = Rc::new(RefCell::new(None));
         spawn_progress_load(progress_load.clone());
 
-        // rAF loop. Self-rescheduling closure that drives App::tick
-        // once per frame and pushes any serialized dirty state to JS.
+        // start the render loop
         spawn_render_loop(self.app.clone(), self.state_cb.clone(), progress_load);
 
         Ok(())
     }
-
-    // ── Inbound IPC (JS → Rust) ─────────────────────────────────────────────
 
     /// Forward a viewport input event. `json` is the JSON-encoded
     /// `ViewportInput` enum payload (same shape as the wry transport).
@@ -234,13 +218,11 @@ impl Default for FolditApp {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Outbound transport: async-request response delivery.
 //
 // State push is driven inline by the rAF loop calling
 // `App::serialize_frontend_dirty`; only the response channel needs a
 // long-lived JS-callback bridge here.
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 struct WebTransport {
@@ -274,11 +256,9 @@ impl bridge::Transport for WebTransport {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // rAF loop: self-rescheduling closure that drives App::tick(dt) and
 // then drains the App-owned FrontendState dirty diff into the JS
 // state callback.
-// ─────────────────────────────────────────────────────────────────────────────
 
 fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: ProgressLoadCell) {
     let window = match web_sys::window() {
@@ -338,13 +318,11 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: Progre
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // OPFS progress persistence: origin-private read at startup, fire-and-forget
 // write when the live map changes. Both run as `spawn_local` tasks off the rAF
 // frame. The OPFS error type is `JsValue` (no `io::ErrorKind`), so a missing
 // file on first run surfaces as a rejected open and is treated as "no saved
 // progress" rather than an error.
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Read the persisted progress map from the OPFS root and stash the bytes into
 /// the shared cell. A first-run miss (the file does not exist) leaves the cell

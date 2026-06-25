@@ -60,9 +60,9 @@ pub enum ViewportInput {
 /// the orchestrator's [`foldit_runner::orchestrator::PluginRegistry`]
 /// to pick `Invoke` vs `StartStream` and routes to the owning plugin.
 ///
-/// Selection is no longer carried on the wire: the backend reads the
-/// authoritative `App.selection` store at dispatch time, so frontends
-/// only need to send the op id (plus optional focus + params).
+/// Selection is not carried on the wire; the backend reads
+/// `App.selection` at dispatch, so frontends only send the op id
+/// (plus optional focus + params).
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct OpDispatch {
     /// Op-id from a `CatalogEntry`. Globally unique across plugins.

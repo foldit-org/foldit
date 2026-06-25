@@ -519,8 +519,7 @@ impl App {
     /// the host's canonical assembly matches the plugin's internal pose
     /// before any user action runs. Every entity the normalized assembly
     /// touches that has a committed lane in the store is normalized inside
-    /// a single multi-lane edit, so a multi-chain session no longer drops
-    /// every entity past the first.
+    /// a single multi-lane edit.
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_post_init(
         &mut self,

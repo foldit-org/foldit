@@ -5,8 +5,7 @@
 //! - `transient: IndexMap<EntityId, Arc<MoleculeEntity>>` - preview /
 //!   scene-resident entities that are visible in [`Self::head_assembly`]
 //!   but absent from every checkpoint. Presence in this map *is* the
-//!   preview signal; the old [`EntityMetadata::is_preview`] flag is
-//!   gone.
+//!   preview signal.
 //! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` - per-entity
 //!   metadata (name, origin).
 //!   `Arc`-shared so unchanged entries stay aliased across history
@@ -273,7 +272,7 @@ impl Session {
     /// order), followed by every transient preview (also in insertion
     /// order). Collects the entity `Arc`s and hands them to
     /// [`Assembly::from_arcs`], so a per-frame call is O(entities) of
-    /// refcount bumps rather than the old O(atoms) deep clone per
+    /// refcount bumps rather than an O(atoms) deep clone per
     /// entity. The returned `Assembly` shares its `Arc<MoleculeEntity>`s
     /// with the history snapshots (and the transient map); that aliasing
     /// is safe because consumers only read the assembly, and history

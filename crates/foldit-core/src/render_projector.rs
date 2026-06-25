@@ -49,9 +49,8 @@ impl RenderProjector {
     /// the head assembly; missing residues default to `0.0` (the mid-palette
     /// stop in absolute mode, the lower quantile in relative mode). viso owns
     /// the per-entity score state (it retains scores across `replace_assembly`
-    /// and reconciles by id), so foldit-core keeps no shadow copy. This
-    /// reproduces the sizing/scatter the old direct App push performed,
-    /// sourced now from the session instead of the just-arrived report.
+    /// and reconciles by id), so foldit-core keeps no shadow copy. The
+    /// sizing/scatter is sourced from the session.
     fn project_scores(doc: &Session, engine: &mut viso::VisoEngine) {
         let Some(breakdown) = doc.current_composition_breakdown() else {
             return;

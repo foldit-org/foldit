@@ -714,12 +714,10 @@ impl App {
     // ── History navigation (Undo / Redo / Jump / Pin) ──
 
     /// Common tail for undo / redo / `jump_checkpoint`: clear cached
-    /// per-residue scores (the values were computed against the
-    /// *previous* head and become meaningless on a head move; v1 just
-    /// blanks them so the structure renders neutral instead of "gray",
-    /// v2 will async-reeval). Score is no longer cached in `App`; the GUI
-    /// projection reads it off the new head checkpoint on the next
-    /// GUI-consumer pass. The `HeadMoved` emitted by undo/redo/jump rides
+    /// per-residue scores (they were computed against the *previous* head
+    /// and become meaningless on a head move). The GUI projection reads the
+    /// score off the new head checkpoint on the next GUI-consumer pass. The
+    /// `HeadMoved` emitted by undo/redo/jump rides
     /// the batch, from which the render projector republishes (picking
     /// `replace_assembly` / `set_assembly`) and the GUI consumer derives
     /// SCENE | SCORE | ACTIONS dirty.

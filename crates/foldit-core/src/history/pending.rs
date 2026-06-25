@@ -1,6 +1,6 @@
 //! `PendingEdit` - one in-flight action's open composition.
 //!
-//! Replaces the old ambient single-action flag. Each in-flight action is
+//! Each in-flight action is
 //! keyed by a `request_id` in `History::pending`; the value is a
 //! `PendingEdit` naming the lane(s) it holds open and carrying the live
 //! composition score streamed into it before commit.

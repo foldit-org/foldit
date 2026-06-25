@@ -10,7 +10,7 @@
 //! keys. `WireId` serializes via `Display` / `FromStr` so JS holds them
 //! as opaque strings; the alternative — a numeric `u64` — silently
 //! truncates the slotmap version (upper 32 bits) past JS's 53-bit
-//! safe-integer range, the audit's highest-severity finding (G4).
+//! safe-integer range.
 //!
 //! The slotmap key types themselves (`EntitySnapshotId`,
 //! `CheckpointId`) live here rather than in `foldit::history` so the
@@ -35,7 +35,7 @@ new_key_type! {
     pub struct CheckpointId;
 }
 
-// ── WireId<K> ──────────────────────────────────────────────────────────
+// WireId<K>
 
 /// Wire-friendly newtype around a slotmap key. Encodes as a decimal
 /// string of `KeyData::as_ffi()`. JS holds these as opaque strings;
@@ -109,7 +109,7 @@ impl<K: Key> specta::Type for WireId<K> {
     }
 }
 
-// ── Read direction: HistorySection (full reproject) ──────────────────
+// Read direction: HistorySection (full reproject)
 
 /// Filter evaluation status as seen on the wire. Strict subset of the
 /// backend [`foldit::history::FilterStatus`] — the wire side only needs
@@ -175,9 +175,9 @@ pub struct CheckpointInfo {
     /// as a normal `number` — well within safe-integer range for any
     /// practical clock (year ~285,000 AD before f64 mantissa breaks).
     pub timestamp_ms: f64,
-    /// Rosetta REU. Mode-independent (G7); the GUI picks raw vs. game.
+    /// Rosetta REU. Mode-independent; the GUI picks raw vs. game.
     pub raw_score: Option<f64>,
-    /// Game score. Mode-independent (G7).
+    /// Game score. Mode-independent.
     pub game_score: Option<f64>,
     /// Filter evaluation summary.
     pub filter_status: FilterStatus,
@@ -228,15 +228,13 @@ pub struct HistoryLiveUpdate {
     pub filter_status: FilterStatus,
 }
 
-// ── Write direction: HistoryCommand ──────────────────────────────────
+// Write direction: HistoryCommand
 
 /// Navigation commands sent from the frontend. Routed through
 /// `AppCommand::History(cmd)` and dispatched to the
 /// `EntityStore` methods.
 ///
-/// New variants must be handled in `App::run_history_command` (G10:
-/// the match is exhaustive — adding a variant without a handler is a
-/// compile error).
+/// New variants are handled in `App::run_history_command`.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind")]
 pub enum HistoryCommand {

@@ -38,7 +38,7 @@ pub enum IpcMessage {
     Ready,
     /// Forwarded pointer/keyboard/scroll/resize from the viewport overlay.
     ViewportInput(ViewportInput),
-    /// Plugin op dispatch keyed on op-id. Wave-1 catalog entries
+    /// Plugin op dispatch keyed on op-id. Catalog entries
     /// (wiggle, shake, ...) flow through here; the App routes the op
     /// to the orchestrator's Invoke / `StartStream` path based on the
     /// registered op kind.

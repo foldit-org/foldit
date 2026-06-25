@@ -361,7 +361,7 @@ pub struct ActionInfo {
     pub active: bool,
     /// Optional hotkey corner-badge string (winit `KeyCode` spelling,
     /// e.g. `"KeyW"`). `None` = no badge. Pressing the key does not
-    /// dispatch the op yet (key routing is item 78).
+    /// dispatch the op yet.
     pub hotkey: Option<String>,
     /// Optional hover tooltip. The GUI falls back to `display` when
     /// `None`.

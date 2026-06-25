@@ -85,7 +85,6 @@ pub struct History {
     /// In-flight actions keyed by request id. Empty in the resting
     /// state; one entry per open action (0 or 1 until concurrent
     /// dispatch lands, but the map and per-lane keying support fan-out).
-    /// Replaces the old ambient single-action flag.
     pub(super) pending: IndexMap<u64, PendingEdit>,
     /// Bumped on push / move / evict - full reproject on the wire.
     pub(super) topology_version: u64,

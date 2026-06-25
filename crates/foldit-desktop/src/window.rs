@@ -17,8 +17,8 @@ use winit::window::{Window, WindowId};
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
 /// `App` owns the [`foldit_gui::FrontendState`] mirror and the
-/// Loading → `InPuzzle` state-machine now (RX13); the runner is purely
-/// the wry/winit + dev-server shell.
+/// Loading → `InPuzzle` state-machine; the runner is purely the
+/// wry/winit + dev-server shell.
 pub struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
@@ -202,8 +202,7 @@ impl AppRunner {
                 IpcMessage::Ready => {
                     log::info!("Webview ready");
                     self.webview_ready = true;
-                    // App owns the FrontendState mirror (RX13) — its
-                    // `on_ready` impl marks every section dirty so the
+                    // App's `on_ready` impl marks every section dirty so the
                     // next push emits a full snapshot.
                     self.app.on_ready();
                 }
@@ -486,7 +485,6 @@ impl AppRunner {
         // visualization → state-machine → populate_frontend.
         self.app.tick(dt.as_secs_f32());
 
-        // Render the engine surface.
         self.app.render();
 
         // Ship any dirty frontend bytes to the webview.
@@ -504,7 +502,6 @@ impl AppRunner {
         // (no-op when neither happened this frame).
         self.apply_progress_persistence();
 
-        // Request next frame
         if let Some(window) = &self.window {
             window.request_redraw();
         }

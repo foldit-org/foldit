@@ -478,9 +478,7 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Visualization helpers (free functions for split-borrow friendliness)
-// ---------------------------------------------------------------------------
 
 /// Update drag/pull/band visualizations. Bands are still inert (the
 /// band state machine is the next item to come back online). The pull

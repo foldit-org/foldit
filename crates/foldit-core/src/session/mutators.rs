@@ -706,10 +706,9 @@ impl Session {
 
     /// Drop the entire history graph, clear metadata and transient.
     /// After `reset`, the store is back to the empty initial state;
-    /// callers populate it via the preview API + `promote_preview`
-    /// (the puzzle-load path used to be a one-shot insert; now it's a
-    /// preview-then-promote flow that runs through the same recorded
-    /// path as RF3 / RFD3 / MPNN promotions, by design).
+    /// callers populate it via the preview API + `promote_preview`, which
+    /// runs through the same recorded path as RF3 / RFD3 / MPNN
+    /// promotions, by design.
     pub fn reset(&mut self) {
         self.metadata.clear();
         self.transient.clear();

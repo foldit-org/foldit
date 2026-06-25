@@ -35,7 +35,7 @@ bitflags! {
         const APP_STATE    = 0b001_0000_0000;
         const HISTORY      = 0b010_0000_0000;
         /// Tentative-score patch (`HistoryLiveUpdate`); does NOT
-        /// reproject the full graph. See § Two-channel push.
+        /// reproject the full graph.
         const HISTORY_LIVE = 0b100_0000_0000;
         /// Active tutorial bubble changed (cursor moved, or sequence
         /// cleared). Triggers a re-push of `ui.text_bubble` without

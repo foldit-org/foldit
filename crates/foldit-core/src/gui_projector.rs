@@ -28,8 +28,7 @@ use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, Histor
 use crate::runner_client::RunnerClient;
 use crate::session::{Puzzle, Session, SessionUpdate};
 
-/// State for the GUI consumer (see `GuiProjector::consume` below): the
-/// history-version debounce cursor.
+/// State for the GUI consumer.
 pub struct GuiProjector {
     /// Debounce cursor for the history channel (topology + live).
     pub(crate) history_sync: HistorySyncCursor,

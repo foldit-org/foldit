@@ -1,6 +1,7 @@
 //! Tee logger: writes log records to stderr AND a shared ring buffer.
 //!
-//! Replaces `env_logger` so that log output can be pushed to the webview debug panel.
+//! A global logger that tees records to stderr and a ring buffer the
+//! webview debug panel drains.
 
 use log::{Log, Metadata, Record};
 use std::collections::VecDeque;

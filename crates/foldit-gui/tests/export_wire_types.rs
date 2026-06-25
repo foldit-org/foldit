@@ -1,5 +1,5 @@
 //! Generates `webview/src/generated/wire.ts` from the Rust wire payload
-//! structs (G11). The file is checked in. CI re-runs this test and
+//! structs. The file is checked in. CI re-runs this test and
 //! `git diff --exit-code`s; drift between the Rust definitions and
 //! the TypeScript declarations becomes a CI failure.
 //!

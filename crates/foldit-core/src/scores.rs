@@ -265,7 +265,7 @@ mod tests {
     /// weighting the equivalent `ScoreReport` directly. This is the value-
     /// identity proof for the session-owned breakdown swap: the render
     /// projector re-derives colors from the stored form and must land on
-    /// the same numbers the old direct push produced from the report.
+    /// the same numbers produced by weighting the `ScoreReport` directly.
     #[test]
     fn stored_breakdown_weighting_matches_report() {
         let weights: HashMap<String, f32> = [

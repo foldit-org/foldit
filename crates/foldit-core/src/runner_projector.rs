@@ -21,9 +21,9 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 /// sync with the host). Cross-platform: the broadcast decision is the
 /// same on native and wasm.
 ///
-/// Per drain it coalesces the batch into one snapshot-diff broadcast
-/// (vs the old one-broadcast-per-mutation queue), so the orchestrator's
-/// generation advances once per drain. It ignores tentative `Edit`s:
+/// Per drain it coalesces the batch into one snapshot-diff broadcast, so
+/// the orchestrator's generation advances once per drain. It ignores
+/// tentative `Edit`s:
 /// plugins never see live frames. (Score updates are off-stream
 /// entirely; canonical writes happen via `Session::set_head_scores`
 /// and never reach the projector.)
@@ -116,8 +116,7 @@ fn head_plugin_source(doc: &Session) -> &str {
 /// the Full serialize fails (currently impossible for in-memory
 /// assemblies), at which point the caller skips the broadcast.
 ///
-/// Mirrors the old `Session::queue_assembly_update_broadcast` fallback
-/// chain: a delta-serialize failure (a topology edit slipping past the
+/// A delta-serialize failure (a topology edit slipping past the
 /// coord-only check) also falls through to a Full.
 fn encode_payload(
     prior: Option<&Assembly>,

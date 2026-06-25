@@ -5,8 +5,8 @@
 //! (`RunnerClient`, `Session`, `ViewOptions`): each fires its plugin query,
 //! decodes the reply through the sibling decoders, and writes the result into
 //! the session's [`crate::session::VizState`] (marking it dirty for the render
-//! projector to push). The caller gates each on the engine being present; the
-//! functions themselves no longer check for it.
+//! projector to push). Each assumes a present engine; gating is the caller's
+//! responsibility.
 
 use crate::runner_client::RunnerClient;
 use crate::session::Session;
@@ -256,7 +256,7 @@ pub fn refresh_exposed_hydrophobics(
 /// Refresh the engine's per-residue non-designable overlay from the loaded
 /// puzzle's design gating. The overlay desaturates locked residues toward
 /// white so the player can see which parts of the structure may not be
-/// mutated. The caller passes a present engine; this no longer gates on one.
+/// mutated. Assumes a present engine; gating is the caller's responsibility.
 pub fn refresh_design_gating(store: &Session, engine: &mut viso::VisoEngine) {
     use std::collections::{BTreeMap, BTreeSet};
 
