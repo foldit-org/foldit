@@ -66,3 +66,4 @@ viso = { path = "crates/viso" }
 
 [patch.crates-io]
 foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+molex = { path = "crates/molex" }

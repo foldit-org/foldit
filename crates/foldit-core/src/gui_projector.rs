@@ -446,12 +446,13 @@ pub fn ca_world_position(
 ) -> Option<glam::Vec3> {
     let protein = entity.as_protein()?;
     let range = protein.residues.get(residue)?.atom_range.clone();
-    protein
-        .atoms
-        .get(range)?
+    let names = protein.columns.name.get(range.clone())?;
+    let positions = protein.columns.position.get(range)?;
+    names
         .iter()
-        .find(|a| &a.name == b"CA  ")
-        .map(|a| a.position)
+        .zip(positions)
+        .find(|(name, _)| *name == b"CA  ")
+        .map(|(_, pos)| *pos)
 }
 
 /// Project the `PANELS` section: the backend-authoritative open set and

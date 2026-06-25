@@ -171,6 +171,7 @@ mod tests {
             element: Element::O,
             name: *b"O   ",
             formal_charge: 0,
+            observed: true,
         };
         MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
     }

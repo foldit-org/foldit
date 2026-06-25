@@ -86,12 +86,12 @@ fn resolve_atom(
     let residue = entity
         .residues()?
         .get(usize::try_from(residue_ref.residue_index).ok()?)?;
-    let atoms = entity.atom_set();
+    let names = &entity.columns().name;
     let wire = atom.atom_name.as_bytes();
     let index = residue
         .atom_range
         .clone()
-        .find(|&i| atoms.get(i).is_some_and(|a| trimmed_atom_name(&a.name) == wire))?;
+        .find(|&i| names.get(i).is_some_and(|n| trimmed_atom_name(n) == wire))?;
     Some(molex::AtomId {
         entity: entity.id(),
         index: u32::try_from(index).ok()?,
@@ -136,6 +136,7 @@ mod tests {
             element,
             name,
             formal_charge: 0,
+            observed: true,
         }
     }
 
@@ -182,11 +183,11 @@ mod tests {
     fn expect_atom_id(asm: &molex::Assembly, residue_index: usize, atom_name: &str) -> molex::AtomId {
         let entity = &asm.entities()[0];
         let residue = &entity.residues().unwrap()[residue_index];
-        let atoms = entity.atom_set();
+        let names = &entity.columns().name;
         let index = residue
             .atom_range
             .clone()
-            .find(|&i| trimmed_atom_name(&atoms[i].name) == atom_name.as_bytes())
+            .find(|&i| trimmed_atom_name(&names[i]) == atom_name.as_bytes())
             .unwrap();
         molex::AtomId {
             entity: entity.id(),

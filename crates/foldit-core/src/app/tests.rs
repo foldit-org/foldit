@@ -109,6 +109,7 @@ mod selection_tests {
             element: Element::O,
             name: *b"O   ",
             formal_charge: 0,
+            observed: true,
         };
         molex::MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
     }
@@ -221,12 +222,12 @@ mod selection_tests {
         // keeping their store ids so `apply_streaming_assembly` id-matches.
         let moved = glam::Vec3::new(7.0, 7.0, 7.0);
         let mut a1 = store.entity(e1).expect("e1").clone();
-        for atom in a1.atom_set_mut() {
-            atom.position = moved;
+        for pos in &mut a1.columns_mut().position {
+            *pos = moved;
         }
         let mut a2 = store.entity(e2).expect("e2").clone();
-        for atom in a2.atom_set_mut() {
-            atom.position = moved;
+        for pos in &mut a2.columns_mut().position {
+            *pos = moved;
         }
         let normalized = molex::Assembly::from_arcs(vec![Arc::new(a1), Arc::new(a2)]);
 
@@ -325,12 +326,12 @@ mod selection_tests {
         // it, commit once. Every lane must carry the moved coordinates.
         let moved = glam::Vec3::new(3.0, 3.0, 3.0);
         let mut a1 = app.store.entity(e1).expect("e1").clone();
-        for atom in a1.atom_set_mut() {
-            atom.position = moved;
+        for pos in &mut a1.columns_mut().position {
+            *pos = moved;
         }
         let mut a2 = app.store.entity(e2).expect("e2").clone();
-        for atom in a2.atom_set_mut() {
-            atom.position = moved;
+        for pos in &mut a2.columns_mut().position {
+            *pos = moved;
         }
         let frame = molex::Assembly::from_arcs(vec![Arc::new(a1), Arc::new(a2)]);
 

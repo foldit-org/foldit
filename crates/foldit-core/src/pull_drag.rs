@@ -98,14 +98,15 @@ pub fn route_atom_pick(
     let MoleculeEntity::Protein(protein) = store.entity(molex_id)? else {
         return None;
     };
-    let atom = protein.atoms.get(atom_idx as usize)?;
+    let idx = atom_idx as usize;
     // Hydrogen reject - element field is the authoritative check; the
     // atom_name prefix gate in the cartoon-pick path is a fallback for
     // when we don't have the Atom in hand.
-    if atom.element == Element::H {
+    let element = *protein.columns.element.get(idx)?;
+    if element == Element::H {
         return None;
     }
-    let atom_name = trim_atom_name(atom.name);
+    let atom_name = trim_atom_name(protein.columns.name[idx]);
     // residue counts << u32::MAX.
     #[allow(clippy::cast_possible_truncation)]
     let residue_in_entity = protein

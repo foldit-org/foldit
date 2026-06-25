@@ -16,6 +16,7 @@ fn mk_atom() -> Atom {
         element: Element::O,
         name: *b"O   ",
         formal_charge: 0,
+        observed: true,
     }
 }
 
@@ -56,6 +57,7 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
                 element: *element,
                 name: **name,
                 formal_charge: 0,
+                observed: true,
             });
         }
         let end = atoms.len();
@@ -350,8 +352,8 @@ fn action_update_emits_tentative_edit() {
 
     store
         .action_update(rid, None, None, None, |e| {
-            for atom in e.atom_set_mut() {
-                atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
+            for pos in &mut e.columns_mut().position {
+                *pos = glam::Vec3::new(9.0, 9.0, 9.0);
             }
         })
         .expect("action_update");
@@ -378,8 +380,8 @@ fn commit_action_emits_head_moved() {
     store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
     store
         .action_update(rid, None, None, None, |e| {
-            for atom in e.atom_set_mut() {
-                atom.position = glam::Vec3::new(9.0, 9.0, 9.0);
+            for pos in &mut e.columns_mut().position {
+                *pos = glam::Vec3::new(9.0, 9.0, 9.0);
             }
         })
         .expect("action_update");

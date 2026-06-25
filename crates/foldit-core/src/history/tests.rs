@@ -18,6 +18,7 @@ fn mk_entity(id: EntityId) -> MoleculeEntity {
         element: Element::O,
         name: *b"O   ",
         formal_charge: 0,
+        observed: true,
     };
     MoleculeEntity::Bulk(BulkEntity::new(
         id,
@@ -529,8 +530,8 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
 
     // One update mutates both held lanes.
     h.action_update(rid, None, None, None, |entity| {
-        for atom in entity.atom_set_mut() {
-            atom.position = glam::Vec3::new(5.0, 5.0, 5.0);
+        for pos in &mut entity.columns_mut().position {
+            *pos = glam::Vec3::new(5.0, 5.0, 5.0);
         }
     })
     .unwrap();
