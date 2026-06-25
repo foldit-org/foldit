@@ -7,9 +7,10 @@
 //! positions, keeping the proto-decode in one pure place.
 //!
 //! Only `HBond` and `Disulfide` are decoded here. `Clash` has its own
-//! independent path (`clash_coord` + `update_clashes`), and `Band` has no
-//! producer yet; both proto types are skipped so the connections map this
-//! module produces carries hydrogen bonds and disulfides only.
+//! independent path (the `clashes` query + `viz/refresh.rs::refresh_clashes`),
+//! and `Band` has no producer yet; both proto types are skipped so the
+//! connections map this module produces carries hydrogen bonds and disulfides
+//! only.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;

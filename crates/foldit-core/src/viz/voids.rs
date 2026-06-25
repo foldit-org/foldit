@@ -4,8 +4,8 @@
 //! bytes: a proto `VoidField`, a void distance field sampled on a regular
 //! grid. This module turns those bytes into the dims/origin/spacing/phi the
 //! viso engine meshes directly, keeping the proto-decode in one pure place
-//! the `RunnerClient` facade and the at-rest trigger both call. The proto
-//! type is named only here; the rest of the core sees [`VoidFieldData`].
+//! `viz/refresh.rs` calls. The proto type is named only here; the rest of the
+//! core sees [`VoidFieldData`].
 
 /// A decoded void distance field, ready to hand to
 /// [`viso::VisoEngine::set_external_void_field`]. Carries the grid `dims`

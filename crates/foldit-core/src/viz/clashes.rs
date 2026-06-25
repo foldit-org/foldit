@@ -3,9 +3,9 @@
 //! The `clashes` query returns a plugin's detected steric clashes as opaque
 //! bytes: a proto `ClashReport`, a list of atom-atom clashes. This module
 //! turns those bytes into the per-endpoint structural refs the viso engine
-//! resolves directly, keeping the proto-decode in one pure place the
-//! `RunnerClient` facade and the at-rest trigger both call. The proto type is
-//! named only here; the rest of the core sees [`ClashData`].
+//! resolves directly, keeping the proto-decode in one pure place
+//! `viz/refresh.rs` calls. The proto type is named only here; the rest of the
+//! core sees [`ClashData`].
 
 /// One endpoint of a decoded clash: the proto-side `entity_id` (orchestrator
 /// scope, mapped to a molex `EntityId` by the trigger), the entity-local

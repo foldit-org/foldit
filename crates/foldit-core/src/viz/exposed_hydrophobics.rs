@@ -4,9 +4,9 @@
 //! solvent-exposed hydrophobic residues as opaque bytes: a proto
 //! `ExposedHydrophobicReport`, a list of flagged residues. This module turns
 //! those bytes into the per-entity structural refs the viso engine resolves
-//! directly, keeping the proto-decode in one pure place the `RunnerClient`
-//! facade and the at-rest trigger both call. The proto type is named only
-//! here; the rest of the core sees [`ExposedHydroData`].
+//! directly, keeping the proto-decode in one pure place `viz/refresh.rs`
+//! calls. The proto type is named only here; the rest of the core sees
+//! [`ExposedHydroData`].
 
 /// One flagged residue: the proto-side `entity_id` (orchestrator scope,
 /// mapped to a molex `EntityId` by the trigger) and the entity-local
