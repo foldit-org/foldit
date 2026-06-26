@@ -30,6 +30,7 @@ impl RunnerClient {
             stream_host: StreamHost {
                 active_streams: std::collections::HashMap::new(),
                 pull_drag: None,
+                pending_pull_origin: None,
             },
         }
     }

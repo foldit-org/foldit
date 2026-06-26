@@ -171,7 +171,14 @@ mod tests {
             formal_charge: 0,
             observed: true,
         };
-        MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
+        MoleculeEntity::Bulk(BulkEntity::new(
+            id,
+            MoleculeType::Water,
+            vec![atom],
+            *b"HOH",
+            1,
+            String::from("W"),
+        ))
     }
 
     fn two_ids() -> (EntityId, EntityId) {

@@ -102,11 +102,7 @@ impl App {
                 // and latch the player-touched flag
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
                     Ok(opts) => {
-                        let changed = self.view_options != opts || self.active_preset.is_some();
-                        self.view_options = opts;
-                        self.active_preset = None;
-                        self.view_settings_touched = true;
-                        if changed {
+                        if self.view.set_manual(opts) {
                             self.store.note_view_options_changed();
                         }
                     }
@@ -116,7 +112,7 @@ impl App {
             AppCommand::LoadViewPreset { name } => {
                 // An explicit player preset pick: latch the touched flag (so it
                 // persists across later loads) and apply the preset now.
-                self.view_settings_touched = true;
+                self.view.touched = true;
                 #[cfg(not(target_arch = "wasm32"))]
                 self.apply_view_preset_to_session(&name);
                 #[cfg(target_arch = "wasm32")]
@@ -196,7 +192,7 @@ impl App {
                 // engine. The funnel does the eager set + note itself when it
                 // seeds; the touched branch does it from the App-owned options.
                 #[cfg(not(target_arch = "wasm32"))]
-                if self.view_settings_touched {
+                if self.view.touched {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session("Default");
@@ -315,7 +311,7 @@ impl App {
                 // A puzzle may pin its own view preset; otherwise fall back to
                 // the Default preset
                 #[cfg(not(target_arch = "wasm32"))]
-                if self.view_settings_touched {
+                if self.view.touched {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session(
@@ -337,12 +333,12 @@ impl App {
                     &title,
                 );
 
-                self.startup_camera = StartupCamera::PuzzlePose {
+                self.startup.camera = StartupCamera::PuzzlePose {
                     eye: cam_eye,
                     up: cam_up,
                 };
 
-                self.startup_ss_override =
+                self.startup.ss_override =
                     ss_override.and_then(|ss| ids.first().map(|&first_id| (first_id.raw(), ss)));
 
                 true
@@ -409,8 +405,7 @@ impl App {
                 return;
             }
         };
-        self.view_options = opts.clone();
-        self.active_preset = Some(name.to_owned());
+        self.view.set_preset(opts.clone(), name);
 
         // Eager engine sync
         if let Some(engine) = self.engine.as_mut() {
@@ -422,7 +417,7 @@ impl App {
     /// Push the persisted App-owned view options to a freshly-reset engine
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn reapply_view_options_to_engine(&mut self) {
-        let opts = self.view_options.clone();
+        let opts = self.view.options.clone();
         if let Some(engine) = self.engine.as_mut() {
             engine.set_options(opts);
         }
@@ -617,7 +612,7 @@ mod preset_tests {
             ColorScheme::Entity,
         );
         assert!(app.active_preset().is_none());
-        assert!(!app.view_settings_touched);
+        assert!(!app.view.touched);
 
         app.apply_view_preset_to_session("Default");
 
@@ -655,8 +650,8 @@ mod preset_tests {
         let presets_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
 
-        app.view_options = mk_non_default_options();
-        app.active_preset = Some("warm".to_owned());
+        app.view.options = mk_non_default_options();
+        app.view.active_preset = Some("warm".to_owned());
 
         app.store.reset();
 

@@ -26,6 +26,7 @@ fn mk_entity(id: EntityId) -> MoleculeEntity {
         vec![atom],
         *b"HOH",
         1,
+        String::from("W"),
     ))
 }
 

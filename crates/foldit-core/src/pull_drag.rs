@@ -248,7 +248,7 @@ impl App {
                     .as_ref()
                     .is_some_and(viso::VisoEngine::mouse_pressed)
                     && !self.runner_client.has_active_pull_drag()
-                    && self.pending_pull_origin.is_some() =>
+                    && self.runner_client.has_pending_pull_origin() =>
             {
                 // The pull intent was locked at button-down; the move
                 // only supplies the drag endpoint. Take the route so
@@ -256,8 +256,8 @@ impl App {
                 // failed stream start falls through to camera for the
                 // rest of the drag rather than retrying mid-gesture.
                 let route = self
-                    .pending_pull_origin
-                    .take()
+                    .runner_client
+                    .take_pending_pull_origin()
                     .expect("guard guarantees Some");
                 if self.begin_pull_drag_from_route(&route, *x, *y) {
                     // viso recorded the press; drop its mouse

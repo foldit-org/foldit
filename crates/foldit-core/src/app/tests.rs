@@ -111,7 +111,14 @@ mod selection_tests {
             formal_charge: 0,
             observed: true,
         };
-        molex::MoleculeEntity::Bulk(BulkEntity::new(id, MoleculeType::Water, vec![atom], *b"HOH", 1))
+        molex::MoleculeEntity::Bulk(BulkEntity::new(
+            id,
+            MoleculeType::Water,
+            vec![atom],
+            *b"HOH",
+            1,
+            String::from("W"),
+        ))
     }
 
     /// A composition score for an open edit must land on that edit and be

@@ -24,72 +24,28 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 mod dispatch;
 pub(crate) mod input;
 mod load;
+mod panels;
 mod preview;
+mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod score_apply;
+mod segment;
 mod startup;
 #[cfg(test)]
 mod tests;
+mod ui;
+mod view;
 
 use self::input::update_all_visualizations;
+use self::panels::PanelState;
+use self::progress::ProgressStore;
+use self::segment::SegmentPanel;
+use self::ui::UiToggles;
+use self::view::ViewState;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::load::{locate_plugin_ui_entrypoints, locate_plugins_root};
-
-/// The open segment-info target plus the identity and secondary structure
-/// cached at the moment it was set.
-///
-/// Identity and SS are computed once (a single `recompute_ss()` over the
-/// head assembly) when the target opens and held here for its lifetime;
-/// the GUI projection rebuilds only the energies and the screen anchor on
-/// each score tick, so a streaming score never re-runs DSSP.
-pub(crate) struct SegmentTarget {
-    pub(crate) entity: molex::EntityId,
-    pub(crate) residue: usize,
-    pub(crate) residue_number: i32,
-    pub(crate) chain: String,
-    pub(crate) aa_three: String,
-    pub(crate) aa_one: String,
-    pub(crate) ss_label: String,
-}
-
-/// Last segment-panel tail tip projected to the screen, value-compared
-/// each frame so an unchanged tip pushes nothing.
-///
-/// The `Unset` arm is distinct from `Hidden`: at rest (no panel ever
-/// opened) the tip is `Unset`, and the off-screen path only emits a hide
-/// when a `Visible` tip preceded it. Without that distinction every idle
-/// frame would push a redundant hide.
-#[derive(Clone, Copy, PartialEq)]
-enum TailTip {
-    /// No tip has been projected yet (no panel opened this session).
-    Unset,
-    /// The panel is open but its residue is off-screen / behind the camera.
-    Hidden,
-    /// The residue's CA projects to this screen position (pixels, top-left).
-    Visible(f32, f32),
-}
-
-/// A tail-tip change the host should push to the webview this frame.
-///
-/// Returned by [`App::take_tail_update`] only when the tip changed since
-/// the last push; an unchanged tip yields `None` and the host pushes
-/// nothing.
-pub enum TailUpdate {
-    /// Move the tail tip to this screen position (pixels, origin top-left).
-    Position(f32, f32),
-    /// Hide the tail (the residue went off-screen, or the panel closed).
-    Hide,
-}
-
-/// Human-readable secondary-structure label for the segment panel.
-fn ss_label(ss: Option<molex::SSType>) -> String {
-    match ss {
-        Some(molex::SSType::Helix) => "Helix",
-        Some(molex::SSType::Sheet) => "Sheet",
-        Some(molex::SSType::Coil) | None => "Loop",
-    }
-    .to_owned()
-}
+pub use self::segment::TailUpdate;
+pub(crate) use self::segment::SegmentTarget;
 
 /// Main application state - thin glue connecting the render engine,
 /// plugin driver, the `Session` store, and the three projectors
@@ -99,7 +55,6 @@ fn ss_label(ss: Option<molex::SSType>) -> String {
 /// state-machine and the GUI projection both live on the same side of
 /// the host seam) and the `AppPhase` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
-#[allow(clippy::struct_excessive_bools, reason = "App holds four independent state flags (view-preset latch, progress-persist signal, hint-bubble visibility, fullscreen mirror) across separate subsystems; grouping them into a sub-struct would be arbitrary and add indirection for no semantic gain")]
 pub struct App {
     // Session encapsulates all state that shares a lifecycle with
     // a structure or puzzle that is loaded into the client.
@@ -114,9 +69,9 @@ pub struct App {
     pub(in crate::app) keybindings: KeyBindings,
     pub(in crate::app) lifecycle: AppPhase,
 
-    pub(in crate::app) view_options: viso::options::VisoOptions,
-    pub(in crate::app) active_preset: Option<String>,
-    pub(in crate::app) view_settings_touched: bool,
+    /// Active view options, the preset they came from, and the player-touched
+    /// latch. App-owned so they persist across a reload.
+    pub(in crate::app) view: ViewState,
 
     // Three projector classes which are the consumers of Assembly updates
     pub(in crate::app) runner_projector: RunnerProjector,
@@ -128,45 +83,23 @@ pub struct App {
     pub(in crate::app) host: Box<dyn crate::HostResources>,
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) startup: self::load::StartupPhase,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) startup_camera: self::load::StartupCamera,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) startup_ss_override: Option<(u32, Vec<molex::SSType>)>,
+    pub(in crate::app) startup: self::startup::StartupState,
     /// One-shot accumulator of App-owned GUI dirty bits the `SessionUpdate`
     /// batch cannot express (segment / panels / ui / progress), plus the
     /// full-populate seed (`DirtyFlags::all()`) raised on session birth.
     pub(in crate::app) pending_dirty: DirtyFlags,
-    /// Open segment-info target with its cached identity + SS, or `None`
-    /// when the panel is closed.
-    pub(in crate::app) open_segment: Option<SegmentTarget>,
-    /// Panels currently shown (by string id). A panel absent from the set
-    /// is closed. Backend-authoritative so visibility survives a reload.
-    pub(in crate::app) open_panels: std::collections::BTreeSet<String>,
-    /// Per-panel dragged top-left position (pixels, origin top-left). A
-    /// panel without an entry renders at its layout default.
-    pub(in crate::app) panel_positions: std::collections::BTreeMap<String, (f32, f32)>,
+    /// Per-residue segment-info panel: open target with cached identity + SS,
+    /// plus the tail-tip debounce cursor.
+    pub(in crate::app) segment: SegmentPanel,
+    /// Panel UI state: which panels are shown (by string id) and each panel's
+    /// dragged top-left. Backend-authoritative so both survive a reload.
+    pub(in crate::app) panels: PanelState,
     /// Puzzle high-score progress: best recorded display score per puzzle id
-    /// (monotonic max). Backend-authoritative.
-    pub(in crate::app) progress: std::collections::BTreeMap<u32, f64>,
-    /// One-shot signal that `progress` changed and must be flushed to disk.
-    /// Set only by a real in-session record/clear, never by a load import, so
-    /// a load does not trigger a save back.
-    pub(in crate::app) progress_persist_pending: bool,
-    /// Whether the tutorial-hint bubble is shown. Backend-authoritative so
-    /// the toggle survives a reload.
-    pub(in crate::app) hints_visible: bool,
-    /// Whether the window is in OS fullscreen. Backend-authoritative mirror.
-    pub(in crate::app) fullscreen: bool,
-    /// Pending fullscreen change for the host to pull this frame, staged only
-    /// when `set_fullscreen` actually flipped the flag.
-    pub(in crate::app) pending_fullscreen: Option<bool>,
-    /// Last tail tip pushed to the host, value-compared each frame so an
-    /// unchanged tip pushes nothing.
-    pub(in crate::app) last_tail_tip: TailTip,
-    /// Pending tail-tip change for the host to pull this frame, set only when
-    /// the projected tip differed from `last_tail_tip`.
-    pub(in crate::app) pending_tail: Option<TailUpdate>,
+    /// (monotonic max) plus the disk-persist signal. Backend-authoritative.
+    pub(in crate::app) progress: ProgressStore,
+    /// OS fullscreen mirror + its host outbox and the tutorial-hint bubble
+    /// visibility. Backend-authoritative so the toggles survive a reload.
+    pub(in crate::app) ui: UiToggles,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -185,8 +118,6 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) inplace_edits:
         std::collections::HashMap<u64, (Vec<molex::EntityId>, crate::history::CheckpointKind, String)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
 
 impl App {
@@ -205,9 +136,7 @@ impl App {
                 kb
             },
             store: Session::new(),
-            view_options: viso::options::VisoOptions::default(),
-            active_preset: None,
-            view_settings_touched: false,
+            view: ViewState::new(),
             runner_client: RunnerClient::new(),
             runner_projector: RunnerProjector::new(),
             render_projector: RenderProjector::new(),
@@ -216,22 +145,16 @@ impl App {
             frontend: FrontendState::new(),
             lifecycle: AppPhase::Initializing,
             #[cfg(not(target_arch = "wasm32"))]
-            startup: self::load::StartupPhase::Idle,
-            #[cfg(not(target_arch = "wasm32"))]
-            startup_camera: self::load::StartupCamera::Fit,
-            #[cfg(not(target_arch = "wasm32"))]
-            startup_ss_override: None,
+            startup: self::startup::StartupState {
+                phase: self::load::StartupPhase::Idle,
+                camera: self::load::StartupCamera::Fit,
+                ss_override: None,
+            },
             pending_dirty: DirtyFlags::empty(),
-            open_segment: None,
-            open_panels: std::collections::BTreeSet::new(),
-            panel_positions: std::collections::BTreeMap::new(),
-            progress: std::collections::BTreeMap::new(),
-            progress_persist_pending: false,
-            hints_visible: true,
-            fullscreen: false,
-            pending_fullscreen: None,
-            last_tail_tip: TailTip::Unset,
-            pending_tail: None,
+            segment: SegmentPanel::new(),
+            panels: PanelState::new(),
+            progress: ProgressStore::new(),
+            ui: UiToggles::new(),
             #[cfg(not(target_arch = "wasm32"))]
             score_targets: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -240,8 +163,6 @@ impl App {
             inplace_previews: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             inplace_edits: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            pending_pull_origin: None,
         }
     }
 
@@ -254,66 +175,31 @@ impl App {
         self.pending_dirty |= DirtyFlags::all();
     }
 
-    /// Open the per-residue segment-info panel on `(eid, residue)`.
-    ///
-    /// Computes the residue identity (number, chain, amino acid) and its
-    /// secondary structure once, via a single `recompute_ss()` over the
-    /// head assembly, and caches them on the target. A no-op when the
-    /// entity or residue does not resolve. Marks the segment section dirty.
+    /// Open the per-residue segment-info panel on `(eid, residue)`, marking
+    /// the segment section dirty when the target resolves. A no-op when the
+    /// entity or residue does not resolve.
     pub(in crate::app) fn open_segment(&mut self, eid: molex::EntityId, residue: usize) {
-        let Some(entity) = self.store.entity(eid) else {
-            return;
-        };
-        let Some(residues) = entity.residues() else {
-            return;
-        };
-        let Some(res) = residues.get(residue) else {
-            return;
-        };
-        let residue_number = res.seq_id();
-        let chain = entity
-            .pdb_chain_id()
-            .map_or_else(String::new, str::to_owned);
-        let aa = molex::chemistry::AminoAcid::from_code(res.name);
-        let aa_three = String::from_utf8_lossy(&res.name).trim().to_owned();
-        let aa_one = aa.map_or_else(String::new, |a| (a.one_letter() as char).to_string());
-
-        let mut assembly = self.store.head_assembly();
-        assembly.recompute_ss();
-        let ss_label = ss_label(assembly.ss_types(eid).get(residue).copied());
-
-        self.open_segment = Some(SegmentTarget {
-            entity: eid,
-            residue,
-            residue_number,
-            chain,
-            aa_three,
-            aa_one,
-            ss_label,
-        });
-        self.pending_dirty |= DirtyFlags::SEGMENT;
+        if self.segment.open(&self.store, eid, residue) {
+            self.pending_dirty |= DirtyFlags::SEGMENT;
+        }
     }
 
     /// Close the segment-info panel. Marks the segment section dirty.
     pub(in crate::app) fn close_segment(&mut self) {
-        self.open_segment = None;
+        self.segment.close();
         self.pending_dirty |= DirtyFlags::SEGMENT;
     }
 
     /// Show or hide a panel by id. Marks the panels section dirty.
     pub(in crate::app) fn set_panel_visible(&mut self, panel: String, visible: bool) {
-        if visible {
-            self.open_panels.insert(panel);
-        } else {
-            self.open_panels.remove(&panel);
-        }
+        self.panels.set_visible(panel, visible);
         self.pending_dirty |= DirtyFlags::PANELS;
     }
 
     /// Record a panel's dragged top-left position, marking the panels section
     /// dirty.
     pub(in crate::app) fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
-        self.panel_positions.insert(panel, (x, y));
+        self.panels.set_position(panel, x, y);
         self.pending_dirty |= DirtyFlags::PANELS;
     }
 
@@ -329,31 +215,22 @@ impl App {
         let Some(score) = self.store.display_score() else {
             return;
         };
-        if score <= 0.0 {
-            return;
-        }
-        let best = self.progress.entry(puzzle_id).or_insert(f64::NEG_INFINITY);
-        if score > *best {
-            *best = score;
+        if self.progress.record(puzzle_id, score) {
             self.pending_dirty |= DirtyFlags::PROGRESS;
-            self.progress_persist_pending = true;
         }
     }
 
     /// Wipe all recorded high-score progress, marking the progress section
     /// dirty.
     pub(in crate::app) fn clear_progress(&mut self) {
-        if self.progress.is_empty() {
-            return;
+        if self.progress.clear() {
+            self.pending_dirty |= DirtyFlags::PROGRESS;
         }
-        self.progress.clear();
-        self.pending_dirty |= DirtyFlags::PROGRESS;
-        self.progress_persist_pending = true;
     }
 
     /// Show or hide the tutorial-hint bubble. Marks the ui section dirty.
     pub(in crate::app) fn set_hints_visible(&mut self, v: bool) {
-        self.hints_visible = v;
+        self.ui.set_hints_visible(v);
         self.pending_dirty |= DirtyFlags::UI;
     }
 
@@ -362,10 +239,7 @@ impl App {
     /// true->false transition stages, so re-setting the same value pushes
     /// nothing to the host.
     pub(in crate::app) fn set_fullscreen(&mut self, v: bool) {
-        if self.fullscreen != v {
-            self.fullscreen = v;
-            self.pending_fullscreen = Some(v);
-        }
+        self.ui.set_fullscreen(v);
         self.pending_dirty |= DirtyFlags::UI;
     }
 
@@ -373,18 +247,14 @@ impl App {
     /// the winit window, or `None` when it did not change since the last
     /// pull. Returned at most once per change.
     pub const fn take_fullscreen_change(&mut self) -> Option<bool> {
-        self.pending_fullscreen.take()
+        self.ui.take_fullscreen_change()
     }
 
     /// Take the serialized high-score progress map for the host to persist to
     /// disk, or `None` when it has not changed since the last pull. Returned
     /// at most once per change.
     pub fn take_progress_to_persist(&mut self) -> Option<Vec<u8>> {
-        if !self.progress_persist_pending {
-            return None;
-        }
-        self.progress_persist_pending = false;
-        serde_json::to_vec(&self.progress).ok()
+        self.progress.take_to_persist()
     }
 
     /// Merge a persisted high-score progress map (as written by
@@ -395,19 +265,7 @@ impl App {
     /// does not set the persist-pending flag, so a load does not bounce back
     /// out as a save.
     pub fn import_progress(&mut self, bytes: &[u8]) {
-        let Ok(loaded) = serde_json::from_slice::<std::collections::BTreeMap<u32, f64>>(bytes)
-        else {
-            return;
-        };
-        let mut changed = false;
-        for (puzzle_id, score) in loaded {
-            let best = self.progress.entry(puzzle_id).or_insert(f64::NEG_INFINITY);
-            if score > *best {
-                *best = score;
-                changed = true;
-            }
-        }
-        if changed {
+        if self.progress.import(bytes) {
             self.pending_dirty |= DirtyFlags::PROGRESS;
         }
     }
@@ -424,14 +282,14 @@ impl App {
     /// The active view options. App-owned so they persist across a reload.
     #[must_use]
     pub const fn view_options(&self) -> &viso::options::VisoOptions {
-        &self.view_options
+        &self.view.options
     }
 
     /// The name of the currently-loaded preset, or `None` when the active
     /// options were set manually.
     #[must_use]
     pub fn active_preset(&self) -> Option<&str> {
-        self.active_preset.as_deref()
+        self.view.active_preset.as_deref()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -479,41 +337,7 @@ impl App {
     /// returned at most once per change: `tick` sets it only on a value
     /// change and this clears it.
     pub const fn take_tail_update(&mut self) -> Option<TailUpdate> {
-        self.pending_tail.take()
-    }
-
-    /// Project the open segment target's CA to the screen and stage a
-    /// tail-tip change when it differs from the last pushed tip. A closed
-    /// panel or an off-screen residue resolves to `Hidden`; a hide is
-    /// staged only when a `Visible` tip preceded it, so an idle frame with
-    /// no panel pushes nothing.
-    fn update_tail_tip(&mut self) {
-        let current = match (self.open_segment.as_ref(), self.engine.as_ref()) {
-            (Some(target), Some(engine)) => self
-                .store
-                .entity(target.entity)
-                .and_then(|entity| crate::gui_projector::ca_world_position(entity, target.residue))
-                .and_then(|world| engine.world_to_screen(world))
-                .map_or(TailTip::Hidden, |v| TailTip::Visible(v.x, v.y)),
-            _ => TailTip::Hidden,
-        };
-
-        if current == self.last_tail_tip {
-            return;
-        }
-
-        match current {
-            TailTip::Visible(x, y) => self.pending_tail = Some(TailUpdate::Position(x, y)),
-            // Only emit a hide when something visible preceded it; the
-            // initial `Unset` -> `Hidden` transition records state silently.
-            TailTip::Hidden => {
-                if matches!(self.last_tail_tip, TailTip::Visible(..)) {
-                    self.pending_tail = Some(TailUpdate::Hide);
-                }
-            }
-            TailTip::Unset => {}
-        }
-        self.last_tail_tip = current;
+        self.segment.take_update()
     }
 
     #[allow(
@@ -547,7 +371,7 @@ impl App {
             // viz cache dirty for the push below.
             let viz_results = self.runner_client.poll_query_results();
             if !viz_results.is_empty() {
-                let opts = &self.view_options;
+                let opts = &self.view.options;
                 crate::viz::refresh::apply_query_results(&mut self.store, opts, viz_results);
             }
         }
@@ -609,17 +433,17 @@ impl App {
                 crate::viz::refresh::refresh_external_cavities(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view_options,
+                    &self.view.options,
                 );
                 crate::viz::refresh::refresh_clashes(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view_options,
+                    &self.view.options,
                 );
                 crate::viz::refresh::refresh_exposed_hydrophobics(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view_options,
+                    &self.view.options,
                 );
             }
         }
@@ -635,7 +459,7 @@ impl App {
                     .iter()
                     .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
                 {
-                    engine.set_options(self.view_options.clone());
+                    engine.set_options(self.view.options.clone());
                 }
             }
         }
@@ -698,7 +522,7 @@ impl App {
 
         // Tail tip: runs after `engine.update` (camera settled this frame)
         // and stages a tip change only when it moved.
-        self.update_tail_tip();
+        self.segment.update_tail_tip(&self.store, self.engine.as_ref());
 
         // Each load path calls `enter_session` at its done-loading point, so
         // the frontend routes to the in-puzzle UI the moment loading
@@ -718,20 +542,20 @@ impl App {
                 engine,
                 driver: &self.runner_client,
                 host: self.host.as_ref(),
-                view_options: &self.view_options,
-                active_preset: self.active_preset.as_deref(),
-                open_segment: self.open_segment.as_ref(),
-                open_panels: &self.open_panels,
-                panel_positions: &self.panel_positions,
-                progress: &self.progress,
-                hints_visible: self.hints_visible,
-                fullscreen: self.fullscreen,
+                view_options: &self.view.options,
+                active_preset: self.view.active_preset.as_deref(),
+                open_segment: self.segment.target(),
+                open_panels: self.panels.open(),
+                panel_positions: self.panels.positions(),
+                progress: self.progress.map(),
+                hints_visible: self.ui.hints_visible(),
+                fullscreen: self.ui.fullscreen(),
             };
             let segment_auto_closed =
                 self.gui_projector
                     .consume(&changes, pending, &src, &mut self.frontend);
             if segment_auto_closed {
-                self.open_segment = None;
+                self.segment.close();
             }
         }
     }

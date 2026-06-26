@@ -161,7 +161,7 @@ impl App {
     /// (re-tabbing a different residue closes the old target and opens the
     /// new one in a single press).
     fn toggle_segment(&mut self, eid: EntityId, res: usize) {
-        if self.open_segment.as_ref().map(|t| (t.entity, t.residue)) == Some((eid, res)) {
+        if self.segment.target().map(|t| (t.entity, t.residue)) == Some((eid, res)) {
             self.close_segment();
         } else {
             self.open_segment(eid, res);
@@ -244,11 +244,11 @@ impl App {
                 // target. Left button only - right/middle are camera.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    self.pending_pull_origin = if button == 0 {
+                    self.runner_client.set_pending_pull_origin(if button == 0 {
                         Self::resolve_pull_route(engine, &self.store, x, y)
                     } else {
                         None
-                    };
+                    });
                 }
             }
             ViewportInput::PointerUp {
@@ -270,7 +270,7 @@ impl App {
                 // that never pulled drops its stored origin here.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    self.pending_pull_origin = None;
+                    self.runner_client.set_pending_pull_origin(None);
                 }
             }
             ViewportInput::PointerMove { x, y, shift, .. } => {

@@ -14,6 +14,17 @@ use super::load::{StartupCamera, StartupPhase, locate_plugins_root};
 use crate::history::CheckpointKind;
 use crate::render_projector::RenderProjector;
 
+/// The async-startup state App owns as one field: the per-frame phase
+/// machine plus the two terminal carryovers (camera intent + puzzle SS
+/// override) that `enter_session_from_startup` consumes once the geometry
+/// settles.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) struct StartupState {
+    pub(in crate::app) phase: StartupPhase,
+    pub(in crate::app) camera: StartupCamera,
+    pub(in crate::app) ss_override: Option<(u32, Vec<molex::SSType>)>,
+}
+
 impl App {
     /// Attach a host-built `VisoEngine` to this App. Hosts are
     /// responsible for constructing the wgpu `RenderContext` against
@@ -96,14 +107,14 @@ impl App {
                 // warms still finish in the background so a later file-load
                 // finds the workers connected.
                 self.set_app_phase(AppPhase::Landing);
-                self.startup = StartupPhase::WarmingForLanding {
+                self.startup.phase = StartupPhase::WarmingForLanding {
                     expected,
                     connected: std::collections::BTreeSet::new(),
                 };
             }
             Some(path) => {
                 self.set_app_phase(AppPhase::LoadingSession);
-                self.startup = StartupPhase::Warming {
+                self.startup.phase = StartupPhase::Warming {
                     expected,
                     connected: std::collections::BTreeSet::new(),
                     path,
@@ -118,14 +129,14 @@ impl App {
     /// fire a `score` query before the head breakdown has stamped.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) const fn startup_settled(&self) -> bool {
-        matches!(self.startup, StartupPhase::Done)
+        matches!(self.startup.phase, StartupPhase::Done)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn advance_startup(&mut self) {
-        match std::mem::replace(&mut self.startup, StartupPhase::Idle) {
+        match std::mem::replace(&mut self.startup.phase, StartupPhase::Idle) {
             StartupPhase::Idle => {}
-            StartupPhase::Done => self.startup = StartupPhase::Done,
+            StartupPhase::Done => self.startup.phase = StartupPhase::Done,
             StartupPhase::Warming {
                 expected,
                 mut connected,
@@ -135,9 +146,9 @@ impl App {
                     connected.insert(plugin_id);
                 }
                 if connected.is_superset(&expected) {
-                    self.startup = self.warms_done_load_and_kick_inits(&path);
+                    self.startup.phase = self.warms_done_load_and_kick_inits(&path);
                 } else {
-                    self.startup = StartupPhase::Warming {
+                    self.startup.phase = StartupPhase::Warming {
                         expected,
                         connected,
                         path,
@@ -158,9 +169,9 @@ impl App {
                     // carried on the Init payload, so the first score can
                     // query it. Tick's at-rest gate may also fire, but
                     // `request_scores` coalesces, so this overlap is harmless.
-                    self.startup = self.kick_first_score_then_phase();
+                    self.startup.phase = self.kick_first_score_then_phase();
                 } else {
-                    self.startup = StartupPhase::Initializing { expected, adopted };
+                    self.startup.phase = StartupPhase::Initializing { expected, adopted };
                 }
             }
             StartupPhase::Scoring => {
@@ -178,9 +189,9 @@ impl App {
                     || !self.runner_client.has_pending_score_queries()
                 {
                     self.enter_session_from_startup();
-                    self.startup = StartupPhase::Done;
+                    self.startup.phase = StartupPhase::Done;
                 } else {
-                    self.startup = StartupPhase::Scoring;
+                    self.startup.phase = StartupPhase::Scoring;
                 }
             }
             StartupPhase::WarmingForLanding {
@@ -194,9 +205,9 @@ impl App {
                     connected.insert(plugin_id);
                 }
                 if connected.is_superset(&expected) {
-                    self.startup = StartupPhase::Done;
+                    self.startup.phase = StartupPhase::Done;
                 } else {
-                    self.startup = StartupPhase::WarmingForLanding { expected, connected };
+                    self.startup.phase = StartupPhase::WarmingForLanding { expected, connected };
                 }
             }
         }
@@ -242,8 +253,8 @@ impl App {
         self.set_app_phase(AppPhase::InSession);
         // Consume the stashed camera intent + puzzle SS before the engine
         // borrow (these are separate `App` fields from `engine`).
-        let camera = std::mem::take(&mut self.startup_camera);
-        let ss_override = self.startup_ss_override.take();
+        let camera = std::mem::take(&mut self.startup.camera);
+        let ss_override = self.startup.ss_override.take();
         // Choose the connection provider and (if a plugin provides them)
         // populate the held set BEFORE the rebake below stamps the assembly,
         // so the first display already carries the plugin's connections and
@@ -304,17 +315,17 @@ impl App {
             crate::viz::refresh::refresh_clashes(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view_options,
+                &self.view.options,
             );
             crate::viz::refresh::refresh_external_cavities(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view_options,
+                &self.view.options,
             );
             crate::viz::refresh::refresh_exposed_hydrophobics(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view_options,
+                &self.view.options,
             );
         }
         // The design-gating overlay is static per puzzle (the mask is set at
@@ -350,7 +361,7 @@ impl App {
                 // engine is given the persisted-or-seeded options. The eager set
                 // + note here is drained by the surrounding tick (advance_startup
                 // runs before this tick's `SessionUpdate` drain + render seam).
-                if self.view_settings_touched {
+                if self.view.touched {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session("Default");
@@ -382,7 +393,7 @@ impl App {
     /// sessions, so the kicked `Init`s re-bind every plugin to this structure.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn arm_session_bringup(&mut self, loaded: bool) {
-        self.startup = if loaded {
+        self.startup.phase = if loaded {
             self.arm_plugin_bringup()
         } else {
             // Nothing loaded; clear the loading screen degraded (viewer-only).

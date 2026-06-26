@@ -445,6 +445,21 @@ impl RunnerClient {
     pub(crate) const fn take_pull_drag(&mut self) -> Option<crate::pull_drag::PullDrag> {
         self.stream_host.pull_drag.take()
     }
+
+    /// Latch (or clear, with `None`) the pull intent at pointer-down.
+    pub(crate) fn set_pending_pull_origin(&mut self, origin: Option<crate::pull_drag::PullRoute>) {
+        self.stream_host.pending_pull_origin = origin;
+    }
+
+    /// Whether a pull intent is latched (the pointer-move interception guard).
+    pub(crate) const fn has_pending_pull_origin(&self) -> bool {
+        self.stream_host.pending_pull_origin.is_some()
+    }
+
+    /// Take + clear the latched pull intent on the consuming pointer-move.
+    pub(crate) const fn take_pending_pull_origin(&mut self) -> Option<crate::pull_drag::PullRoute> {
+        self.stream_host.pending_pull_origin.take()
+    }
 }
 
 /// Reshape a runner `OpDispatchError` into the core-side [`DispatchError`].

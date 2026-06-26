@@ -35,6 +35,7 @@ fn mk_bulk(id: EntityId) -> MoleculeEntity {
         vec![mk_atom()],
         *b"HOH",
         1,
+        String::from("W"),
     ))
 }
 

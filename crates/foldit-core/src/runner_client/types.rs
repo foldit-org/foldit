@@ -244,6 +244,13 @@ pub struct StreamHost {
     /// field carries the extra viso-side bookkeeping needed for
     /// pointer-move (`PullInfo` + op id).
     pub(crate) pull_drag: Option<crate::pull_drag::PullDrag>,
+    /// One-slot latch for the pull intent resolved at pointer-down.
+    /// `Some(route)` from pointer-down on a left-button target until the
+    /// pointer-move that consumes it (or the pointer-up that drops it).
+    /// `take`n exactly once so a gesture makes at most one stream-start
+    /// attempt; lives beside `pull_drag` as the pre-drag stage of the
+    /// same gesture FSM.
+    pub(crate) pending_pull_origin: Option<crate::pull_drag::PullRoute>,
 }
 
 /// Bundle stored per running stream so `drain_op_events` /
