@@ -598,6 +598,35 @@ impl Session {
         }
     }
 
+    /// Register a newly-adopted design entity as fully designable, so every
+    /// residue on `entity` answers `true` to [`Session::is_designable`].
+    ///
+    /// A no-op unless design gating is already active (`design_gating` is
+    /// `Some`): a non-design session must stay ungated, and a fabricated
+    /// gating map would silently lock everything else. The installed mask
+    /// covers the entity's whole residue range `0..=residue_count-1`, the
+    /// index domain the design-gating overlay and dispatch query over.
+    pub(crate) fn register_full_designable_entity(
+        &mut self,
+        entity: EntityId,
+        residue_count: usize,
+    ) {
+        let Some(puzzle) = self.puzzle.as_mut() else {
+            return;
+        };
+        let Some(gating) = puzzle.design_gating.as_mut() else {
+            return;
+        };
+        let Some(last) = residue_count.checked_sub(1) else {
+            return;
+        };
+        let end = u32::try_from(last).unwrap_or(u32::MAX);
+        gating.insert(
+            entity,
+            crate::puzzle_setup::DesignMask { ranges: vec![0..=end] },
+        );
+    }
+
     /// Begin a session over a freshly-loaded structure: install its display
     /// `title` and `puzzle` add-on in one funnel. `puzzle` is `Some` for a
     /// campaign/intro puzzle load (carrying its filters + tutorial

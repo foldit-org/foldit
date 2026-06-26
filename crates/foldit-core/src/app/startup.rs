@@ -164,11 +164,19 @@ impl App {
                 }
             }
             StartupPhase::Scoring => {
-                // Watch the head-breakdown predicate: tick step-2's
-                // `poll_async_scores` stamps it; we only flip into the
-                // session once it lands. No edit is open during startup, so
-                // the breakdown reads the committed head.
-                if self.store.current_composition_breakdown().is_some() {
+                // Flip into the session once the first score's breakdown
+                // stamps (tick step-2's `poll_async_scores` stamps it; no edit
+                // is open during startup, so it reads the committed head). If
+                // every kicked query has instead returned without stamping,
+                // enter the session unscored rather than wait on a breakdown
+                // that will never come: a polymer-less (e.g. ligand-only) load
+                // gives the scorer nothing to score, so its report is
+                // content-empty and dropped, and the query's pending slot
+                // clears on that empty reply. The at-rest scorer re-fires once
+                // a later edit introduces scorable geometry.
+                if self.store.current_composition_breakdown().is_some()
+                    || !self.runner_client.has_pending_score_queries()
+                {
                     self.enter_session_from_startup();
                     self.startup = StartupPhase::Done;
                 } else {
@@ -199,8 +207,10 @@ impl App {
     /// to stamp. If nothing went in flight (no scorer queued anything), the
     /// breakdown predicate would never flip, so enter the session immediately
     /// rather than hang the loading screen. A scorer that replies with an
-    /// empty / degraded report and never stamps still waits in `Scoring` by
-    /// design; only the no-scorer case takes the immediate-enter path.
+    /// empty / degraded report and never stamps does not hang either: the
+    /// `Scoring` arm falls through to the session unscored once that query's
+    /// pending slot clears, so a polymer-less load with nothing to score still
+    /// reaches `Done`.
     ///
     /// The immediate-enter branch mirrors the `Scoring` arm's stamp terminal
     /// (`enter_session` + `InSession` + `Done`) so both paths clear the

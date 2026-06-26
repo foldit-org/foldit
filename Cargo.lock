@@ -3029,7 +3029,9 @@ dependencies = [
 
 [[package]]
 name = "molex"
-version = "0.6.0"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "080217ab09ccb750133e94f120570158fc2a3fe4ce74f7662ba8dbc00657a3f8"
 dependencies = [
  "compact_str",
  "flate2",

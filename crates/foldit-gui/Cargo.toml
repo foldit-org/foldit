@@ -14,7 +14,7 @@ publish = false
 workspace = true
 
 [dependencies]
-molex = { version = "0.6.0", features = ["serde", "specta"] }
+molex = { version = "0.7.1", features = ["serde", "specta"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bitflags = "2"

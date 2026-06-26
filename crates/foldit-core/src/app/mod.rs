@@ -593,8 +593,17 @@ impl App {
             let view_toggled = changes
                 .iter()
                 .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged));
+            // A creates-entities op (e.g. RFdiffusion3) opens no edit, so
+            // `has_pending` is false while it streams. Its frames are noisy
+            // diffusion intermediates (the first is near-superimposed atoms),
+            // so evaluating overlays against them yields garbage clashes that
+            // then persist for the whole action. Gate the refresh off while a
+            // streaming preview is live; it re-runs on the committed design.
             if self.engine.is_some()
-                && ((self.startup_settled() && has_geometry && !self.store.has_pending())
+                && ((self.startup_settled()
+                    && has_geometry
+                    && !self.store.has_pending()
+                    && self.creates_previews.is_empty())
                     || view_toggled)
             {
                 crate::viz::refresh::refresh_external_cavities(
@@ -664,7 +673,15 @@ impl App {
         // outstanding query per provider is the most in flight.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if self.startup_settled() && has_geometry && !self.store.has_pending() {
+            // Also held off while a creates-entities preview streams: those
+            // frames are noisy diffusion intermediates, so scoring them yields
+            // a meaningless clash-saturated total. Re-scores on the committed
+            // design once the stream's terminal clears `creates_previews`.
+            if self.startup_settled()
+                && has_geometry
+                && !self.store.has_pending()
+                && self.creates_previews.is_empty()
+            {
                 self.request_scores();
             }
         }

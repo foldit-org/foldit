@@ -37,10 +37,17 @@ impl App {
             Some((preview_id, _)) => {
                 let _ = self.store.remove_preview(preview_id);
                 let id = self.insert_design_preview(payload);
+                // A streaming design frame renders as the gray-tube preview
+                // ghost like every other preview; the rebuild minted a fresh
+                // id, so re-mark it provisional.
+                self.store.set_entity_provisional(id, true);
                 let _ = self.creates_previews.insert(token, (id, atoms));
             }
             None => {
                 let id = self.insert_design_preview(payload);
+                // First frame: render the streaming design as the gray-tube
+                // preview ghost (provisional) like every other preview.
+                self.store.set_entity_provisional(id, true);
                 let _ = self.creates_previews.insert(token, (id, atoms));
             }
         }
@@ -286,17 +293,22 @@ impl App {
     }
 
     /// Insert `payload` as a transient preview (fresh id) and promote it.
+    /// On a design-gated puzzle the promoted entity is registered as fully
+    /// designable, making the created design itself the designable target.
     #[cfg(not(target_arch = "wasm32"))]
     fn adopt_one_entity(&mut self, payload: molex::MoleculeEntity) {
+        let residue_count = payload.residue_count();
         let id = self.insert_design_preview(payload);
-        self.promote_adopted(id);
+        if self.promote_adopted(id) {
+            self.store.register_full_designable_entity(id, residue_count);
+        }
     }
 
     /// Promote an already-inserted preview `id` into history as a new
     /// committed entity, scoring the resulting checkpoint. Discards the
-    /// preview on failure.
+    /// preview on failure. Returns whether promotion succeeded.
     #[cfg(not(target_arch = "wasm32"))]
-    fn promote_adopted(&mut self, id: molex::EntityId) {
+    fn promote_adopted(&mut self, id: molex::EntityId) -> bool {
         match self.store.promote_preview(
             id,
             CheckpointKind::PromotedPreview { entity: id },
@@ -304,10 +316,14 @@ impl App {
             None,
             "RFdiffusion3",
         ) {
-            Ok(ckpt) => self.score_committed_checkpoint(ckpt),
+            Ok(ckpt) => {
+                self.score_committed_checkpoint(ckpt);
+                true
+            }
             Err(e) => {
                 log::warn!("promote_adopted: promote failed: {e}");
                 let _ = self.store.remove_preview(id);
+                false
             }
         }
     }

@@ -1162,3 +1162,102 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
         "focusing the protein brings locked residue 164 back into scope",
     );
 }
+
+#[test]
+fn adopted_design_entity_registers_as_fully_designable() {
+    // A created (rfd3) design entity adopted into a design-gated session must
+    // become the designable target: every residue on it answers `true` to
+    // `is_designable`. Exercises the Session mutator the adopt path calls
+    // (`register_full_designable_entity`) without App/host/runner.
+    const N: usize = 12;
+    let n_u32 = u32::try_from(N).expect("N fits u32");
+
+    let mut store = Session::new();
+    store.start(
+        "Design".to_owned(),
+        Some(Puzzle {
+            id: 0,
+            start_energy: 0.0,
+            completion_energy: 0.0,
+            weight_patch: None,
+            filters: Vec::new(),
+            bubbles: None,
+            current_bubble: None,
+            constraints: Vec::new(),
+            ligands: Vec::new(),
+            // Gating active (a design puzzle) but the new entity is absent.
+            design_gating: Some(BTreeMap::new()),
+        }),
+    );
+    assert!(store.design_gating_active(), "the puzzle declares design gating");
+
+    let design = store
+        .load_entity_into_history(mk_protein(mk_dummy_id(), N), "rfd3")
+        .expect("the design entity should commit");
+
+    // Before registration: absent from the gating map → secure-by-default
+    // locks the whole entity (the bug).
+    for r in 0..n_u32 {
+        assert!(
+            !store.is_designable(design, r),
+            "residue {r} is locked before registration",
+        );
+    }
+
+    store.register_full_designable_entity(design, N);
+
+    // After registration: every residue is designable.
+    for r in 0..n_u32 {
+        assert!(
+            store.is_designable(design, r),
+            "residue {r} is designable after registration",
+        );
+    }
+
+    // The selection gate (Shake Mutate enablement) passes over the design.
+    store.set_focus(viso::Focus::All);
+    store.select_residue(design, 0);
+    store.select_residue(design, n_u32 - 1);
+    assert!(
+        store.selection_is_designable(),
+        "a selection on the fully-designable design passes the gate",
+    );
+}
+
+#[test]
+fn register_full_designable_entity_is_noop_when_gating_inactive() {
+    // A non-design context (no gating) must stay ungated: registration is a
+    // no-op, so designability remains governed elsewhere (secure-by-default
+    // `false` here).
+    const N: usize = 8;
+
+    let mut store = Session::new();
+    store.start(
+        "Free".to_owned(),
+        Some(Puzzle {
+            id: 0,
+            start_energy: 0.0,
+            completion_energy: 0.0,
+            weight_patch: None,
+            filters: Vec::new(),
+            bubbles: None,
+            current_bubble: None,
+            constraints: Vec::new(),
+            ligands: Vec::new(),
+            design_gating: None,
+        }),
+    );
+    assert!(!store.design_gating_active(), "no gating on this puzzle");
+
+    let design = store
+        .load_entity_into_history(mk_protein(mk_dummy_id(), N), "rfd3")
+        .expect("the entity should commit");
+
+    store.register_full_designable_entity(design, N);
+
+    assert!(!store.design_gating_active(), "registration fabricated no gating");
+    assert!(
+        !store.is_designable(design, 0),
+        "an ungated session stays secure-by-default",
+    );
+}
