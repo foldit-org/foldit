@@ -79,7 +79,7 @@ pub struct OpDispatch {
     pub params: std::collections::HashMap<String, crate::state::ParamValue>,
 }
 
-/// Native GUI / chrome commands — the non-plugin action lane.
+/// Native GUI / chrome commands - the non-plugin action lane.
 ///
 /// History navigation, tutorial-bubble stepping, view options, and
 /// structure / puzzle loading all ride this typed envelope. Distinct

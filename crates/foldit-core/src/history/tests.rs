@@ -545,6 +545,53 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
     assert!(!h.has_pending());
 }
 
+#[test]
+fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
+    // A multi-segment preview op: each accepted candidate commits a
+    // checkpoint on the lane, then the same edit re-opens under the same
+    // token from the just-committed head, so the lane advances segment-by-
+    // segment while the stream stays open. No begin args are re-supplied.
+    let (mut h, ids) = mk_history(1);
+    let e = ids[0];
+    let rid = 9u64;
+    let ckpt_len_before = h.checkpoints().len();
+
+    h.begin_action([e], plugin_op("rebuild"), Cow::Borrowed("Rebuild"), rid)
+        .unwrap();
+    let committed_before_seg1 = h.lane(e).unwrap().snapshot(h.lane(e).unwrap().head())
+        .unwrap()
+        .parent
+        .unwrap();
+
+    // First segment commits one checkpoint and re-opens the edit.
+    let c1 = h.commit_and_reopen(rid).unwrap();
+    assert_eq!(h.checkpoints().len(), ckpt_len_before + 1);
+    assert_eq!(h.checkpoints().head(), c1);
+    // The label rode the snapshot, so the committed checkpoint carries it
+    // without the caller re-supplying it.
+    assert_eq!(h.checkpoint(c1).unwrap().label, Cow::Borrowed("Rebuild"));
+    // The edit is still open under the same id, re-forked from the new head:
+    // the open tentative's parent is now the segment-1 committed snapshot,
+    // not the pre-edit head.
+    assert!(h.is_pending(rid));
+    let tentative = h.lane(e).unwrap().head();
+    let reopened_parent = h.lane(e).unwrap().snapshot(tentative).unwrap().parent.unwrap();
+    assert_ne!(reopened_parent, committed_before_seg1);
+    assert_eq!(reopened_parent, h.checkpoint(c1).unwrap().entity_heads[&e]);
+
+    // Second segment commits off the reopened edit, advancing the lane again.
+    let c2 = h.commit_and_reopen(rid).unwrap();
+    assert_eq!(h.checkpoints().len(), ckpt_len_before + 2);
+    assert_eq!(h.checkpoint(c2).unwrap().parent, Some(c1));
+    assert_eq!(h.checkpoint(c2).unwrap().label, Cow::Borrowed("Rebuild"));
+    assert!(h.is_pending(rid));
+
+    // The terminal segment commits without re-opening: the edit closes.
+    let c3 = h.commit_action(rid).unwrap();
+    assert_eq!(h.checkpoint(c3).unwrap().parent, Some(c2));
+    assert!(!h.has_pending());
+}
+
 // ── Lane undo ────────────────────────────────────────────────────
 
 #[test]

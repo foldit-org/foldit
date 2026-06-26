@@ -2,15 +2,14 @@
 //!
 //! `GuiProjector` is the state half of the GUI consumer: a single
 //! history-version debounce cursor. Its `consume` method projects
-//! `Session` / `VisoEngine` / `RunnerClient` state into `FrontendState`
+//! `Session` / `VisoEngine` / `RunnerClient` state into `GuiState`
 //! and additionally reads the History cursor.
 
 use web_time::{Instant, UNIX_EPOCH};
 
 use foldit_gui::{
-    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, FrontendState, HistoryLiveUpdate,
-    HistorySection, PanelPosition, PanelsSection, ProgressEntry, ProgressSection, SegmentInfo,
-    TextBubbleButton, TextBubblePayload, WireId,
+    CheckpointInfo, CheckpointKindTag, DirtyFlags, FilterStatus, GuiState, HistoryLiveUpdate,
+    HistorySection, SegmentInfo, SegmentTarget, TextBubbleButton, TextBubblePayload, WireId,
 };
 use viso::{Focus, VisoEngine};
 
@@ -22,6 +21,10 @@ use crate::session::{Puzzle, Session, SessionUpdate};
 pub struct GuiProjector {
     /// Debounce cursor for the history channel (topology + live).
     pub(crate) history_sync: HistorySyncCursor,
+    /// Accumulator of App-owned GUI dirty bits the `SessionUpdate` batch cannot
+    /// express (segment), plus the full-populate seed
+    /// (`DirtyFlags::all()`) raised on session birth. Drained at `consume`.
+    pending: DirtyFlags,
 }
 
 impl GuiProjector {
@@ -32,7 +35,13 @@ impl GuiProjector {
                 live: None,
                 live_push_at: None,
             },
+            pending: DirtyFlags::empty(),
         }
+    }
+
+    /// OR-accumulate App-owned dirty bits to drain on the next `consume`.
+    pub(crate) fn mark_dirty(&mut self, flags: DirtyFlags) {
+        self.pending |= flags;
     }
 }
 
@@ -182,28 +191,6 @@ pub struct GuiSources<'a> {
     /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
     pub host: &'a dyn crate::HostResources,
-    /// App-owned active view options for the `VIEW` section. Lives on `App`
-    /// (not `Session`) so it survives a topology swap.
-    pub view_options: &'a viso::options::VisoOptions,
-    /// App-owned active preset name for the `VIEW` section, or `None` when the
-    /// options were set manually.
-    pub active_preset: Option<&'a str>,
-    /// Open segment-info target with its cached identity + SS, or `None`
-    /// when the panel is closed. App-owned (survives a topology swap until
-    /// the target stops resolving).
-    pub open_segment: Option<&'a crate::app::SegmentTarget>,
-    /// Panels currently shown (by string id). App-owned so visibility
-    /// survives a topology swap.
-    pub open_panels: &'a std::collections::BTreeSet<String>,
-    /// Per-panel dragged top-left positions. App-owned.
-    pub panel_positions: &'a std::collections::BTreeMap<String, (f32, f32)>,
-    /// Puzzle high-score progress: best display score per puzzle id.
-    /// App-owned so it survives a topology swap.
-    pub progress: &'a std::collections::BTreeMap<u32, f64>,
-    /// Backend-authoritative tutorial-hint visibility for the `UI` section.
-    pub hints_visible: bool,
-    /// Backend-authoritative fullscreen flag for the `UI` section.
-    pub fullscreen: bool,
 }
 
 impl GuiProjector {
@@ -220,11 +207,12 @@ impl GuiProjector {
     ///
     /// Per-section dirtiness is derived entirely from the drained `updates`
     /// batch - each `SessionUpdate` variant maps to the GUI sections it
-    /// invalidates - OR'd with the App-side `pending` accumulator. The
-    /// accumulator carries the App-owned dirty bits the `updates` batch cannot
-    /// express (segment / panels / ui / progress), plus the full-populate seed
-    /// (`DirtyFlags::all()`) the tick raises on session birth (the Loading →
-    /// `InSession` flip and every reload) to push every section once.
+    /// invalidates - OR'd with the owned `pending` accumulator, which is
+    /// drained here. The accumulator carries the App-owned dirty bits the
+    /// `updates` batch cannot express (segment), plus
+    /// the full-populate seed (`DirtyFlags::all()`) raised on session birth
+    /// (the Loading → `InSession` flip and every reload) to push every section
+    /// once.
     ///
     /// Returns `true` when the segment arm auto-closed (the cached target
     /// no longer resolves): the App owns the open target, so it clears its
@@ -232,15 +220,14 @@ impl GuiProjector {
     pub(crate) fn consume(
         &mut self,
         updates: &[SessionUpdate],
-        pending: DirtyFlags,
         src: &GuiSources<'_>,
-        frontend: &mut FrontendState,
+        frontend: &mut GuiState,
     ) -> bool {
         // FPS and selected count change every frame - always push them.
         frontend.set_fps(src.engine.fps());
         frontend.ui.selected_count = src.session.selection_total_count();
 
-        let dirty = compute_dirty(updates) | pending;
+        let dirty = compute_dirty(updates) | std::mem::take(&mut self.pending);
 
         if dirty.is_empty() {
             return false;
@@ -262,7 +249,7 @@ impl GuiProjector {
             project_actions(src.session, src.driver, frontend);
         }
         if dirty.contains(DirtyFlags::VIEW) {
-            project_view(src.view_options, src.active_preset, src.host, frontend);
+            project_view(src.host, frontend);
         }
         if dirty.contains(DirtyFlags::SELECTION) {
             project_selection(src.session, frontend);
@@ -271,20 +258,13 @@ impl GuiProjector {
             project_scene(src.session, src.engine, frontend);
         }
         let auto_closed = if dirty.contains(DirtyFlags::SEGMENT) {
-            project_segment(src.open_segment, src.session, src.engine, frontend)
+            let (info, closed) =
+                project_segment(frontend.segment_target(), src.session, src.engine);
+            frontend.set_segment_info(info);
+            closed
         } else {
             false
         };
-        if dirty.contains(DirtyFlags::PANELS) {
-            project_panels(src.open_panels, src.panel_positions, frontend);
-        }
-        if dirty.contains(DirtyFlags::PROGRESS) {
-            project_progress(src.progress, frontend);
-        }
-        if dirty.contains(DirtyFlags::UI) {
-            frontend.ui.hints_visible = src.hints_visible;
-            frontend.ui.fullscreen = src.fullscreen;
-        }
 
         sync_history(&mut self.history_sync, src.session, frontend);
         auto_closed
@@ -320,7 +300,7 @@ fn compute_dirty(updates: &[SessionUpdate]) -> DirtyFlags {
 
 /// Project the `PUZZLE` section: the puzzle-panel title/objective plus the
 /// puzzle-swap bubble push.
-fn project_puzzle(session: &Session, frontend: &mut FrontendState) {
+fn project_puzzle(session: &Session, frontend: &mut GuiState) {
     // The puzzle panel's title is the standalone session title,
     // which on a puzzle load equals the puzzle name.
     match session.puzzle() {
@@ -343,7 +323,7 @@ fn project_puzzle(session: &Session, frontend: &mut FrontendState) {
 
 /// Project the `SCORE` section: the display score plus the puzzle victory
 /// latch.
-fn project_score(session: &Session, frontend: &mut FrontendState) {
+fn project_score(session: &Session, frontend: &mut GuiState) {
     if let Some(score) = session.display_score() {
         frontend.set_score(score, false);
         // Victory check: with a puzzle loaded, latch it complete the
@@ -362,31 +342,29 @@ fn project_score(session: &Session, frontend: &mut FrontendState) {
 ///
 /// Identity and SS come from the cached `target`; only the energies and
 /// the screen anchor are rebuilt here, so a streaming score never re-runs
-/// DSSP. Returns `true` when the cached target no longer resolves (entity
-/// or residue gone): the section is cleared and the App drops its copy.
+/// DSSP. Returns the fresh `segment_info` payload (`None` clears the panel)
+/// and `true` when the cached target no longer resolves (entity or residue
+/// gone) so the App drops its copy. The caller applies the payload, keeping
+/// the target read (a borrow of `GuiState`) disjoint from the write.
 fn project_segment(
-    target: Option<&crate::app::SegmentTarget>,
+    target: Option<&SegmentTarget>,
     session: &Session,
     engine: &VisoEngine,
-    frontend: &mut FrontendState,
-) -> bool {
+) -> (Option<SegmentInfo>, bool) {
     let Some(target) = target else {
-        frontend.set_segment_info(None);
-        return false;
+        return (None, false);
     };
 
     // Auto-close when the target stops resolving (topology swap, entity or
     // residue removed). The cached identity is stale at that point.
     let Some(entity) = session.entity(target.entity) else {
-        frontend.set_segment_info(None);
-        return true;
+        return (None, true);
     };
     let still_present = entity
         .residues()
         .is_some_and(|r| target.residue < r.len());
     if !still_present {
-        frontend.set_segment_info(None);
-        return true;
+        return (None, true);
     }
 
     // Fresh energies: the raw per-term row for this residue zipped against
@@ -424,7 +402,7 @@ fn project_segment(
         .and_then(|world| engine.world_to_screen(world))
         .map(|v| (v.x, v.y));
 
-    frontend.set_segment_info(Some(SegmentInfo {
+    let info = SegmentInfo {
         residue_number: target.residue_number,
         chain: target.chain.clone(),
         aa_three: target.aa_three.clone(),
@@ -434,8 +412,8 @@ fn project_segment(
         term_values,
         weighted,
         anchor,
-    }));
-    false
+    };
+    (Some(info), false)
 }
 
 /// World position of a residue's CA atom, or `None` for a non-protein
@@ -455,43 +433,8 @@ pub fn ca_world_position(
         .map(|(_, pos)| *pos)
 }
 
-/// Project the `PANELS` section: the backend-authoritative open set and
-/// per-panel positions, built from the App-owned state.
-fn project_panels(
-    open_panels: &std::collections::BTreeSet<String>,
-    panel_positions: &std::collections::BTreeMap<String, (f32, f32)>,
-    frontend: &mut FrontendState,
-) {
-    let open = open_panels.iter().cloned().collect();
-    let positions = panel_positions
-        .iter()
-        .map(|(panel, (x, y))| PanelPosition {
-            panel: panel.clone(),
-            x: *x,
-            y: *y,
-        })
-        .collect();
-    frontend.set_panels(PanelsSection { open, positions });
-}
-
-/// Project the `PROGRESS` section: the per-puzzle high-score map, built
-/// from the App-owned progress state.
-fn project_progress(
-    progress: &std::collections::BTreeMap<u32, f64>,
-    frontend: &mut FrontendState,
-) {
-    let entries = progress
-        .iter()
-        .map(|(&puzzle_id, &high_score)| ProgressEntry {
-            puzzle_id,
-            high_score,
-        })
-        .collect();
-    frontend.set_progress(ProgressSection { entries });
-}
-
 /// Project the `ACTIONS` section: the focus- + selection-aware op catalog.
-fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut FrontendState) {
+fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut GuiState) {
     // Availability depends on focus + selection + lock state.
     // Source focus from the authoritative session (same as the
     // SCENE arm below), then hand the driver the selection + an
@@ -517,21 +460,19 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut Fron
 
 /// Project the `VIEW` section: view options, the static schema, and the
 /// host-sourced preset list.
-fn project_view(
-    view_options: &viso::options::VisoOptions,
-    active_preset: Option<&str>,
-    host: &dyn crate::HostResources,
-    frontend: &mut FrontendState,
-) {
-    // Source of truth is the App-owned view options, not the engine: the
-    // engine is a follower that the tick re-applies on `ViewOptionsChanged`.
-    // The `display` group is the only sparse one (its `DisplayOverrides`
-    // drop `None` fields on serialization); densify it so the settings
-    // panel reads each control's effective value instead of falling back to
-    // a control minimum. The other groups are already dense.
-    let mut display_dense = view_options.clone();
+fn project_view(host: &dyn crate::HostResources, frontend: &mut GuiState) {
+    // Source of truth is the frontend's faithful (sparse) view options, not
+    // the engine: the engine is a follower that the tick re-applies on
+    // `ViewOptionsChanged`. Deserialize back into viso's options, then
+    // densify the `display` group — the only sparse one (its
+    // `DisplayOverrides` drop `None` fields on serialization) — so the
+    // settings panel reads each control's effective value instead of falling
+    // back to a control minimum. The other groups are already dense.
+    let mut display_dense: viso::options::VisoOptions =
+        serde_json::from_value(frontend.view_options_raw().clone()).unwrap_or_default();
     display_dense.display = display_dense.display.with_resolved_overrides();
-    frontend.view.options = serde_json::to_value(&display_dense).unwrap_or_default();
+    let dense = serde_json::to_value(&display_dense).unwrap_or_default();
+    frontend.set_view_options_dense(dense);
 
     if frontend.view.options_schema.is_null() {
         frontend.view.options_schema =
@@ -552,7 +493,8 @@ fn project_view(
             .map(viso::options::VisoOptions::list_presets)
             .unwrap_or_default();
     }
-    frontend.view.active_preset = active_preset.map(String::from);
+    // `frontend.view.active_preset` is already authoritative on the frontend
+    // (set by the inbound manual / preset edit), so this arm leaves it as-is.
 
     // This arm writes `frontend.view.*` by direct field assignment, so it
     // must raise the VIEW bit itself: the transmit step only emits the view
@@ -562,7 +504,7 @@ fn project_view(
 }
 
 /// Project the `SELECTION` section: the per-entity residue selection.
-fn project_selection(session: &Session, frontend: &mut FrontendState) {
+fn project_selection(session: &Session, frontend: &mut GuiState) {
     let entries: Vec<foldit_gui::EntitySelection> = session
         .selection()
         .iter()
@@ -576,7 +518,7 @@ fn project_selection(session: &Session, frontend: &mut FrontendState) {
 
 /// Project the `SCENE` section: the per-entity scene listing plus the
 /// focused-entity highlight.
-fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut FrontendState) {
+fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut GuiState) {
     use molex::MoleculeType;
     let mut scene_entities = Vec::new();
     for (eid, _meta) in session.iter() {
@@ -636,7 +578,7 @@ fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut Frontend
 ///     50ms (20Hz) debounce so per-cycle Rosetta scores don't
 ///     saturate the IPC. The final cycle on commit always lands
 ///     because committing also bumps `topology_version`.
-fn sync_history(cursor: &mut HistorySyncCursor, session: &Session, frontend: &mut FrontendState) {
+fn sync_history(cursor: &mut HistorySyncCursor, session: &Session, frontend: &mut GuiState) {
     let topology = session.history().topology_version();
     let live = session.history().live_version();
     let topology_changed = cursor.topology != Some(topology);
@@ -691,14 +633,13 @@ mod tests {
     /// null schema. Drive the arm directly and assert the bit lands.
     #[test]
     fn project_view_raises_view_dirty_bit() {
-        let view_options = viso::options::VisoOptions::default();
         let host = TestHost;
-        let mut frontend = FrontendState::new();
+        let mut frontend = GuiState::new();
         // Clear any construction-time dirt so the assertion is about
         // `project_view`'s own raise.
         let _ = frontend.take_dirty();
 
-        project_view(&view_options, None, &host, &mut frontend);
+        project_view(&host, &mut frontend);
 
         assert!(
             frontend.take_dirty().contains(DirtyFlags::VIEW),

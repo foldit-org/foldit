@@ -74,6 +74,18 @@ impl Session {
         Ok(ckpt)
     }
 
+    /// Commit the action identified by `request_id` and re-open an edit
+    /// over the same lanes under the same id for the next segment of a
+    /// multi-segment preview op. Mints the committed checkpoint exactly
+    /// like [`Self::commit_action`], then re-forks each lane from its
+    /// just-committed head reusing the prior edit's kind and label.
+    /// Returns the committed checkpoint id.
+    pub fn commit_and_reopen(&mut self, request_id: u64) -> Result<CheckpointId, SessionError> {
+        let ckpt = self.history.commit_and_reopen(request_id)?;
+        self.apply(SessionUpdate::HeadMoved);
+        Ok(ckpt)
+    }
+
     /// Abort the action identified by `request_id`. Removes its tentative
     /// snapshot(s); lane heads fall back to their parents.
     pub fn abort_action(&mut self, request_id: u64) -> Result<(), SessionError> {

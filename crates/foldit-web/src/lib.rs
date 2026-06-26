@@ -97,7 +97,7 @@ impl FolditApp {
 
     /// Register the JS callback that receives state-section pushes. The
     /// callback is invoked as `cb(jsonString)` where `jsonString` is the
-    /// stringified `Partial<FrontendState>`.
+    /// stringified `Partial<GuiState>`.
     #[wasm_bindgen(js_name = setStateCallback)]
     pub fn set_state_callback(&self, cb: js_sys::Function) {
         *self.state_cb.borrow_mut() = Some(cb);
@@ -257,7 +257,7 @@ impl bridge::Transport for WebTransport {
 }
 
 // rAF loop: self-rescheduling closure that drives App::tick(dt) and
-// then drains the App-owned FrontendState dirty diff into the JS
+// then drains the App-owned GuiState dirty diff into the JS
 // state callback.
 
 fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: ProgressLoadCell) {

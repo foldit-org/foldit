@@ -97,12 +97,15 @@ impl App {
             AppCommand::LoadPuzzle { puzzle_id } => self.handle_load_puzzle(puzzle_id),
             AppCommand::LoadPuzzleDir { path } => self.handle_load_puzzle_dir(&path),
             AppCommand::SetViewOptions { options } => {
-                // A manual edit: store the App-owned options, clear the active
-                // preset (manually-set options no longer match a named preset),
-                // and latch the player-touched flag
+                // A manual edit: store the faithful (sparse) options, clear the
+                // active preset (manually-set options no longer match a named
+                // preset), and latch the player-touched flag. Deserialize the
+                // inbound dense options into viso's type, then re-serialize the
+                // faithful form so the frontend holds the round-trip source.
                 match serde_json::from_value::<viso::options::VisoOptions>(options) {
                     Ok(opts) => {
-                        if self.view.set_manual(opts) {
+                        let faithful = serde_json::to_value(&opts).unwrap_or_default();
+                        if self.gui.set_view_manual(faithful) {
                             self.store.note_view_options_changed();
                         }
                     }
@@ -112,7 +115,7 @@ impl App {
             AppCommand::LoadViewPreset { name } => {
                 // An explicit player preset pick: latch the touched flag (so it
                 // persists across later loads) and apply the preset now.
-                self.view.touched = true;
+                self.gui.set_view_touched(true);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.apply_view_preset_to_session(&name);
                 #[cfg(target_arch = "wasm32")]
@@ -127,7 +130,7 @@ impl App {
                 // the whole VIEW section.
                 #[cfg(not(target_arch = "wasm32"))]
                 // Own the dir so the `&self.host` borrow is released before
-                // the disjoint `&mut self.engine` / `&mut self.frontend`
+                // the disjoint `&mut self.engine` / `&mut self.gui`
                 // borrows below.
                 if let Some(dir) = self
                     .host
@@ -137,9 +140,9 @@ impl App {
                     if let Some(engine) = self.engine.as_mut() {
                         engine.save_preset(&name, &dir);
                     }
-                    self.frontend.view.available_presets =
+                    self.gui.view.available_presets =
                         viso::options::VisoOptions::list_presets(&dir);
-                    self.frontend.mark_dirty(DirtyFlags::VIEW);
+                    self.gui.mark_dirty(DirtyFlags::VIEW);
                 }
                 #[cfg(target_arch = "wasm32")]
                 let _ = name;
@@ -192,7 +195,7 @@ impl App {
                 // engine. The funnel does the eager set + note itself when it
                 // seeds; the touched branch does it from the App-owned options.
                 #[cfg(not(target_arch = "wasm32"))]
-                if self.view.touched {
+                if self.gui.view_touched() {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session("Default");
@@ -242,6 +245,7 @@ impl App {
         self.store.reset();
         self.store.clear_selection();
         self.runner_client.reset_for_new_structure();
+        self.ops.clear();
 
         if let Some(engine) = self.engine.as_mut() {
             engine.clear_scores();
@@ -311,7 +315,7 @@ impl App {
                 // A puzzle may pin its own view preset; otherwise fall back to
                 // the Default preset
                 #[cfg(not(target_arch = "wasm32"))]
-                if self.view.touched {
+                if self.gui.view_touched() {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session(
@@ -405,7 +409,10 @@ impl App {
                 return;
             }
         };
-        self.view.set_preset(opts.clone(), name);
+        // Record the faithful (sparse) form as the round-trip source, keeping
+        // the dense `opts` for the eager engine sync below.
+        let faithful = serde_json::to_value(&opts).unwrap_or_default();
+        self.gui.set_view_preset(faithful, name.to_owned());
 
         // Eager engine sync
         if let Some(engine) = self.engine.as_mut() {
@@ -414,10 +421,11 @@ impl App {
         self.store.note_view_options_changed();
     }
 
-    /// Push the persisted App-owned view options to a freshly-reset engine
+    /// Push the persisted view options to a freshly-reset engine, rebuilt from
+    /// the frontend-held faithful form.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn reapply_view_options_to_engine(&mut self) {
-        let opts = self.view.options.clone();
+        let opts = self.view_options();
         if let Some(engine) = self.engine.as_mut() {
             engine.set_options(opts);
         }
@@ -612,7 +620,7 @@ mod preset_tests {
             ColorScheme::Entity,
         );
         assert!(app.active_preset().is_none());
-        assert!(!app.view.touched);
+        assert!(!app.gui.view_touched());
 
         app.apply_view_preset_to_session("Default");
 
@@ -644,21 +652,22 @@ mod preset_tests {
         );
     }
 
-    /// The view options + active preset live on `App` and survive `Session::reset`
+    /// The view options + active preset live on the frontend and survive
+    /// `Session::reset`.
     #[test]
     fn view_options_persist_across_session_reset() {
         let presets_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/view_presets");
         let mut app = App::new(Box::new(PresetHost { presets_dir }));
 
-        app.view.options = mk_non_default_options();
-        app.view.active_preset = Some("warm".to_owned());
+        let faithful = serde_json::to_value(mk_non_default_options()).unwrap();
+        app.gui.set_view_preset(faithful, "warm".to_owned());
 
         app.store.reset();
 
         assert_eq!(
             app.view_options(),
-            &mk_non_default_options(),
-            "App view options survive a topology swap",
+            mk_non_default_options(),
+            "view options survive a topology swap",
         );
         assert_eq!(
             app.active_preset(),

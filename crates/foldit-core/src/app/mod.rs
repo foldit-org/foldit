@@ -10,48 +10,40 @@
 //! Host crates wrap this in their own lifecycle, forwarding host-agnostic
 //! input types to `App`'s methods.
 
-use foldit_gui::{AppPhase, DirtyFlags, FrontendState};
+use foldit_gui::{AppPhase, DirtyFlags, GuiState};
 use viso::{KeyBindings, VisoEngine};
 
-use crate::gui_projector::{GuiProjector, GuiSources};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::history::CheckpointId;
+use crate::gui_projector::GuiSources;
 use crate::render_projector::RenderProjector;
 use crate::runner_client::RunnerClient;
-use crate::runner_projector::RunnerProjector;
 use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 
 mod dispatch;
 pub(crate) mod input;
 mod load;
-mod panels;
+#[cfg(not(target_arch = "wasm32"))]
+mod ops;
 mod preview;
-mod progress;
+mod projectors;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod score_apply;
-mod segment;
 mod startup;
 #[cfg(test)]
 mod tests;
-mod ui;
-mod view;
 
 use self::input::update_all_visualizations;
-use self::panels::PanelState;
-use self::progress::ProgressStore;
-use self::segment::SegmentPanel;
-use self::ui::UiToggles;
-use self::view::ViewState;
+#[cfg(not(target_arch = "wasm32"))]
+use self::ops::OpStreamState;
+use self::projectors::Projectors;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::load::{locate_plugin_ui_entrypoints, locate_plugins_root};
-pub use self::segment::TailUpdate;
-pub(crate) use self::segment::SegmentTarget;
+pub use foldit_gui::TailUpdate;
 
 /// Main application state - thin glue connecting the render engine,
 /// plugin driver, the `Session` store, and the three projectors
 /// (`RunnerProjector`, `RenderProjector`, `GuiProjector`).
 ///
-/// `App` also owns the host-bound [`FrontendState`] mirror (so the load
+/// `App` also owns the host-bound [`GuiState`] mirror (so the load
 /// state-machine and the GUI projection both live on the same side of
 /// the host seam) and the `AppPhase` machine that drives the startup
 /// phases up to the first-score `InSession` flip.
@@ -65,18 +57,12 @@ pub struct App {
     pub(crate) engine: Option<VisoEngine>,
     pub(crate) runner_client: RunnerClient,
 
-    pub(in crate::app) frontend: FrontendState,
+    pub(in crate::app) gui: GuiState,
     pub(in crate::app) keybindings: KeyBindings,
-    pub(in crate::app) lifecycle: AppPhase,
 
-    /// Active view options, the preset they came from, and the player-touched
-    /// latch. App-owned so they persist across a reload.
-    pub(in crate::app) view: ViewState,
-
-    // Three projector classes which are the consumers of Assembly updates
-    pub(in crate::app) runner_projector: RunnerProjector,
-    pub(in crate::app) render_projector: RenderProjector,
-    pub(in crate::app) gui_projector: GuiProjector,
+    // The three projector classes which are the consumers of Assembly updates.
+    // The GUI projector also owns the App-side dirty accumulator.
+    pub(in crate::app) projectors: Projectors,
 
     /// Host-provided filesystem / resource access. The only path through
     /// which foldit-core touches the filesystem outside puzzle loading.
@@ -84,40 +70,10 @@ pub struct App {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) startup: self::startup::StartupState,
-    /// One-shot accumulator of App-owned GUI dirty bits the `SessionUpdate`
-    /// batch cannot express (segment / panels / ui / progress), plus the
-    /// full-populate seed (`DirtyFlags::all()`) raised on session birth.
-    pub(in crate::app) pending_dirty: DirtyFlags,
-    /// Per-residue segment-info panel: open target with cached identity + SS,
-    /// plus the tail-tip debounce cursor.
-    pub(in crate::app) segment: SegmentPanel,
-    /// Panel UI state: which panels are shown (by string id) and each panel's
-    /// dragged top-left. Backend-authoritative so both survive a reload.
-    pub(in crate::app) panels: PanelState,
-    /// Puzzle high-score progress: best recorded display score per puzzle id
-    /// (monotonic max) plus the disk-persist signal. Backend-authoritative.
-    pub(in crate::app) progress: ProgressStore,
-    /// OS fullscreen mirror + its host outbox and the tutorial-hint bubble
-    /// visibility. Backend-authoritative so the toggles survive a reload.
-    pub(in crate::app) ui: UiToggles,
+    /// The in-flight op-stream token maps (`score_targets`, `creates_previews`,
+    /// `inplace_previews`), keyed by edit/request token.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) score_targets: std::collections::HashMap<u64, CheckpointId>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) creates_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
-    /// Live in-place preview ghosts keyed by edit token, each `(ghost entity
-    /// id, last atom count)`. A preview-style op opens its in-place edit
-    /// normally (the lane stays frozen) and animates a discardable gray clone
-    /// here; the ghost is removed at the terminal, never promoted. Kept
-    /// separate from `creates_previews` so the commit fork stays unambiguous.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) inplace_previews: std::collections::HashMap<u64, (molex::EntityId, usize)>,
-    /// `begin_action` args (`lanes`, `kind`, `display`) retained per edit
-    /// token for preview ops so a non-terminal checkpoint can re-open the
-    /// same edit for the next segment. Populated where the edit is first
-    /// opened, removed at the terminal alongside `inplace_previews`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) inplace_edits:
-        std::collections::HashMap<u64, (Vec<molex::EntityId>, crate::history::CheckpointKind, String)>,
+    pub(in crate::app) ops: OpStreamState,
 }
 
 impl App {
@@ -136,71 +92,97 @@ impl App {
                 kb
             },
             store: Session::new(),
-            view: ViewState::new(),
             runner_client: RunnerClient::new(),
-            runner_projector: RunnerProjector::new(),
-            render_projector: RenderProjector::new(),
-            gui_projector: GuiProjector::new(),
+            projectors: Projectors::new(),
             host,
-            frontend: FrontendState::new(),
-            lifecycle: AppPhase::Initializing,
+            gui: GuiState::new(),
             #[cfg(not(target_arch = "wasm32"))]
             startup: self::startup::StartupState {
                 phase: self::load::StartupPhase::Idle,
                 camera: self::load::StartupCamera::Fit,
                 ss_override: None,
             },
-            pending_dirty: DirtyFlags::empty(),
-            segment: SegmentPanel::new(),
-            panels: PanelState::new(),
-            progress: ProgressStore::new(),
-            ui: UiToggles::new(),
             #[cfg(not(target_arch = "wasm32"))]
-            score_targets: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            creates_previews: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            inplace_previews: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            inplace_edits: std::collections::HashMap::new(),
+            ops: OpStreamState::new(),
         }
+    }
+
+    /// OR-accumulate App-owned GUI dirty bits into the GUI projector. These
+    /// are the bits the `SessionUpdate` batch cannot express (segment)
+    /// plus the full-populate seed (`DirtyFlags::all()`) the
+    /// session-birth path raises; the projector drains them at the tick consume.
+    fn mark_dirty(&mut self, flags: DirtyFlags) {
+        self.projectors.gui.mark_dirty(flags);
     }
 
     /// Flip the App into the in-session lifecycle phase the moment a
     /// structure finishes loading, on every load path.
     pub(in crate::app) fn enter_session(&mut self) {
         self.set_app_phase(AppPhase::InSession);
-        self.frontend.set_score(0.0, true);
-        self.frontend.set_score_title(self.store.title().to_owned());
-        self.pending_dirty |= DirtyFlags::all();
+        self.gui.set_score(0.0, true);
+        self.gui.set_score_title(self.store.title().to_owned());
+        self.mark_dirty(DirtyFlags::all());
     }
 
     /// Open the per-residue segment-info panel on `(eid, residue)`, marking
     /// the segment section dirty when the target resolves. A no-op when the
     /// entity or residue does not resolve.
     pub(in crate::app) fn open_segment(&mut self, eid: molex::EntityId, residue: usize) {
-        if self.segment.open(&self.store, eid, residue) {
-            self.pending_dirty |= DirtyFlags::SEGMENT;
-        }
+        let Some(target) = self.resolve_segment_target(eid, residue) else {
+            return;
+        };
+        self.gui.set_segment_target(Some(target));
+        self.mark_dirty(DirtyFlags::SEGMENT);
+    }
+
+    /// Resolve `(eid, residue)` into a segment target, computing the residue
+    /// identity (number, chain, amino acid) and its secondary structure once
+    /// via a single `recompute_ss()` over the head assembly and caching them
+    /// on the target. `None` when the entity or residue does not resolve.
+    fn resolve_segment_target(
+        &self,
+        eid: molex::EntityId,
+        residue: usize,
+    ) -> Option<foldit_gui::SegmentTarget> {
+        let entity = self.store.entity(eid)?;
+        let res = entity.residues()?.get(residue)?;
+        let residue_number = res.seq_id();
+        let chain = entity
+            .pdb_chain_id()
+            .map_or_else(String::new, str::to_owned);
+        let aa = molex::chemistry::AminoAcid::from_code(res.name);
+        let aa_three = String::from_utf8_lossy(&res.name).trim().to_owned();
+        let aa_one = aa.map_or_else(String::new, |a| (a.one_letter() as char).to_string());
+
+        let mut assembly = self.store.head_assembly();
+        assembly.recompute_ss();
+        let ss_label = ss_label(assembly.ss_types(eid).get(residue).copied());
+
+        Some(foldit_gui::SegmentTarget {
+            entity: eid,
+            residue,
+            residue_number,
+            chain,
+            aa_three,
+            aa_one,
+            ss_label,
+        })
     }
 
     /// Close the segment-info panel. Marks the segment section dirty.
     pub(in crate::app) fn close_segment(&mut self) {
-        self.segment.close();
-        self.pending_dirty |= DirtyFlags::SEGMENT;
+        self.gui.close_segment();
     }
 
     /// Show or hide a panel by id. Marks the panels section dirty.
     pub(in crate::app) fn set_panel_visible(&mut self, panel: String, visible: bool) {
-        self.panels.set_visible(panel, visible);
-        self.pending_dirty |= DirtyFlags::PANELS;
+        self.gui.set_panel_visible(panel, visible);
     }
 
     /// Record a panel's dragged top-left position, marking the panels section
     /// dirty.
     pub(in crate::app) fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
-        self.panels.set_position(panel, x, y);
-        self.pending_dirty |= DirtyFlags::PANELS;
+        self.gui.set_panel_position(panel, x, y);
     }
 
     /// Record the loaded puzzle's display score against its high-score
@@ -215,23 +197,18 @@ impl App {
         let Some(score) = self.store.display_score() else {
             return;
         };
-        if self.progress.record(puzzle_id, score) {
-            self.pending_dirty |= DirtyFlags::PROGRESS;
-        }
+        self.gui.record_progress(puzzle_id, score);
     }
 
     /// Wipe all recorded high-score progress, marking the progress section
     /// dirty.
     pub(in crate::app) fn clear_progress(&mut self) {
-        if self.progress.clear() {
-            self.pending_dirty |= DirtyFlags::PROGRESS;
-        }
+        self.gui.clear_progress();
     }
 
     /// Show or hide the tutorial-hint bubble. Marks the ui section dirty.
     pub(in crate::app) fn set_hints_visible(&mut self, v: bool) {
-        self.ui.set_hints_visible(v);
-        self.pending_dirty |= DirtyFlags::UI;
+        self.gui.set_hints_visible(v);
     }
 
     /// Enter or leave OS fullscreen. Marks the ui section dirty and stages a
@@ -239,22 +216,21 @@ impl App {
     /// true->false transition stages, so re-setting the same value pushes
     /// nothing to the host.
     pub(in crate::app) fn set_fullscreen(&mut self, v: bool) {
-        self.ui.set_fullscreen(v);
-        self.pending_dirty |= DirtyFlags::UI;
+        self.gui.set_fullscreen(v);
     }
 
     /// Take the pending fullscreen change for the desktop host to apply to
     /// the winit window, or `None` when it did not change since the last
     /// pull. Returned at most once per change.
     pub const fn take_fullscreen_change(&mut self) -> Option<bool> {
-        self.ui.take_fullscreen_change()
+        self.gui.take_fullscreen_change()
     }
 
     /// Take the serialized high-score progress map for the host to persist to
     /// disk, or `None` when it has not changed since the last pull. Returned
     /// at most once per change.
     pub fn take_progress_to_persist(&mut self) -> Option<Vec<u8>> {
-        self.progress.take_to_persist()
+        self.gui.take_progress_to_persist()
     }
 
     /// Merge a persisted high-score progress map (as written by
@@ -265,9 +241,7 @@ impl App {
     /// does not set the persist-pending flag, so a load does not bounce back
     /// out as a save.
     pub fn import_progress(&mut self, bytes: &[u8]) {
-        if self.progress.import(bytes) {
-            self.pending_dirty |= DirtyFlags::PROGRESS;
-        }
+        self.gui.import_progress(bytes);
     }
 
     /// Advance the App-lifetime phase and mirror it to the frontend
@@ -275,21 +249,22 @@ impl App {
     /// the value actually changes, so re-setting the same phase is a
     /// no-op on the wire.
     pub(in crate::app) fn set_app_phase(&mut self, state: AppPhase) {
-        self.lifecycle = state;
-        self.frontend.set_app_state(self.lifecycle);
+        self.gui.set_app_state(state);
     }
 
-    /// The active view options. App-owned so they persist across a reload.
+    /// The active view options, reconstructed from the frontend-held faithful
+    /// (sparse) form. Faithful round-trip: display overrides left to inherit
+    /// stay `None`, so re-applying preserves their inherit semantics.
     #[must_use]
-    pub const fn view_options(&self) -> &viso::options::VisoOptions {
-        &self.view.options
+    pub fn view_options(&self) -> viso::options::VisoOptions {
+        serde_json::from_value(self.gui.view_options_raw().clone()).unwrap_or_default()
     }
 
     /// The name of the currently-loaded preset, or `None` when the active
     /// options were set manually.
     #[must_use]
     pub fn active_preset(&self) -> Option<&str> {
-        self.view.active_preset.as_deref()
+        self.gui.view.active_preset.as_deref()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -320,15 +295,15 @@ impl App {
 
     /// Set the host log mirror on the owned frontend.
     pub fn set_frontend_log(&mut self, log: String) {
-        self.frontend.set_log(log);
+        self.gui.set_log(log);
     }
 
-    /// Serialize whatever sections of the owned [`FrontendState`] are
+    /// Serialize whatever sections of the owned [`GuiState`] are
     /// currently dirty into a JSON byte string suitable for an IPC push, and
     /// clear the dirty bits. Returns `None` when nothing changed since the
     /// last drain.
     pub fn serialize_frontend_dirty(&mut self) -> Option<Vec<u8>> {
-        foldit_gui::bridge::push::serialize_dirty(&mut self.frontend)
+        foldit_gui::bridge::push::serialize_dirty(&mut self.gui)
             .map(|v| v.to_string().into_bytes())
     }
 
@@ -337,7 +312,7 @@ impl App {
     /// returned at most once per change: `tick` sets it only on a value
     /// change and this clears it.
     pub const fn take_tail_update(&mut self) -> Option<TailUpdate> {
-        self.segment.take_update()
+        self.gui.take_tail_update()
     }
 
     #[allow(
@@ -371,8 +346,8 @@ impl App {
             // viz cache dirty for the push below.
             let viz_results = self.runner_client.poll_query_results();
             if !viz_results.is_empty() {
-                let opts = &self.view.options;
-                crate::viz::refresh::apply_query_results(&mut self.store, opts, viz_results);
+                let opts = self.view_options();
+                crate::viz::refresh::apply_query_results(&mut self.store, &opts, viz_results);
             }
         }
 
@@ -427,39 +402,44 @@ impl App {
                 && ((self.startup_settled()
                     && has_geometry
                     && !self.store.has_pending()
-                    && self.creates_previews.is_empty())
+                    && self.ops.creates_previews.is_empty())
                     || view_toggled)
             {
+                let opts = self.view_options();
                 crate::viz::refresh::refresh_external_cavities(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view.options,
+                    &opts,
                 );
                 crate::viz::refresh::refresh_clashes(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view.options,
+                    &opts,
                 );
                 crate::viz::refresh::refresh_exposed_hydrophobics(
                     &mut self.runner_client,
                     &mut self.store,
-                    &self.view.options,
+                    &opts,
                 );
             }
         }
 
         if !changes.is_empty() {
             if let Some(orch) = self.runner_client.orchestrator_mut() {
-                self.runner_projector.consume(&changes, &mut self.store, orch);
+                self.projectors.runner.consume(&changes, &mut self.store, orch);
             }
 
+            // Materialize the reapply options before the `&mut engine` borrow:
+            // they are reconstructed from the frontend-held faithful form, an
+            // immutable `&self` read that cannot overlap the engine borrow.
+            let reapply_options = changes
+                .iter()
+                .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
+                .then(|| self.view_options());
             if let Some(engine) = self.engine.as_mut() {
-                self.render_projector.consume(&changes, &mut self.store, engine);
-                if changes
-                    .iter()
-                    .any(|c| matches!(c, SessionUpdate::ViewOptionsChanged))
-                {
-                    engine.set_options(self.view.options.clone());
+                self.projectors.render.consume(&changes, &mut self.store, engine);
+                if let Some(opts) = reapply_options {
+                    engine.set_options(opts);
                 }
             }
         }
@@ -504,7 +484,7 @@ impl App {
             if self.startup_settled()
                 && has_geometry
                 && !self.store.has_pending()
-                && self.creates_previews.is_empty()
+                && self.ops.creates_previews.is_empty()
             {
                 self.request_scores();
             }
@@ -521,50 +501,63 @@ impl App {
         }
 
         // Tail tip: runs after `engine.update` (camera settled this frame)
-        // and stages a tip change only when it moved.
-        self.segment.update_tail_tip(&self.store, self.engine.as_ref());
+        // and stages a tip change only when it moved. Core resolves the open
+        // target's CA to a screen position (off-screen / closed / no engine
+        // all resolve to `None`); the debounce FSM lives on the frontend.
+        let tail_screen_pos = match (self.gui.segment_target(), self.engine.as_ref()) {
+            (Some(target), Some(engine)) => self
+                .store
+                .entity(target.entity)
+                .and_then(|entity| crate::gui_projector::ca_world_position(entity, target.residue))
+                .and_then(|world| engine.world_to_screen(world))
+                .map(|v| (v.x, v.y)),
+            _ => None,
+        };
+        self.gui.push_tail_tip(tail_screen_pos);
 
         // Each load path calls `enter_session` at its done-loading point, so
         // the frontend routes to the in-puzzle UI the moment loading
         // completes, with the score flowing in asynchronously.
 
         // Frontend projection: the GUI consumer derives its dirty set
-        // entirely from this tick's `changes` batch, OR'd with the App-side
-        // `pending_dirty` accumulator (the segment / panels / ui / progress
-        // bits plus the session-birth full-populate seed). The accumulator
-        // is drained only when the engine is present and the consumer runs;
-        // with no engine attached yet it persists to a later tick, so the
-        // birth populate is never dropped.
+        // entirely from this tick's `changes` batch, OR'd with the dirty
+        // accumulator the GUI projector owns (the segment bits
+        // plus the session-birth full-populate seed). The
+        // accumulator is drained inside `consume`, which runs only when the
+        // engine is present; with no engine attached yet the bits persist to
+        // a later tick, so the birth populate is never dropped.
         if let Some(engine) = self.engine.as_ref() {
-            let pending = std::mem::take(&mut self.pending_dirty);
             let src = GuiSources {
                 session: &self.store,
                 engine,
                 driver: &self.runner_client,
                 host: self.host.as_ref(),
-                view_options: &self.view.options,
-                active_preset: self.view.active_preset.as_deref(),
-                open_segment: self.segment.target(),
-                open_panels: self.panels.open(),
-                panel_positions: self.panels.positions(),
-                progress: self.progress.map(),
-                hints_visible: self.ui.hints_visible(),
-                fullscreen: self.ui.fullscreen(),
             };
             let segment_auto_closed =
-                self.gui_projector
-                    .consume(&changes, pending, &src, &mut self.frontend);
+                self.projectors
+                    .gui
+                    .consume(&changes, &src, &mut self.gui);
             if segment_auto_closed {
-                self.segment.close();
+                self.gui.close_segment();
             }
         }
     }
 }
 
+/// Human-readable secondary-structure label for the segment panel.
+fn ss_label(ss: Option<molex::SSType>) -> String {
+    match ss {
+        Some(molex::SSType::Helix) => "Helix",
+        Some(molex::SSType::Sheet) => "Sheet",
+        Some(molex::SSType::Coil) | None => "Loop",
+    }
+    .to_owned()
+}
+
 /// `App` is the sink for frontend -> backend commands dispatched by the GUI.
 impl foldit_gui::Dispatcher for App {
     fn on_ready(&mut self) {
-        self.frontend.mark_all_dirty();
+        self.gui.mark_all_dirty();
     }
 
     fn on_viewport_input(&mut self, input: foldit_gui::ViewportInput) {

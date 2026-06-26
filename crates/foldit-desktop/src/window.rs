@@ -16,7 +16,7 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
-/// `App` owns the [`foldit_gui::FrontendState`] mirror and the
+/// `App` owns the [`foldit_gui::GuiState`] mirror and the
 /// Loading → `InPuzzle` state-machine; the runner is purely the
 /// wry/winit + dev-server shell.
 pub struct AppRunner {
@@ -284,7 +284,7 @@ impl AppRunner {
         let _ = webview.evaluate_script(&script);
     }
 
-    /// Ship any dirty sections of the App-owned `FrontendState` to the
+    /// Ship any dirty sections of the App-owned `GuiState` to the
     /// webview. `App::tick` already populated the frontend on this
     /// frame; the host only does the log-mirror handoff and the IPC
     /// transport.

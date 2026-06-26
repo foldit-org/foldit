@@ -388,6 +388,40 @@ impl History {
         }
     }
 
+    /// Commit the action identified by `request_id`, then immediately
+    /// re-open an edit over the same lanes under the same id, re-forking
+    /// each lane from its just-committed head. The reopened edit reuses the
+    /// committed edit's `kind` and label, so a multi-segment preview op
+    /// (rebuild / RFD3 accept-by-accept) advances its lane segment-by-
+    /// segment without the caller re-supplying the begin args. Returns the
+    /// committed checkpoint id (the value [`Self::commit_action`] returns).
+    pub fn commit_and_reopen(&mut self, request_id: u64) -> Result<CheckpointId, HistoryError> {
+        // Capture the prior edit's lanes, kind, and label while its
+        // `PendingEdit` is still live: the commit below `swap_remove`s it
+        // and moves its `kind` onto the minted checkpoint, leaving nothing
+        // for the reopen to fork from. Cloning the entity list and kind
+        // because the pending edit is consumed by the commit before the
+        // reopen needs them. The label comes from the first held lane's
+        // tentative snapshot, the same source `do_commit` recovers it from.
+        let edit = self
+            .pending
+            .get(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?;
+        let entities: SmallVec<[EntityId; 1]> = edit.lanes.iter().map(|(e, _)| *e).collect();
+        let kind = edit.kind.clone();
+        let label: Cow<'static, str> = edit
+            .lanes
+            .first()
+            .and_then(|(entity, snap_id)| {
+                self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id))
+            })
+            .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
+
+        let ckpt = self.commit_action(request_id)?;
+        self.begin_action(entities, kind, label, request_id)?;
+        Ok(ckpt)
+    }
+
     /// Abort the action identified by `request_id`. Removes each held
     /// lane's tentative snapshot; lane heads fall back to their parents.
     /// No checkpoint is removed (a begin mints none) and the committed

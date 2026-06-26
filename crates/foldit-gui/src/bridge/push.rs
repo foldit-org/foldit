@@ -1,4 +1,4 @@
-//! Section serializer — pure function over `FrontendState`.
+//! Section serializer — pure function over `GuiState`.
 //!
 //! Produces the partial-state JSON object that gets handed to
 //! [`Transport::send_state`]. Sections are emitted only when their dirty
@@ -6,7 +6,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::{DirtyFlags, FrontendState};
+use crate::{DirtyFlags, GuiState};
 
 /// Drain dirty flags and serialize the corresponding sections. Returns
 /// `None` when nothing was dirty (caller should skip the push).
@@ -15,7 +15,7 @@ use crate::{DirtyFlags, FrontendState};
     clippy::missing_panics_doc,
     reason = "serde_json::to_value over these plain state structs is infallible: Value represents every field, NaN/Infinity floats map to Null rather than erroring, and the only error source (non-string map keys) does not occur here"
 )]
-pub fn serialize_dirty(state: &mut FrontendState) -> Option<Value> {
+pub fn serialize_dirty(state: &mut GuiState) -> Option<Value> {
     let dirty = state.take_dirty();
     if dirty.is_empty() {
         return None;
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn full_dirty_emits_every_section() -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = FrontendState::new();
+        let mut state = GuiState::new();
         state.mark_all_dirty();
 
         let value = serialize_dirty(&mut state).ok_or("all-dirty must serialize")?;

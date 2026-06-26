@@ -15,7 +15,7 @@ pub type RequestResult = Result<Value, String>;
 
 /// Platform-specific delivery channel from Rust to JS.
 pub trait Transport {
-    /// Push a partial-`FrontendState` JSON object to the frontend's
+    /// Push a partial-`GuiState` JSON object to the frontend's
     /// `__onStateUpdate` channel.
     fn send_state(&self, payload: &Value);
 

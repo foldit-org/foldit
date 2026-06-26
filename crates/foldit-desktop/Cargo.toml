@@ -42,7 +42,7 @@ wry = { version = "0.50", features = ["transparent"] }
 # Native cross-platform file dialog (macOS/Windows/Linux backends)
 rfd = "0.15"
 
-# Serialization for IPC and FrontendState
+# Serialization for IPC and GuiState
 serde_json = "1"
 
 # Host-owned puzzle-progress persistence. The host owns the async runtime and

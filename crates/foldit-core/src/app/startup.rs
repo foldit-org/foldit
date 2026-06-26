@@ -63,7 +63,7 @@ impl App {
         // A fresh orchestrator restarts request ids at 1, so drop any
         // stale composition targets before a new edit can reuse an old id.
         self.runner_client.init_orchestrator();
-        self.score_targets.clear();
+        self.ops.clear();
 
         // Load the default score-term weights once, before the first score.
         // `reset` leaves `term_weights` untouched, so a single load here
@@ -282,15 +282,16 @@ impl App {
             // the final geometry. The first score may have
             // pushed before viso created the entity's scene-local state, in
             // which case that push was silently dropped and the backbone would
-            // render gray. Disjoint field borrow: `render_projector` and `store`
-            // are separate fields from `engine`, mirroring the tick consume seam.
+            // render gray. Disjoint field borrow: `projectors.render` and
+            // `store` are separate fields from `engine`, mirroring the tick
+            // consume seam.
             RenderProjector::reproject_scores(&self.store, engine);
             // Re-push alone only updates the separate residue-color buffer; the
             // cartoon tube's color is baked into the mesh at build time and the
             // startup geometry baked gray (it published before the first score
             // arrived). Force a full-rebuild republish now that the scores are
             // populated so the backbone mesh re-bakes colored.
-            self.render_projector.rebake_geometry(&mut self.store, engine);
+            self.projectors.render.rebake_geometry(&mut self.store, engine);
             // Apply any puzzle-pinned SS override AFTER the rebake: it calls
             // `replace_assembly`, which rebuilds the cartoon from the
             // assembly's own (loop) SS, so an override set earlier would be
@@ -312,20 +313,21 @@ impl App {
         // query, so this is an inert no-op when any is absent. The caller
         // gates on the engine, which is present at this seam.
         if self.engine.is_some() {
+            let opts = self.view_options();
             crate::viz::refresh::refresh_clashes(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view.options,
+                &opts,
             );
             crate::viz::refresh::refresh_external_cavities(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view.options,
+                &opts,
             );
             crate::viz::refresh::refresh_exposed_hydrophobics(
                 &mut self.runner_client,
                 &mut self.store,
-                &self.view.options,
+                &opts,
             );
         }
         // The design-gating overlay is static per puzzle (the mask is set at
@@ -361,7 +363,7 @@ impl App {
                 // engine is given the persisted-or-seeded options. The eager set
                 // + note here is drained by the surrounding tick (advance_startup
                 // runs before this tick's `SessionUpdate` drain + render seam).
-                if self.view.touched {
+                if self.gui.view_touched() {
                     self.reapply_view_options_to_engine();
                 } else {
                     self.apply_view_preset_to_session("Default");

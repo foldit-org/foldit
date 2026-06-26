@@ -47,7 +47,7 @@ pub enum IpcMessage {
     /// options, load structure / puzzle). Non-plugin lane.
     AppCommand(AppCommand),
     /// Panel-originated selection mutation. Replaces the current
-    /// [`crate::FrontendState::selection`] (and the backend `App.selection`
+    /// [`crate::GuiState::selection`] (and the backend `App.selection`
     /// source of truth) with the supplied per-entity residue lists.
     SetSelection { entries: Vec<EntitySelection> },
     /// Desktop-only: request the native "Load Session" file picker. Handled

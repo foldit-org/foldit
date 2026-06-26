@@ -161,7 +161,7 @@ impl App {
     /// (re-tabbing a different residue closes the old target and opens the
     /// new one in a single press).
     fn toggle_segment(&mut self, eid: EntityId, res: usize) {
-        if self.segment.target().map(|t| (t.entity, t.residue)) == Some((eid, res)) {
+        if self.gui.segment_target().map(|t| (t.entity, t.residue)) == Some((eid, res)) {
             self.close_segment();
         } else {
             self.open_segment(eid, res);

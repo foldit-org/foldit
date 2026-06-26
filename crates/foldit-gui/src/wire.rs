@@ -112,7 +112,7 @@ impl<K: Key> specta::Type for WireId<K> {
 // Read direction: HistorySection (full reproject)
 
 /// Filter evaluation status as seen on the wire. Strict subset of the
-/// backend [`foldit::history::FilterStatus`] — the wire side only needs
+/// backend [`foldit::history::FilterStatus`]; the wire side only needs
 /// the discriminant for rendering. Failure reasons can join later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
@@ -163,7 +163,7 @@ pub struct CheckpointInfo {
     pub entity_heads: IndexMap<EntityId, WireId<EntitySnapshotId>>,
     /// Entity this checkpoint primarily targets, if any. `None` for
     /// non-entity-targeted kinds (`Loaded`). Drives the `HistoryPanel`'s
-    /// focus filter — when a user focuses entity X, the panel keeps
+    /// focus filter - when a user focuses entity X, the panel keeps
     /// checkpoints with `entity == Some(X)` plus those with
     /// `entity == None` (root) for context.
     pub entity: Option<EntityId>,
@@ -172,7 +172,7 @@ pub struct CheckpointInfo {
     /// Display label for tooltip / context menu.
     pub label: String,
     /// Milliseconds since UNIX epoch. Encoded as `f64` so JS reads it
-    /// as a normal `number` — well within safe-integer range for any
+    /// as a normal `number`; well within safe-integer range for any
     /// practical clock (year ~285,000 AD before f64 mantissa breaks).
     pub timestamp_ms: f64,
     /// Rosetta REU. Mode-independent; the GUI picks raw vs. game.
@@ -196,7 +196,7 @@ pub struct HistorySection {
     /// All live checkpoints.
     pub checkpoints: Vec<CheckpointInfo>,
     /// Current checkpoint head. Wire-default is empty (cannot fail in
-    /// real payloads — the backend always seeds at least one root).
+    /// real payloads; the backend always seeds at least one root).
     pub checkpoint_head: Option<WireId<CheckpointId>>,
     /// Root checkpoint.
     pub checkpoint_root: Option<WireId<CheckpointId>>,
@@ -205,7 +205,7 @@ pub struct HistorySection {
     /// Highest filter-passing live checkpoint.
     pub best_that_counts: Option<WireId<CheckpointId>>,
     /// Bumped on every topology mutation. JS uses this to reconcile.
-    /// `f64` for the same reason as `timestamp_ms` — JS reads it as a
+    /// `f64` for the same reason as `timestamp_ms`; JS reads it as a
     /// plain `number`.
     pub topology_version: f64,
 }

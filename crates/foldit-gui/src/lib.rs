@@ -52,12 +52,29 @@ bitflags! {
     }
 }
 
+/// Last segment-panel tail tip projected to the screen, value-compared each
+/// frame so an unchanged tip pushes nothing.
+///
+/// The `Unset` arm is distinct from `Hidden`: at rest (no panel ever opened)
+/// the tip is `Unset`, and the off-screen path only emits a hide when a
+/// `Visible` tip preceded it. Without that distinction every idle frame
+/// would push a redundant hide.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TailTip {
+    /// No tip has been projected yet (no panel opened this session).
+    Unset,
+    /// The panel is open but its residue is off-screen / behind the camera.
+    Hidden,
+    /// The residue's CA projects to this screen position (pixels, top-left).
+    Visible(f32, f32),
+}
+
 /// State sections that get pushed to the GUI when dirty.
 ///
 /// Only dirty sections are serialized and emitted via Tauri events.
 /// The GUI merges partial updates into its local store.
 #[derive(Debug, Clone, Serialize)]
-pub struct FrontendState {
+pub struct GuiState {
     /// Top-level lifecycle phase. Primary gate for what the GUI renders at the
     /// root level. Drives the `LoadingScreen` → game UI transition; backend
     /// advances this through the startup phases and flips it to `InSession`
@@ -67,6 +84,18 @@ pub struct FrontendState {
     pub puzzle: PuzzleSection,
     pub selection: SelectionSection,
     pub view: ViewSection,
+    /// Authoritative faithful view options: the sparse serialization of
+    /// viso's options, where display overrides left to inherit stay absent.
+    /// Round-trip source the engine reapply and the dense `view.options`
+    /// wire form are both derived from in core (which owns viso); kept off
+    /// the wire because the GUI reads the dense `view.options` instead.
+    #[serde(skip)]
+    view_options_raw: serde_json::Value,
+    /// Latches once the player changes any view setting, after which a fresh
+    /// load keeps the persisted options instead of re-seeding the Default
+    /// preset.
+    #[serde(skip)]
+    view_touched: bool,
     pub ui: UISection,
     pub actions: ActionsSection,
     pub loading: LoadingSection,
@@ -81,19 +110,61 @@ pub struct FrontendState {
     /// Per-residue segment-info panel payload. `None` when no segment is
     /// open. Set by the GUI projection's segment arm.
     pub segment_info: Option<SegmentInfo>,
+    /// Open segment-info target with its cached identity + SS, or `None` when
+    /// the panel is closed. Set by the core open resolution (the only place
+    /// that reads `Session`); the projection's segment arm reads it back to
+    /// rebuild `segment_info`.
+    #[serde(skip)]
+    segment_target: Option<SegmentTarget>,
+    /// Last tail tip pushed to the host, value-compared each frame so an
+    /// unchanged tip pushes nothing.
+    #[serde(skip)]
+    last_tail_tip: TailTip,
+    /// Pending tail-tip change for the host to pull this frame, set only when
+    /// the projected tip differed from `last_tail_tip`.
+    #[serde(skip)]
+    pending_tail: Option<TailUpdate>,
     /// Backend-authoritative panel open/closed set and per-panel
     /// positions. Always present; empty when no panels are open and none
-    /// have been moved. Set by the GUI projection's panels arm.
+    /// have been moved. The wire mirror of `panels_open` / `panels_positions`,
+    /// regenerated on every mutation.
     pub panels: PanelsSection,
     /// Backend-authoritative puzzle high-score progress. Always present;
-    /// empty until the player scores on a puzzle. Set by the GUI
-    /// projection's progress arm.
+    /// empty until the player scores on a puzzle. The wire mirror of
+    /// `progress_map`, regenerated on every mutation.
     pub progress: ProgressSection,
+    /// Authoritative open panel set. The `panels` wire section above is
+    /// regenerated from this (together with `panels_positions`) on each
+    /// mutation; a panel absent here is closed.
+    #[serde(skip)]
+    panels_open: std::collections::BTreeSet<String>,
+    /// Authoritative per-panel dragged top-left positions, source of truth
+    /// alongside `panels_open`. A panel without an entry renders at its
+    /// layout default.
+    #[serde(skip)]
+    panels_positions: std::collections::BTreeMap<String, (f32, f32)>,
+    /// Authoritative best display score per puzzle id (monotonic max). The
+    /// `progress` wire section above is regenerated from this on each
+    /// mutation; this map is the source of truth.
+    #[serde(skip)]
+    progress_map: std::collections::BTreeMap<u32, f64>,
+    /// One-shot flag that `progress_map` changed and must be flushed to disk.
+    /// Set only by a real in-session record/clear, never by an import, so a
+    /// load does not bounce back out as a save. Drained by
+    /// `take_progress_to_persist`.
+    #[serde(skip)]
+    progress_persist_pending: bool,
+    /// Host outbox for an OS fullscreen change. Staged by `set_fullscreen`
+    /// only on an actual value flip and drained by `take_fullscreen_change`;
+    /// the desktop host pulls it to apply the change to the winit window. Not
+    /// serialized to the GUI — `ui.fullscreen` carries the value there.
+    #[serde(skip)]
+    pending_fullscreen: Option<bool>,
     #[serde(skip)]
     dirty: DirtyFlags,
 }
 
-impl Default for FrontendState {
+impl Default for GuiState {
     fn default() -> Self {
         Self {
             app_state: AppPhase::Initializing,
@@ -101,6 +172,8 @@ impl Default for FrontendState {
             puzzle: PuzzleSection::default(),
             selection: SelectionSection::default(),
             view: ViewSection::default(),
+            view_options_raw: serde_json::Value::Null,
+            view_touched: false,
             ui: UISection::default(),
             actions: ActionsSection::default(),
             loading: LoadingSection::default(),
@@ -108,14 +181,22 @@ impl Default for FrontendState {
             history: HistorySection::default(),
             history_live: None,
             segment_info: None,
+            segment_target: None,
+            last_tail_tip: TailTip::Unset,
+            pending_tail: None,
             panels: PanelsSection::default(),
             progress: ProgressSection::default(),
+            panels_open: std::collections::BTreeSet::new(),
+            panels_positions: std::collections::BTreeMap::new(),
+            progress_map: std::collections::BTreeMap::new(),
+            progress_persist_pending: false,
+            pending_fullscreen: None,
             dirty: DirtyFlags::empty(),
         }
     }
 }
 
-impl FrontendState {
+impl GuiState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -171,19 +252,184 @@ impl FrontendState {
         self.dirty |= DirtyFlags::SEGMENT;
     }
 
-    /// Replace the panels section (open set + positions). Marks `PANELS`
-    /// dirty unconditionally; the projection only calls this when the
-    /// backend panel state actually changed.
-    pub fn set_panels(&mut self, panels: PanelsSection) {
-        self.panels = panels;
+    /// Replace the open segment target (or clear it with `None`). Pure: the
+    /// core open resolution sets this after its `Session` reads; the segment
+    /// projection arm reads it back via [`Self::segment_target`].
+    pub fn set_segment_target(&mut self, target: Option<SegmentTarget>) {
+        self.segment_target = target;
+    }
+
+    /// The open segment target, or `None` when the panel is closed.
+    #[must_use]
+    pub const fn segment_target(&self) -> Option<&SegmentTarget> {
+        self.segment_target.as_ref()
+    }
+
+    /// Close the segment panel: clear both the open target and the wire
+    /// payload, marking `SEGMENT` dirty so the next push emits the clear.
+    pub fn close_segment(&mut self) {
+        self.segment_target = None;
+        self.segment_info = None;
+        self.dirty |= DirtyFlags::SEGMENT;
+    }
+
+    /// Stage a tail-tip change when the projected screen position differs from
+    /// the last pushed tip. `Some((x, y))` is a visible tip; `None` is
+    /// off-screen / closed. A hide is staged only when a `Visible` tip
+    /// preceded it, so the initial at-rest transition pushes nothing.
+    pub fn push_tail_tip(&mut self, screen_pos: Option<(f32, f32)>) {
+        let current = match screen_pos {
+            Some((x, y)) => TailTip::Visible(x, y),
+            None => TailTip::Hidden,
+        };
+
+        if current == self.last_tail_tip {
+            return;
+        }
+
+        match current {
+            TailTip::Visible(x, y) => self.pending_tail = Some(TailUpdate::Position(x, y)),
+            TailTip::Hidden => {
+                if matches!(self.last_tail_tip, TailTip::Visible(..)) {
+                    self.pending_tail = Some(TailUpdate::Hide);
+                }
+            }
+            TailTip::Unset => {}
+        }
+        self.last_tail_tip = current;
+    }
+
+    /// Take the pending tail-tip change for the host to push, or `None` when
+    /// the tip did not move since the last push. Returned at most once per
+    /// change: `push_tail_tip` sets it only on a value change and this clears
+    /// it.
+    pub const fn take_tail_update(&mut self) -> Option<TailUpdate> {
+        self.pending_tail.take()
+    }
+
+    /// Show or hide a panel by id. Regenerates the wire `panels` section and
+    /// marks `PANELS` dirty unconditionally.
+    pub fn set_panel_visible(&mut self, panel: String, visible: bool) {
+        if visible {
+            self.panels_open.insert(panel);
+        } else {
+            self.panels_open.remove(&panel);
+        }
+        self.refresh_panels_section();
+    }
+
+    /// Record a panel's dragged top-left position. Regenerates the wire
+    /// `panels` section and marks `PANELS` dirty unconditionally.
+    pub fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
+        self.panels_positions.insert(panel, (x, y));
+        self.refresh_panels_section();
+    }
+
+    /// Rebuild the `panels` wire section from the authoritative open set and
+    /// position map (both in `BTreeSet` / `BTreeMap` sort order) and mark
+    /// `PANELS` dirty so the next push emits it.
+    fn refresh_panels_section(&mut self) {
+        self.panels = PanelsSection {
+            open: self.panels_open.iter().cloned().collect(),
+            positions: self
+                .panels_positions
+                .iter()
+                .map(|(panel, &(x, y))| PanelPosition {
+                    panel: panel.clone(),
+                    x,
+                    y,
+                })
+                .collect(),
+        };
         self.dirty |= DirtyFlags::PANELS;
     }
 
-    /// Replace the progress section. Marks `PROGRESS` dirty
-    /// unconditionally; the projection only calls this when the backend
-    /// progress map actually changed.
-    pub fn set_progress(&mut self, progress: ProgressSection) {
-        self.progress = progress;
+    /// Record a puzzle's display score against its high-score progress.
+    /// Monotonic max: only writes (and arms the persist signal) when the
+    /// score is positive and beats the puzzle's current best. A puzzle counts
+    /// as complete once its best is positive, so this map is the sole gate the
+    /// menu's unlock math reads. Refreshes the wire section and marks
+    /// `PROGRESS` dirty when the best changed.
+    pub fn record_progress(&mut self, puzzle_id: u32, score: f64) {
+        if score <= 0.0 {
+            return;
+        }
+        let best = self
+            .progress_map
+            .entry(puzzle_id)
+            .or_insert(f64::NEG_INFINITY);
+        if score > *best {
+            *best = score;
+            self.progress_persist_pending = true;
+            self.refresh_progress_section();
+        }
+    }
+
+    /// Wipe all recorded high-score progress, arming the persist signal.
+    /// Refreshes the wire section and marks `PROGRESS` dirty when anything
+    /// was cleared.
+    pub fn clear_progress(&mut self) {
+        if self.progress_map.is_empty() {
+            return;
+        }
+        self.progress_map.clear();
+        self.progress_persist_pending = true;
+        self.refresh_progress_section();
+    }
+
+    /// Take the serialized high-score map for the host to persist to disk, or
+    /// `None` when it has not changed since the last pull. Returned at most
+    /// once per change.
+    pub fn take_progress_to_persist(&mut self) -> Option<Vec<u8>> {
+        if !self.progress_persist_pending {
+            return None;
+        }
+        self.progress_persist_pending = false;
+        serde_json::to_vec(&self.progress_map).ok()
+    }
+
+    /// Merge a persisted high-score map (as written by
+    /// [`Self::take_progress_to_persist`]) back into the live map. Monotonic
+    /// max per puzzle so any record made in-session before the async load
+    /// completed is not clobbered by a stale on-disk best. Refreshes the wire
+    /// section and marks `PROGRESS` dirty when the merge changed anything, but
+    /// deliberately does not arm the persist signal, so a load does not bounce
+    /// back out as a save.
+    pub fn import_progress(&mut self, bytes: &[u8]) {
+        let Ok(loaded) =
+            serde_json::from_slice::<std::collections::BTreeMap<u32, f64>>(bytes)
+        else {
+            return;
+        };
+        let mut changed = false;
+        for (puzzle_id, score) in loaded {
+            let best = self
+                .progress_map
+                .entry(puzzle_id)
+                .or_insert(f64::NEG_INFINITY);
+            if score > *best {
+                *best = score;
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_progress_section();
+        }
+    }
+
+    /// Rebuild the `progress` wire section from the authoritative map and mark
+    /// `PROGRESS` dirty so the next push emits it.
+    fn refresh_progress_section(&mut self) {
+        self.progress = ProgressSection {
+            entries: self
+                .progress_map
+                .iter()
+                .map(|(&puzzle_id, &high_score)| ProgressEntry {
+                    puzzle_id,
+                    high_score,
+                })
+                .collect(),
+        };
         self.dirty |= DirtyFlags::PROGRESS;
     }
 
@@ -247,6 +493,30 @@ impl FrontendState {
         self.dirty |= DirtyFlags::UI;
     }
 
+    /// Enter or leave OS fullscreen. Value-gates the host outbox: only sets
+    /// `ui.fullscreen` and stages `pending_fullscreen` on an actual
+    /// false->true / true->false flip, so re-setting the same value stages
+    /// nothing for the host to pull. Marks `UI` dirty.
+    pub fn set_fullscreen(&mut self, value: bool) {
+        if self.ui.fullscreen != value {
+            self.ui.fullscreen = value;
+            self.pending_fullscreen = Some(value);
+        }
+        self.dirty |= DirtyFlags::UI;
+    }
+
+    /// Drain the staged fullscreen change for the desktop host, or `None` when
+    /// it did not flip since the last pull. Returned at most once per change.
+    pub const fn take_fullscreen_change(&mut self) -> Option<bool> {
+        self.pending_fullscreen.take()
+    }
+
+    /// Show or hide the tutorial-hint bubble. Marks `UI` dirty.
+    pub fn set_hints_visible(&mut self, value: bool) {
+        self.ui.hints_visible = value;
+        self.dirty |= DirtyFlags::UI;
+    }
+
     pub fn set_loading_progress(&mut self, progress: Option<f32>) {
         self.loading.progress = progress;
         self.dirty |= DirtyFlags::LOADING;
@@ -289,6 +559,53 @@ impl FrontendState {
             self.scene.focused_entity = focused;
             self.dirty |= DirtyFlags::SCENE;
         }
+    }
+
+    /// Apply a manual view-options edit: adopt the faithful options, drop
+    /// the active preset (manual options match no named preset), and latch
+    /// `view_touched`. Returns whether the options or the preset actually
+    /// changed, so the caller notes a single view change only on a real edit.
+    pub fn set_view_manual(&mut self, raw: serde_json::Value) -> bool {
+        let changed = self.view_options_raw != raw || self.view.active_preset.is_some();
+        self.view_options_raw = raw;
+        self.view.active_preset = None;
+        self.view_touched = true;
+        changed
+    }
+
+    /// Adopt a named preset's faithful options and record the preset name.
+    /// Deliberately does not latch `view_touched` — an automatic seed is not
+    /// a player edit; the explicit preset-pick path latches it separately.
+    pub fn set_view_preset(&mut self, raw: serde_json::Value, name: String) {
+        self.view_options_raw = raw;
+        self.view.active_preset = Some(name);
+    }
+
+    /// The authoritative faithful view options. Core deserializes this into
+    /// viso's options to reapply to the engine and to densify for the wire.
+    #[must_use]
+    pub const fn view_options_raw(&self) -> &serde_json::Value {
+        &self.view_options_raw
+    }
+
+    /// Whether the player has changed any view setting this run.
+    #[must_use]
+    pub const fn view_touched(&self) -> bool {
+        self.view_touched
+    }
+
+    /// Latch or clear the player-touched view flag. The explicit
+    /// preset-pick path latches it so the choice survives later loads.
+    pub const fn set_view_touched(&mut self, touched: bool) {
+        self.view_touched = touched;
+    }
+
+    /// Push the densified wire form of the view options into the section the
+    /// GUI settings panel reads. Core resolves the `None` display overrides
+    /// to their effective values first; that densify is a viso operation and
+    /// stays in core.
+    pub fn set_view_options_dense(&mut self, dense: serde_json::Value) {
+        self.view.options = dense;
     }
 
     /// History section accessors.

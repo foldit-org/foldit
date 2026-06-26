@@ -116,13 +116,12 @@ impl App {
                         if let Some(token) = token {
                             // Discard any in-progress creates-entities preview
                             // or in-place ghost this stream was animating.
-                            if let Some((preview_id, _)) = self.creates_previews.remove(&token) {
+                            if let Some((preview_id, _)) = self.ops.creates_previews.remove(&token) {
                                 let _ = self.store.remove_preview(preview_id);
                             }
-                            if let Some((preview_id, _)) = self.inplace_previews.remove(&token) {
+                            if let Some((preview_id, _)) = self.ops.inplace_previews.remove(&token) {
                                 let _ = self.store.remove_preview(preview_id);
                             }
-                            let _ = self.inplace_edits.remove(&token);
                             if self.store.is_pending(token) {
                                 if let Err(e) = self.store.abort_action(token) {
                                     log::warn!("abort_action failed: {e}");
@@ -252,17 +251,8 @@ impl App {
                     op_id: op.op_id.clone(),
                     display: display.clone(),
                 };
-                // A preview op re-opens this edit on each checkpoint, so
-                // retain the begin args. Cloned because `begin_action` below
-                // consumes both lanes and kind, and the re-open needs them.
-                let stash = preview.then(|| (lanes.clone(), kind.clone(), display.clone()));
                 match self.store.begin_action(lanes, kind, display.clone(), request_id) {
-                    Ok(()) => {
-                        if let Some(s) = stash {
-                            let _ = self.inplace_edits.insert(request_id, s);
-                        }
-                        Some((request_id, seed_lane))
-                    }
+                    Ok(()) => Some((request_id, seed_lane)),
                     Err(e) => {
                         log::trace!(
                             "handle_dispatch_op({:?}): begin_action skipped: {e}",
@@ -405,7 +395,7 @@ impl App {
             let _ = self.store.commit_action(token);
         }
         // The edit's correlation id is spent; drop any lingering target.
-        let _ = self.score_targets.remove(&token);
+        let _ = self.ops.score_targets.remove(&token);
     }
 
     /// Common tail for undo / redo / `jump_checkpoint`: clear cached
@@ -495,7 +485,7 @@ impl App {
                         }
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            let _ = self.score_targets.remove(&rid);
+                            let _ = self.ops.score_targets.remove(&rid);
                         }
                     }
                     Ok(HistoryOutcome::HeadMoved)
@@ -511,7 +501,7 @@ impl App {
                 // `topology_version`, so the GUI consumer's cursor-driven
                 // history push never re-fires. Push the refreshed history
                 // section at-site so the panel reflects the change.
-                self.frontend.set_history(project_history(&self.store));
+                self.gui.set_history(project_history(&self.store));
             }
             Ok(HistoryOutcome::Noop) => {}
             Err(e) => log::warn!("history command refused: {e}"),

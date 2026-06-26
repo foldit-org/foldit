@@ -26,7 +26,7 @@ impl App {
         // per-residue segment at every C->N gap.
         let payload: molex::MoleculeEntity = entity.to_continuous();
         let atoms = payload.atom_count();
-        match self.creates_previews.get(&token).copied() {
+        match self.ops.creates_previews.get(&token).copied() {
             // Same topology: cheap in-place coord update (animates).
             Some((preview_id, prev_atoms)) if prev_atoms == atoms => {
                 let _ = self.store.update_preview(preview_id, payload);
@@ -41,14 +41,14 @@ impl App {
                 // ghost like every other preview; the rebuild minted a fresh
                 // id, so re-mark it provisional.
                 self.store.set_entity_provisional(id, true);
-                let _ = self.creates_previews.insert(token, (id, atoms));
+                let _ = self.ops.creates_previews.insert(token, (id, atoms));
             }
             None => {
                 let id = self.insert_design_preview(payload);
                 // First frame: render the streaming design as the gray-tube
                 // preview ghost (provisional) like every other preview.
                 self.store.set_entity_provisional(id, true);
-                let _ = self.creates_previews.insert(token, (id, atoms));
+                let _ = self.ops.creates_previews.insert(token, (id, atoms));
             }
         }
     }
@@ -74,14 +74,14 @@ impl App {
             .store
             .entity(preview_id)
             .map_or(0, molex::MoleculeEntity::atom_count);
-        let _ = self.inplace_previews.insert(token, (preview_id, atom_count));
+        let _ = self.ops.inplace_previews.insert(token, (preview_id, atom_count));
     }
 
     /// Apply a terminal [`OpEvent::Commit`]: drop a preview ghost, adopt an
     /// entity-creating op's terminal entities, or commit the open edit to the
     /// real lane and score the resulting checkpoint. For a checkpoint-driven
     /// preview op this commits the final segment (earlier segments already
-    /// committed); the retained begin args are dropped here.
+    /// committed via [`App::promote_inplace_checkpoint`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn apply_commit_event(
         &mut self,
@@ -99,12 +99,9 @@ impl App {
             // promoted. Both effects land in this one drain so the projector
             // sees the lane update and the ghost removal together.
             if let Some(token) = token {
-                if let Some((preview_id, _)) = self.inplace_previews.remove(&token) {
+                if let Some((preview_id, _)) = self.ops.inplace_previews.remove(&token) {
                     let _ = self.store.remove_preview(preview_id);
                 }
-                // The checkpoint-driven re-open ends here; drop the retained
-                // begin args for this edit.
-                let _ = self.inplace_edits.remove(&token);
             }
         }
         if creates_entities {
@@ -115,7 +112,7 @@ impl App {
             // target is untouched.
             self.commit_created_entities(token, assembly);
             if let Some(token) = token {
-                let _ = self.score_targets.remove(&token);
+                let _ = self.ops.score_targets.remove(&token);
             }
         } else if let Some(token) = token {
             // Capture sole-open-ness while the edit is still pending: the
@@ -145,7 +142,7 @@ impl App {
                 }
                 // The edit's correlation id is now spent; drop any lingering
                 // composition target.
-                let _ = self.score_targets.remove(&token);
+                let _ = self.ops.score_targets.remove(&token);
             }
         }
     }
@@ -160,11 +157,11 @@ impl App {
     /// Scoring mirrors the terminal commit: a sole open edit's candidate
     /// already carries this checkpoint's score, so stamp it directly; with a
     /// peer edit open the live pose is a blend, so re-score the committed
-    /// union. The re-`begin_action` reuses the same token (the commit freed
-    /// the lane and dropped the token; the re-open re-forks from the now-
-    /// committed head under that token). A non-preview op or one with no open
-    /// edit / no retained begin args never reaches here as a commit: it logs
-    /// and skips so it cannot disturb a lane it does not own.
+    /// union. [`Session::commit_and_reopen`] mints the segment's checkpoint
+    /// and re-forks the same lanes under the same token from the now-
+    /// committed head, reusing the edit's own kind and label. A non-preview
+    /// op or one with no open edit under this token never reaches here as a
+    /// commit: it logs and skips so it cannot disturb a lane it does not own.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn promote_inplace_checkpoint(
         &mut self,
@@ -172,15 +169,15 @@ impl App {
         assembly: &molex::Assembly,
         score: Option<crate::scores::ScoreReport>,
     ) {
-        let Some((lanes, kind, display)) = self.inplace_edits.get(&token).cloned() else {
+        if !self.store.is_pending(token) {
             log::trace!("promote checkpoint rid={token}: no open in-place edit, skipped");
             return;
-        };
+        }
         let sole = self.store.sole_pending_request_id() == Some(token);
         if !self.store.apply_streaming_assembly(assembly, None, token) {
             return;
         }
-        match self.store.commit_action(token) {
+        match self.store.commit_and_reopen(token) {
             Ok(ckpt) => match score.filter(|_| sole) {
                 Some(report) => {
                     let (raw, game, breakdown) = self.prepare_score_stamp(report);
@@ -194,18 +191,8 @@ impl App {
                 None => self.score_committed_checkpoint(ckpt),
             },
             Err(e) => {
-                log::warn!("promote checkpoint rid={token}: commit_action failed: {e}");
-                return;
+                log::warn!("promote checkpoint rid={token}: commit_and_reopen failed: {e}");
             }
-        }
-        // Re-open the edit under the same token for the next segment; it
-        // re-forks each lane from its just-committed head.
-        if let Err(e) = self
-            .store
-            .begin_action(lanes, kind, display, token)
-        {
-            log::warn!("promote checkpoint rid={token}: re-begin_action failed: {e}");
-            let _ = self.inplace_edits.remove(&token);
         }
     }
 
@@ -224,7 +211,7 @@ impl App {
     /// topology `replace_assembly`, then re-marks it provisional.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn stream_inplace_preview_frame(&mut self, token: u64, assembly: &molex::Assembly) {
-        let Some((preview_id, prev_atoms)) = self.inplace_previews.get(&token).copied() else {
+        let Some((preview_id, prev_atoms)) = self.ops.inplace_previews.get(&token).copied() else {
             return;
         };
         let Some(entity) = assembly.entities().first() else {
@@ -246,7 +233,7 @@ impl App {
                 crate::session::EntityOrigin::Generated,
             );
             self.store.set_entity_provisional(id, true);
-            let _ = self.inplace_previews.insert(token, (id, atoms));
+            let _ = self.ops.inplace_previews.insert(token, (id, atoms));
         }
     }
 
@@ -276,7 +263,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn commit_created_entities(&mut self, token: Option<u64>, assembly: &molex::Assembly) {
         if let Some(t) = token {
-            if let Some((preview_id, _)) = self.creates_previews.remove(&t) {
+            if let Some((preview_id, _)) = self.ops.creates_previews.remove(&t) {
                 let _ = self.store.remove_preview(preview_id);
             }
         }

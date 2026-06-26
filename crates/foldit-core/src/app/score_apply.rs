@@ -186,7 +186,7 @@ impl App {
             return;
         };
         self.runner_client.score_composition(bytes, rid);
-        let _ = self.score_targets.insert(rid, ckpt_id);
+        let _ = self.ops.score_targets.insert(rid, ckpt_id);
     }
 
     /// Drain composition-score replies and stamp each commit-time checkpoint
@@ -205,7 +205,7 @@ impl App {
             return;
         }
         for (rid, report) in replies {
-            let Some(ckpt_id) = self.score_targets.get(&rid).copied() else {
+            let Some(ckpt_id) = self.ops.score_targets.get(&rid).copied() else {
                 continue;
             };
             let raw = report.weighted_total(self.store.term_weights());
@@ -232,7 +232,7 @@ impl App {
             };
             self.store
                 .set_checkpoint_scores(ckpt_id, Some(raw), Some(game), Some(breakdown));
-            let _ = self.score_targets.remove(&rid);
+            let _ = self.ops.score_targets.remove(&rid);
         }
     }
 }
