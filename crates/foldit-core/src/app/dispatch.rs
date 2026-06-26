@@ -381,7 +381,7 @@ impl App {
             // is nothing to apply into or commit.
             return;
         };
-        let assembly = match molex::ops::wire::deserialize_assembly(bytes) {
+        let assembly = match molex::Assembly::from_bytes(bytes) {
             Ok(a) => a,
             Err(e) => {
                 log::warn!("dispatch_invoke: decode failed: {e:?}");

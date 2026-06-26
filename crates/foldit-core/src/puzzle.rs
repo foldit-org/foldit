@@ -310,11 +310,9 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
                 .map_err(|e| format!("Failed to decode base64 structure data: {e}"))?;
 
             match structure.format.as_str() {
-                "bcif" => {
-                    use molex::adapters::bcif::bcif_to_entities;
-                    bcif_to_entities(&raw)
-                        .map_err(|e| format!("Failed to parse inline BinaryCIF: {e:?}"))?
-                }
+                "bcif" => molex::Assembly::from_bcif(&raw)
+                    .map_err(|e| format!("Failed to parse inline BinaryCIF: {e:?}"))?
+                    .into_entities(),
                 other => {
                     return Err(format!(
                         "Inline structure data not supported for format '{other}'"
@@ -592,12 +590,19 @@ pub fn load_entities_from_file(path: &Path) -> Result<Vec<molex::MoleculeEntity>
         .unwrap_or_default();
 
     match ext.as_str() {
-        "pdb" => molex::adapters::pdb::pdb_file_to_entities(path)
-            .map_err(|e| format!("Failed to parse PDB: {e:?}")),
-        "cif" | "mmcif" => molex::adapters::mmcif_file_to_entities(path)
-            .map_err(|e| format!("Failed to parse mmCIF: {e:?}")),
-        "bcif" => molex::adapters::bcif::bcif_file_to_entities(path)
-            .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}")),
+        "pdb" => molex::Assembly::from_file(path)
+            .map_err(|e| format!("Failed to parse PDB: {e:?}"))
+            .map(molex::Assembly::into_entities),
+        "cif" | "mmcif" => molex::Assembly::from_file(path)
+            .map_err(|e| format!("Failed to parse mmCIF: {e:?}"))
+            .map(molex::Assembly::into_entities),
+        "bcif" => {
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Failed to read BinaryCIF: {e}"))?;
+            molex::Assembly::from_bcif(&bytes)
+                .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}"))
+                .map(molex::Assembly::into_entities)
+        }
         _ => Err(format!("Unknown file extension: {ext}")),
     }
 }

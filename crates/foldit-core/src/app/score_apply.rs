@@ -181,7 +181,7 @@ impl App {
         let Some(assembly) = self.store.checkpoint_assembly(ckpt_id) else {
             return;
         };
-        let Ok(bytes) = molex::ops::wire::serialize_assembly(&assembly) else {
+        let Ok(bytes) = assembly.to_bytes() else {
             log::warn!("[App] commit-stamp serialize failed for checkpoint {ckpt_id:?}");
             return;
         };

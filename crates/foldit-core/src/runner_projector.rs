@@ -124,9 +124,7 @@ fn encode_payload(
             // Delta serialize rejected the edits - fall through to Full.
         }
     }
-    molex::ops::wire::serialize_assembly(new)
-        .ok()
-        .map(BroadcastPayload::Full)
+    new.to_bytes().ok().map(BroadcastPayload::Full)
 }
 
 /// Whole-assembly diff, via [`molex::MoleculeEntity::diff`]. Returns

@@ -392,7 +392,7 @@ impl App {
     fn arm_plugin_bringup(&mut self) -> StartupPhase {
         let initial_assembly = {
             let head_before = self.store.head_assembly();
-            match molex::ops::wire::serialize_assembly(&head_before) {
+            match head_before.to_bytes() {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!(
@@ -529,7 +529,7 @@ impl App {
             );
             return;
         }
-        let normalized = match molex::ops::wire::deserialize_assembly(post_init_bytes) {
+        let normalized = match molex::Assembly::from_bytes(post_init_bytes) {
             Ok(a) => a,
             Err(e) => {
                 log::warn!(
