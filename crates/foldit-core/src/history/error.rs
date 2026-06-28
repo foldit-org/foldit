@@ -47,15 +47,6 @@ pub enum HistoryError {
     /// Branch was required because there is more than one child.
     #[error("branch hint required: head has multiple children")]
     AmbiguousBranch,
-    /// `commit_action` / `update_action` mismatch - the active entity
-    /// isn't the one the caller addressed. Reserved for the
-    /// entity-mismatch guard path; only fires on internal misuse today.
-    #[allow(dead_code)]
-    #[error("entity mismatch (expected {}, got {})", expected.raw(), got.raw())]
-    EntityMismatch {
-        expected: EntityId,
-        got: EntityId,
-    },
     /// Tentative target - head-pointer moves are not allowed onto a
     /// tentative checkpoint from outside its own action.
     #[error("cannot jump onto a tentative checkpoint")]

@@ -76,6 +76,7 @@ impl History {
                 ckpt.breakdown = breakdown;
             }
             self.live_version = self.live_version.saturating_add(1);
+            self.recompute_best();
             return true;
         }
         false

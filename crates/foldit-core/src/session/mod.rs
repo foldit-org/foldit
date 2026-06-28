@@ -1,4 +1,5 @@
-//! Authoritative document atop the two-layer [`History`].
+//! Session is intended to encapsulate/own all App state that is tied
+//! to the lifecycle of a Session (and optionally Puzzle)
 //!
 //! `Session` owns:
 //! - [`History`] - the full per-entity timelines + checkpoint graph.
@@ -6,58 +7,37 @@
 //!   scene-resident entities that are visible in [`Self::head_assembly`]
 //!   but absent from every checkpoint. Presence in this map *is* the
 //!   preview signal.
-//! - `metadata: IndexMap<EntityId, Arc<EntityMetadata>>` - per-entity
-//!   metadata (name, origin).
+//! - `metadata: IndexMap<EntityId, Arc<str>>` - per-entity display name.
 //!   `Arc`-shared so unchanged entries stay aliased across history
-//!   operations (no metadata serialization on every mutation).
+//!   operations.
 //!
-//! Mutation intent is in the type signature: three explicit
-//! categories - history-bearing actions, metadata-only edits, and
-//! one-shot transient previews - with no neutral default. Adding a new
-//! mutation requires choosing one.
-//!
-//! There is no `mutate(closure)`-style API. Every checkpoint-bearing
-//! event funnels through `History::record` via a thin shim
-//! here; the single-root invariant is preserved end to end.
-//!
-//! **Emit invariant.** Every public mutator is a shim: it performs its
-//! state change, then emits exactly one [`SessionUpdate`] (or none, where
-//! the change is unobservable) through the [`Self::apply`] funnel. The
-//! `Session` holds no projection logic - it neither serializes
-//! assemblies nor knows about plugins or viso. Because `pending_updates`
-//! is private and `apply` is its sole pusher, "one emit per mutator" is a
-//! structural invariant, not a runtime assertion.
-//!
-//! The mutating surface (every `&mut self` shim) lives in the sibling
-//! `mutators` child module; this file holds the struct, its construction,
-//! the read accessors, and the backend helpers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+
 use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::{Assembly, MoleculeEntity};
 use viso::Focus;
 
-use crate::history::{CheckpointId, History, HistoryError};
-
 mod apply;
 mod change;
-pub use change::SessionUpdate;
-pub use change::SessionUpdateConsumer;
-mod metadata;
-pub use metadata::{EntityMetadata, EntityOrigin};
+mod commands;
+mod load;
 mod mutators;
-mod viz;
-pub use viz::VizState;
+mod previews;
+
+pub use change::{SessionUpdate, SessionUpdateConsumer};
+use previews::Previews;
+
+use crate::history::{CheckpointId, History, HistoryError};
 
 /// Error returned by every fallible [`Session`] operation.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    /// `History`-layer refusal (state machine, action lock, missing id,
-    /// etc.). See [`HistoryError`].
+    /// `History`-layer refusal
     #[error("{0}")]
     History(#[from] HistoryError),
     /// `id` is not currently a transient preview.
@@ -68,146 +48,105 @@ pub enum SessionError {
 /// Puzzle-shaped session add-on. `None` on the [`Session`] is the default
 /// free-form ("scientist") session with no puzzle goal; `Some` is a loaded
 /// campaign/intro puzzle. Populated from the puzzle TOML on a puzzle load.
-///
-/// `start_energy` / `completion_energy` are the target energies handed
-/// to the GUI (the same numbers, in the same units, that the puzzle TOML
-/// supplies). `bubbles` / `current_bubble` carry the tutorial sequence and
-/// its cursor; they move together - a puzzle with a tutorial sequence is
-/// `bubbles: Some(seq)` + `current_bubble: Some(0)`, and a puzzle with no
-/// sequence is both `None`.
 #[derive(Debug)]
 pub struct Puzzle {
     pub id: u32,
     pub start_energy: f64,
     pub completion_energy: f64,
-    /// Optional per-puzzle scorefunction weight patch (`scoretype_name ->
-    /// weight`) from the puzzle TOML's `[puzzle.weights]` table. `None` when
-    /// the puzzle declares no patch. The host overlays it onto its display
-    /// weight map at load, and threads it to the bridge through the session-init
-    /// config params so the patched terms ship and are optimized against.
     pub weight_patch: Option<std::collections::HashMap<String, f32>>,
-    /// Scored filters from the puzzle TOML's `[[puzzle.filter]]` tables.
-    /// Empty when the puzzle declares none. The native `ExposedCount`
-    /// filter is evaluated by the exposed-hydro coordinator, whose met-bonus
-    /// breakdown is stored on [`Session::filter_bonus`] and folded into the
-    /// headline game score.
-    pub filters: Vec<crate::puzzle::FilterSpec>,
-    pub bubbles: Option<Vec<crate::puzzle::Bubble>>,
+    pub filters: Vec<crate::puzzle_toml::FilterSpec>,
+    pub bubbles: Option<Vec<crate::puzzle_toml::Bubble>>,
     pub current_bubble: Option<usize>,
-    /// Catalytic constraints parsed from the puzzle's `.cnstr` file. Empty
-    /// when the puzzle declares none. Carried here so the session-init kick
-    /// can deliver them to the worker.
     pub constraints: Vec<crate::puzzle_setup::Constraint>,
-    /// Ligand asset bytes read from the puzzle dir. Empty for protein-only
-    /// puzzles. Carried here so the session-init kick can deliver them to the
-    /// worker.
-    pub ligands: Vec<crate::puzzle::LigandAsset>,
-    /// Per-entity design gating, keyed by the loaded `EntityId`. `None` means
-    /// the puzzle declares no gating (e.g. a free-edit fold puzzle); `Some`
-    /// carries one mask per designable entity (resolved from the puzzle TOML's
-    /// per-chain masks at load). The query is secure-by-default: an entity
-    /// absent from the map - or any residue outside its mask - is not
-    /// designable, so the ligand (and any chain without an entry) is locked.
+    pub ligands: Vec<crate::puzzle_load::LigandAsset>,
     pub design_gating: Option<BTreeMap<EntityId, crate::puzzle_setup::DesignMask>>,
 }
 
 impl Puzzle {
     /// Whether residue `res` on `entity` may be designed (mutated).
-    ///
-    /// Secure-by-default: `None` gating answers `false` for every residue,
-    /// and an entity absent from the gating map - or a residue outside its
-    /// mask - is not designable.
     #[must_use]
     pub fn is_designable(&self, entity: EntityId, res: u32) -> bool {
         self.design_gating
             .as_ref()
             .is_some_and(|map| map.get(&entity).is_some_and(|m| m.is_designable(res)))
     }
+
+    /// Install the resolved per-entity design gating.
+    pub(crate) fn set_design_gating(
+        &mut self,
+        gating: Option<BTreeMap<EntityId, crate::puzzle_setup::DesignMask>>,
+    ) {
+        self.design_gating = gating;
+    }
+
+    /// Mark `entity`'s whole residue range `0..=residue_count-1` designable.
+    /// A no-op unless gating is already active (`design_gating` is `Some`).
+    pub(crate) fn register_full_designable_entity(
+        &mut self,
+        entity: EntityId,
+        residue_count: usize,
+    ) {
+        let Some(gating) = self.design_gating.as_mut() else {
+            return;
+        };
+        let Some(last) = residue_count.checked_sub(1) else {
+            return;
+        };
+        let end = u32::try_from(last).unwrap_or(u32::MAX);
+        gating.insert(
+            entity,
+            crate::puzzle_setup::DesignMask { ranges: vec![0..=end] },
+        );
+    }
+
+    /// Step the tutorial-bubble cursor; returns whether it moved. Forward
+    /// saturates one past the last bubble, back saturates at 0. No-op when
+    /// the puzzle carries no tutorial sequence.
+    pub(crate) fn advance_bubble(&mut self, back: bool) -> bool {
+        let Some(cursor) = self.current_bubble else {
+            return false;
+        };
+        let len = self.bubbles.as_ref().map_or(0, Vec::len);
+        let next = if back {
+            cursor.saturating_sub(1)
+        } else if cursor < len {
+            cursor + 1
+        } else {
+            cursor
+        };
+        if next == cursor {
+            return false;
+        }
+        self.current_bubble = Some(next);
+        true
+    }
 }
 
 /// Authoritative document over the whole scene.
 pub struct Session {
-    /// Per-entity metadata. `Arc`-shared so unchanged entries alias
-    /// across history operations (no metadata serialization fan-out
-    /// per mutation).
-    metadata: IndexMap<EntityId, Arc<EntityMetadata>>,
-    /// Preview / scene-resident entities. Visible in
-    /// [`Self::head_assembly`] but absent from every checkpoint.
-    /// `promote_preview` moves entries into history; `remove_preview`
-    /// drops them.
+    /// Per-entity display name.
+    metadata: IndexMap<EntityId, Arc<str>>,
+    /// Preview / scene-resident entities.
+    /// Visible in [`Self::head_assembly`] but absent from checkpoints.
     transient: IndexMap<EntityId, Arc<MoleculeEntity>>,
     /// Id allocator. Stable across history navigation.
     allocator: EntityIdAllocator,
     /// The full two-layer history.
     history: History,
-    /// Ambient residue selection, keyed by entity. A first-class scene
-    /// field beside `history`, but *not* history-versioned: undo / redo /
-    /// jump leave it untouched. Empty inner sets are never stored -
-    /// removing the last residue on an entity removes the entity entry,
-    /// so iterating yields only entities that currently have at least one
-    /// selected residue. [`Self::reset`] clears it on a topology swap.
+    /// Ambient residue selection, keyed by entity.
     selection: BTreeMap<EntityId, BTreeSet<u32>>,
-    /// Ambient per-entity render overrides, keyed by entity. Not
-    /// history-versioned: undo / redo / jump leave it untouched.
-    /// Session-scoped (entity ids are reused across puzzles), so
-    /// [`Self::reset`] clears it on a topology swap for id-reuse safety.
-    /// Empty override entries are never stored - merging a field that
-    /// leaves an entry empty removes the entity entry.
+    /// Ambient per-entity render overrides, keyed by entity.
     appearance: BTreeMap<EntityId, viso::DisplayOverrides>,
-    /// Ambient session focus (Tab-cycle target). Not history-versioned:
-    /// undo / redo / jump leave it untouched. [`Self::reset`] returns it
-    /// to [`Focus::All`] on a topology swap.
+    /// Ambient session focus (Tab-cycle target).
     focus: Focus,
-    /// Display title for the current session: the file stem on a free-form
-    /// load, the puzzle name on a puzzle load. Plain session state derived
-    /// from the load source; never empty in practice (a structure with no
-    /// derivable name gets `"Unknown"` at create time). [`Self::reset`]
-    /// leaves it untouched - the following load's create seam
-    /// ([`Self::start`]) overwrites it.
+    /// Display title for the current session.
     title: String,
-    /// Puzzle-shaped session state. `None` is the default free-form
-    /// ("scientist") session; `Some` is a loaded campaign/intro puzzle
-    /// carrying its target energies and tutorial-bubble cursor. Ambient
-    /// session state, not history-versioned; [`Self::reset`] clears it on a
-    /// topology swap. Installing or clearing the puzzle emits
-    /// [`SessionUpdate::PuzzleChanged`]; stepping the bubble cursor emits
-    /// [`SessionUpdate::BubbleChanged`].
+    /// Session state specific to game or intro puzzles.
     puzzle: Option<Puzzle>,
-    /// Score-term weight map (`term_name -> weight`) core multiplies the
-    /// plugin's raw per-term energies by to produce the weighted total +
-    /// per-residue scalars. Session-lifetime ambient state, not
-    /// history-versioned and never on the `SessionUpdate` stream: it changes
-    /// only at load, before the first score, so no consumer needs a change
-    /// signal. Default empty; the App loads `ref2015_cart` into it once at
-    /// init. [`Self::reset`] leaves it untouched (the `title` pattern): a
-    /// reload re-sets it via the same init seam, so it carries across swaps.
-    term_weights: std::collections::HashMap<String, f32>,
-    /// Score-term name list (the alignment key for every stored breakdown's
-    /// `whole_pose_terms` and each residue's `terms`). Session-lifetime
-    /// ambient state, like [`Self::term_weights`]: it changes only when a
-    /// score report lands (the App re-sets it from each report, idempotent),
-    /// and [`Self::reset`] leaves it untouched so the next session's first
-    /// score overwrites it. Lives once on the session rather than being
-    /// duplicated on every checkpoint's breakdown.
-    term_names: Vec<String>,
-    /// Labeled breakdown of the RAW score bonus from the loaded puzzle's met
-    /// filters: each entry is `(filter label, bonus value)` in RAW score
-    /// units (e.g. the native `ExposedCount` filter contributes
-    /// `("exposed_count", bonus)`). Ambient session state, not
-    /// history-versioned. Empty by default; [`Self::reset`] clears it on a
-    /// topology swap.
-    filter_bonus: Vec<(String, f64)>,
-    /// Session-scoped DERIVED viz cache: the plugin-provided rendering
-    /// connections plus the topology id set they were queried for, and the
-    /// three structural-viz overlay payloads (cavities, clashes,
-    /// exposed-hydrophobics) with their dirty flag. Not history-versioned;
-    /// regenerated from the structure via plugin queries. [`Self::reset`]
-    /// clears it on a topology swap so a new puzzle reusing the same entity
-    /// ids does not inherit a stale held set.
-    pub(crate) viz: VizState,
-    /// Drain queue of [`SessionUpdate`]s emitted by this store's mutators
-    /// through [`Self::apply`]. Always empty in steady state.
+    /// Queue of [`SessionUpdate`]s emitted by this store's mutators
     pending_updates: Vec<SessionUpdate>,
+    /// In-flight op-stream preview token maps.
+    previews: Previews,
 }
 
 impl Default for Session {
@@ -232,36 +171,19 @@ impl Session {
             focus: Focus::default(),
             title: "Unknown".to_owned(),
             puzzle: None,
-            term_weights: std::collections::HashMap::new(),
-            term_names: Vec::new(),
-            filter_bonus: Vec::new(),
-            viz: VizState::default(),
             pending_updates: Vec::new(),
+            previews: Previews::new(),
         }
     }
 
     /// Build the current view of the assembly: the lane heads of every
-    /// entity in the checkpoint head's `entity_heads` (in canonical
-    /// order), followed by every transient preview (also in insertion
-    /// order). Collects the entity `Arc`s and hands them to
-    /// [`Assembly::from_arcs`], so a per-frame call is O(entities) of
-    /// refcount bumps rather than an O(atoms) deep clone per
-    /// entity. The returned `Assembly` shares its `Arc<MoleculeEntity>`s
-    /// with the history snapshots (and the transient map); that aliasing
-    /// is safe because consumers only read the assembly, and history
-    /// forks its own copy via `Arc::make_mut` before any in-place edit,
-    /// so a published snapshot never observes a later mutation.
+    /// entity in the checkpoint head's `entity_heads`, followed by
+    /// every transient preview
     #[must_use]
     pub fn head_assembly(&self) -> Assembly {
         let head_id = self.history.checkpoints().head();
         let mut entities: Vec<Arc<MoleculeEntity>> = Vec::new();
         if let Some(head) = self.history.checkpoint(head_id) {
-            // Membership (which entities, in what order) comes from the
-            // committed head; the snapshot read comes from each lane's
-            // head, which is the open tentative when an action holds the
-            // lane and the committed snapshot otherwise. This makes the
-            // live view follow an in-flight action; an action never
-            // changes membership.
             for eid in head.entity_heads.keys() {
                 if let Some(lane) = self.history.lane(*eid) {
                     if let Some(snap) = lane.snapshot(lane.head()) {
@@ -270,9 +192,11 @@ impl Session {
                 }
             }
         }
+
         for arc in self.transient.values() {
             entities.push(Arc::clone(arc));
         }
+
         Assembly::from_arcs(entities)
     }
 
@@ -282,10 +206,7 @@ impl Session {
         &self.history
     }
 
-    /// Look up an entity by id. Reads the lane head (the open tentative
-    /// when an action holds the lane, else the committed snapshot) for any
-    /// entity in the committed membership, then falls back to transient
-    /// previews.
+    /// Look up an entity by id.
     #[must_use]
     pub fn entity(&self, id: EntityId) -> Option<&MoleculeEntity> {
         let head_id = self.history.checkpoints().head();
@@ -308,20 +229,12 @@ impl Session {
         self.entity(id).map(MoleculeEntity::entity_kind)
     }
 
-    /// Look up an entity's metadata.
+    /// Look up an entity's display name.
     #[must_use]
-    pub fn metadata(&self, id: EntityId) -> Option<&EntityMetadata> {
+    pub fn name(&self, id: EntityId) -> Option<&str> {
         self.metadata.get(&id).map(Arc::as_ref)
     }
 
-    /// Live entity membership: the head checkpoint's committed entities
-    /// (canonical `entity_heads` order), followed by the transient
-    /// previews (insertion order). The two sets are disjoint
-    /// (`promote_preview` moves an entity from `transient` into
-    /// history), so concatenating committed-then-preview needs no dedup.
-    /// This is the membership source for `ids` / `count` / `iter`; the
-    /// `metadata` map is now a pure side table, not a membership oracle
-    /// (it is never GC'd, so it over-reports).
     fn live_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
         let head_id = self.history.checkpoints().head();
         let entity_heads = self.history.checkpoint(head_id).map(|h| &h.entity_heads);
@@ -331,15 +244,13 @@ impl Session {
             .chain(self.transient.keys().copied())
     }
 
-    /// Iterate every live (committed ∪ preview) entity's metadata, in
-    /// canonical order (committed first, then preview). Live ids with no
-    /// side-table entry are skipped.
-    pub fn iter(&self) -> impl Iterator<Item = (EntityId, &EntityMetadata)> {
+    /// Iterate every live entity's display name
+    pub fn iter(&self) -> impl Iterator<Item = (EntityId, &str)> {
         self.live_ids()
             .filter_map(move |id| self.metadata.get(&id).map(|m| (id, m.as_ref())))
     }
 
-    /// All live (committed ∪ preview) entity ids, in canonical order
+    /// All live entity ids
     /// (committed first, then preview).
     pub fn ids(&self) -> impl Iterator<Item = EntityId> + '_ {
         self.live_ids()
@@ -351,7 +262,7 @@ impl Session {
         self.ids().find(|id| u64::from(id.raw()) == entity_id)
     }
 
-    /// Number of live (committed ∪ preview) entities.
+    /// Number of live entities.
     #[must_use]
     pub fn count(&self) -> usize {
         self.live_ids().count()
@@ -382,25 +293,15 @@ impl Session {
         self.history.current_composition_scores()
     }
 
-    /// The RAW per-term breakdown of the current composition node (first
-    /// open pending edit if any, else the committed head). The render
-    /// projector re-derives the displayed per-residue colors from it ×
-    /// [`Self::term_weights`] (zipping [`Self::term_names`]) on every
-    /// `ScoresChanged`. `None` until a score with a breakdown is stamped.
+    /// The raw per-term breakdown of the current composition node
     #[must_use]
     pub fn current_composition_breakdown(&self) -> Option<&crate::scores::StoredBreakdown> {
         self.history.current_composition_breakdown()
     }
 
-    /// Read the score for the *current composition node* (the open pending
-    /// edit when an action is in flight, else the committed head checkpoint),
-    /// projected through the active scoring mode. Following the composition
-    /// node keeps the displayed score on an in-flight action's streamed score
-    /// without ever reading the committed parent (derive, don't store).
     pub(crate) fn display_score(&self) -> Option<f64> {
         let (raw, game) = self.current_composition_scores();
-        // A loaded puzzle displays the foldit game score; the free-form
-        // session displays the raw Rosetta score.
+
         if self.puzzle().is_some() {
             game
         } else {
@@ -430,96 +331,43 @@ impl Session {
             .map(Assembly::from_arcs)
     }
 
-    // Ambient residue selection (not history-versioned); the mutators live
-    // in [`mutators`]. Invariant maintained across every mutator: per-entity
-    // sets are never left empty in the outer map, so `selected_entities`
-    // yields only entities that currently have at least one selected residue.
-
-    /// The current residue selection, keyed by entity. Empty inner sets
-    /// are never present (see the invariant above), so every entry
-    /// carries at least one residue.
+    // Getter for selection, as per entity map
     #[must_use]
     pub const fn selection(&self) -> &BTreeMap<EntityId, BTreeSet<u32>> {
         &self.selection
     }
 
-    /// The current per-entity appearance overrides, keyed by entity. Empty
-    /// override entries are never present (merging a field that leaves an
-    /// entry empty removes it), so every entry carries at least one set
-    /// field. The render projector reads this and reconciles the engine's
-    /// working copy against it.
+    // Getter for appearance, as per entity map
     #[must_use]
     pub const fn appearance(&self) -> &BTreeMap<EntityId, viso::DisplayOverrides> {
         &self.appearance
     }
 
-    /// Selected residues on a specific entity, or `None` if the entity
-    /// has no selection. Sets are never empty by invariant, so
-    /// `Some(_)` always carries at least one residue. Selection query
-    /// API; currently only exercised by tests.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn selected_residues_on(&self, entity: EntityId) -> Option<&BTreeSet<u32>> {
-        self.selection.get(&entity)
-    }
-
-    /// Point-query: is `(entity, residue_index)` selected? Selection
-    /// query API; currently only exercised by tests.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn is_residue_selected(&self, entity: EntityId, residue_index: u32) -> bool {
-        self.selection
-            .get(&entity)
-            .is_some_and(|set| set.contains(&residue_index))
-    }
-
-    /// Iterator over the entities that currently have at least one
-    /// residue selected. Order is `BTreeMap`'s natural key order.
-    /// Selection query API; currently only exercised by tests.
-    #[allow(dead_code)]
-    pub fn selected_entities(&self) -> impl Iterator<Item = EntityId> + '_ {
-        self.selection.keys().copied()
-    }
-
-    /// True when no residue is selected on any entity. Selection query
-    /// API; currently only exercised by tests.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn selection_is_empty(&self) -> bool {
-        self.selection.is_empty()
-    }
-
-    /// Total number of selected residues across all entities (sum of
-    /// per-entity set sizes).
+    /// Total number of selected residues across all entities
     #[must_use]
     pub fn selection_total_count(&self) -> usize {
-        self.selection.values().map(std::collections::BTreeSet::len).sum()
+        self.selection
+            .values()
+            .map(std::collections::BTreeSet::len)
+            .sum()
     }
 
-    /// The current session focus.
     #[must_use]
     pub const fn focus(&self) -> Focus {
         self.focus
     }
 
-    /// Display title for the current session (file stem on a free-form
-    /// load, puzzle name on a puzzle load). Always a real string; set by
-    /// the create seam ([`Self::start`]).
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// The loaded puzzle, or `None` in the default free-form session.
     #[must_use]
     pub const fn puzzle(&self) -> Option<&Puzzle> {
         self.puzzle.as_ref()
     }
 
-    /// Whether residue `res` on `entity` may be designed (mutated) in the
-    /// current session. Secure-by-default: a free-form session (no puzzle),
-    /// a puzzle with no design gating, or an entity/residue outside the mask
-    /// all answer `false`. Forwards to [`Puzzle::is_designable`].
+    // Is Residue N of Entity X designable?
     #[must_use]
     pub fn is_designable(&self, entity: EntityId, res: u32) -> bool {
         self.puzzle
@@ -528,17 +376,7 @@ impl Session {
     }
 
     /// Whether the current focus-scoped selection is fully designable.
-    ///
-    /// Mirrors the runner's selection-spec focus scoping: with
-    /// [`Focus::Entity`] only that entity's selected residues are checked;
-    /// with [`Focus::All`] every selected `(entity, residue)` is checked.
-    /// A design-gated action is enabled only when this holds. The empty
-    /// selection is vacuously designable (the action's `selection_spec`
-    /// min-residues gate handles the empty case separately).
-    ///
-    /// Secure-by-default through [`Self::is_designable`]: any residue in
-    /// scope that is not designable (including a free-form session or an
-    /// ungated puzzle) makes the result `false`.
+    /// Used to gate action availability
     #[must_use]
     pub fn selection_is_designable(&self) -> bool {
         match self.focus {
@@ -548,16 +386,14 @@ impl Session {
                 .into_iter()
                 .flatten()
                 .all(|&res| self.is_designable(eid, res)),
-            Focus::All => self.selection.iter().all(|(&eid, residues)| {
-                residues.iter().all(|&res| self.is_designable(eid, res))
-            }),
+            Focus::All => self
+                .selection
+                .iter()
+                .all(|(&eid, residues)| residues.iter().all(|&res| self.is_designable(eid, res))),
         }
     }
 
-    /// Whether the loaded puzzle gates design per entity (its `design_gating`
-    /// is `Some`). Distinguishes a design puzzle from a free-edit fold puzzle
-    /// or free-form session (no gating); gates whether the design mask is sent
-    /// to the plugin and drives the design overlay.
+    /// Whether the loaded puzzle gates design per entity
     #[must_use]
     pub fn design_gating_active(&self) -> bool {
         self.puzzle
@@ -565,46 +401,32 @@ impl Session {
             .is_some_and(|p| p.design_gating.is_some())
     }
 
-    /// The labeled breakdown of the RAW score bonus from the loaded puzzle's
-    /// met filters, each entry `(filter label, bonus value)`. Empty in a
-    /// free-form session or when no filter is met. The dev readout lists it;
-    /// the score path folds [`Self::filter_bonus_total`] into the raw value
-    /// before the raw->game map.
+    /// Per-entity set of residues the loaded puzzle permits redesign at, read
+    /// off the session's design mask over the live head entities. Empty when
+    /// no design gating is active (free-form session, fold puzzle). Carried on
+    /// the [`DispatchIntent`] so the plugin can gate identity changes; the
+    /// engine intersects it with the resolved selection, so computing it over
+    /// every live protein entity is sufficient.
+    ///
+    /// [`DispatchIntent`]: crate::runner_client::DispatchIntent
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn filter_bonus(&self) -> &[(String, f64)] {
-        &self.filter_bonus
+    pub(crate) fn designable_residues(&self) -> BTreeMap<EntityId, BTreeSet<u32>> {
+        let mut designable: BTreeMap<EntityId, BTreeSet<u32>> = BTreeMap::new();
+        if !self.design_gating_active() {
+            return designable;
+        }
+        for entity in self.head_assembly().entities() {
+            let eid = entity.id();
+            let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
+            let residues: BTreeSet<u32> =
+                (0..count).filter(|&res| self.is_designable(eid, res)).collect();
+            if !residues.is_empty() {
+                let _ = designable.insert(eid, residues);
+            }
+        }
+        designable
     }
-
-    /// The summed RAW score bonus across every met filter. `0.0` in a
-    /// free-form session or when no filter is met. The score path folds this
-    /// into the raw value before the raw->game map.
-    #[must_use]
-    pub fn filter_bonus_total(&self) -> f64 {
-        self.filter_bonus.iter().map(|(_, v)| v).sum()
-    }
-
-    /// Replace the met-filter RAW bonus breakdown. Silent (no `SessionUpdate`):
-    /// it rides the `ScoresChanged` that the score write following it emits.
-    /// Recomputed by the exposed-hydro coordinator at rest each geometry
-    /// change; [`Self::reset`] clears it on a topology swap.
-    pub fn set_filter_bonus(&mut self, breakdown: Vec<(String, f64)>) {
-        self.filter_bonus = breakdown;
-    }
-
-    /// The active score-term weight map core multiplies raw per-term
-    /// energies by. Empty until the App loads the default at init.
-    #[must_use]
-    pub const fn term_weights(&self) -> &std::collections::HashMap<String, f32> {
-        &self.term_weights
-    }
-
-    /// The score-term name list (alignment key for every stored breakdown).
-    /// Empty until the first score report lands.
-    #[must_use]
-    pub fn term_names(&self) -> &[String] {
-        &self.term_names
-    }
-
 }
 
 #[cfg(test)]

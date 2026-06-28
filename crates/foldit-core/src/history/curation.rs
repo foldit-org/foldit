@@ -36,6 +36,7 @@ impl History {
             .get_mut(id)
             .ok_or(HistoryError::UnknownCheckpoint { id })?;
         ckpt.exclude_from_best = exclude;
+        self.recompute_best();
         Ok(())
     }
 
@@ -83,6 +84,7 @@ impl History {
             ckpt.breakdown = breakdown;
         }
         self.live_version = self.live_version.saturating_add(1);
+        self.recompute_best();
 
         if cfg!(debug_assertions) {
             self.assert_invariant();

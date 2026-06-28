@@ -353,7 +353,7 @@ impl RunnerClient {
             // Pull-drag moves geometry, never redesigns identity.
             designable: Vec::new(),
         };
-        let params = crate::pull_drag::build_start_params(
+        let params = super::pull::build_start_params(
             intent.op_id,
             intent.residue_in_entity,
             &intent.atom_name,
@@ -432,22 +432,22 @@ impl RunnerClient {
 
     /// Mutable handle to the live drag (pointer-move updates its
     /// `screen_target` and reads its rid / plugin id).
-    pub(crate) const fn pull_drag_mut(&mut self) -> Option<&mut crate::pull_drag::PullDrag> {
+    pub(crate) const fn pull_drag_mut(&mut self) -> Option<&mut super::pull::PullDrag> {
         self.stream_host.pull_drag.as_mut()
     }
 
     /// Install the live drag state on stream start.
-    pub(crate) fn set_pull_drag(&mut self, drag: crate::pull_drag::PullDrag) {
+    pub(crate) fn set_pull_drag(&mut self, drag: super::pull::PullDrag) {
         self.stream_host.pull_drag = Some(drag);
     }
 
     /// Take + clear the live drag state on pointer-up / cancel.
-    pub(crate) const fn take_pull_drag(&mut self) -> Option<crate::pull_drag::PullDrag> {
+    pub(crate) const fn take_pull_drag(&mut self) -> Option<super::pull::PullDrag> {
         self.stream_host.pull_drag.take()
     }
 
     /// Latch (or clear, with `None`) the pull intent at pointer-down.
-    pub(crate) fn set_pending_pull_origin(&mut self, origin: Option<crate::pull_drag::PullRoute>) {
+    pub(crate) fn set_pending_pull_origin(&mut self, origin: Option<super::pull::PullRoute>) {
         self.stream_host.pending_pull_origin = origin;
     }
 
@@ -457,7 +457,7 @@ impl RunnerClient {
     }
 
     /// Take + clear the latched pull intent on the consuming pointer-move.
-    pub(crate) const fn take_pending_pull_origin(&mut self) -> Option<crate::pull_drag::PullRoute> {
+    pub(crate) const fn take_pending_pull_origin(&mut self) -> Option<super::pull::PullRoute> {
         self.stream_host.pending_pull_origin.take()
     }
 }

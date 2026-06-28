@@ -14,7 +14,7 @@ use bitflags::bitflags;
 use serde::Serialize;
 
 pub use actions::{AppCommand, OpDispatch, ViewportInput};
-pub use bridge::{Dispatcher, IpcMessage, RequestKind, RequestResult, Transport};
+pub use bridge::{IpcMessage, RequestKind, RequestResult, Transport};
 pub use state::*;
 pub use wire::{
     CheckpointId, CheckpointInfo, CheckpointKindTag, EntitySnapshotId, FilterStatus,

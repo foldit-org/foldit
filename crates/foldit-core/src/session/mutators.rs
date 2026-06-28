@@ -15,10 +15,10 @@ use molex::MoleculeEntity;
 use viso::Focus;
 
 use crate::history::{
-    CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History, HistoryError,
+    CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History,
 };
 
-use super::{EntityMetadata, EntityOrigin, Puzzle, Session, SessionError, SessionUpdate};
+use super::{Puzzle, Session, SessionError, SessionUpdate};
 
 impl Session {
     /// Begin a streaming action over `entities` under the caller-supplied
@@ -111,23 +111,6 @@ impl Session {
         &mut self,
         branch: Option<CheckpointId>,
     ) -> Result<Option<CheckpointId>, SessionError> {
-        let head = self.history.checkpoints().head();
-        let kids: Vec<CheckpointId> = self
-            .history
-            .checkpoint(head)
-            .map(|h| h.children.iter().copied().collect())
-            .unwrap_or_default();
-        match (branch, kids.as_slice()) {
-            (_, []) => return Ok(None),
-            (Some(b), kids) if kids.contains(&b) => {}
-            (Some(_), _) => {
-                return Err(SessionError::History(HistoryError::NoSuchBranch))
-            }
-            (None, [_]) => {}
-            (None, _) => {
-                return Err(SessionError::History(HistoryError::AmbiguousBranch))
-            }
-        }
         let moved = self.history.redo(branch)?;
         if moved.is_some() {
             self.apply(SessionUpdate::HeadMoved);
@@ -167,11 +150,15 @@ impl Session {
     }
 
     pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
-        Ok(self.history.pin_checkpoint(id)?)
+        self.history.pin_checkpoint(id)?;
+        self.apply(SessionUpdate::CurationChanged);
+        Ok(())
     }
 
     pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), SessionError> {
-        Ok(self.history.unpin_checkpoint(id)?)
+        self.history.unpin_checkpoint(id)?;
+        self.apply(SessionUpdate::CurationChanged);
+        Ok(())
     }
 
     pub fn set_exclude_from_best(
@@ -179,7 +166,9 @@ impl Session {
         id: CheckpointId,
         exclude: bool,
     ) -> Result<(), SessionError> {
-        Ok(self.history.set_exclude_from_best(id, exclude)?)
+        self.history.set_exclude_from_best(id, exclude)?;
+        self.apply(SessionUpdate::CurationChanged);
+        Ok(())
     }
 
     /// Stamp scores on the current head checkpoint in place. Canonical
@@ -194,7 +183,6 @@ impl Session {
         game_score: Option<f64>,
         breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        self.debug_assert_breakdown_alignment(breakdown.as_ref());
         if self.history.set_head_scores(raw_score, game_score, breakdown) {
             self.apply(SessionUpdate::ScoresChanged);
         }
@@ -211,7 +199,6 @@ impl Session {
         game_score: Option<f64>,
         breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        self.debug_assert_breakdown_alignment(breakdown.as_ref());
         if self
             .history
             .set_edit_scores(request_id, raw_score, game_score, breakdown)
@@ -231,7 +218,6 @@ impl Session {
         game_score: Option<f64>,
         breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        self.debug_assert_breakdown_alignment(breakdown.as_ref());
         if self
             .history
             .set_checkpoint_scores(id, raw_score, game_score, breakdown)
@@ -240,48 +226,14 @@ impl Session {
         }
     }
 
-    /// Debug-only alignment invariant: a stored breakdown's `whole_pose_terms`
-    /// and every residue's `terms` must match the session `term_names`
-    /// length. The render projector zips the breakdown against `term_names`
-    /// when re-deriving colors; a length mismatch would silently drop the
-    /// tail or misalign, so it is caught at every write site under test /
-    /// debug builds. Callers set `term_names` from the same report before
-    /// stamping the breakdown, so this holds by construction.
-    fn debug_assert_breakdown_alignment(
-        &self,
-        breakdown: Option<&crate::scores::StoredBreakdown>,
-    ) {
-        if let Some(b) = breakdown {
-            debug_assert_eq!(
-                b.whole_pose_terms.len(),
-                self.term_names.len(),
-                "stored whole_pose_terms must align to session term_names",
-            );
-            for rts in &b.per_residue_terms {
-                debug_assert_eq!(
-                    rts.terms.len(),
-                    self.term_names.len(),
-                    "stored per-residue terms must align to session term_names",
-                );
-            }
-        }
-    }
-
     /// Insert a new preview entity. Allocates a fresh id, sets the
     /// entity's id to it, and stores it in `transient` plus
     /// `metadata`. Bypasses history.
-    pub fn insert_preview(
-        &mut self,
-        mut entity: MoleculeEntity,
-        name: String,
-        origin: EntityOrigin,
-    ) -> EntityId {
+    pub fn insert_preview(&mut self, mut entity: MoleculeEntity, name: String) -> EntityId {
         let id = self.allocator.allocate();
         entity.set_id(id);
         let _ = self.transient.insert(id, Arc::new(entity));
-        let _ = self
-            .metadata
-            .insert(id, Arc::new(EntityMetadata::new(name, origin)));
+        let _ = self.metadata.insert(id, Arc::from(name));
         self.apply(SessionUpdate::PreviewAdded);
         id
     }
@@ -314,13 +266,12 @@ impl Session {
     /// Promote a preview into history. Removes it from `transient` and
     /// pushes one checkpoint via [`History::add_entity`] with `kind`
     /// (typically [`CheckpointKind::PromotedPreview`] or one of the
-    /// ML kinds). Optionally stamps final origin / name.
+    /// ML kinds). Optionally stamps a final name.
     /// Refused if the preview is unknown or an action is in flight.
     pub fn promote_preview(
         &mut self,
         id: EntityId,
         kind: CheckpointKind,
-        origin: Option<EntityOrigin>,
         name: Option<String>,
         label: impl Into<Cow<'static, str>>,
     ) -> Result<CheckpointId, SessionError> {
@@ -329,14 +280,8 @@ impl Session {
             .shift_remove(&id)
             .ok_or(SessionError::NotAPreview { id })?;
 
-        if let Some(meta_arc) = self.metadata.get_mut(&id) {
-            let meta = Arc::make_mut(meta_arc);
-            if let Some(o) = origin {
-                meta.origin = o;
-            }
-            if let Some(n) = name {
-                meta.name = n;
-            }
+        if let Some(n) = name {
+            let _ = self.metadata.insert(id, Arc::from(n));
         }
 
         match self.history.add_entity(id, payload, kind, label.into()) {
@@ -380,7 +325,7 @@ impl Session {
             MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent
         );
         let zero_residue = entity.residue_count() == 0;
-        let id = self.insert_preview(entity, name.to_owned(), EntityOrigin::Loaded);
+        let id = self.insert_preview(entity, name.to_owned());
         if is_ambient || zero_residue {
             // Leave it transient: visible in viso, absent from history.
             return Some(id);
@@ -391,7 +336,6 @@ impl Session {
                 entity: id,
                 kind: mol_type,
             },
-            None,
             None,
             std::borrow::Cow::Owned(format!("Loaded {name}")),
         ) {
@@ -442,21 +386,6 @@ impl Session {
             .entry(entity)
             .or_default()
             .insert(residue_index);
-        self.apply(SessionUpdate::SelectionChanged);
-    }
-
-    /// Mark a single residue on `entity` as deselected. Idempotent on
-    /// already-empty state. If this empties the per-entity set, the
-    /// entity entry is removed from the outer map (sets are never
-    /// left empty). Currently only exercised by tests.
-    #[allow(dead_code)]
-    pub fn deselect_residue(&mut self, entity: EntityId, residue_index: u32) {
-        if let Some(set) = self.selection.get_mut(&entity) {
-            set.remove(&residue_index);
-            if set.is_empty() {
-                self.selection.remove(&entity);
-            }
-        }
         self.apply(SessionUpdate::SelectionChanged);
     }
 
@@ -606,37 +535,21 @@ impl Session {
         >,
     ) {
         if let Some(puzzle) = self.puzzle.as_mut() {
-            puzzle.design_gating = gating;
+            puzzle.set_design_gating(gating);
         }
     }
 
     /// Register a newly-adopted design entity as fully designable, so every
-    /// residue on `entity` answers `true` to [`Session::is_designable`].
-    ///
-    /// A no-op unless design gating is already active (`design_gating` is
-    /// `Some`): a non-design session must stay ungated, and a fabricated
-    /// gating map would silently lock everything else. The installed mask
-    /// covers the entity's whole residue range `0..=residue_count-1`, the
-    /// index domain the design-gating overlay and dispatch query over.
+    /// residue on `entity` answers `true` to [`Session::is_designable`]. A
+    /// no-op when no puzzle is installed or gating is not already active.
     pub(crate) fn register_full_designable_entity(
         &mut self,
         entity: EntityId,
         residue_count: usize,
     ) {
-        let Some(puzzle) = self.puzzle.as_mut() else {
-            return;
-        };
-        let Some(gating) = puzzle.design_gating.as_mut() else {
-            return;
-        };
-        let Some(last) = residue_count.checked_sub(1) else {
-            return;
-        };
-        let end = u32::try_from(last).unwrap_or(u32::MAX);
-        gating.insert(
-            entity,
-            crate::puzzle_setup::DesignMask { ranges: vec![0..=end] },
-        );
+        if let Some(puzzle) = self.puzzle.as_mut() {
+            puzzle.register_full_designable_entity(entity, residue_count);
+        }
     }
 
     /// Begin a session over a freshly-loaded structure: install its display
@@ -663,42 +576,10 @@ impl Session {
     /// [`SessionUpdate::BubbleChanged`] only when the cursor actually moves
     /// - a step at either clamp is silent.
     pub fn advance_bubble(&mut self, back: bool) {
-        let Some(puzzle) = self.puzzle.as_mut() else {
-            return;
-        };
-        let Some(cursor) = puzzle.current_bubble else {
-            return;
-        };
-        let len = puzzle.bubbles.as_ref().map_or(0, Vec::len);
-        let next = if back {
-            cursor.saturating_sub(1)
-        } else if cursor < len {
-            cursor + 1
-        } else {
-            cursor
-        };
-        if next == cursor {
-            return;
+        let moved = self.puzzle.as_mut().is_some_and(|p| p.advance_bubble(back));
+        if moved {
+            self.apply(SessionUpdate::BubbleChanged);
         }
-        puzzle.current_bubble = Some(next);
-        self.apply(SessionUpdate::BubbleChanged);
-    }
-
-    /// Install the score-term weight map. Silent (no `SessionUpdate`): the
-    /// weights change only at load, before the first score, so no consumer
-    /// needs a change signal. Called once at App init; survives reloads
-    /// because [`Self::reset`] leaves `term_weights` untouched.
-    pub fn set_term_weights(&mut self, weights: std::collections::HashMap<String, f32>) {
-        self.term_weights = weights;
-    }
-
-    /// Install the score-term name list. Silent (no `SessionUpdate`): it
-    /// rides the `ScoresChanged` that the same score write emits, and on its
-    /// own carries no displayable change. Re-set from each report (idempotent
-    /// in steady state); survives reloads because [`Self::reset`] leaves it
-    /// untouched, like `term_weights`.
-    pub fn set_term_names(&mut self, names: Vec<String>) {
-        self.term_names = names;
     }
 
     /// Drop the entire history graph, clear metadata and transient.
@@ -712,21 +593,19 @@ impl Session {
         self.allocator = EntityIdAllocator::new();
         self.history = History::new(std::iter::empty(), PathBuf::new());
         // Everything below is ambient session state tied to the outgoing
-        // structure: the entity-id-keyed maps (selection, appearance, viz)
+        // structure: the entity-id-keyed maps (selection, appearance)
         // would alias the incoming assembly's reused ids (the allocator
-        // restarts), and the rest (focus, puzzle, filter_bonus) belongs to
-        // the structure being dropped. Cleared silently; the reset's own
-        // `HeadMoved` below stands in for the topology swap.
+        // restarts), and the rest (focus, puzzle) belongs to the structure
+        // being dropped. Cleared silently; the reset's own `HeadMoved` below
+        // stands in for the topology swap.
         self.selection.clear();
         self.appearance.clear();
+        self.previews.clear();
         self.focus = Focus::default();
         self.puzzle = None;
-        self.filter_bonus.clear();
-        self.viz = crate::session::VizState::default();
-        // `title`, `term_weights`, and the view options + active preset are
-        // left untouched: the following load re-sets the first two via the
-        // `start` / App-init seams, and view state lives on `App` and persists
-        // there, so each carries across the swap.
+        // `title` and the view options + active preset are left untouched: the
+        // following load re-sets the title via the `start` seam, and view state
+        // lives on `App` and persists there, so each carries across the swap.
         // Drop any changes emitted before the reset - they describe state
         // that no longer exists. Cleared BEFORE the reset's own emit below
         // so that change survives. The runner projector's published snapshot

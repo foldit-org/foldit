@@ -44,12 +44,12 @@ mod selection_tests {
         let mut app = fresh_app();
         let ids = mint_ids(1);
         app.store.select_residue(ids[0], 7);
-        assert!(!app.store.selection_is_empty());
+        assert!(!app.store.selection().is_empty());
         // Empty entries: clear (`clear_selection` always runs first; no
         // entry loop body) - independent of whether the empty store
         // could even resolve a raw id.
         app.handle_set_selection(Vec::new());
-        assert!(app.store.selection_is_empty());
+        assert!(app.store.selection().is_empty());
     }
 
     #[test]
@@ -71,7 +71,7 @@ mod selection_tests {
                 residues: vec![5],
             },
         ]);
-        assert!(app.store.selection_is_empty());
+        assert!(app.store.selection().is_empty());
     }
 
     /// `SetFocus` is handled before the engine guard, so it takes effect on
@@ -84,7 +84,7 @@ mod selection_tests {
         let mut app = fresh_app();
         let id = app
             .store
-            .insert_preview(mk_bulk(), "e".to_owned(), crate::session::EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "e".to_owned());
 
         app.handle_app_command(foldit_gui::AppCommand::SetFocus {
             entity_id: Some(id.raw()),
@@ -130,19 +130,17 @@ mod selection_tests {
     #[test]
     fn composition_score_routes_to_pending_edit_not_committed_parent() {
         use crate::history::CheckpointKind;
-        use crate::session::EntityOrigin;
 
         let mut app = fresh_app();
         // Commit one entity so the head is a real checkpoint, and stamp a
         // known score on it (the committed parent).
         let id = app
             .store
-            .insert_preview(mk_bulk(), "e".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "e".to_owned());
         app.store
             .promote_preview(
                 id,
                 CheckpointKind::PromotedPreview { entity: id },
-                None,
                 None,
                 "e",
             )
@@ -210,20 +208,19 @@ mod selection_tests {
     #[test]
     fn post_init_normalizes_every_matching_entity_not_just_the_first() {
         use crate::history::CheckpointKind;
-        use crate::session::EntityOrigin;
         use std::sync::Arc;
 
         let mut store = Session::new();
         // Two committed entities.
-        let e1 = store.insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
+        let e1 = store.insert_preview(mk_bulk(), "a".to_owned());
         store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
             .expect("promote a");
-        let e2 = store.insert_preview(mk_bulk(), "b".to_owned(), EntityOrigin::Loaded);
+        let e2 = store.insert_preview(mk_bulk(), "b".to_owned());
         store
-            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
+            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, "b")
             .expect("promote b");
-        let ckpts_before = store.history().checkpoints().len();
+        let ckpts_before = store.history().checkpoints().iter().count();
 
         // A "normalized" assembly that displaces BOTH entities' atoms,
         // keeping their store ids so `apply_streaming_assembly` id-matches.
@@ -275,7 +272,7 @@ mod selection_tests {
 
         // Exactly one new checkpoint, and BOTH entities carry the moved
         // coordinates - not just the first.
-        assert_eq!(store.history().checkpoints().len(), ckpts_before + 1);
+        assert_eq!(store.history().checkpoints().iter().count(), ckpts_before + 1);
         let head = store.head_assembly();
         for e in [e1, e2] {
             let ent = head.entity(e).expect("entity present in head assembly");
@@ -298,28 +295,27 @@ mod selection_tests {
     #[test]
     fn global_scope_opens_edit_over_all_committed_entities() {
         use crate::history::CheckpointKind;
-        use crate::session::EntityOrigin;
         use std::sync::Arc;
 
         let mut app = fresh_app();
         // Two committed entities.
         let e1 = app
             .store
-            .insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "a".to_owned());
         app.store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
             .expect("promote a");
         let e2 = app
             .store
-            .insert_preview(mk_bulk(), "b".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "b".to_owned());
         app.store
-            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, None, "b")
+            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, "b")
             .expect("promote b");
         // A preview that is never promoted: it has no committed lane and so
         // must be filtered out of a whole-pose edit's lane set.
         let e_transient = app
             .store
-            .insert_preview(mk_bulk(), "c".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "c".to_owned());
 
         // AllEntities resolves to exactly the two committed lanes.
         let mut lanes = app.lanes_for_scope(&EditScope::AllEntities);
@@ -382,7 +378,6 @@ mod selection_tests {
     fn empty_score_report_does_not_stamp_breakdown() {
         use crate::history::CheckpointKind;
         use crate::scores::{ResidueTermScores, ScoreReport};
-        use crate::session::EntityOrigin;
         use std::collections::HashMap;
 
         let mut app = fresh_app();
@@ -390,9 +385,9 @@ mod selection_tests {
         // no-pending-edit branch of `apply_score_reports` runs).
         let id = app
             .store
-            .insert_preview(mk_bulk(), "e".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "e".to_owned());
         app.store
-            .promote_preview(id, CheckpointKind::PromotedPreview { entity: id }, None, None, "e")
+            .promote_preview(id, CheckpointKind::PromotedPreview { entity: id }, None, "e")
             .expect("promote");
         assert!(
             app.store.current_composition_breakdown().is_none(),
@@ -411,7 +406,7 @@ mod selection_tests {
                 bonus_breakdown: Vec::new(),
             },
         );
-        app.apply_score_reports(empty);
+        app.scores.apply_score_reports(&mut app.store, empty);
         assert!(
             app.store.current_composition_breakdown().is_none(),
             "empty report must not stamp a breakdown"
@@ -432,7 +427,7 @@ mod selection_tests {
                 bonus_breakdown: Vec::new(),
             },
         );
-        app.apply_score_reports(full);
+        app.scores.apply_score_reports(&mut app.store, full);
         assert!(
             app.store.current_composition_breakdown().is_some(),
             "non-empty report must stamp a breakdown"
@@ -446,18 +441,17 @@ mod selection_tests {
     #[test]
     fn entity_scope_filters_to_committed_lanes() {
         use crate::history::CheckpointKind;
-        use crate::session::EntityOrigin;
 
         let mut app = fresh_app();
         let e1 = app
             .store
-            .insert_preview(mk_bulk(), "a".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "a".to_owned());
         app.store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, None, "a")
+            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
             .expect("promote a");
         let e_transient = app
             .store
-            .insert_preview(mk_bulk(), "t".to_owned(), EntityOrigin::Loaded);
+            .insert_preview(mk_bulk(), "t".to_owned());
 
         // The resolved set names a committed entity and a transient one;
         // only the committed lane survives the filter.

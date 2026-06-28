@@ -16,22 +16,15 @@ use super::EntitySnapshotId;
 /// [`CheckpointKind::PluginOp`] shape: foldit-core records the op by its
 /// `(plugin_id, op_id)` identity without naming any plugin or enumerating
 /// plugin internals. The remaining variants are host structural events
-/// (load, add / remove entity, per-lane revert, preview promotion).
+/// (load, add entity, per-lane revert, preview promotion).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointKind {
     /// Puzzle / file load - the root checkpoint.
     Loaded { source: PathBuf },
     /// Promoted a transient preview (e.g., a streamed ML result).
-    /// Preview-promotion substrate is built and tested; no production
-    /// path emits this kind yet.
-    #[allow(dead_code)]
     PromotedPreview { entity: EntityId },
     /// New entity added to the assembly.
     AddEntity { entity: EntityId, kind: MoleculeType },
-    /// Entity removed from the assembly. Built and tested; no production
-    /// path emits this kind yet.
-    #[allow(dead_code)]
-    RemoveEntity { entity: EntityId },
     /// Per-entity revert to an older snapshot. Lane head moves to
     /// `target`; no new snapshot pushed; this checkpoint references the
     /// existing target snapshot.
@@ -60,7 +53,6 @@ impl CheckpointKind {
             Self::Loaded { .. } | Self::PluginOp { .. } => None,
             Self::PromotedPreview { entity, .. }
             | Self::AddEntity { entity, .. }
-            | Self::RemoveEntity { entity, .. }
             | Self::LaneUndo { entity, .. } => Some(*entity),
         }
     }

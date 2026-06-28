@@ -1,7 +1,7 @@
 //! Foldit-RS desktop binary.
 //!
 //! Thin entry: parse argv, set up logging, resolve the structure path,
-//! construct `foldit_core::app::App`, hand it to the winit/wry event
+//! construct `foldit_core::App`, hand it to the winit/wry event
 //! loop in `window::run`. All host-agnostic state and dispatch logic
 //! lives in `foldit-core`; this binary owns only the desktop shell.
 //!
@@ -27,7 +27,7 @@ mod tee_logger;
 mod webview_assets;
 mod window;
 
-use foldit_core::app::App;
+use foldit_core::App;
 
 /// Platform file name of the python-host cdylib (the worker dlopens it by this
 /// name). Mirrors `xtask`'s `python_host_lib_name`.

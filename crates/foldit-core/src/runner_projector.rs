@@ -61,12 +61,15 @@ impl RunnerProjector {
 /// change; otherwise diffs the held snapshot against
 /// `doc.head_assembly()` to produce a Full or coord-only Delta, fans it
 /// out through the orchestrator sink, and adopts the new snapshot.
-impl SessionUpdateConsumer<foldit_runner::Orchestrator> for RunnerProjector {
+impl SessionUpdateConsumer for RunnerProjector {
+    type Sources<'a> = &'a mut Session;
+    type Sink = foldit_runner::Orchestrator;
+    type Out = ();
     fn consume(
         &mut self,
         changes: &[SessionUpdate],
-        doc: &mut Session,
-        orch: &mut foldit_runner::Orchestrator,
+        doc: Self::Sources<'_>,
+        orch: &mut Self::Sink,
     ) {
         if !changes.iter().any(Self::is_observable) {
             // Tentative-only / empty batch: nothing the plugins should
@@ -154,7 +157,7 @@ fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{EntityOrigin, Session};
+    use crate::session::Session;
     use foldit_runner::orchestrator::BroadcastPayload;
     use molex::entity::molecule::atom::Atom;
     use molex::entity::molecule::bulk::BulkEntity;
@@ -279,11 +282,7 @@ mod tests {
     #[test]
     fn broadcast_observable_batch_advances_gen_and_adopts_snapshot() {
         let mut doc = Session::new();
-        let _ = doc.insert_preview(
-            mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO),
-            "p".to_owned(),
-            EntityOrigin::Loaded,
-        );
+        let _ = doc.insert_preview(mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO), "p".to_owned());
         let changes = doc.take_updates(); // [PreviewAdded]
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();

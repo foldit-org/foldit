@@ -3,13 +3,22 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::app::score_coordinator::ScoreCoordinator;
 use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 
-/// App-owned viso projector. Holds the monotonic publish counter that
-/// every published `Assembly` is stamped with. The per-session diff
-/// baselines used to route publishes (last-published id set, last-pushed
-/// appearance ids, last SS-bearing assembly) live on the session's
-/// `VizState`, not here, so `Session::reset` clears them.
+/// The inputs the render projection reads.
+pub struct RenderSources<'a> {
+    pub session: &'a mut Session,
+    pub reapply_options: Option<viso::options::VisoOptions>,
+    pub scores: &'a ScoreCoordinator,
+    /// The plugin-provided connections to stamp, sourced from the App-owned
+    /// `Viz` cache. `None` falls back to molex's geometric detection.
+    pub held_connections: Option<&'a HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
+}
+
+/// App-owned viso projector. Holds the monotonic publish counter and the
+/// per-session diff baselines that route publishes (last-published id set,
+/// last-pushed appearance ids, last SS-bearing assembly).
 pub struct RenderProjector {
     /// Monotonic counter stamped onto every published `Assembly`.
     /// Incremented on every `project` that actually publishes. Without
@@ -19,11 +28,41 @@ pub struct RenderProjector {
     /// not reset on `Session::reset`, so a fresh post-reset publish still
     /// advances it and viso never sees the generation go backwards.
     publish_seq: u64,
+    /// Entity-id set of the last published assembly, compared against the next
+    /// drain's id set to choose `set_assembly` vs `replace_assembly`.
+    last_published_ids: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// Entity ids whose appearance overrides were last pushed to the engine
+    /// working copy, used to detect an entry the session dropped since.
+    last_pushed_appearance: BTreeSet<molex::entity::molecule::id::EntityId>,
+    /// The last SS-bearing published assembly (the one a `recompute_ss` ran
+    /// on), cached so a streaming tentative frame carries its secondary
+    /// structure forward without re-running DSSP. `None` until the first
+    /// committed / load publish.
+    last_ss: Option<molex::Assembly>,
 }
 
 impl RenderProjector {
     pub const fn new() -> Self {
-        Self { publish_seq: 0 }
+        Self {
+            publish_seq: 0,
+            last_published_ids: BTreeSet::new(),
+            last_pushed_appearance: BTreeSet::new(),
+            last_ss: None,
+        }
+    }
+
+    /// Clear the diff baselines so a new puzzle reusing the outgoing puzzle's
+    /// entity ids never inherits a stale baseline. Leaves `publish_seq`
+    /// untouched (app-lifetime). Called at the App reset seam.
+    pub(crate) fn reset_baselines(&mut self) {
+        self.last_published_ids.clear();
+        self.last_pushed_appearance.clear();
+        self.last_ss = None;
+    }
+
+    /// Clear just the last-published id set, for the startup synthetic replay.
+    pub(crate) fn clear_last_published_ids(&mut self) {
+        self.last_published_ids.clear();
     }
 
     /// Re-derive the displayed per-residue colors from the session-owned
@@ -40,11 +79,11 @@ impl RenderProjector {
     /// the per-entity score state (it retains scores across `replace_assembly`
     /// and reconciles by id), so foldit-core keeps no shadow copy. The
     /// sizing/scatter is sourced from the session.
-    fn project_scores(doc: &Session, engine: &mut viso::VisoEngine) {
+    fn project_scores(doc: &Session, scores: &ScoreCoordinator, engine: &mut viso::VisoEngine) {
         let Some(breakdown) = doc.current_composition_breakdown() else {
             return;
         };
-        let weighted = breakdown.weighted_per_residue(doc.term_names(), doc.term_weights());
+        let weighted = breakdown.weighted_per_residue(scores.term_names(), scores.term_weights());
         if weighted.is_empty() {
             return;
         }
@@ -85,139 +124,41 @@ impl RenderProjector {
         }
     }
 
-    /// Force a per-residue color re-push at a moment viso is known to have
-    /// fully synced the current geometry (so every entity's scene-local
-    /// state exists and the push is not silently dropped). Used at the
-    /// startup session-entry seam, where the first score may have pushed
-    /// before viso created the entity state. Re-runs the same private
-    /// projection the `ScoresChanged` path uses; no-ops internally when no
-    /// breakdown is stamped or it carries no per-residue rows.
-    pub(crate) fn reproject_scores(doc: &Session, engine: &mut viso::VisoEngine) {
-        Self::project_scores(doc, engine);
-    }
-
-    /// Force a full-rebuild republish of the current head assembly so the
-    /// cartoon mesh re-bakes with the current `annotations.scores`. The
-    /// cartoon tube's per-residue color is baked into the mesh at build time;
-    /// viso re-reads `annotations.scores` only when it submits a full-rebuild
-    /// mesh (`replace_assembly` -> `sync_now` -> `submit_full_rebuild`). At
-    /// startup the geometry publishes before the first async score arrives, so
-    /// the tube bakes gray, and the later score push fires only a color
-    /// re-push (the separate residue-color buffer) that never re-bakes the
-    /// backbone. Issuing a full rebuild AFTER the scores are present bakes the
-    /// colored tube, matching steady-state gameplay where an edit's geometry
-    /// change re-bakes the mesh as the score updates.
-    ///
-    /// Always routes to `replace_assembly` (not the membership-gated
-    /// `set_assembly`): a same-topology `set_assembly` may be a coord-only
-    /// update that does not re-bake colors, and we specifically need the full
-    /// rebuild. The session's `last_published_ids` baseline is refreshed so
-    /// the next normal `consume` does not read a spurious topology change.
-    pub(crate) fn rebake_geometry(&mut self, doc: &mut Session, engine: &mut viso::VisoEngine) {
-        let mut asm = doc.head_assembly();
-        Self::populate_connections(doc, &mut asm);
-        // Session-entry full rebuild bakes the cartoon, so it needs SS (molex
-        // construction leaves `ss_types` empty; this is a load-time publish).
-        asm.recompute_ss();
-        let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
-            asm.entities().iter().map(|e| e.id()).collect();
-        doc.viz.last_ss = Some(asm.clone());
-
-        self.publish_seq = self.publish_seq.saturating_add(1);
-        asm.set_generation(self.publish_seq);
-        let asm = std::sync::Arc::new(asm);
-
-        engine.replace_assembly(asm);
-        doc.viz.last_published_ids = new_ids;
-    }
-
-    /// Stamp the rendering connections (disulfides and hydrogen bonds) onto
-    /// the owned assembly before it is published. The assembly is rebuilt
-    /// per conformation change and its `connections` start empty, so the
-    /// owner must populate them on every publish; viso resolves the
-    /// endpoints to rendered atom positions reactively. Both publish paths
-    /// call this so they cannot drift apart on what gets stamped.
-    ///
-    /// Provider-aware on the session's held set
-    /// (`crate::viz::refresh::refresh_connections` writes it earlier in the
-    /// same tick): when a
-    /// plugin provides connections the held atom-index map is stamped
-    /// verbatim and molex's geometric fallback is NOT run; otherwise molex
-    /// detects them geometrically per publish.
-    fn populate_connections(doc: &Session, asm: &mut molex::Assembly) {
-        let connections = doc
-            .viz
-            .held_connections
-            .as_ref()
-            .map_or_else(|| asm.detect_fallback_connections(), Clone::clone);
+    /// Stamp the rendering connections (disulfides and hydrogen bonds) onto the
+    /// owned assembly before it is published. The assembly is rebuilt per
+    /// conformation change with empty `connections`, so this runs on every
+    /// publish; viso resolves the endpoints reactively. Provider-aware on the
+    /// held set: when a plugin provides connections the atom-index map is
+    /// stamped verbatim and molex's geometric fallback is NOT run; otherwise
+    /// molex detects them geometrically per publish.
+    fn populate_connections(
+        held: Option<&HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
+        asm: &mut molex::Assembly,
+    ) {
+        let connections = held.map_or_else(|| asm.detect_fallback_connections(), Clone::clone);
         asm.set_connections(connections);
-    }
-
-    /// Push the three structural-viz overlays (external cavities/voids,
-    /// steric-clash arcs, exposed-hydrophobic grease beads) from the cached
-    /// viz state to the engine, but only when the cache is dirty. The App's
-    /// overlay refresh recomputes the payloads at rest each geometry change
-    /// (and on a view toggle) and marks the cache dirty; this is the single
-    /// pusher, fired on the drain. Returns `true` when it pushed so the
-    /// caller can clear the dirty flag (the projector holds only a shared
-    /// `&Session`, so it cannot clear the flag itself).
-    ///
-    /// Gating on the dirty flag is what makes the overlays freeze during a
-    /// wiggle: while motion is in flight the refresh does not run, the flag
-    /// stays clear, and this skips the push instead of re-pushing the stale
-    /// payloads every drain.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn push_overlays(doc: &Session, engine: &mut viso::VisoEngine) -> bool {
-        if !doc.viz.viz_dirty {
-            return false;
-        }
-        let field = &doc.viz.void_field;
-        engine.set_external_void_field(
-            field.dims,
-            field.origin,
-            field.spacing,
-            field.phi.clone(),
-            field.threshold,
-        );
-        engine.update_clashes(doc.viz.clashes.clone());
-        engine.update_exposed_hydrophobics(doc.viz.exposed_hydrophobics.clone());
-        true
     }
 }
 
-/// Consume a drained `SessionUpdate` batch and drive viso. Five
-/// independent reactions, each self-filtered by what the batch carries:
-///
-/// - A `SelectionChanged` sources the highlight from the authoritative
-///   `Session` selection.
-/// - A `FocusChanged` pushes viso's camera-framing mirror and reframes.
-/// - An `EntityAppearanceChanged` reconciles the engine's per-entity
-///   override working copy against the authoritative `Session` appearance
-///   map: every current override is pushed, and any entity dropped from the
-///   map since the last push is cleared on the engine.
-/// - A geometry change (`Edit` / `HeadMoved` / preview add/discard)
-///   republishes the current head assembly, picking `replace_assembly`
-///   only when the entity-id *set* changed since the last publish (an id
-///   joined or left) and `set_assembly` otherwise (a steady-state coord
-///   update or a same-membership reorder).
-/// - A `ScoresChanged` re-derives the per-residue colors from the
-///   session-owned breakdown ([`Self::project_scores`]).
-///
-/// The `ViewOptionsChanged` reaction is NOT here: the view options live on
-/// `App` (so they persist across a topology swap), and `App` applies them
-/// to the engine at the same tick seam, gated on the same signal.
-///
-/// The selection / focus reactions run before the geometry / scores
-/// reactions. A batch may carry any subset. No-ops on a batch carrying none
-/// of them (e.g. a `BubbleChanged` / `PuzzleChanged`-only batch): no wasted
-/// assembly builds, generation bumps, or pushes.
-impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
+/// Consume a drained `SessionUpdate` batch and drive viso. Each reaction is
+/// self-filtered by what the batch carries; a batch may carry any subset and
+/// a batch carrying none is a no-op.
+impl SessionUpdateConsumer for RenderProjector {
+    type Sources<'a> = RenderSources<'a>;
+    type Sink = viso::VisoEngine;
+    type Out = ();
     fn consume(
         &mut self,
         changes: &[SessionUpdate],
-        doc: &mut Session,
+        sources: RenderSources<'_>,
         engine: &mut viso::VisoEngine,
     ) {
+        let RenderSources {
+            session: doc,
+            reapply_options,
+            scores,
+            held_connections,
+        } = sources;
         if changes
             .iter()
             .any(|c| matches!(c, SessionUpdate::SelectionChanged))
@@ -235,27 +176,21 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
             // Reconcile the engine working copy against the authoritative
             // session map: push every current override, then clear any entity
             // that was in the last push but is no longer present (an emptied
-            // or removed entry). Collect the new baseline (owned) before the
-            // mutable `doc.viz` write so the immutable `doc.appearance()`
-            // borrow is finished by then.
-            let new_pushed: BTreeSet<molex::entity::molecule::id::EntityId> = {
-                let appearance = doc.appearance();
-                for (id, ovr) in appearance {
-                    engine.set_entity_appearance(*id, ovr.clone());
+            // or removed entry).
+            let appearance = doc.appearance();
+            for (id, ovr) in appearance {
+                engine.set_entity_appearance(*id, ovr.clone());
+            }
+            for id in &self.last_pushed_appearance {
+                if !appearance.contains_key(id) {
+                    engine.clear_entity_appearance(*id);
                 }
-                for id in &doc.viz.last_pushed_appearance {
-                    if !appearance.contains_key(id) {
-                        engine.clear_entity_appearance(*id);
-                    }
-                }
-                appearance.keys().copied().collect()
-            };
-            doc.viz.last_pushed_appearance = new_pushed;
+            }
+            self.last_pushed_appearance = appearance.keys().copied().collect();
         }
-        // The `ViewOptionsChanged` reaction (apply the App-owned options to
-        // the engine) is driven by `App` at the same tick seam: the options
-        // live on `App` (so they survive a topology swap), not on `Session`,
-        // and this projector only takes a `&Session`.
+        if let Some(opts) = reapply_options {
+            engine.set_options(opts);
+        }
 
         // A geometry change republishes the head assembly; a `ScoresChanged`
         // re-derives the per-residue colors. A batch can carry both (a
@@ -278,7 +213,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
             let head = doc.head_assembly();
             let new_ids: BTreeSet<molex::entity::molecule::id::EntityId> =
                 head.entities().iter().map(|e| e.id()).collect();
-            let topology_changed = new_ids != doc.viz.last_published_ids;
+            let topology_changed = new_ids != self.last_published_ids;
 
             // SS is opt-in on molex construction (`ss_types` starts empty). On a
             // committed / topology-changing publish (load, action commit, entity
@@ -295,9 +230,9 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
             let mut asm = if committed_geometry || topology_changed {
                 let mut a = head;
                 a.recompute_ss();
-                doc.viz.last_ss = Some(a.clone());
+                self.last_ss = Some(a.clone());
                 a
-            } else if let Some(prev) = doc.viz.last_ss.as_ref() {
+            } else if let Some(prev) = self.last_ss.as_ref() {
                 // `head` is the freshly built coord snapshot (owned here);
                 // overlay the cached committed SS onto it in place. `prev`
                 // (the cached committed assembly) is borrowed and left intact.
@@ -308,7 +243,7 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
                 head
             };
 
-            Self::populate_connections(doc, &mut asm);
+            Self::populate_connections(held_connections, &mut asm);
             self.publish_seq = self.publish_seq.saturating_add(1);
             asm.set_generation(self.publish_seq);
             let asm = std::sync::Arc::new(asm);
@@ -318,11 +253,26 @@ impl SessionUpdateConsumer<viso::VisoEngine> for RenderProjector {
             } else {
                 engine.set_assembly(asm);
             }
-            doc.viz.last_published_ids = new_ids;
+            self.last_published_ids = new_ids;
+        }
+
+        // A pure head-move (history nav) clears per-residue colors; a same-batch
+        // score re-pushes below.
+        let head_nav_only = changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::HeadMoved))
+            && !changes
+                .iter()
+                .any(|u| u.is_geometry() && !matches!(u, SessionUpdate::HeadMoved));
+        if head_nav_only {
+            let ids: Vec<molex::EntityId> = doc.ids().collect();
+            for eid in ids {
+                engine.set_per_residue_scores(eid.raw(), None);
+            }
         }
 
         if has_scores {
-            Self::project_scores(doc, engine);
+            Self::project_scores(doc, scores, engine);
         }
     }
 }
@@ -338,6 +288,6 @@ pub fn focus_description(doc: &Session, focus: viso::Focus) -> String {
             format!("All ({count} entities)")
         }
         viso::Focus::Entity(id) => doc
-            .metadata(id).map_or_else(|| format!("Entity {}", id.raw()), |m| m.name.clone()),
+            .name(id).map_or_else(|| format!("Entity {}", id.raw()), str::to_owned),
     }
 }

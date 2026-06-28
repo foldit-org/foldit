@@ -1,8 +1,8 @@
 //! Transport-agnostic IPC message + request shapes shared by all platforms.
 //!
 //! Both `WryTransport` (desktop) and `WasmTransport` (web) decode incoming
-//! traffic into [`IpcMessage`] and dispatch through the same [`Dispatcher`]
-//! trait. Adding a new IPC command is one variant + one decode arm.
+//! traffic into [`IpcMessage`] and dispatch through the same `App`.
+//! Adding a new IPC command is one variant + one decode arm.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,12 +17,6 @@ pub enum RequestKind {
     /// Read a file from the resource bundle; payload `{ filepath: String }`.
     /// Response: base64-encoded bytes plus encoding tag.
     ReadResourceFile,
-    /// Forward an HTTP-like request to the foldit server (e.g., news fetch).
-    /// Payload: `{ endpoint: String, request: Value }`. Response: raw JSON.
-    ServerRequest,
-    /// Look up the human-readable display string for a hotkey identifier.
-    /// Payload: `{ hotkey: String }`. Response: string.
-    GetHotkeyText,
     /// One-shot catalog of plugin-contributed custom panels. No payload.
     /// Response: an array of [`crate::state::PanelInfo`].
     PanelsCatalog,

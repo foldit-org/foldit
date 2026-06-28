@@ -123,7 +123,7 @@ impl History {
             entity_heads.insert(*entity, *snap_id);
         }
 
-        let new_ckpt = self.checkpoints.checkpoints.insert(Checkpoint {
+        let new_ckpt = self.mint_checkpoint(Checkpoint {
             parent: Some(parent_ckpt_id),
             children: SmallVec::new(),
             entity_heads,
@@ -132,21 +132,10 @@ impl History {
             timestamp: now,
             raw_score: edit.raw_score,
             game_score: edit.game_score,
-            // The open edit IS the transient composition node; its breakdown
-            // transfers onto the checkpoint minted at commit, symmetric with
-            // its scalar scores, so the committed node owns the per-residue
-            // source the projector re-derives colors from.
             breakdown: edit.breakdown,
             filter_status: edit.filter_status,
             exclude_from_best: false,
         });
-        self.checkpoints.checkpoints[parent_ckpt_id]
-            .children
-            .push(new_ckpt);
-        self.checkpoints.head = new_ckpt;
-
-        self.inc_refs_for_checkpoint(new_ckpt);
-        self.recompute_best();
 
         Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
@@ -181,65 +170,6 @@ impl History {
         }
 
         Ok(HistoryEventOutcome::Aborted)
-    }
-
-    // `expect` resolves a lane whose presence the caller established above.
-    #[allow(clippy::expect_used)]
-    pub(super) fn do_record_entity_update(
-        &mut self,
-        entity: EntityId,
-        kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
-        label: Cow<'static, str>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
-    ) -> Result<HistoryEventOutcome, HistoryError> {
-        if !self.lanes.contains_key(&entity) {
-            return Err(HistoryError::UnknownEntity { entity });
-        }
-        let now = SystemTime::now();
-
-        let lane = self.lanes.get_mut(&entity).expect("checked above");
-        let parent = lane.head;
-        let new_snap = lane.snapshots.insert(EntitySnapshot {
-            parent: Some(parent),
-            children: SmallVec::new(),
-            payload,
-            label: label.clone(),
-            timestamp: now,
-            tentative: false,
-            checkpoint_refs: 0,
-        });
-        lane.snapshots[parent].children.push(new_snap);
-        lane.head = new_snap;
-
-        let parent_ckpt_id = self.checkpoints.head;
-        let parent_ckpt = &self.checkpoints.checkpoints[parent_ckpt_id];
-        let mut entity_heads = parent_ckpt.entity_heads.clone();
-        entity_heads.insert(entity, new_snap);
-
-        let new_ckpt = self.checkpoints.checkpoints.insert(Checkpoint {
-            parent: Some(parent_ckpt_id),
-            children: SmallVec::new(),
-            entity_heads,
-            kind,
-            label,
-            timestamp: now,
-            raw_score,
-            game_score,
-            breakdown: None,
-            filter_status: FilterStatus::NotEvaluated,
-            exclude_from_best: false,
-        });
-        self.checkpoints.checkpoints[parent_ckpt_id]
-            .children
-            .push(new_ckpt);
-        self.checkpoints.head = new_ckpt;
-
-        self.inc_refs_for_checkpoint(new_ckpt);
-        self.recompute_best();
-
-        Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
 
     pub(super) fn do_lane_undo(
@@ -350,7 +280,7 @@ impl History {
         let mut entity_heads = parent_ckpt.entity_heads.clone();
         entity_heads.insert(entity_id, snap_id);
 
-        let new_ckpt = self.checkpoints.checkpoints.insert(Checkpoint {
+        let new_ckpt = self.mint_checkpoint(Checkpoint {
             parent: Some(parent_ckpt_id),
             children: SmallVec::new(),
             entity_heads,
@@ -363,13 +293,6 @@ impl History {
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });
-        self.checkpoints.checkpoints[parent_ckpt_id]
-            .children
-            .push(new_ckpt);
-        self.checkpoints.head = new_ckpt;
-
-        self.inc_refs_for_checkpoint(new_ckpt);
-        self.recompute_best();
 
         Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
@@ -395,7 +318,7 @@ impl History {
         let mut entity_heads = parent_ckpt.entity_heads.clone();
         entity_heads.insert(entity, target);
 
-        let new_ckpt = self.checkpoints.checkpoints.insert(Checkpoint {
+        let new_ckpt = self.mint_checkpoint(Checkpoint {
             parent: Some(parent_ckpt_id),
             children: SmallVec::new(),
             entity_heads,
@@ -408,12 +331,6 @@ impl History {
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
         });
-        self.checkpoints.checkpoints[parent_ckpt_id]
-            .children
-            .push(new_ckpt);
-        self.checkpoints.head = new_ckpt;
-
-        self.inc_refs_for_checkpoint(new_ckpt);
 
         HistoryEventOutcome::Pushed(new_ckpt)
     }
@@ -445,6 +362,19 @@ impl History {
         }
         self.checkpoints.head = target;
         Ok(HistoryEventOutcome::HeadMoved { from, to: target })
+    }
+
+    /// Insert `ckpt`, link it under its parent, advance the head, and
+    /// bump snapshot refs. Best cursors are recomputed by the record tail.
+    fn mint_checkpoint(&mut self, ckpt: Checkpoint) -> CheckpointId {
+        let parent = ckpt.parent;
+        let new_ckpt = self.checkpoints.checkpoints.insert(ckpt);
+        if let Some(parent) = parent {
+            self.checkpoints.checkpoints[parent].children.push(new_ckpt);
+        }
+        self.checkpoints.head = new_ckpt;
+        self.inc_refs_for_checkpoint(new_ckpt);
+        new_ckpt
     }
 
     /// Increment `checkpoint_refs` for every snapshot referenced by

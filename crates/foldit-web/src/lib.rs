@@ -45,11 +45,9 @@ use web_sys::HtmlCanvasElement;
 
 pub use wasm_bindgen_rayon::init_thread_pool;
 
-use foldit_core::App;
+use foldit_core::{App, HostEffects};
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
-use foldit_gui::{
-    AppCommand, Dispatcher, EntitySelection, OpDispatch, ViewportInput,
-};
+use foldit_gui::{AppCommand, EntitySelection, OpDispatch, ViewportInput};
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
 
@@ -157,7 +155,7 @@ impl FolditApp {
     pub fn viewport_input(&self, json: &str) -> Result<(), JsValue> {
         let input: ViewportInput = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("viewport_input parse: {e}")))?;
-        self.app.borrow_mut().on_viewport_input(input);
+        self.app.borrow_mut().handle_viewport_input(input);
         Ok(())
     }
 
@@ -167,7 +165,7 @@ impl FolditApp {
     pub fn app_command(&self, json: &str) -> Result<(), JsValue> {
         let command: AppCommand = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("app_command parse: {e}")))?;
-        self.app.borrow_mut().on_app_command(command);
+        self.app.borrow_mut().handle_app_command(command);
         Ok(())
     }
 
@@ -188,7 +186,7 @@ impl FolditApp {
     pub fn set_selection(&self, json: &str) -> Result<(), JsValue> {
         let entries: Vec<EntitySelection> = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("set_selection parse: {e}")))?;
-        self.app.borrow_mut().on_set_selection(entries);
+        self.app.borrow_mut().handle_set_selection(entries);
         Ok(())
     }
 
@@ -220,9 +218,8 @@ impl Default for FolditApp {
 
 // Outbound transport: async-request response delivery.
 //
-// State push is driven inline by the rAF loop calling
-// `App::serialize_frontend_dirty`; only the response channel needs a
-// long-lived JS-callback bridge here.
+// State push is driven through `WebEffects` during `App::tick`; only the
+// response channel needs a long-lived JS-callback bridge here.
 
 #[allow(dead_code)]
 struct WebTransport {
@@ -256,9 +253,34 @@ impl bridge::Transport for WebTransport {
     }
 }
 
-// rAF loop: self-rescheduling closure that drives App::tick(dt) and
-// then drains the App-owned GuiState dirty diff into the JS
-// state callback.
+/// Transient per-frame effect sink passed into `App::tick`. `push_tail` and
+/// `set_fullscreen` are no-ops on web; persistence fires a `spawn_local` write.
+struct WebEffects<'a> {
+    state_cb: &'a JsCallback,
+}
+
+impl HostEffects for WebEffects<'_> {
+    fn push_state(&mut self, json: &[u8]) {
+        let Some(cb) = self.state_cb.borrow().clone() else {
+            return;
+        };
+        if let Ok(s) = std::str::from_utf8(json) {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(s));
+        }
+    }
+
+    fn push_tail(&mut self, _update: foldit_core::TailUpdate) {}
+
+    fn set_fullscreen(&mut self, _value: bool) {}
+
+    fn persist_progress(&mut self, bytes: Vec<u8>) {
+        spawn_progress_save(bytes);
+    }
+}
+
+// rAF loop: self-rescheduling closure that drives App::tick(dt, fx) and
+// renders. The dirty GuiState diff and progress persistence are pushed
+// through `fx` during the tick.
 
 fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: ProgressLoadCell) {
     let window = match web_sys::window() {
@@ -281,27 +303,16 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: Progre
         *last_ts.borrow_mut() = now;
 
         {
-            let mut app = app.borrow_mut();
-            app.tick(dt);
-            app.render();
-            if let Some(bytes) = app.serialize_frontend_dirty() {
-                if let Some(cb) = state_cb.borrow().clone() {
-                    // bytes is already JSON-encoded UTF-8.
-                    if let Ok(json) = std::str::from_utf8(&bytes) {
-                        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(json));
-                    }
-                }
+            let mut fx = WebEffects { state_cb: &state_cb };
+            {
+                let mut app = app.borrow_mut();
+                app.tick(dt, &mut fx);
+                app.render();
             }
-
-            // Merge any landed progress load (once) and fire-and-forget a
-            // pending save. The OPFS I/O runs on spawned tasks, so the frame
-            // is never blocked on it. Mirrors the desktop host's
-            // `apply_progress_persistence`.
+            // Merge any landed progress load after the tick's state push
+            // (projects next frame).
             if let Some(bytes) = progress_load.borrow_mut().take() {
-                app.import_progress(&bytes);
-            }
-            if let Some(bytes) = app.take_progress_to_persist() {
-                spawn_progress_save(bytes);
+                app.borrow_mut().import_progress(&bytes);
             }
         }
 

@@ -4,9 +4,13 @@
 
 mod dispatch;
 mod catalog;
+#[cfg(not(target_arch = "wasm32"))]
+mod pull;
 mod scores;
 mod types;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use pull::{build_pull_info, route_atom_pick, route_residue_pick, PullDrag, PullRoute};
 #[cfg(not(target_arch = "wasm32"))]
 pub use types::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamHost, StreamStartIntent,
@@ -250,7 +254,7 @@ impl RunnerClient {
     pub(crate) fn kick_inits(
         &mut self,
         initial_assembly: &[u8],
-        ligands: &[crate::puzzle::LigandAsset],
+        ligands: &[crate::puzzle_load::LigandAsset],
         constraints: &[crate::puzzle_setup::Constraint],
         config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
     ) -> Vec<String> {
@@ -319,7 +323,7 @@ impl RunnerClient {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn init_payload_from_puzzle(
-    ligands: &[crate::puzzle::LigandAsset],
+    ligands: &[crate::puzzle_load::LigandAsset],
     constraints: &[crate::puzzle_setup::Constraint],
     config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
 ) -> foldit_runner::orchestrator::InitPayload {

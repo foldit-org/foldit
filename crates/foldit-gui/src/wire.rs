@@ -234,7 +234,7 @@ pub struct HistoryLiveUpdate {
 /// `AppCommand::History(cmd)` and dispatched to the
 /// `EntityStore` methods.
 ///
-/// New variants are handled in `App::run_history_command`.
+/// New variants are handled in `Session::apply_history_command`.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind")]
 pub enum HistoryCommand {

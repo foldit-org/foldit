@@ -2,81 +2,9 @@
 
 use super::App;
 #[cfg(not(target_arch = "wasm32"))]
-use molex::entity::molecule::id::EntityId;
-
-#[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
 
 impl App {
-    /// Adopt every entity in an entity-creating op's terminal `assembly`
-    /// as a new committed entity. Each is inserted as a transient preview
-    /// (which allocates a fresh id, so it can't collide with the focused
-    /// target) and immediately promoted into history via
-    /// [`CheckpointKind::PromotedPreview`]. The focused target is never
-    /// touched: creates-entities ops open no edit over it, so this is
-    /// purely additive.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) fn stream_preview_frame(&mut self, token: u64, assembly: &molex::Assembly) {
-        let Some(entity) = assembly.entities().first() else {
-            return;
-        };
-        // Draw the in-progress diffusion frame faithfully: rebuild protein
-        // chains as one continuous segment so noisy intermediate coordinates
-        // render as a connected backbone instead of fragmenting into a
-        // per-residue segment at every C->N gap.
-        let payload: molex::MoleculeEntity = entity.to_continuous();
-        let atoms = payload.atom_count();
-        match self.ops.creates_previews.get(&token).copied() {
-            // Same topology: cheap in-place coord update (animates).
-            Some((preview_id, prev_atoms)) if prev_atoms == atoms => {
-                let _ = self.store.update_preview(preview_id, payload);
-            }
-            // Atom count changed: a same-id coord update would desync viso's
-            // topology vs positions (hard panic). Rebuild under a fresh id so
-            // the render projector does a topology `replace_assembly`.
-            Some((preview_id, _)) => {
-                let _ = self.store.remove_preview(preview_id);
-                let id = self.insert_design_preview(payload);
-                // A streaming design frame renders as the gray-tube preview
-                // ghost like every other preview; the rebuild minted a fresh
-                // id, so re-mark it provisional.
-                self.store.set_entity_provisional(id, true);
-                let _ = self.ops.creates_previews.insert(token, (id, atoms));
-            }
-            None => {
-                let id = self.insert_design_preview(payload);
-                // First frame: render the streaming design as the gray-tube
-                // preview ghost (provisional) like every other preview.
-                self.store.set_entity_provisional(id, true);
-                let _ = self.ops.creates_previews.insert(token, (id, atoms));
-            }
-        }
-    }
-
-    /// Seed a preview-style op's discardable ghost from the target `lane_id`:
-    /// clone that lane's geometry into a transient preview marked provisional
-    /// (viso renders a provisional entity as a flat gray tube), name it after
-    /// the op, and track it under `token` so the stream's frames update the
-    /// ghost while the real lane stays frozen. Rebuild edits a single entity;
-    /// when an op resolves to several lanes, only the first carries a ghost.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) fn seed_inplace_preview(&mut self, token: u64, lane_id: EntityId, name: String) {
-        // Clone the lane geometry to seed an independent preview entity that
-        // animates without touching the real lane.
-        let Some(clone) = self.store.entity(lane_id).cloned() else {
-            return;
-        };
-        let preview_id =
-            self.store
-                .insert_preview(clone, name, crate::session::EntityOrigin::Generated);
-        self.store.set_entity_provisional(preview_id, true);
-        let atom_count = self
-            .store
-            .entity(preview_id)
-            .map_or(0, molex::MoleculeEntity::atom_count);
-        let _ = self.ops.inplace_previews.insert(token, (preview_id, atom_count));
-    }
-
     /// Apply a terminal [`OpEvent::Commit`]: drop a preview ghost, adopt an
     /// entity-creating op's terminal entities, or commit the open edit to the
     /// real lane and score the resulting checkpoint. For a checkpoint-driven
@@ -99,9 +27,7 @@ impl App {
             // promoted. Both effects land in this one drain so the projector
             // sees the lane update and the ghost removal together.
             if let Some(token) = token {
-                if let Some((preview_id, _)) = self.ops.inplace_previews.remove(&token) {
-                    let _ = self.store.remove_preview(preview_id);
-                }
+                self.store.discard_inplace_ghost(token);
             }
         }
         if creates_entities {
@@ -112,7 +38,7 @@ impl App {
             // target is untouched.
             self.commit_created_entities(token, assembly);
             if let Some(token) = token {
-                let _ = self.ops.score_targets.remove(&token);
+                let _ = self.scores.remove_target(token);
             }
         } else if let Some(token) = token {
             // Capture sole-open-ness while the edit is still pending: the
@@ -128,7 +54,8 @@ impl App {
                 match self.store.commit_action(token) {
                     Ok(ckpt) => match score.filter(|_| sole) {
                         Some(report) => {
-                            let (raw, game, breakdown) = self.prepare_score_stamp(report);
+                            let (raw, game, breakdown) =
+                                self.scores.prepare_score_stamp(report);
                             self.store.set_checkpoint_scores(
                                 ckpt,
                                 Some(raw),
@@ -136,13 +63,17 @@ impl App {
                                 Some(breakdown),
                             );
                         }
-                        None => self.score_committed_checkpoint(ckpt),
+                        None => self.scores.score_committed_checkpoint(
+                            &mut self.runner_client,
+                            &self.store,
+                            ckpt,
+                        ),
                     },
                     Err(e) => log::warn!("commit_action failed: {e}"),
                 }
                 // The edit's correlation id is now spent; drop any lingering
                 // composition target.
-                let _ = self.ops.score_targets.remove(&token);
+                let _ = self.scores.remove_target(token);
             }
         }
     }
@@ -180,7 +111,8 @@ impl App {
         match self.store.commit_and_reopen(token) {
             Ok(ckpt) => match score.filter(|_| sole) {
                 Some(report) => {
-                    let (raw, game, breakdown) = self.prepare_score_stamp(report);
+                    let (raw, game, breakdown) =
+                        self.scores.prepare_score_stamp(report);
                     self.store.set_checkpoint_scores(
                         ckpt,
                         Some(raw),
@@ -188,64 +120,16 @@ impl App {
                         Some(breakdown),
                     );
                 }
-                None => self.score_committed_checkpoint(ckpt),
+                None => self.scores.score_committed_checkpoint(
+                    &mut self.runner_client,
+                    &self.store,
+                    ckpt,
+                ),
             },
             Err(e) => {
                 log::warn!("promote checkpoint rid={token}: commit_and_reopen failed: {e}");
             }
         }
-    }
-
-    /// Apply one streaming frame of a preview-style op to its discardable
-    /// ghost. The ghost is seeded at dispatch (a provisional clone of the
-    /// target lane); this updates it in place from the frame's first entity,
-    /// leaving the real lane untouched. No-op when no ghost is tracked for the
-    /// token (a streaming frame never moves the lane; only a commit does).
-    ///
-    /// The frame carries the op's full fixed topology (unlike the backbone-
-    /// only diffusion frames `stream_preview_frame` continuous-rebuilds), so
-    /// the payload is used as-is. A same-atom-count frame updates in place
-    /// (the override persists across `update_preview`: the id is unchanged); a
-    /// changed atom count - not expected for a fixed-topology rebuild, but
-    /// guarded - rebuilds under a fresh id so the render projector does a
-    /// topology `replace_assembly`, then re-marks it provisional.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(in crate::app) fn stream_inplace_preview_frame(&mut self, token: u64, assembly: &molex::Assembly) {
-        let Some((preview_id, prev_atoms)) = self.ops.inplace_previews.get(&token).copied() else {
-            return;
-        };
-        let Some(entity) = assembly.entities().first() else {
-            return;
-        };
-        let payload: molex::MoleculeEntity = (**entity).clone();
-        let atoms = payload.atom_count();
-        if prev_atoms == atoms {
-            let _ = self.store.update_preview(preview_id, payload);
-        } else {
-            let name = self
-                .store
-                .metadata(preview_id)
-                .map_or_else(String::new, |m| m.name.clone());
-            let _ = self.store.remove_preview(preview_id);
-            let id = self.store.insert_preview(
-                payload,
-                name,
-                crate::session::EntityOrigin::Generated,
-            );
-            self.store.set_entity_provisional(id, true);
-            let _ = self.ops.inplace_previews.insert(token, (id, atoms));
-        }
-    }
-
-    /// Insert a streamed design frame as a transient preview, returning its
-    /// allocated id.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn insert_design_preview(&mut self, payload: molex::MoleculeEntity) -> molex::EntityId {
-        self.store.insert_preview(
-            payload,
-            String::from("RFdiffusion3 design"),
-            crate::session::EntityOrigin::Generated,
-        )
     }
 
     /// Terminal handling for a creates-entities stream. Tears down the
@@ -263,9 +147,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn commit_created_entities(&mut self, token: Option<u64>, assembly: &molex::Assembly) {
         if let Some(t) = token {
-            if let Some((preview_id, _)) = self.ops.creates_previews.remove(&t) {
-                let _ = self.store.remove_preview(preview_id);
-            }
+            self.store.discard_created_preview(t);
         }
         self.adopt_created_entities(assembly);
     }
@@ -285,7 +167,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn adopt_one_entity(&mut self, payload: molex::MoleculeEntity) {
         let residue_count = payload.residue_count();
-        let id = self.insert_design_preview(payload);
+        let id = self.store.insert_design_preview(payload);
         if self.promote_adopted(id) {
             self.store.register_full_designable_entity(id, residue_count);
         }
@@ -300,11 +182,11 @@ impl App {
             id,
             CheckpointKind::PromotedPreview { entity: id },
             None,
-            None,
             "RFdiffusion3",
         ) {
             Ok(ckpt) => {
-                self.score_committed_checkpoint(ckpt);
+                self.scores
+                    .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
                 true
             }
             Err(e) => {

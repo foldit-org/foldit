@@ -50,10 +50,6 @@ use smallvec::SmallVec;
 // the reverse). Re-exported through this module for ergonomic
 // `foldit::history::CheckpointId` use sites.
 pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId};
-// `WireId<K>` is the generic newtype underlying both ids above; re-exported
-// for symmetry and currently referenced only by tests.
-#[allow(unused_imports)]
-pub use foldit_gui::wire::WireId;
 
 mod types;
 pub use types::{CheckpointKind, FilterStatus};
@@ -109,17 +105,6 @@ enum HistoryEvent {
     },
     Abort {
         request_id: u64,
-    },
-    // Atomic non-streaming update path; built and tested, no production
-    // caller emits it yet (see `record_entity_update`).
-    #[allow(dead_code)]
-    RecordEntityUpdate {
-        entity: EntityId,
-        kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
-        label: Cow<'static, str>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
     },
     LaneUndo {
         entity: EntityId,
@@ -243,8 +228,7 @@ impl History {
         self.lanes.get(&entity)
     }
 
-    /// Whether any action is in flight. Currently only exercised by tests.
-    #[allow(dead_code)]
+    /// Whether any action is in flight.
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -274,13 +258,6 @@ impl History {
     #[must_use]
     pub fn checkpoint(&self, id: CheckpointId) -> Option<&Checkpoint> {
         self.checkpoints.checkpoint(id)
-    }
-
-    /// Lookup helper. Currently only exercised by tests.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn snapshot(&self, entity: EntityId, id: EntitySnapshotId) -> Option<&EntitySnapshot> {
-        self.lanes.get(&entity)?.snapshot(id)
     }
 
     /// Begin a streaming action over `entities` under the caller-supplied
@@ -453,35 +430,6 @@ impl History {
         }
     }
 
-    /// Atomic non-streaming entity update - used by RFD3-final / MPNN
-    /// results, manual moves, etc. Pushes one snapshot + one checkpoint
-    /// with `tentative = false` immediately. Refused while `Active`.
-    /// Optional `raw_score` / `game_score` are stamped on the new
-    /// checkpoint (caller carries both; projection picks at read).
-    /// Currently only exercised by tests.
-    #[allow(dead_code)]
-    pub fn record_entity_update(
-        &mut self,
-        entity: EntityId,
-        kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
-        label: Cow<'static, str>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
-    ) -> Result<CheckpointId, HistoryError> {
-        match self.record(HistoryEvent::RecordEntityUpdate {
-            entity,
-            kind,
-            payload,
-            label,
-            raw_score,
-            game_score,
-        })? {
-            HistoryEventOutcome::Pushed(id) => Ok(id),
-            _ => unreachable!("RecordEntityUpdate always pushes"),
-        }
-    }
-
     /// Move `entity`'s lane head to `target`. Pushes a `LaneUndo`
     /// checkpoint with `entity_heads` mirroring the new lane head;
     /// no new snapshot.
@@ -571,9 +519,10 @@ impl History {
 
 }
 
+mod best;
 mod composition;
 mod curation;
-mod dispatch;
+mod record_root;
 mod eviction;
 mod invariant;
 mod record;

@@ -13,9 +13,10 @@ use foldit_gui::{
 };
 use viso::{Focus, VisoEngine};
 
+use crate::app::score_coordinator::ScoreCoordinator;
 use crate::history::{CheckpointKind, FilterStatus as HistoryFilterStatus, History};
 use crate::runner_client::RunnerClient;
-use crate::session::{Puzzle, Session, SessionUpdate};
+use crate::session::{Puzzle, Session, SessionUpdate, SessionUpdateConsumer};
 
 /// State for the GUI consumer.
 pub struct GuiProjector {
@@ -65,11 +66,11 @@ fn timestamp_ms(t: web_time::SystemTime) -> f64 {
         .map_or(0.0, |d| d.as_millis() as f64)
 }
 
-/// Convert a parsed [`crate::puzzle::Bubble`] into the GUI-bound IPC
+/// Convert a parsed [`crate::puzzle_toml::Bubble`] into the GUI-bound IPC
 /// twin. Tier-1 conversion: text/color/image pass through; buttons are
 /// built from `bubble.button` (defaulting to `"Next"`) plus an optional
 /// `alt_button`, with `goto` left `None` since clicks close locally.
-fn bubble_to_payload(b: &crate::puzzle::Bubble) -> TextBubblePayload {
+fn bubble_to_payload(b: &crate::puzzle_toml::Bubble) -> TextBubblePayload {
     let mut buttons = vec![TextBubbleButton {
         text: b.button.clone().unwrap_or_else(|| "Next".to_owned()),
         goto: None,
@@ -93,7 +94,6 @@ const fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
         CheckpointKind::Loaded { .. } => CheckpointKindTag::Load,
         CheckpointKind::PromotedPreview { .. } => CheckpointKindTag::PromotedPreview,
         CheckpointKind::AddEntity { .. } => CheckpointKindTag::AddEntity,
-        CheckpointKind::RemoveEntity { .. } => CheckpointKindTag::RemoveEntity,
         CheckpointKind::LaneUndo { .. } => CheckpointKindTag::LaneUndo,
         CheckpointKind::PluginOp { .. } => CheckpointKindTag::PluginOp,
     }
@@ -108,7 +108,7 @@ const fn filter_status_wire(s: &HistoryFilterStatus) -> FilterStatus {
 }
 
 /// Project the backend `History` into the wire payload consumed by
-/// the `HistoryPanel`. Also called at-site from `App::run_history_command`
+/// the `HistoryPanel`. Also called at-site from `Session::apply_history_command`
 /// for curation changes that don't bump `topology_version`.
 // `topology_version` is `f64` on the wire (JS `number`); the counter
 // increments per topology change and stays far below f64's 2^53 ceiling.
@@ -191,45 +191,35 @@ pub struct GuiSources<'a> {
     /// Host resource access - the view-preset directory listing for the
     /// `VIEW` section. Read only on `not(wasm)`.
     pub host: &'a dyn crate::HostResources,
+    pub scores: &'a ScoreCoordinator,
 }
 
-impl GuiProjector {
-    /// Project the live `Session` / `VisoEngine` / `RunnerClient` state into
-    /// `frontend` - the third consumer of the `SessionUpdate` batch,
-    /// alongside the render and plugin projectors.
-    ///
-    /// Unlike those two it reads several subsystems (the GUI mirrors score,
-    /// selection, scene, history, puzzle, bubble, focus, view, loading), so
-    /// it does not implement the two-input `SessionUpdateConsumer<Sink>`
-    /// trait: that signature can express only one read input (`session`).
-    /// Naming the extra inputs here - the `GuiSources` borrows - is what
-    /// keeps this honest and out of the `&App` fake-abstraction trap.
-    ///
-    /// Per-section dirtiness is derived entirely from the drained `updates`
-    /// batch - each `SessionUpdate` variant maps to the GUI sections it
-    /// invalidates - OR'd with the owned `pending` accumulator, which is
-    /// drained here. The accumulator carries the App-owned dirty bits the
-    /// `updates` batch cannot express (segment), plus
-    /// the full-populate seed (`DirtyFlags::all()`) raised on session birth
-    /// (the Loading → `InSession` flip and every reload) to push every section
-    /// once.
-    ///
-    /// Returns `true` when the segment arm auto-closed (the cached target
-    /// no longer resolves): the App owns the open target, so it clears its
-    /// copy on this signal, mirroring the overlay-flag handshake.
-    pub(crate) fn consume(
+/// Project the live `Session` / `VisoEngine` / `RunnerClient` state into
+/// `GuiState`. Per-section dirtiness is derived from the drained `updates`
+/// batch OR'd with the owned `pending` accumulator (drained here).
+///
+/// Returns `true` when the segment arm auto-closed (the cached target no
+/// longer resolves) so the App clears its copy of the open target.
+impl SessionUpdateConsumer for GuiProjector {
+    type Sources<'a> = GuiSources<'a>;
+    type Sink = GuiState;
+    type Out = bool;
+    fn consume(
         &mut self,
         updates: &[SessionUpdate],
-        src: &GuiSources<'_>,
+        sources: GuiSources<'_>,
         frontend: &mut GuiState,
     ) -> bool {
         // FPS and selected count change every frame - always push them.
-        frontend.set_fps(src.engine.fps());
-        frontend.ui.selected_count = src.session.selection_total_count();
+        frontend.set_fps(sources.engine.fps());
+        frontend.ui.selected_count = sources.session.selection_total_count();
 
         let dirty = compute_dirty(updates) | std::mem::take(&mut self.pending);
+        let force_history = updates
+            .iter()
+            .any(|u| matches!(u, SessionUpdate::CurationChanged));
 
-        if dirty.is_empty() {
+        if dirty.is_empty() && !force_history {
             return false;
         }
 
@@ -237,36 +227,40 @@ impl GuiProjector {
         // and then the score check below can latch victory in the same frame
         // without being overwritten.
         if dirty.contains(DirtyFlags::PUZZLE) {
-            project_puzzle(src.session, frontend);
+            project_puzzle(sources.session, frontend);
         }
         if dirty.contains(DirtyFlags::TEXT_BUBBLE) {
-            frontend.set_text_bubble(current_bubble_payload(src.session.puzzle()));
+            frontend.set_text_bubble(current_bubble_payload(sources.session.puzzle()));
         }
         if dirty.contains(DirtyFlags::SCORE) {
-            project_score(src.session, frontend);
+            project_score(sources.session, frontend);
         }
         if dirty.contains(DirtyFlags::ACTIONS) {
-            project_actions(src.session, src.driver, frontend);
+            project_actions(sources.session, sources.driver, frontend);
         }
         if dirty.contains(DirtyFlags::VIEW) {
-            project_view(src.host, frontend);
+            project_view(sources.host, frontend);
         }
         if dirty.contains(DirtyFlags::SELECTION) {
-            project_selection(src.session, frontend);
+            project_selection(sources.session, frontend);
         }
         if dirty.contains(DirtyFlags::SCENE) {
-            project_scene(src.session, src.engine, frontend);
+            project_scene(sources.session, sources.engine, frontend);
         }
         let auto_closed = if dirty.contains(DirtyFlags::SEGMENT) {
-            let (info, closed) =
-                project_segment(frontend.segment_target(), src.session, src.engine);
+            let (info, closed) = project_segment(
+                frontend.segment_target(),
+                sources.session,
+                sources.scores,
+                sources.engine,
+            );
             frontend.set_segment_info(info);
             closed
         } else {
             false
         };
 
-        sync_history(&mut self.history_sync, src.session, frontend);
+        sync_history(&mut self.history_sync, sources.session, frontend, force_history);
         auto_closed
     }
 }
@@ -293,6 +287,8 @@ fn compute_dirty(updates: &[SessionUpdate]) -> DirtyFlags {
             SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
             SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,
             SessionUpdate::PuzzleChanged => DirtyFlags::PUZZLE,
+            // Drives the full history push via `force_history`, not a section.
+            SessionUpdate::CurationChanged => DirtyFlags::empty(),
         };
     }
     dirty
@@ -326,11 +322,16 @@ fn project_puzzle(session: &Session, frontend: &mut GuiState) {
 fn project_score(session: &Session, frontend: &mut GuiState) {
     if let Some(score) = session.display_score() {
         frontend.set_score(score, false);
-        // Victory check: with a puzzle loaded, latch it complete the
-        // first time the score crosses the toml completion energy.
-        // Higher game score = better fold (game-score formula
-        // negates), so the comparison is `>=`.
         if let Some(p) = session.puzzle() {
+            // Record the display score into high-score progress.
+            // `record_progress` is monotonic (writes only on positive +
+            // beats-best), so it is the sole gate the menu's unlock math
+            // reads; a puzzle counts complete once its best is positive.
+            frontend.record_progress(p.id, score);
+            // Victory check: with a puzzle loaded, latch it complete the
+            // first time the score crosses the toml completion energy.
+            // Higher game score = better fold (game-score formula
+            // negates), so the comparison is `>=`.
             if p.completion_energy > 0.0 && score >= p.completion_energy {
                 frontend.mark_puzzle_complete();
             }
@@ -349,6 +350,7 @@ fn project_score(session: &Session, frontend: &mut GuiState) {
 fn project_segment(
     target: Option<&SegmentTarget>,
     session: &Session,
+    scores: &ScoreCoordinator,
     engine: &VisoEngine,
 ) -> (Option<SegmentInfo>, bool) {
     let Some(target) = target else {
@@ -370,7 +372,7 @@ fn project_segment(
     // Fresh energies: the raw per-term row for this residue zipped against
     // the session term names, plus the weighted scalar. Empty / zero when
     // no breakdown is stamped yet (right after load, or on wasm).
-    let term_names = session.term_names().to_vec();
+    let term_names = scores.term_names().to_vec();
     let (term_values, weighted) = session.current_composition_breakdown().map_or_else(
         || (Vec::new(), 0.0_f32),
         |breakdown| {
@@ -388,7 +390,7 @@ fn project_segment(
                 reason = "the panel's weighted scalar is a display value; f32 precision suffices"
             )]
             let weighted = breakdown
-                .weighted_per_residue(session.term_names(), session.term_weights())
+                .weighted_per_residue(scores.term_names(), scores.term_weights())
                 .into_iter()
                 .find(|(eid, res, _)| *eid == target.entity && *res as usize == target.residue)
                 .map_or(0.0, |(_, _, score)| score as f32);
@@ -431,6 +433,40 @@ pub fn ca_world_position(
         .zip(positions)
         .find(|(name, _)| *name == b"CA  ")
         .map(|(_, pos)| *pos)
+}
+
+/// Resolve `(eid, residue)` into a segment target, computing the residue
+/// identity (number, chain, amino acid) and its secondary structure once
+/// via a single `recompute_ss()` over the head assembly and caching them
+/// on the target. `None` when the entity or residue does not resolve.
+pub fn resolve_segment_target(
+    session: &Session,
+    eid: molex::EntityId,
+    residue: usize,
+) -> Option<SegmentTarget> {
+    let entity = session.entity(eid)?;
+    let res = entity.residues()?.get(residue)?;
+    let residue_number = res.seq_id();
+    let chain = entity
+        .pdb_chain_id()
+        .map_or_else(String::new, str::to_owned);
+    let aa = molex::chemistry::AminoAcid::from_code(res.name);
+    let aa_three = String::from_utf8_lossy(&res.name).trim().to_owned();
+    let aa_one = aa.map_or_else(String::new, |a| (a.one_letter() as char).to_string());
+
+    let mut assembly = session.head_assembly();
+    assembly.recompute_ss();
+    let ss_label = foldit_gui::ss_label(assembly.ss_types(eid).get(residue).copied());
+
+    Some(SegmentTarget {
+        entity: eid,
+        residue,
+        residue_number,
+        chain,
+        aa_three,
+        aa_one,
+        ss_label,
+    })
 }
 
 /// Project the `ACTIONS` section: the focus- + selection-aware op catalog.
@@ -521,7 +557,7 @@ fn project_selection(session: &Session, frontend: &mut GuiState) {
 fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut GuiState) {
     use molex::MoleculeType;
     let mut scene_entities = Vec::new();
-    for (eid, _meta) in session.iter() {
+    for (eid, _name) in session.iter() {
         let Some(entity) = session.entity(eid) else {
             continue;
         };
@@ -578,13 +614,18 @@ fn project_scene(session: &Session, engine: &VisoEngine, frontend: &mut GuiState
 ///     50ms (20Hz) debounce so per-cycle Rosetta scores don't
 ///     saturate the IPC. The final cycle on commit always lands
 ///     because committing also bumps `topology_version`.
-fn sync_history(cursor: &mut HistorySyncCursor, session: &Session, frontend: &mut GuiState) {
+fn sync_history(
+    cursor: &mut HistorySyncCursor,
+    session: &Session,
+    frontend: &mut GuiState,
+    force_history: bool,
+) {
     let topology = session.history().topology_version();
     let live = session.history().live_version();
     let topology_changed = cursor.topology != Some(topology);
     let live_changed = cursor.live != Some(live);
 
-    if topology_changed {
+    if topology_changed || force_history {
         frontend.set_history(project_history(session));
         cursor.topology = Some(topology);
         cursor.live = Some(live);

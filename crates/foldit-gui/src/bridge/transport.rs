@@ -5,12 +5,12 @@
 //! - `WasmTransport` (web): JS side via a stored `js_sys::Function` callback.
 //!
 //! Both consume the same payloads from [`crate::bridge::push::serialize_dirty`]
-//! and [`Dispatcher::handle_request`], so the only thing that varies between
+//! and `handle_request`, so the only thing that varies between
 //! platforms is the byte-delivery mechanism.
 
 use serde_json::Value;
 
-/// Result returned by [`Dispatcher::handle_request`].
+/// Result returned by `handle_request`.
 pub type RequestResult = Result<Value, String>;
 
 /// Platform-specific delivery channel from Rust to JS.

@@ -2,7 +2,7 @@
 //!
 //! These methods arm and advance the per-frame bring-up sequence (plugin
 //! warm, `Init`, first score) that runs while the host keeps rendering the
-//! loading screen; the phase enum itself lives in `super::load`.
+//! loading screen.
 
 use viso::VisoEngine;
 
@@ -10,19 +10,69 @@ use foldit_gui::AppPhase;
 use molex::entity::molecule::id::EntityId;
 
 use super::App;
-use super::load::{StartupCamera, StartupPhase, locate_plugins_root};
+use super::plugins::locate_plugins_root;
 use crate::history::CheckpointKind;
-use crate::render_projector::RenderProjector;
+use crate::render_projector::RenderSources;
+use crate::session::{SessionUpdate, SessionUpdateConsumer};
 
 /// The async-startup state App owns as one field: the per-frame phase
 /// machine plus the two terminal carryovers (camera intent + puzzle SS
 /// override) that `enter_session_from_startup` consumes once the geometry
 /// settles.
 #[cfg(not(target_arch = "wasm32"))]
-pub(in crate::app) struct StartupState {
+pub(in crate::app) struct BringupState {
     pub(in crate::app) phase: StartupPhase,
     pub(in crate::app) camera: StartupCamera,
     pub(in crate::app) ss_override: Option<(u32, Vec<molex::SSType>)>,
+}
+
+/// Non-blocking startup phase, advanced once per frame by
+/// [`App::advance_startup`]. The machine accumulates per-plugin worker
+/// completions across frames (the polls are stateless: each returns only
+/// what completed THIS frame) against an `expected` set, so the host
+/// renders the loading screen while bring-up proceeds.
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::app) enum StartupPhase {
+    /// Not started; the host has not called `begin_startup` yet.
+    Idle,
+    /// Full session bring-up: warming plugins
+    Warming {
+        expected: std::collections::BTreeSet<String>,
+        connected: std::collections::BTreeSet<String>,
+        path: String,
+    },
+    /// Plugin `Init` sessions in flight; accumulating adopted plugin ids.
+    Initializing {
+        expected: std::collections::BTreeSet<String>,
+        adopted: std::collections::BTreeSet<String>,
+    },
+    /// First score requested; waiting for the head breakdown to stamp.
+    Scoring,
+    /// No bootstrap structure: Landing is already shown and the warms are
+    /// finishing in the background so a later file-load finds connected
+    /// workers.
+    WarmingForLanding {
+        expected: std::collections::BTreeSet<String>,
+        connected: std::collections::BTreeSet<String>,
+    },
+    /// Bring-up complete; the machine is inert.
+    Done,
+}
+
+/// How the startup-machine terminal ([`App::enter_session_from_startup`])
+/// frames the camera once the geometry has settled. The launch and free-form
+/// structure paths fit on the focused geometry; a puzzle load stashes its
+/// saved pose so the terminal honors it instead of fitting. Consumed (reset
+/// to [`StartupCamera::Fit`]) when the terminal runs.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(in crate::app) enum StartupCamera {
+    /// Frame on the focused geometry (launch + free-form structure load).
+    #[default]
+    Fit,
+    /// Apply a puzzle's saved eye/up anchored on the settled centroid;
+    /// falls back to a focus fit when no centroid is available.
+    PuzzlePose { eye: glam::Vec3, up: glam::Vec3 },
 }
 
 impl App {
@@ -32,7 +82,7 @@ impl App {
     /// and applying any preset / render-scale tweaks they want before
     /// handing it over.
     pub fn attach_engine(&mut self, engine: VisoEngine) {
-        self.engine = Some(engine);
+        self.harness.attach(engine);
     }
 
     /// Begin app bring-up: the one host trigger that arms the non-blocking
@@ -55,7 +105,7 @@ impl App {
     /// frames, so the host renders the loading screen throughout.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn begin_startup(&mut self) {
-        if self.engine.is_none() {
+        if self.harness.engine.is_none() {
             log::error!("begin_startup called before create_render_context");
             return;
         }
@@ -63,7 +113,7 @@ impl App {
         // A fresh orchestrator restarts request ids at 1, so drop any
         // stale composition targets before a new edit can reuse an old id.
         self.runner_client.init_orchestrator();
-        self.ops.clear();
+        self.scores.clear_targets();
 
         // Load the default score-term weights once, before the first score.
         // `reset` leaves `term_weights` untouched, so a single load here
@@ -71,14 +121,14 @@ impl App {
         // On failure, log and proceed degraded (every weight then resolves
         // to 0.0, so scores read 0 until a valid map lands -- the app stays
         // up rather than crashing on a missing asset).
-        if self.store.term_weights().is_empty() {
+        if self.scores.term_weights().is_empty() {
             match crate::scores::load_default_term_weights() {
                 Ok(weights) => {
                     log::info!(
                         "[App] loaded {} default score-term weights",
                         weights.len()
                     );
-                    self.store.set_term_weights(weights);
+                    self.scores.set_term_weights(weights);
                 }
                 Err(e) => log::error!("[App] failed to load default score-term weights: {e}"),
             }
@@ -107,14 +157,14 @@ impl App {
                 // warms still finish in the background so a later file-load
                 // finds the workers connected.
                 self.set_app_phase(AppPhase::Landing);
-                self.startup.phase = StartupPhase::WarmingForLanding {
+                self.bringup.phase = StartupPhase::WarmingForLanding {
                     expected,
                     connected: std::collections::BTreeSet::new(),
                 };
             }
             Some(path) => {
                 self.set_app_phase(AppPhase::LoadingSession);
-                self.startup.phase = StartupPhase::Warming {
+                self.bringup.phase = StartupPhase::Warming {
                     expected,
                     connected: std::collections::BTreeSet::new(),
                     path,
@@ -129,14 +179,14 @@ impl App {
     /// fire a `score` query before the head breakdown has stamped.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) const fn startup_settled(&self) -> bool {
-        matches!(self.startup.phase, StartupPhase::Done)
+        matches!(self.bringup.phase, StartupPhase::Done)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn advance_startup(&mut self) {
-        match std::mem::replace(&mut self.startup.phase, StartupPhase::Idle) {
+        match std::mem::replace(&mut self.bringup.phase, StartupPhase::Idle) {
             StartupPhase::Idle => {}
-            StartupPhase::Done => self.startup.phase = StartupPhase::Done,
+            StartupPhase::Done => self.bringup.phase = StartupPhase::Done,
             StartupPhase::Warming {
                 expected,
                 mut connected,
@@ -146,9 +196,9 @@ impl App {
                     connected.insert(plugin_id);
                 }
                 if connected.is_superset(&expected) {
-                    self.startup.phase = self.warms_done_load_and_kick_inits(&path);
+                    self.bringup.phase = self.warms_done_load_and_kick_inits(&path);
                 } else {
-                    self.startup.phase = StartupPhase::Warming {
+                    self.bringup.phase = StartupPhase::Warming {
                         expected,
                         connected,
                         path,
@@ -169,15 +219,15 @@ impl App {
                     // carried on the Init payload, so the first score can
                     // query it. Tick's at-rest gate may also fire, but
                     // `request_scores` coalesces, so this overlap is harmless.
-                    self.startup.phase = self.kick_first_score_then_phase();
+                    self.bringup.phase = self.kick_first_score_then_phase();
                 } else {
-                    self.startup.phase = StartupPhase::Initializing { expected, adopted };
+                    self.bringup.phase = StartupPhase::Initializing { expected, adopted };
                 }
             }
             StartupPhase::Scoring => {
                 // Flip into the session once the first score's breakdown
-                // stamps (tick step-2's `poll_async_scores` stamps it; no edit
-                // is open during startup, so it reads the committed head). If
+                // stamps (the tick's score poll stamps it; no edit is open
+                // during startup, so it reads the committed head). If
                 // every kicked query has instead returned without stamping,
                 // enter the session unscored rather than wait on a breakdown
                 // that will never come: a polymer-less (e.g. ligand-only) load
@@ -189,9 +239,9 @@ impl App {
                     || !self.runner_client.has_pending_score_queries()
                 {
                     self.enter_session_from_startup();
-                    self.startup.phase = StartupPhase::Done;
+                    self.bringup.phase = StartupPhase::Done;
                 } else {
-                    self.startup.phase = StartupPhase::Scoring;
+                    self.bringup.phase = StartupPhase::Scoring;
                 }
             }
             StartupPhase::WarmingForLanding {
@@ -205,9 +255,9 @@ impl App {
                     connected.insert(plugin_id);
                 }
                 if connected.is_superset(&expected) {
-                    self.startup.phase = StartupPhase::Done;
+                    self.bringup.phase = StartupPhase::Done;
                 } else {
-                    self.startup.phase = StartupPhase::WarmingForLanding { expected, connected };
+                    self.bringup.phase = StartupPhase::WarmingForLanding { expected, connected };
                 }
             }
         }
@@ -228,7 +278,7 @@ impl App {
     /// loading screen identically.
     #[cfg(not(target_arch = "wasm32"))]
     fn kick_first_score_then_phase(&mut self) -> StartupPhase {
-        self.request_scores();
+        self.runner_client.request_scores();
         if self.runner_client.has_pending_score_queries() {
             StartupPhase::Scoring
         } else {
@@ -253,17 +303,15 @@ impl App {
         self.set_app_phase(AppPhase::InSession);
         // Consume the stashed camera intent + puzzle SS before the engine
         // borrow (these are separate `App` fields from `engine`).
-        let camera = std::mem::take(&mut self.startup.camera);
-        let ss_override = self.startup.ss_override.take();
-        // Choose the connection provider and (if a plugin provides them)
-        // populate the held set BEFORE the rebake below stamps the assembly,
-        // so the first display already carries the plugin's connections and
-        // the rebake never runs molex's geometric fallback under a provider.
-        // Gated on the engine, which is present at this seam.
-        if self.engine.is_some() {
-            crate::viz::refresh::refresh_connections(&mut self.runner_client, &mut self.store);
+        let camera = std::mem::take(&mut self.bringup.camera);
+        let ss_override = self.bringup.ss_override.take();
+        // Fire every viz channel once for the freshly-settled session.
+        if self.harness.engine.is_some() {
+            let opts = self.view_options();
+            self.viz
+                .replay(&mut self.runner_client, &self.store, &mut self.scores, &opts);
         }
-        if let Some(engine) = self.engine.as_mut() {
+        if let Some(engine) = self.harness.engine.as_mut() {
             // Camera: a puzzle load supplies its saved eye/up (anchored on the
             // settled centroid); every other path frames on the focused
             // geometry.
@@ -278,20 +326,29 @@ impl App {
                     }
                 }
             }
-            // Force a per-residue color re-push now that viso has fully synced
-            // the final geometry. The first score may have
-            // pushed before viso created the entity's scene-local state, in
-            // which case that push was silently dropped and the backbone would
-            // render gray. Disjoint field borrow: `projectors.render` and
-            // `store` are separate fields from `engine`, mirroring the tick
-            // consume seam.
-            RenderProjector::reproject_scores(&self.store, engine);
-            // Re-push alone only updates the separate residue-color buffer; the
-            // cartoon tube's color is baked into the mesh at build time and the
-            // startup geometry baked gray (it published before the first score
-            // arrived). Force a full-rebuild republish now that the scores are
-            // populated so the backbone mesh re-bakes colored.
-            self.projectors.render.rebake_geometry(&mut self.store, engine);
+            // Startup replay: scores, then a head-move rebuild whose same-batch
+            // score re-push restores the colors the head-move clear drops.
+            self.projectors.render.clear_last_published_ids();
+            self.projectors.render.consume(
+                &[SessionUpdate::ScoresChanged],
+                RenderSources {
+                    session: &mut self.store,
+                    reapply_options: None,
+                    scores: &self.scores,
+                    held_connections: self.viz.held_connections(),
+                },
+                engine,
+            );
+            self.projectors.render.consume(
+                &[SessionUpdate::HeadMoved, SessionUpdate::ScoresChanged],
+                RenderSources {
+                    session: &mut self.store,
+                    reapply_options: None,
+                    scores: &self.scores,
+                    held_connections: self.viz.held_connections(),
+                },
+                engine,
+            );
             // Apply any puzzle-pinned SS override AFTER the rebake: it calls
             // `replace_assembly`, which rebuilds the cartoon from the
             // assembly's own (loop) SS, so an override set earlier would be
@@ -301,41 +358,12 @@ impl App {
                 engine.set_ss_override(entity_raw, ss);
             }
         }
-        // Fire the initial structural-viz queries once. The at-rest clash /
-        // void refresh in `tick` gates on `startup_settled()` and a
-        // geometry change in the batch, but the geometry changes happen
-        // DURING bring-up (before the
-        // machine settles) and the settled session is at rest, so that gate
-        // never fires for the first display. Kick them here so clashes,
-        // voids, and exposed-hydrophobic beads show without waiting for the
-        // first user edit. Each gates
-        // on its display toggle and a plugin advertising the
-        // query, so this is an inert no-op when any is absent. The caller
-        // gates on the engine, which is present at this seam.
-        if self.engine.is_some() {
-            let opts = self.view_options();
-            crate::viz::refresh::refresh_clashes(
-                &mut self.runner_client,
-                &mut self.store,
-                &opts,
-            );
-            crate::viz::refresh::refresh_external_cavities(
-                &mut self.runner_client,
-                &mut self.store,
-                &opts,
-            );
-            crate::viz::refresh::refresh_exposed_hydrophobics(
-                &mut self.runner_client,
-                &mut self.store,
-                &opts,
-            );
-        }
         // The design-gating overlay is static per puzzle (the mask is set at
         // load), so a single load-time push suffices: viso re-derives the GPU
         // bitset from the per-entity set on every mesh rebuild, keeping the
         // overlay pinned across geometry changes without a per-tick re-push.
-        if let Some(engine) = self.engine.as_mut() {
-            crate::viz::refresh::refresh_design_gating(&self.store, engine);
+        if let Some(engine) = self.harness.engine.as_mut() {
+            crate::viz::refresh_design_gating(&self.store, engine);
         }
     }
 
@@ -346,7 +374,7 @@ impl App {
     /// this frame, so no inline `tick(0.0)` is taken here.
     #[cfg(not(target_arch = "wasm32"))]
     fn warms_done_load_and_kick_inits(&mut self, path: &str) -> StartupPhase {
-        match crate::puzzle::load_file_as_entities(path) {
+        match crate::structure_io::load_file_as_entities(path) {
             Ok((entities, name)) => {
                 for entity in entities {
                     let _ = self.store.load_entity_into_history(entity, &name);
@@ -386,7 +414,7 @@ impl App {
         self.arm_plugin_bringup()
     }
 
-    /// Set [`Self::startup`] to drive plugin bring-up for an in-session load
+    /// Set [`Self::bringup`] to drive plugin bring-up for an in-session load
     /// (file / puzzle). When `loaded`, arms the same `Init` -> score ->
     /// `InSession` sequence the launch path runs (the plugins are
     /// already warm, so it enters at `Initializing`); when the load failed,
@@ -395,7 +423,7 @@ impl App {
     /// sessions, so the kicked `Init`s re-bind every plugin to this structure.
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) fn arm_session_bringup(&mut self, loaded: bool) {
-        self.startup.phase = if loaded {
+        self.bringup.phase = if loaded {
             self.arm_plugin_bringup()
         } else {
             // Nothing loaded; clear the loading screen degraded (viewer-only).

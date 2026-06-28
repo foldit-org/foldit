@@ -2,10 +2,9 @@
 //! RAW (unweighted) per-term energies (whole-pose and per-residue) plus the
 //! term-name alignment key.
 //!
-//! Core owns the weighting: it multiplies the raw per-term energies by a
-//! session-held weight map ([`Session::term_weights`]) to produce the
-//! weighted total and per-residue scalars itself, which are what the app
-//! displays and colors by.
+//! Core owns the weighting: it multiplies the raw per-term energies by the
+//! coordinator-held weight map to produce the weighted total and per-residue
+//! scalars itself, which are what the app displays and colors by.
 //!
 //! Cross-platform: the blocking score path is reachable on wasm, so these
 //! types, their conversion, and the weighting methods must build on every
@@ -58,12 +57,11 @@ pub struct StoredBreakdown {
 }
 
 impl StoredBreakdown {
-    /// Core-weighted per-residue scalars, identical in shape and value to
-    /// [`ScoreReport::weighted_per_residue`] but taking `term_names`
-    /// externally (the alignment key lives on the `Session`, not on the
-    /// stored form). One `(entity_id, residue_index, score)` per
-    /// [`ResidueTermScores`], where `score = Σ terms[i] *
-    /// weights[term_names[i]]` (missing weights `0.0`).
+    /// Core-weighted per-residue scalars, taking `term_names` externally
+    /// (the alignment key lives on the `Session`, not on the stored form).
+    /// One `(entity_id, residue_index, score)` per [`ResidueTermScores`],
+    /// where `score = Σ terms[i] * weights[term_names[i]]` (missing weights
+    /// `0.0`).
     pub fn weighted_per_residue(
         &self,
         term_names: &[String],
@@ -100,35 +98,6 @@ impl ScoreReport {
                 f64::from(*raw) * f64::from(w)
             })
             .sum()
-    }
-
-    /// Core-weighted per-residue scalars: one `(entity_id, residue_index,
-    /// score)` per [`ResidueTermScores`], where `score = Σ terms[i] *
-    /// weights[term_names[i]]` (missing weights `0.0`). The production path
-    /// now weights via [`StoredBreakdown::weighted_per_residue`] (term names
-    /// supplied externally from the session); this report-local form is
-    /// retained as the value-identity oracle that test pins the stored form's
-    /// output against, hence `#[allow(dead_code)]` for non-test builds.
-    #[allow(dead_code)]
-    pub fn weighted_per_residue(
-        &self,
-        weights: &HashMap<String, f32>,
-    ) -> Vec<(molex::EntityId, u32, f64)> {
-        self.per_residue_terms
-            .iter()
-            .map(|rts| {
-                let score: f64 = self
-                    .term_names
-                    .iter()
-                    .zip(&rts.terms)
-                    .map(|(name, raw)| {
-                        let w = weights.get(name).copied().unwrap_or(0.0);
-                        f64::from(*raw) * f64::from(w)
-                    })
-                    .sum();
-                (rts.entity_id, rts.residue_index, score)
-            })
-            .collect()
     }
 }
 
@@ -173,7 +142,7 @@ pub fn parse_wts(src: &str) -> HashMap<String, f32> {
 
 /// Load + parse the default `ref2015_cart` weight map. Resolves
 /// `assets/scoring/ref2015_cart.wts` by walking up from the running
-/// executable (same shape as [`crate::puzzle::levels_root`], covering test,
+/// executable (same shape as [`crate::puzzle_load::levels_root`], covering test,
 /// dev, and installed binary layouts). Returns an `Err` string the caller
 /// can log if no ancestor carries the asset or the file is unreadable.
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,6 +177,43 @@ pub fn load_default_term_weights() -> Result<HashMap<String, f32>, String> {
     ))
 }
 
+/// Read a `toml::Value` as an `f64`, accepting an integer or float literal.
+/// Anything else (string, bool, ...) yields `None`. Filter thresholds and
+/// bonuses are small magnitudes, so the integer widening is exact in practice.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "filter thresholds/bonuses are small integers; widening is exact"
+)]
+const fn toml_number(value: &toml::Value) -> Option<f64> {
+    match value {
+        toml::Value::Integer(n) => Some(*n as f64),
+        toml::Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Sum the RAW score bonus of every native `ExposedCount` filter met at the
+/// given exposed-hydrophobic `count`. A native `ExposedCount` filter awards its
+/// `bonus` param when `count` is below `max_exposed_hydrophobics`
+/// (`max_exposed_hydrophobics = 1` means the win is `count == 0`), else `0`. A
+/// filter that names a `plugin` (forwarded, not scored here), one missing the
+/// threshold or the bonus param, and any non-`ExposedCount` kind all contribute
+/// nothing (forward-compatible: an unknown filter type parses but is inert). The
+/// result is a RAW delta the score path folds in before the raw->game map.
+#[must_use]
+pub fn exposed_count_bonus(filters: &[crate::puzzle_toml::FilterSpec], count: u32) -> f64 {
+    filters
+        .iter()
+        .filter(|f| f.kind == "ExposedCount" && f.plugin.is_none())
+        .filter_map(|f| {
+            let max = toml_number(f.params.get("max_exposed_hydrophobics")?)?;
+            let bonus = toml_number(f.params.get("bonus")?)?;
+            Some((max, bonus))
+        })
+        .map(|(max, bonus)| if f64::from(count) < max { bonus } else { 0.0 })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,7 +246,11 @@ mod tests {
 
         assert_eq!(report.weighted_total(&weights), 25.0);
 
-        let per_residue = report.weighted_per_residue(&weights);
+        let stored = StoredBreakdown {
+            whole_pose_terms: report.whole_pose_terms,
+            per_residue_terms: report.per_residue_terms,
+        };
+        let per_residue = stored.weighted_per_residue(&report.term_names, &weights);
         assert_eq!(per_residue.len(), 1);
         let (entity_id, residue_index, score) = per_residue[0];
         assert_eq!(entity_id, molex::EntityId::from_raw(7));
@@ -248,12 +258,9 @@ mod tests {
         assert_eq!(score, 8.0);
     }
 
-    /// Re-derivation equality: weighting a `StoredBreakdown` against an
-    /// external `term_names` produces the same per-residue scalars as
-    /// weighting the equivalent `ScoreReport` directly. This is the value-
-    /// identity proof for the session-owned breakdown swap: the render
-    /// projector re-derives colors from the stored form and must land on
-    /// the same numbers produced by weighting the `ScoreReport` directly.
+    /// Per-residue scalars from a `StoredBreakdown` against an external
+    /// `term_names`: `score = Σ terms[i] * weights[term_names[i]]`, one entry
+    /// per residue in lane order.
     #[test]
     fn stored_breakdown_weighting_matches_report() {
         let weights: HashMap<String, f32> = [
@@ -284,14 +291,22 @@ mod tests {
             bonus_breakdown: Vec::new(),
         };
         let stored = StoredBreakdown {
-            whole_pose_terms: report.whole_pose_terms.clone(),
-            per_residue_terms: report.per_residue_terms.clone(),
+            whole_pose_terms: report.whole_pose_terms,
+            per_residue_terms: report.per_residue_terms,
         };
 
-        assert_eq!(
-            stored.weighted_per_residue(&term_names, &weights),
-            report.weighted_per_residue(&weights),
-        );
+        let weighted = stored.weighted_per_residue(&term_names, &weights);
+        assert_eq!(weighted.len(), 2);
+
+        // 1.5*1.0 + (-2.0)*0.55 + 0.25*(-0.5) = 0.275
+        assert_eq!(weighted[0].0, molex::EntityId::from_raw(0));
+        assert_eq!(weighted[0].1, 5);
+        assert!((weighted[0].2 - 0.275).abs() < 1e-6);
+
+        // -3.0*1.0 + 4.0*0.55 + 8.0*(-0.5) = -4.8
+        assert_eq!(weighted[1].0, molex::EntityId::from_raw(2));
+        assert_eq!(weighted[1].1, 11);
+        assert!((weighted[1].2 - (-4.8)).abs() < 1e-6);
     }
 
     /// An unweighted term (absent from the map) contributes nothing.
@@ -333,5 +348,67 @@ NO_HB_ENV_DEP
         assert!(!weights.contains_key("METHOD_WEIGHTS"));
         assert!(!weights.contains_key("INCLUDE_INTRA_RES_PROTEIN"));
         assert!(!weights.contains_key("NO_HB_ENV_DEP"));
+    }
+
+    mod exposed_count {
+        #![allow(
+            clippy::float_cmp,
+            reason = "exact-constant assertions on deterministic bonus returns"
+        )]
+
+        use super::exposed_count_bonus;
+        use crate::puzzle_toml::FilterSpec;
+        use std::collections::BTreeMap;
+
+        /// Build an `ExposedCount` filter with its threshold + bonus params, the
+        /// way the transcribed `[[puzzle.filter]]` block stores them.
+        fn exposed_count(max: i64, bonus: i64) -> FilterSpec {
+            let mut params = BTreeMap::new();
+            params.insert(
+                "max_exposed_hydrophobics".to_owned(),
+                toml::Value::Integer(max),
+            );
+            params.insert("bonus".to_owned(), toml::Value::Integer(bonus));
+            FilterSpec {
+                kind: "ExposedCount".to_owned(),
+                plugin: None,
+                params,
+            }
+        }
+
+        #[test]
+        fn bonus_awarded_below_max() {
+            // max=1: the win is count==0; count 0 < 1 awards the bonus.
+            let filters = [exposed_count(1, -100)];
+            assert_eq!(exposed_count_bonus(&filters, 0), -100.0);
+        }
+
+        #[test]
+        fn no_bonus_at_or_above_max() {
+            let filters = [exposed_count(1, -100)];
+            assert_eq!(exposed_count_bonus(&filters, 1), 0.0);
+            assert_eq!(exposed_count_bonus(&filters, 5), 0.0);
+        }
+
+        #[test]
+        fn unknown_kind_is_inert() {
+            let mut filter = exposed_count(1, -100);
+            filter.kind = "some_future_kind".to_owned();
+            assert_eq!(exposed_count_bonus(&[filter], 0), 0.0);
+        }
+
+        #[test]
+        fn forwarded_filter_is_inert() {
+            // A filter that names a plugin is forwarded for scoring, not
+            // evaluated here, so it contributes no native bonus.
+            let mut filter = exposed_count(1, -100);
+            filter.plugin = Some("rosetta".to_owned());
+            assert_eq!(exposed_count_bonus(&[filter], 0), 0.0);
+        }
+
+        #[test]
+        fn empty_filters_yield_zero() {
+            assert_eq!(exposed_count_bonus(&[], 0), 0.0);
+        }
     }
 }

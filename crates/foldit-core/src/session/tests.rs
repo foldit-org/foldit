@@ -103,7 +103,6 @@ fn insert_preview_then_promote_lands_in_history() {
     let id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "preview".to_owned(),
-        EntityOrigin::Loaded,
     );
     // Preview is visible in head_assembly.
     let asm = store.head_assembly();
@@ -117,7 +116,6 @@ fn insert_preview_then_promote_lands_in_history() {
         .promote_preview(
             id,
             CheckpointKind::PromotedPreview { entity: id },
-            None,
             None,
             "promoted",
         )
@@ -137,7 +135,6 @@ fn promote_preview_unknown_id_returns_not_a_preview() {
             stranger,
             CheckpointKind::PromotedPreview { entity: stranger },
             None,
-            None,
             "no",
         )
         .unwrap_err();
@@ -153,13 +150,11 @@ fn live_membership_lists_committed_then_preview() {
     let a = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "a".to_owned(),
-        EntityOrigin::Loaded,
     );
     store
         .promote_preview(
             a,
             CheckpointKind::PromotedPreview { entity: a },
-            None,
             None,
             "a",
         )
@@ -168,7 +163,6 @@ fn live_membership_lists_committed_then_preview() {
     let b = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "b".to_owned(),
-        EntityOrigin::Loaded,
     );
 
     assert_eq!(store.count(), 2);
@@ -186,13 +180,11 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     let x = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "x".to_owned(),
-        EntityOrigin::Loaded,
     );
     store
         .promote_preview(
             x,
             CheckpointKind::PromotedPreview { entity: x },
-            None,
             None,
             "x",
         )
@@ -203,8 +195,8 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     // Navigate back past X's checkpoint to the empty root.
     store.undo().expect("undo");
 
-    // Metadata lingers: the side table still holds X.
-    assert!(store.metadata(x).is_some());
+    // Name lingers: the side table still holds X.
+    assert!(store.name(x).is_some());
     // Derived membership must NOT surface the undone entity.
     assert_eq!(store.count(), 0);
     assert!(store.ids().next().is_none());
@@ -219,14 +211,13 @@ fn reset_clears_history_metadata_and_transient() {
     let _id = store.insert_preview(
         mk_bulk(mk_dummy_id()),
         "x".to_owned(),
-        EntityOrigin::Loaded,
     );
     assert_eq!(store.count(), 1);
 
     store.reset();
 
     assert_eq!(store.count(), 0);
-    assert_eq!(store.history().checkpoints().len(), 1); // root only
+    assert_eq!(store.history().checkpoints().iter().count(), 1); // root only
     assert!(store
         .history()
         .checkpoint(store.history().checkpoints().head())
@@ -248,13 +239,11 @@ fn store_with_protein(n_residues: usize) -> (Session, EntityId) {
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), n_residues),
         "p".to_owned(),
-        EntityOrigin::Loaded,
     );
     store
         .promote_preview(
             id,
             CheckpointKind::PromotedPreview { entity: id },
-            None,
             None,
             "promote",
         )
@@ -275,7 +264,6 @@ fn insert_preview_emits_preview_added() {
     let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 2),
         "p".to_owned(),
-        EntityOrigin::Loaded,
     );
     let changes = store.take_updates();
     assert!(
@@ -292,7 +280,6 @@ fn remove_preview_emits_preview_discarded() {
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_owned(),
-        EntityOrigin::Loaded,
     );
     let _ = store.take_updates();
     assert!(store.remove_preview(id));
@@ -316,14 +303,12 @@ fn promote_preview_emits_head_moved() {
     let id = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "p".to_owned(),
-        EntityOrigin::Loaded,
     );
     let _ = store.take_updates();
     store
         .promote_preview(
             id,
             CheckpointKind::PromotedPreview { entity: id },
-            None,
             None,
             "promote",
         )
@@ -470,13 +455,11 @@ fn jump_checkpoint_emits_head_moved() {
     let id_b = store.insert_preview(
         mk_protein(mk_dummy_id(), 3),
         "b".to_owned(),
-        EntityOrigin::Loaded,
     );
     store
         .promote_preview(
             id_b,
             CheckpointKind::PromotedPreview { entity: id_b },
-            None,
             None,
             "promote b",
         )
@@ -553,7 +536,6 @@ fn reset_clears_pending_then_emits_one_head_moved() {
     let _ = store.insert_preview(
         mk_protein(mk_dummy_id(), 1),
         "leftover".to_owned(),
-        EntityOrigin::Loaded,
     );
 
     store.reset();
@@ -575,13 +557,28 @@ fn mint_ids(n: usize) -> Vec<EntityId> {
     (0..n).map(|_| alloc.allocate()).collect()
 }
 
+/// Remove a single residue via the live selection surface: re-set the
+/// entity to its current set minus `residue`. Empty result drops the
+/// entry (`set_residues_on` invariant), so absent residues are a no-op.
+fn deselect(store: &mut Session, entity: EntityId, residue: u32) {
+    let keep: Vec<u32> = store
+        .selection()
+        .get(&entity)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|&r| r != residue)
+        .collect();
+    store.set_residues_on(entity, keep);
+}
+
 #[test]
 fn new_session_has_empty_selection() {
     let store = Session::new();
     let ids = mint_ids(1);
-    assert!(store.selection_is_empty());
+    assert!(store.selection().is_empty());
     assert_eq!(store.selection_total_count(), 0);
-    assert!(store.selected_residues_on(ids[0]).is_none());
+    assert!(store.selection().get(&ids[0]).is_none());
 }
 
 #[test]
@@ -592,8 +589,8 @@ fn select_residue_is_idempotent() {
     store.select_residue(e, 7);
     store.select_residue(e, 7);
     assert_eq!(store.selection_total_count(), 1);
-    assert!(store.is_residue_selected(e, 7));
-    let set = store.selected_residues_on(e).expect("present");
+    assert!(store.selection().get(&e).is_some_and(|s| s.contains(&7)));
+    let set = store.selection().get(&e).expect("present");
     assert_eq!(set.len(), 1);
 }
 
@@ -605,10 +602,10 @@ fn clear_selection_empties_the_map() {
     store.select_residue(ids[1], 5);
     assert_eq!(store.selection_total_count(), 2);
     store.clear_selection();
-    assert!(store.selection_is_empty());
-    assert!(store.selected_residues_on(ids[0]).is_none());
-    assert!(store.selected_residues_on(ids[1]).is_none());
-    assert!(!store.is_residue_selected(ids[0], 0));
+    assert!(store.selection().is_empty());
+    assert!(store.selection().get(&ids[0]).is_none());
+    assert!(store.selection().get(&ids[1]).is_none());
+    assert!(!store.selection().get(&ids[0]).is_some_and(|s| s.contains(&0)));
 }
 
 #[test]
@@ -619,7 +616,7 @@ fn set_residues_on_replaces_not_merges() {
     store.select_residue(e, 2);
     store.select_residue(e, 3);
     store.set_residues_on(e, [10, 11]);
-    let set = store.selected_residues_on(e).expect("present");
+    let set = store.selection().get(&e).expect("present");
     assert_eq!(set.len(), 2);
     assert!(set.contains(&10));
     assert!(set.contains(&11));
@@ -634,8 +631,8 @@ fn set_residues_on_empty_removes_entity_entry() {
     let e = mint_ids(1)[0];
     store.select_residue(e, 9);
     store.set_residues_on(e, std::iter::empty());
-    assert!(store.selected_residues_on(e).is_none());
-    assert!(store.selection_is_empty());
+    assert!(store.selection().get(&e).is_none());
+    assert!(store.selection().is_empty());
 }
 
 #[test]
@@ -648,17 +645,17 @@ fn multi_entity_isolation() {
     store.select_residue(a, 2);
     store.select_residue(b, 100);
 
-    assert!(store.is_residue_selected(a, 1));
-    assert!(store.is_residue_selected(a, 2));
-    assert!(!store.is_residue_selected(a, 100));
-    assert!(store.is_residue_selected(b, 100));
-    assert!(!store.is_residue_selected(b, 1));
+    assert!(store.selection().get(&a).is_some_and(|s| s.contains(&1)));
+    assert!(store.selection().get(&a).is_some_and(|s| s.contains(&2)));
+    assert!(!store.selection().get(&a).is_some_and(|s| s.contains(&100)));
+    assert!(store.selection().get(&b).is_some_and(|s| s.contains(&100)));
+    assert!(!store.selection().get(&b).is_some_and(|s| s.contains(&1)));
 
     store.clear_selection();
     store.select_residue(a, 1);
     store.set_residues_on(b, [42, 43]);
     // Mutating B must not have touched A.
-    assert_eq!(store.selected_residues_on(a).expect("present").len(), 1);
+    assert_eq!(store.selection().get(&a).expect("present").len(), 1);
 }
 
 #[test]
@@ -667,13 +664,13 @@ fn deselect_last_residue_removes_entity_entry() {
     let e = mint_ids(1)[0];
     store.select_residue(e, 0);
     store.select_residue(e, 1);
-    store.deselect_residue(e, 0);
+    deselect(&mut store, e, 0);
     // Set is still non-empty: entry must remain.
-    assert!(store.selected_residues_on(e).is_some());
-    store.deselect_residue(e, 1);
+    assert!(store.selection().get(&e).is_some());
+    deselect(&mut store, e, 1);
     // Last residue gone: entity entry must be removed.
-    assert!(store.selected_residues_on(e).is_none());
-    assert!(store.selection_is_empty());
+    assert!(store.selection().get(&e).is_none());
+    assert!(store.selection().is_empty());
 }
 
 #[test]
@@ -682,11 +679,11 @@ fn deselect_idempotent_on_missing() {
     let e = mint_ids(1)[0];
     // Deselect a residue that was never selected: no panic, no phantom
     // entity entry left behind.
-    store.deselect_residue(e, 99);
-    assert!(store.selection_is_empty());
+    deselect(&mut store, e, 99);
+    assert!(store.selection().is_empty());
     store.select_residue(e, 1);
-    store.deselect_residue(e, 99);
-    assert!(store.is_residue_selected(e, 1));
+    deselect(&mut store, e, 99);
+    assert!(store.selection().get(&e).is_some_and(|s| s.contains(&1)));
     assert_eq!(store.selection_total_count(), 1);
 }
 
@@ -696,16 +693,16 @@ fn toggle_residue_round_trips() {
     let e = mint_ids(1)[0];
     // First toggle selects.
     assert!(store.toggle_residue(e, 3));
-    assert!(store.is_residue_selected(e, 3));
+    assert!(store.selection().get(&e).is_some_and(|s| s.contains(&3)));
     // Second toggle deselects and removes the empty entity entry.
     assert!(!store.toggle_residue(e, 3));
-    assert!(!store.is_residue_selected(e, 3));
-    assert!(store.selected_residues_on(e).is_none());
+    assert!(!store.selection().get(&e).is_some_and(|s| s.contains(&3)));
+    assert!(store.selection().get(&e).is_none());
     // Toggle on a sibling residue while none are selected: same entity,
     // but the entry was removed in step 2, so this is a fresh insert.
     assert!(store.toggle_residue(e, 4));
-    assert!(store.is_residue_selected(e, 4));
-    assert!(!store.is_residue_selected(e, 3));
+    assert!(store.selection().get(&e).is_some_and(|s| s.contains(&4)));
+    assert!(!store.selection().get(&e).is_some_and(|s| s.contains(&3)));
 }
 
 #[test]
@@ -715,12 +712,12 @@ fn selected_entities_enumerates_only_nonempty() {
     store.select_residue(ids[0], 0);
     store.select_residue(ids[1], 0);
     store.select_residue(ids[2], 0);
-    store.deselect_residue(ids[1], 0);
-    let ents: Vec<_> = store.selected_entities().collect();
+    deselect(&mut store, ids[1], 0);
+    let ents: Vec<EntityId> = store.selection().keys().copied().collect();
     // BTreeMap key order is by `EntityId`'s `Ord`, which for the molex
     // newtype is the underlying u32 order. The allocator hands out ids in
-    // sequence so ids[0] < ids[1] < ids[2]; after removing ids[1],
-    // `selected_entities` enumerates ids[0], ids[2] in that order.
+    // sequence so ids[0] < ids[1] < ids[2]; after removing ids[1], the
+    // selection keys enumerate ids[0], ids[2] in that order.
     assert_eq!(ents, vec![ids[0], ids[2]]);
 }
 
@@ -798,11 +795,11 @@ fn reset_clears_selection() {
     let e = mint_ids(1)[0];
     store.select_residue(e, 1);
     store.select_residue(e, 2);
-    assert!(!store.selection_is_empty());
+    assert!(!store.selection().is_empty());
 
     store.reset();
     assert!(
-        store.selection_is_empty(),
+        store.selection().is_empty(),
         "reset drops the stale selection on a topology swap",
     );
 }
@@ -856,8 +853,8 @@ fn reset_clears_focus_to_all() {
 
 /// A bare tutorial bubble (all optional flow fields empty). Only the
 /// vector length matters to the cursor mutators under test.
-fn mk_bubble() -> crate::puzzle::Bubble {
-    crate::puzzle::Bubble {
+fn mk_bubble() -> crate::puzzle_toml::Bubble {
+    crate::puzzle_toml::Bubble {
         text: String::new(),
         color: None,
         point_to: None,
@@ -1052,7 +1049,7 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
     // chain byte, so it never matches and stays locked (secure-by-default).
     let bglb_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/levels/bglb");
-    let data = crate::puzzle::load_puzzle_data_from_dir(&bglb_dir)
+    let data = crate::puzzle_load::load_puzzle_data_from_dir(&bglb_dir)
         .expect("BglB puzzle should load");
 
     let mut store = Session::new();

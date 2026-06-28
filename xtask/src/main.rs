@@ -103,6 +103,10 @@ enum Commands {
     BuildMolex,
     /// Build the GUI (bun run build) and copy dist to assets/gui
     BuildGui,
+    /// Build the Rosetta plugin UI ES module (bun run build in the
+    /// plugin's ui/ dir). Output `ui/dist/rama_map.mjs` is built on demand
+    /// and gitignored; `package` copies it into the staging bundle.
+    BuildRosettaUi,
     /// Build the backend host artifacts (foldit-worker + python-host dylib)
     /// into target/<profile>/ so they sit next to the foldit-desktop exe for
     /// `cargo run`. A plain `cargo run` rebuilds neither (the worker is a
@@ -155,6 +159,7 @@ fn main() -> Result<()> {
         } => package(formats.as_deref(), skip_assembly),
         Commands::BuildMolex => build_molex(),
         Commands::BuildGui => build_gui(),
+        Commands::BuildRosettaUi => build_rosetta_ui(),
         Commands::BuildHost { debug } => build_host(debug),
         Commands::BuildWeb { debug } => build_web(debug),
         Commands::PackageWeb => package_web(),
@@ -671,6 +676,19 @@ fn copy_rosetta_plugin() -> Result<()> {
         println!("Warning: Rosetta assets not found at {assets_src} (icons + database)");
         println!("  Run 'cargo xtask build-rosetta-interactive' first");
     }
+
+    // The built panel ES module (plugin.toml's [[panels]].entry). Built on
+    // demand and gitignored, so it lives outside assets/; copy it to the same
+    // manifest-relative path the serve/allowlist resolves against.
+    let panel_src = format!("{rosetta_plugin_src}/ui/dist/rama_map.mjs");
+    if Path::new(&panel_src).exists() {
+        let panel_dst_dir = format!("{rosetta_plugin_dst}/ui/dist");
+        std::fs::create_dir_all(&panel_dst_dir)?;
+        std::fs::copy(&panel_src, format!("{panel_dst_dir}/rama_map.mjs"))?;
+    } else {
+        println!("Warning: Rosetta panel module not found at {panel_src}");
+        println!("  Run 'cargo xtask build-rosetta-ui' first");
+    }
     Ok(())
 }
 
@@ -740,6 +758,35 @@ fn build_gui() -> Result<()> {
 
     copy_dir(&dist_dir, gui_dir)?;
     println!("GUI built and copied to {gui_dir}");
+    Ok(())
+}
+
+fn build_rosetta_ui() -> Result<()> {
+    let ui_src_dir = "crates/foldit-runner/plugins/rosetta/ui";
+
+    println!("Installing Rosetta UI dependencies...");
+    let install_status = Command::new("bun")
+        .arg("install")
+        .current_dir(ui_src_dir)
+        .status()?;
+    if !install_status.success() {
+        anyhow::bail!("Failed to install Rosetta UI dependencies");
+    }
+
+    println!("Building Rosetta UI...");
+    let status = Command::new("bun")
+        .args(["run", "build"])
+        .current_dir(ui_src_dir)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("Failed to build Rosetta UI");
+    }
+
+    let built = format!("{ui_src_dir}/dist/rama_map.mjs");
+    if !Path::new(&built).exists() {
+        anyhow::bail!("Rosetta UI build did not produce {built}");
+    }
+    println!("Rosetta UI built at {built}");
     Ok(())
 }
 

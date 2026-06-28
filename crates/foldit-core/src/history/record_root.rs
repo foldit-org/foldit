@@ -60,9 +60,9 @@ impl History {
                         return Err(HistoryError::ActiveActionInProgress);
                     }
                 }
-                // Both move the committed head, which would strand an
-                // open edit's commit composition.
-                HistoryEvent::RecordEntityUpdate { .. } | HistoryEvent::AddEntity { .. } => {
+                // Moves the committed head, which would strand an open
+                // edit's commit composition.
+                HistoryEvent::AddEntity { .. } => {
                     return Err(HistoryError::ActiveActionInProgress)
                 }
                 HistoryEvent::LaneUndo { .. }
@@ -86,7 +86,6 @@ impl History {
         let is_push = matches!(
             event,
             HistoryEvent::Begin { .. }
-                | HistoryEvent::RecordEntityUpdate { .. }
                 | HistoryEvent::LaneUndo { .. }
                 | HistoryEvent::LaneRedo { .. }
                 | HistoryEvent::AddEntity { .. }
@@ -101,16 +100,6 @@ impl History {
             } => self.do_begin(&entities, kind, &label, request_id)?,
             HistoryEvent::Commit { request_id } => self.do_commit(request_id)?,
             HistoryEvent::Abort { request_id } => self.do_abort(request_id)?,
-            HistoryEvent::RecordEntityUpdate {
-                entity,
-                kind,
-                payload,
-                label,
-                raw_score,
-                game_score,
-            } => {
-                self.do_record_entity_update(entity, kind, payload, label, raw_score, game_score)?
-            }
             HistoryEvent::LaneUndo { entity, target } => self.do_lane_undo(entity, target)?,
             HistoryEvent::LaneRedo { entity, branch } => self.do_lane_redo(entity, branch)?,
             HistoryEvent::Undo => self.do_undo()?,
@@ -129,6 +118,13 @@ impl History {
         }
 
         self.evict_to_budget();
+
+        // Recompute best cursors after a checkpoint mint (prune/detach in
+        // the step above may also have nulled them).
+        if matches!(result, HistoryEventOutcome::Pushed(_)) {
+            self.recompute_best();
+        }
+
         self.topology_version = self.topology_version.saturating_add(1);
 
         if cfg!(debug_assertions) {

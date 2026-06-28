@@ -1,5 +1,6 @@
 // foldit:allow-long-file: exhaustive history unit-test module; length is intrinsic.
 use super::*;
+use foldit_gui::wire::WireId;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::EntityIdAllocator;
 use molex::Element;
@@ -62,26 +63,12 @@ fn linear_push_undo_redo_single_lane() {
     let e = ids[0];
     let root = h.checkpoints().root();
 
-    let c1 = h
-        .record_entity_update(
-            e,
-            plugin_op("wiggle"),
-            arc_entity(e),
-            Cow::Borrowed("w1"),
-            None,
-            None,
-        )
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w1"), 1)
         .unwrap();
-    let c2 = h
-        .record_entity_update(
-            e,
-            plugin_op("wiggle"),
-            arc_entity(e),
-            Cow::Borrowed("w2"),
-            None,
-            None,
-        )
+    let c1 = h.commit_action(1).unwrap();
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w2"), 2)
         .unwrap();
+    let c2 = h.commit_action(2).unwrap();
     assert_eq!(h.checkpoints().head(), c2);
 
     // undo → c1
@@ -116,26 +103,12 @@ fn push_after_undo_drops_redo_path() {
     let (mut h, ids) = mk_history(1);
     let e = ids[0];
 
-    let c1 = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("s1"),
-            None,
-            None,
-        )
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s1"), 1)
         .unwrap();
-    let c2 = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("s2"),
-            None,
-            None,
-        )
+    let c1 = h.commit_action(1).unwrap();
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2"), 2)
         .unwrap();
+    let c2 = h.commit_action(2).unwrap();
 
     // Undo to c1; redo path still alive (c2 reachable).
     let to = h.undo().unwrap().unwrap();
@@ -149,16 +122,9 @@ fn push_after_undo_drops_redo_path() {
     // replaces), and c1 must have exactly one child - the new
     // checkpoint.
     h.undo().unwrap();
-    let c2b = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("s2b"),
-            None,
-            None,
-        )
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2b"), 3)
         .unwrap();
+    let c2b = h.commit_action(3).unwrap();
     assert!(
         h.checkpoint(c2).is_none(),
         "c2 must be evicted by the linear-undo prune",
@@ -182,26 +148,12 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
         max_snapshots_per_lane: 4,
     });
 
-    let c1 = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("c1"),
-            None,
-            None,
-        )
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1"), 1)
         .unwrap();
-    let c2 = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("c2"),
-            None,
-            None,
-        )
+    let c1 = h.commit_action(1).unwrap();
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c2"), 2)
         .unwrap();
+    let c2 = h.commit_action(2).unwrap();
 
     // Pin c1 so it survives eviction even when off the head path.
     h.pin_checkpoint(c1).unwrap();
@@ -209,30 +161,18 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     // Branch off c1 to create something *off* the head path that
     // can be evicted later.
     h.undo().unwrap(); // back to c1
-    let c1b = h
-        .record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("c1b"),
-            None,
-            None,
-        )
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1b"), 3)
         .unwrap();
+    let c1b = h.commit_action(3).unwrap();
     // Mark c1b's checkpoint with a raw_score so best cursor latches.
     h.set_exclude_from_best(c1b, false).unwrap();
 
     // Push enough to force eviction.
-    for i in 0..6 {
-        h.record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::from(format!("extra{i}")),
-            None,
-            None,
-        )
-        .unwrap();
+    for i in 0u64..6 {
+        let rid = 4 + i;
+        h.begin_action([e], plugin_op("shake"), Cow::from(format!("extra{i}")), rid)
+            .unwrap();
+        h.commit_action(rid).unwrap();
     }
 
     // Pinned c1 must still be alive.
@@ -263,7 +203,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     for (_, ckpt) in h.checkpoints().iter() {
         for (eid, sid) in &ckpt.entity_heads {
             assert!(
-                h.snapshot(*eid, *sid).is_some(),
+                h.lane(*eid).and_then(|l| l.snapshot(*sid)).is_some(),
                 "live checkpoint references dead snapshot"
             );
         }
@@ -279,21 +219,16 @@ fn snapshot_eviction_refuses_when_referenced() {
         max_snapshots_per_lane: 3,
     });
 
-    // Push 5 record_entity_updates → 5 snapshots + root = 6 on the
-    // lane. Budget is 3, so we need to evict 3. But: every snapshot
-    // is a head of some live checkpoint (each push has its own
-    // checkpoint). Therefore checkpoint_refs > 0 and refuses
-    // eviction. The cross-DAG invariant must hold throughout.
-    for i in 0..5 {
-        h.record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::from(format!("s{i}")),
-            None,
-            None,
-        )
-        .unwrap();
+    // Push 5 committed actions → 5 snapshots + root = 6 on the lane.
+    // Budget is 3, so we need to evict 3. But: every snapshot is a head
+    // of some live checkpoint (each push has its own checkpoint).
+    // Therefore checkpoint_refs > 0 and refuses eviction. The cross-DAG
+    // invariant must hold throughout.
+    for i in 0u64..5 {
+        let rid = i + 1;
+        h.begin_action([e], plugin_op("shake"), Cow::from(format!("s{i}")), rid)
+            .unwrap();
+        h.commit_action(rid).unwrap();
     }
     // Lane should have at minimum: root + current head; checkpoint
     // refs prevent dropping intermediate snapshots until their
@@ -301,7 +236,7 @@ fn snapshot_eviction_refuses_when_referenced() {
     // none are. So the lane is over budget - that's fine; eviction
     // simply *refuses* when the only candidates are referenced.
     assert!(
-        h.lane(e).unwrap().len() >= 4,
+        h.lane(e).unwrap().snapshots.len() >= 4,
         "lane shrank below ref-protected size"
     );
 }
@@ -316,15 +251,9 @@ fn nav_during_active_is_refused_with_entity_locked() {
     let root = h.checkpoints().root();
 
     // Push one regular checkpoint so undo has somewhere to go.
-    h.record_entity_update(
-        e,
-        plugin_op("shake"),
-        arc_entity(e),
-        Cow::Borrowed("pre"),
-        None,
-        None,
-    )
-    .unwrap();
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("pre"), 10)
+        .unwrap();
+    h.commit_action(10).unwrap();
 
     // Begin an action on `e`.
     let rid = 1u64;
@@ -356,22 +285,15 @@ fn nav_during_active_is_refused_with_entity_locked() {
 
     // lane_undo on a different entity → also refused (all lanes
     // frozen during Active per strategy doc § Lock semantics).
-    let other_lane_root = h.lane(other).unwrap().root();
+    let other_lane_root = h.lane(other).unwrap().root;
     assert!(matches!(
         h.lane_undo(other, other_lane_root),
         Err(HistoryError::EntityLocked { entity }) if entity == e
     ));
 
-    // record_entity_update → ActiveActionInProgress.
+    // Begin on the already-busy lane → ActiveActionInProgress.
     assert!(matches!(
-        h.record_entity_update(
-            e,
-            plugin_op("shake"),
-            arc_entity(e),
-            Cow::Borrowed("nope"),
-            None,
-            None,
-        ),
+        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 3),
         Err(HistoryError::ActiveActionInProgress)
     ));
 
@@ -385,8 +307,8 @@ fn nav_during_active_is_refused_with_entity_locked() {
 fn abort_action_drops_tentative() {
     let (mut h, ids) = mk_history(1);
     let e = ids[0];
-    let lane_len_before = h.lane(e).unwrap().len();
-    let ckpt_len_before = h.checkpoints().len();
+    let lane_len_before = h.lane(e).unwrap().snapshots.len();
+    let ckpt_len_before = h.checkpoints().iter().count();
 
     let rid = 1u64;
     h.begin_action(
@@ -399,14 +321,14 @@ fn abort_action_drops_tentative() {
 
     // While in flight: the lane grew by one tentative snapshot, but a
     // begin mints no checkpoint, so the checkpoint graph is unchanged.
-    assert_eq!(h.lane(e).unwrap().len(), lane_len_before + 1);
-    assert_eq!(h.checkpoints().len(), ckpt_len_before);
+    assert_eq!(h.lane(e).unwrap().snapshots.len(), lane_len_before + 1);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before);
     assert!(h.has_pending());
 
     h.abort_action(rid).unwrap();
     // Restored: the tentative snapshot is gone and nothing is pending.
-    assert_eq!(h.lane(e).unwrap().len(), lane_len_before);
-    assert_eq!(h.checkpoints().len(), ckpt_len_before);
+    assert_eq!(h.lane(e).unwrap().snapshots.len(), lane_len_before);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before);
     assert!(!h.has_pending());
 }
 
@@ -518,7 +440,7 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
     let e2 = ids[1];
     let e1_committed = h.lane(e1).unwrap().head();
     let e2_committed = h.lane(e2).unwrap().head();
-    let ckpt_len_before = h.checkpoints().len();
+    let ckpt_len_before = h.checkpoints().iter().count();
 
     let rid = 7u64;
     h.begin_action([e1, e2], plugin_op("init"), Cow::Borrowed("init"), rid)
@@ -527,7 +449,7 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
     // Both lanes now hold an open tentative; no checkpoint minted yet.
     assert_ne!(h.lane(e1).unwrap().head(), e1_committed);
     assert_ne!(h.lane(e2).unwrap().head(), e2_committed);
-    assert_eq!(h.checkpoints().len(), ckpt_len_before);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before);
 
     // One update mutates both held lanes.
     h.action_update(rid, None, None, None, |entity| {
@@ -539,7 +461,7 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
 
     // Commit: exactly one new checkpoint, both lanes advanced.
     let c = h.commit_action(rid).unwrap();
-    assert_eq!(h.checkpoints().len(), ckpt_len_before + 1);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before + 1);
     assert_ne!(h.checkpoint(c).unwrap().entity_heads[&e1], e1_committed);
     assert_ne!(h.checkpoint(c).unwrap().entity_heads[&e2], e2_committed);
     assert!(!h.has_pending());
@@ -554,7 +476,7 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
     let (mut h, ids) = mk_history(1);
     let e = ids[0];
     let rid = 9u64;
-    let ckpt_len_before = h.checkpoints().len();
+    let ckpt_len_before = h.checkpoints().iter().count();
 
     h.begin_action([e], plugin_op("rebuild"), Cow::Borrowed("Rebuild"), rid)
         .unwrap();
@@ -565,7 +487,7 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
 
     // First segment commits one checkpoint and re-opens the edit.
     let c1 = h.commit_and_reopen(rid).unwrap();
-    assert_eq!(h.checkpoints().len(), ckpt_len_before + 1);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before + 1);
     assert_eq!(h.checkpoints().head(), c1);
     // The label rode the snapshot, so the committed checkpoint carries it
     // without the caller re-supplying it.
@@ -581,7 +503,7 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
 
     // Second segment commits off the reopened edit, advancing the lane again.
     let c2 = h.commit_and_reopen(rid).unwrap();
-    assert_eq!(h.checkpoints().len(), ckpt_len_before + 2);
+    assert_eq!(h.checkpoints().iter().count(), ckpt_len_before + 2);
     assert_eq!(h.checkpoint(c2).unwrap().parent, Some(c1));
     assert_eq!(h.checkpoint(c2).unwrap().label, Cow::Borrowed("Rebuild"));
     assert!(h.is_pending(rid));
@@ -601,37 +523,16 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let e2 = ids[1];
 
     // Two pushes on e1, one on e2 - three checkpoints + root.
-    let _ = h
-        .record_entity_update(
-            e1,
-            plugin_op("shake"),
-            arc_entity(e1),
-            Cow::Borrowed("e1-1"),
-            None,
-            None,
-        )
+    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-1"), 1)
         .unwrap();
+    let _ = h.commit_action(1).unwrap();
     let target_e1 = h.lane(e1).unwrap().head();
-    let _ = h
-        .record_entity_update(
-            e1,
-            plugin_op("shake"),
-            arc_entity(e1),
-            Cow::Borrowed("e1-2"),
-            None,
-            None,
-        )
+    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-2"), 2)
         .unwrap();
-    let _ = h
-        .record_entity_update(
-            e2,
-            plugin_op("shake"),
-            arc_entity(e2),
-            Cow::Borrowed("e2-1"),
-            None,
-            None,
-        )
+    let _ = h.commit_action(2).unwrap();
+    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("e2-1"), 3)
         .unwrap();
+    let _ = h.commit_action(3).unwrap();
     let e2_head_before = h.lane(e2).unwrap().head();
 
     // Lane-undo e1 to target_e1.
@@ -670,7 +571,7 @@ fn add_entity_introduces_lane_and_pushes_checkpoint() {
         new_id = alloc.allocate();
     }
 
-    let n_ckpts_before = h.checkpoints().len();
+    let n_ckpts_before = h.checkpoints().iter().count();
     let n_lanes_before = h.lanes.len();
 
     let ckpt = h
@@ -687,7 +588,7 @@ fn add_entity_introduces_lane_and_pushes_checkpoint() {
 
     // Lane and checkpoint each grew by 1.
     assert_eq!(h.lanes.len(), n_lanes_before + 1);
-    assert_eq!(h.checkpoints().len(), n_ckpts_before + 1);
+    assert_eq!(h.checkpoints().iter().count(), n_ckpts_before + 1);
     // New lane is keyed by the new id.
     assert!(h.lane(new_id).is_some());
     // Checkpoint's entity_heads contains both the original entity
@@ -835,16 +736,14 @@ proptest! {
 
         for op in ops {
             let _ = match op {
-                Op::Record => h
-                    .record_entity_update(
-                        e,
-                        plugin_op("shake"),
-                        arc_entity(e),
-                        Cow::Borrowed("r"),
-                        None,
-                        None,
-                    )
-                    .map(|_| ()),
+                Op::Record => {
+                    let id = next_rid;
+                    next_rid += 1;
+                    match h.begin_action([e], plugin_op("shake"), Cow::Borrowed("r"), id) {
+                        Ok(()) => h.commit_action(id).map(|_| ()),
+                        Err(e) => Err(e),
+                    }
+                }
                 Op::BeginAction => {
                     let id = next_rid;
                     next_rid += 1;
@@ -881,7 +780,7 @@ proptest! {
                 Op::Undo => h.undo().map(|_| ()),
                 Op::Redo => h.redo(None).map(|_| ()),
                 Op::LaneUndoToRoot => {
-                    let r = h.lane(e).unwrap().root();
+                    let r = h.lane(e).unwrap().root;
                     h.lane_undo(e, r).map(|_| ())
                 }
             };

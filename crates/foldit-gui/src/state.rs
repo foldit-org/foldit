@@ -130,6 +130,17 @@ pub struct SegmentTarget {
     pub ss_label: String,
 }
 
+/// Human-readable secondary-structure label for the segment panel.
+#[must_use]
+pub fn ss_label(ss: Option<molex::SSType>) -> String {
+    match ss {
+        Some(molex::SSType::Helix) => "Helix",
+        Some(molex::SSType::Sheet) => "Sheet",
+        Some(molex::SSType::Coil) | None => "Loop",
+    }
+    .to_owned()
+}
+
 /// A tail-tip change the host should push to the webview this frame.
 ///
 /// Drained by `GuiState::take_tail_update` only when the tip changed
@@ -250,8 +261,7 @@ impl Default for ViewSection {
 
 /// Tutorial bubble payload pushed to the GUI.
 ///
-/// Clean IPC twin of
-/// [`crate::puzzle::Bubble`] (Rust-side); only carries fields the
+/// Clean IPC twin of the Rust-side `Bubble`; only carries fields the
 /// Tier-1 renderer reads. Anchor/branch/event metadata is intentionally
 /// dropped here; Tier-2/3 will widen this as those features land.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

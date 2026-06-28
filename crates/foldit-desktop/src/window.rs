@@ -3,7 +3,7 @@
 //! `AppRunner` owns the window-layer state and holds `App` by value.
 //! It implements `ApplicationHandler` and delegates domain logic to `App` via method calls.
 
-use foldit_core::App;
+use foldit_core::{App, HostEffects};
 use foldit_gui::IpcMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,62 +137,8 @@ impl AppRunner {
         });
     }
 
-    /// Merge a freshly loaded progress map (once, on the first frame the load
-    /// task has a result) and fire-and-forget any pending save. The opfs write
-    /// runs on a runtime worker thread, so the frame is never blocked on disk.
-    /// Mirrors `apply_fullscreen_change`: a per-frame pull of host-owned effect
-    /// state from `App`.
-    fn apply_progress_persistence(&mut self) {
-        if let Ok(bytes) = self.progress_load_rx.try_recv() {
-            self.app.import_progress(&bytes);
-        }
-
-        let Some(bytes) = self.app.take_progress_to_persist() else {
-            return;
-        };
-        let Some(dir) = Self::foldit_data_dir() else {
-            return;
-        };
-        self.progress_runtime.spawn(async move {
-            use opfs::persistent::DirectoryHandle as DirHandle;
-            use opfs::{
-                CreateWritableOptions, DirectoryHandle as _, FileHandle as _,
-                GetFileHandleOptions, WritableFileStream as _,
-            };
-
-            let handle = DirHandle::from(dir);
-            let get_opts = GetFileHandleOptions { create: true };
-            let mut file = match handle
-                .get_file_handle_with_options(Self::PROGRESS_FILE, &get_opts)
-                .await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    log::warn!("Could not open progress file for write: {e}");
-                    return;
-                }
-            };
-            let write_opts = CreateWritableOptions { keep_existing_data: false };
-            let mut writer = match file.create_writable_with_options(&write_opts).await {
-                Ok(w) => w,
-                Err(e) => {
-                    log::warn!("Could not open progress writer: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = writer.write_at_cursor_pos(&bytes).await {
-                log::warn!("Could not write progress: {e}");
-                return;
-            }
-            if let Err(e) = writer.close().await {
-                log::warn!("Could not flush progress: {e}");
-            }
-        });
-    }
-
     /// Drain IPC messages from the webview and dispatch them.
     fn process_ipc_messages(&mut self) {
-        use foldit_gui::Dispatcher;
         let Some(rx) = &self.ipc_rx else {
             return;
         };
@@ -206,10 +152,10 @@ impl AppRunner {
                     // next push emits a full snapshot.
                     self.app.on_ready();
                 }
-                IpcMessage::ViewportInput(input) => self.app.on_viewport_input(input),
+                IpcMessage::ViewportInput(input) => self.app.handle_viewport_input(input),
                 IpcMessage::DispatchOp(op) => self.app.on_dispatch_op(op),
-                IpcMessage::AppCommand(command) => self.app.on_app_command(command),
-                IpcMessage::SetSelection { entries } => self.app.on_set_selection(entries),
+                IpcMessage::AppCommand(command) => self.app.handle_app_command(command),
+                IpcMessage::SetSelection { entries } => self.app.handle_set_selection(entries),
                 IpcMessage::OpenSessionDialog => self.open_session_dialog(),
                 IpcMessage::Request { wish_id, kind, payload } => {
                     let result = self.app.handle_request(kind, payload);
@@ -225,7 +171,7 @@ impl AppRunner {
     /// is the intended behavior for a file picker.
     fn open_session_dialog(&mut self) {
         use foldit_core::puzzle::SessionLoadKind;
-        use foldit_gui::{AppCommand, Dispatcher};
+        use foldit_gui::AppCommand;
 
         let Some(path) = rfd::FileDialog::new()
             .set_title("Load Session")
@@ -237,12 +183,12 @@ impl AppRunner {
 
         match foldit_core::puzzle::classify_session_path(&path) {
             SessionLoadKind::PuzzleDir(dir) => {
-                self.app.on_app_command(AppCommand::LoadPuzzleDir {
+                self.app.handle_app_command(AppCommand::LoadPuzzleDir {
                     path: dir.to_string_lossy().into_owned(),
                 });
             }
             SessionLoadKind::Structure(file) => {
-                self.app.on_app_command(AppCommand::LoadStructure {
+                self.app.handle_app_command(AppCommand::LoadStructure {
                     path: file.to_string_lossy().into_owned(),
                 });
             }
@@ -282,83 +228,6 @@ impl AppRunner {
             payload,
         );
         let _ = webview.evaluate_script(&script);
-    }
-
-    /// Ship any dirty sections of the App-owned `GuiState` to the
-    /// webview. `App::tick` already populated the frontend on this
-    /// frame; the host only does the log-mirror handoff and the IPC
-    /// transport.
-    fn push_dirty_state_to_webview(&mut self) {
-        // Drain log buffer into App-owned frontend state.
-        if let Ok(buf) = self.log_buffer.lock() {
-            if !buf.is_empty() {
-                let log_text: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
-                self.app.set_frontend_log(log_text);
-            }
-        }
-
-        if !self.webview_ready {
-            return;
-        }
-        let Some(bytes) = self.app.serialize_frontend_dirty() else {
-            return;
-        };
-        let Ok(payload) = std::str::from_utf8(&bytes) else {
-            return;
-        };
-        if let Some(ref webview) = self.webview {
-            let script = format!(
-                "if(window.__onStateUpdate)window.__onStateUpdate({payload})"
-            );
-            let _ = webview.evaluate_script(&script);
-        }
-    }
-
-    /// Ship the segment panel's live tail-tip position to the webview on a
-    /// new `window.__onTailUpdate` channel. `App::take_tail_update` returns
-    /// a change at most once per frame (and `None` for an unmoved tip), so a
-    /// position update fires `__onTailUpdate(x, y)`, an off-screen / closed
-    /// transition fires `__onTailUpdate(null)`, and an unchanged tip pushes
-    /// nothing. Guarded like the `__onStateUpdate` push above so it is a
-    /// no-op until the JS listener exists.
-    fn push_tail_to_webview(&mut self) {
-        if !self.webview_ready {
-            return;
-        }
-        let Some(update) = self.app.take_tail_update() else {
-            return;
-        };
-        let Some(ref webview) = self.webview else {
-            return;
-        };
-        let script = match update {
-            foldit_core::TailUpdate::Position(x, y) => {
-                format!("if(window.__onTailUpdate)window.__onTailUpdate({x},{y})")
-            }
-            foldit_core::TailUpdate::Hide => {
-                "if(window.__onTailUpdate)window.__onTailUpdate(null)".to_owned()
-            }
-        };
-        let _ = webview.evaluate_script(&script);
-    }
-
-    /// Apply a pending backend fullscreen change to the winit window. The
-    /// desktop window is the source of truth for OS fullscreen here (the
-    /// in-webview DOM fullscreen API does not own the native window), so the
-    /// backend mirror is pulled and enacted on the actual window each frame.
-    /// `App::take_fullscreen_change` returns a change at most once per
-    /// transition, so an unchanged flag is a no-op.
-    fn apply_fullscreen_change(&mut self) {
-        let Some(value) = self.app.take_fullscreen_change() else {
-            return;
-        };
-        if let Some(window) = &self.window {
-            window.set_fullscreen(if value {
-                Some(winit::window::Fullscreen::Borderless(None))
-            } else {
-                None
-            });
-        }
     }
 
     /// Resize the webview to match a new window size (physical pixels).
@@ -448,8 +317,8 @@ impl AppRunner {
                 // per-frame `app.tick` drives the warm connect, plugin Init,
                 // normalize, and first score across frames.
                 self.app.begin_startup();
-                // Kick the async read of persisted progress; its result is
-                // merged in `apply_progress_persistence` once it lands.
+                // Kick the async read of persisted progress; `tick_frame`
+                // merges the result via `import_progress` once it lands.
                 self.spawn_progress_load();
                 // Fall through to tick + render this frame.
             } else {
@@ -480,31 +349,125 @@ impl AppRunner {
             }
         }
 
+        // Drain log buffer into App-owned frontend state before the tick.
+        if let Ok(buf) = self.log_buffer.lock() {
+            if !buf.is_empty() {
+                let log_text: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
+                self.app.set_frontend_log(log_text);
+            }
+        }
+
         // App-owned drive loop: backend updates → `SessionUpdate` drain →
         // broadcaster + render projector → score poll → engine update +
-        // visualization → state-machine → populate_frontend.
-        self.app.tick(dt.as_secs_f32());
+        // visualization → state-machine → populate_frontend. Tail pushes
+        // (state, tail-tip, fullscreen, persist) fire through `fx`.
+        let mut fx = DesktopEffects {
+            webview: self.webview.as_ref(),
+            webview_ready: self.webview_ready,
+            window: self.window.as_ref(),
+            runtime: &self.progress_runtime,
+        };
+        self.app.tick(dt.as_secs_f32(), &mut fx);
 
         self.app.render();
 
-        // Ship any dirty frontend bytes to the webview.
-        self.push_dirty_state_to_webview();
-
-        // Ship the segment panel's live tail-tip position (no-op when the
-        // tip did not move this frame).
-        self.push_tail_to_webview();
-
-        // Apply any backend fullscreen change to the winit window (no-op when
-        // the flag did not flip this frame).
-        self.apply_fullscreen_change();
-
-        // Merge any landed progress load and fire-and-forget a pending save
-        // (no-op when neither happened this frame).
-        self.apply_progress_persistence();
+        // Merge any landed progress load (projects next frame).
+        if let Ok(bytes) = self.progress_load_rx.try_recv() {
+            self.app.import_progress(&bytes);
+        }
 
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+/// Transient per-frame effect sink built from `AppRunner`'s non-`App`
+/// fields and passed into `App::tick`.
+struct DesktopEffects<'a> {
+    webview: Option<&'a wry::WebView>,
+    webview_ready: bool,
+    window: Option<&'a Arc<Window>>,
+    runtime: &'a tokio::runtime::Runtime,
+}
+
+impl HostEffects for DesktopEffects<'_> {
+    fn push_state(&mut self, json: &[u8]) {
+        if !self.webview_ready {
+            return;
+        }
+        let Ok(payload) = std::str::from_utf8(json) else {
+            return;
+        };
+        if let Some(webview) = self.webview {
+            let script = format!("if(window.__onStateUpdate)window.__onStateUpdate({payload})");
+            let _ = webview.evaluate_script(&script);
+        }
+    }
+
+    fn push_tail(&mut self, update: foldit_core::TailUpdate) {
+        if !self.webview_ready {
+            return;
+        }
+        let Some(webview) = self.webview else {
+            return;
+        };
+        let script = match update {
+            foldit_core::TailUpdate::Position(x, y) => {
+                format!("if(window.__onTailUpdate)window.__onTailUpdate({x},{y})")
+            }
+            foldit_core::TailUpdate::Hide => {
+                "if(window.__onTailUpdate)window.__onTailUpdate(null)".to_owned()
+            }
+        };
+        let _ = webview.evaluate_script(&script);
+    }
+
+    fn set_fullscreen(&mut self, value: bool) {
+        if let Some(window) = self.window {
+            window.set_fullscreen(value.then(|| winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
+    fn persist_progress(&mut self, bytes: Vec<u8>) {
+        let Some(dir) = AppRunner::foldit_data_dir() else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            use opfs::persistent::DirectoryHandle as DirHandle;
+            use opfs::{
+                CreateWritableOptions, DirectoryHandle as _, FileHandle as _, GetFileHandleOptions,
+                WritableFileStream as _,
+            };
+
+            let handle = DirHandle::from(dir);
+            let get_opts = GetFileHandleOptions { create: true };
+            let mut file = match handle
+                .get_file_handle_with_options(AppRunner::PROGRESS_FILE, &get_opts)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("Could not open progress file for write: {e}");
+                    return;
+                }
+            };
+            let write_opts = CreateWritableOptions { keep_existing_data: false };
+            let mut writer = match file.create_writable_with_options(&write_opts).await {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("Could not open progress writer: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = writer.write_at_cursor_pos(&bytes).await {
+                log::warn!("Could not write progress: {e}");
+                return;
+            }
+            if let Err(e) = writer.close().await {
+                log::warn!("Could not flush progress: {e}");
+            }
+        });
     }
 }
 
