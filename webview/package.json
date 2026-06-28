@@ -14,7 +14,11 @@
     "lint": "eslint .",
     "preview": "vite preview"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "dependencies": {
+    "@foldit/plugin-bridge": "workspace:*",
     "autoprefixer": "^10.4.22",
     "dompurify": "^3.3.1",
     "marked": "^17.0.1",

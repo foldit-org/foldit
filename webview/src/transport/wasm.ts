@@ -4,9 +4,8 @@
  * (`transport/index.ts`) selects between them based on FOLDIT_TARGET.
  */
 
-import type { FrontendState, ViewportInput, AppCommand, OpDispatch, EntitySelection } from '../types';
-
-export type RequestKind = 'read_resource_file' | 'server_request' | 'get_hotkey_text' | 'panels_catalog' | 'settings_catalog';
+import type { FrontendState, ViewportInput, AppCommand, EntitySelection } from '../types';
+import type { DispatchableOp, RequestKind } from '@foldit/plugin-bridge';
 
 // The wasm-pack output lives at /pkg/foldit_web.js relative to the served
 // bundle root (xtask build-web emits there). The dynamic import keeps the
@@ -130,9 +129,7 @@ export function viewportInput(input: ViewportInput): void {
 /** Dispatch a plugin op by op-id (catalog-driven button click).
  *  `focused_entity_id` is omittable here; a missing key deserializes to
  *  `None` on the Rust side, so click-to-fire buttons post `{ op_id }`. */
-export function dispatchOp(
-  op: Omit<OpDispatch, 'focused_entity_id'> & { focused_entity_id?: OpDispatch['focused_entity_id'] },
-): void {
+export function dispatchOp(op: DispatchableOp): void {
   loadApp().then(app => app.dispatchOp(JSON.stringify(op)));
 }
 

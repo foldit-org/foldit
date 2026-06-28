@@ -99,7 +99,11 @@ export const [panels, setPanels] = createSignal<PanelDescriptor[]>(FIRST_PARTY);
 function makePluginPanelBody(panel: PanelInfo): Component {
 	return () => {
 		const host = document.createElement('div');
-		host.style.display = 'contents';
+		// A box-generating display: `contents` produced no box, so the mounted
+		// shadow content collapsed. The plugin owns its min-height; the host
+		// just needs to be a real box that spans the panel width.
+		host.style.display = 'block';
+		host.style.width = '100%';
 		onMount(() => {
 			let live = true;
 			let teardown: (() => void) | undefined;

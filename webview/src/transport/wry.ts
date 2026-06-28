@@ -1,10 +1,5 @@
-import type { FrontendState, ViewportInput, AppCommand, OpDispatch, EntitySelection } from '../types';
-
-/**
- * Async-request kinds — keep in sync with `foldit_gui::bridge::message::RequestKind`
- * (snake_case discriminants on the wire).
- */
-export type RequestKind = 'read_resource_file' | 'server_request' | 'get_hotkey_text' | 'panels_catalog' | 'settings_catalog';
+import type { FrontendState, ViewportInput, AppCommand, EntitySelection } from '../types';
+import type { DispatchableOp, RequestKind } from '@foldit/plugin-bridge';
 
 declare global {
   interface Window {
@@ -53,9 +48,7 @@ export function viewportInput(input: ViewportInput): void {
 /** Dispatch a plugin op by op-id (catalog-driven button click).
  *  `focused_entity_id` is omittable here; a missing key deserializes to
  *  `None` on the Rust side, so click-to-fire buttons post `{ op_id }`. */
-export function dispatchOp(
-  op: Omit<OpDispatch, 'focused_entity_id'> & { focused_entity_id?: OpDispatch['focused_entity_id'] },
-): void {
+export function dispatchOp(op: DispatchableOp): void {
   window.ipc.postMessage(JSON.stringify({ cmd: 'dispatch_op', data: op }));
 }
 

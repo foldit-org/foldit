@@ -5,6 +5,7 @@
     "": {
       "name": "foldit-gui",
       "dependencies": {
+        "@foldit/plugin-bridge": "workspace:*",
         "autoprefixer": "^10.4.22",
         "dompurify": "^3.3.1",
         "marked": "^17.0.1",
@@ -30,6 +31,20 @@
         "typescript-eslint": "^8.48.1",
         "vite": "^5.4.21",
         "vitest": "^3.2.4",
+      },
+    },
+    "packages/plugin-bridge": {
+      "name": "@foldit/plugin-bridge",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^5.8.3",
+        "vite": "^5.4.21",
+        "vite-plugin-solid": "^2.11.10",
+      },
+      "peerDependencies": {
+        "solid-js": "^1.9.10",
+        "vite": "^5.4.21",
+        "vite-plugin-solid": "^2.11.10",
       },
     },
   },
@@ -342,6 +357,8 @@
     "@eslint/object-schema": ["@eslint/object-schema@2.1.7", "", {}, "sha512-VtAOaymWVfZcmZbp6E2mympDIHvyjXs/12LqWYjVw6qjrfF+VK+fyG33kChz3nnK+SU5/NeHOqrTEHS8sXO3OA=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.4.1", "", { "dependencies": { "@eslint/core": "0.17.0", "levn": "0.4.1" } }, "sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA=="],
+
+    "@foldit/plugin-bridge": ["@foldit/plugin-bridge@workspace:packages/plugin-bridge"],
 
     "@gerrit0/mini-shiki": ["@gerrit0/mini-shiki@3.21.0", "", { "dependencies": { "@shikijs/engine-oniguruma": "3.21.0", "@shikijs/langs": "3.21.0", "@shikijs/themes": "3.21.0", "@shikijs/types": "3.21.0", "@shikijs/vscode-textmate": "10.0.2" } }, "sha512-9PrsT5DjZA+w3lur/aOIx3FlDeHdyCEFlv9U+fmsVyjPZh61G5SYURQ/1ebe2U63KbDmI2V8IhIUegWb8hjOyg=="],
 

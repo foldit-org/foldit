@@ -79,9 +79,13 @@ function SettingsTabBody(props: { tab: SettingsTabInfo }) {
 		seed();
 		const s = schema();
 		if (!s?.properties) return [];
-		return Object.keys(s.properties).filter(
-			(name) => controlKind(s.properties[name], s) !== 'none',
-		);
+		// v1 settings are top-level leaf fields only. Nested object schemas
+		// ('group') are not admitted: onUpdate writes a single top-level
+		// field name and would discard any nested path.
+		return Object.keys(s.properties).filter((name) => {
+			const kind = controlKind(s.properties[name], s);
+			return kind === 'slider' || kind === 'checkbox' || kind === 'select';
+		});
 	});
 
 	const onUpdate = (field: string, value: unknown) => {
