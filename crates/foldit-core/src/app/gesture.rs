@@ -241,7 +241,12 @@ impl App {
             return;
         };
 
-        self.runner_client.update_stream(request_id, &plugin_id, target);
+        let mut params = std::collections::HashMap::new();
+        let _ = params.insert(
+            String::from("endpoint"),
+            foldit_runner::orchestrator::ParamValue::Vec3([target.x, target.y, target.z]),
+        );
+        self.runner_client.update_stream(request_id, &plugin_id, params);
     }
 
     /// Pointer-up (or any cancel signal): tear down the drag state

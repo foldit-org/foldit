@@ -4,6 +4,9 @@ import {
   setSelection,
   viewportInput,
   request,
+  startStream,
+  updateStream,
+  cancelStream,
   openSessionDialog,
 } from './transport';
 import { subscribe as channelSubscribe, currentState } from './stateChannel';
@@ -33,6 +36,9 @@ export function createBridge(): PluginBridge {
     setSelection,
     viewportInput,
     request,
+    startStream,
+    updateStream,
+    cancelStream,
     openSessionDialog,
     contractVersion: BRIDGE_CONTRACT_VERSION,
   };

@@ -88,110 +88,125 @@ impl App {
         }
     }
 
-    /// Dispatch a plugin op by op-id.
+    /// Dispatch a plugin op by op-id (fire-and-forget; any stream rid is
+    /// discarded). The panel stream-control path shares the same body via
+    /// [`Self::dispatch_op_inner`] but keeps the rid.
     pub fn handle_dispatch_op(&mut self, op: foldit_gui::OpDispatch) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let focused_entity_id: Option<molex::EntityId> = match self.store.focus() {
-                Focus::Entity(eid) => Some(eid),
-                Focus::All => None,
-            };
-
-            let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
-                log::warn!(
-                    "handle_dispatch_op({:?}): op not resolvable (no orchestrator or op-id not in registry)",
-                    op.op_id
-                );
-                return;
-            };
-
-            let display = self
-                .runner_client
-                .op_display(&plugin_id, &op.op_id)
-                .unwrap_or_else(|| op.op_id.clone());
-            let intent = DispatchIntent {
-                selection: self.store.selection().clone(),
-                designable: self.store.designable_residues(),
-                focused_entity_id,
-                op_id: op.op_id.clone(),
-                params: op.params,
-            };
-            let store = &self.store;
-            let dispatch_outcome =
-                self.runner_client
-                    .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
-
-            let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { scope, .. } | OpOutcome::Invoke { scope, .. }) => {
-                    Some(self.lanes_for_scope(scope))
-                }
-                Err(_) => None,
-            };
-            let dispatch_id = match &dispatch_outcome {
-                Ok(OpOutcome::Stream { request_id, .. } | OpOutcome::Invoke { request_id, .. }) => {
-                    Some(*request_id)
-                }
-                Err(_) => None,
-            };
-
-            let creates_entities = self.runner_client.op_creates_entities(&op.op_id);
-            let preview = self.runner_client.op_preview(&plugin_id, &op.op_id);
-
-            let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
-                if creates_entities || lanes.is_empty() {
-                    return None;
-                }
-                let seed_lane = lanes.first().copied();
-                let kind = CheckpointKind::PluginOp {
-                    plugin_id: plugin_id.clone(),
-                    op_id: op.op_id.clone(),
-                    display: display.clone(),
-                };
-                match self
-                    .store
-                    .begin_action(lanes, kind, display.clone(), request_id)
-                {
-                    Ok(()) => Some((request_id, seed_lane)),
-                    Err(e) => {
-                        log::trace!(
-                            "handle_dispatch_op({:?}): begin_action skipped: {e}",
-                            op.op_id
-                        );
-                        None
-                    }
-                }
-            });
-
-            if preview {
-                if let Some((token, Some(lane_id))) = edit_token {
-                    self.store.seed_inplace_preview(token, lane_id, display);
-                }
-            }
-            let edit_token = edit_token.map(|(request_id, _)| request_id);
-
-            match dispatch_outcome {
-                Ok(OpOutcome::Stream { .. }) => {
-                }
-                Ok(OpOutcome::Invoke { bytes, .. }) => {
-                    self.apply_invoke_result(&bytes, edit_token);
-                }
-                Err(DispatchError::EntityLocked { entity }) => {
-                    log::warn!(
-                        "handle_dispatch_op({:?}): dispatch refused, entity {entity} locked",
-                        op.op_id
-                    );
-                }
-                Err(DispatchError::BackendBusy { plugin_id }) => {
-                    log::info!("dispatch refused: backend {plugin_id} busy");
-                }
-                Err(DispatchError::Failed(s)) => {
-                    log::error!("handle_dispatch_op({:?}): dispatch failed: {s}", op.op_id);
-                }
-            }
+            let _ = self.dispatch_op_inner(op);
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = op;
+        }
+    }
+
+    /// Single source for plugin op dispatch: resolve the op off the
+    /// registry, open the history edit, and run the resulting outcome.
+    /// Returns the stream `request_id` when the op dispatched as a stream
+    /// (so a panel can drive update / cancel against it); `None` for a
+    /// one-shot invoke or any dispatch failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn dispatch_op_inner(&mut self, op: foldit_gui::OpDispatch) -> Option<u64> {
+        let focused_entity_id: Option<molex::EntityId> = match self.store.focus() {
+            Focus::Entity(eid) => Some(eid),
+            Focus::All => None,
+        };
+
+        let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
+            log::warn!(
+                "dispatch_op_inner({:?}): op not resolvable (no orchestrator or op-id not in registry)",
+                op.op_id
+            );
+            return None;
+        };
+
+        let display = self
+            .runner_client
+            .op_display(&plugin_id, &op.op_id)
+            .unwrap_or_else(|| op.op_id.clone());
+        let intent = DispatchIntent {
+            selection: self.store.selection().clone(),
+            designable: self.store.designable_residues(),
+            focused_entity_id,
+            op_id: op.op_id.clone(),
+            params: op.params,
+        };
+        let store = &self.store;
+        let dispatch_outcome =
+            self.runner_client
+                .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
+
+        let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
+            Ok(OpOutcome::Stream { scope, .. } | OpOutcome::Invoke { scope, .. }) => {
+                Some(self.lanes_for_scope(scope))
+            }
+            Err(_) => None,
+        };
+        let dispatch_id = match &dispatch_outcome {
+            Ok(OpOutcome::Stream { request_id, .. } | OpOutcome::Invoke { request_id, .. }) => {
+                Some(*request_id)
+            }
+            Err(_) => None,
+        };
+
+        let creates_entities = self.runner_client.op_creates_entities(&op.op_id);
+        let preview = self.runner_client.op_preview(&plugin_id, &op.op_id);
+
+        let edit_token = dispatch_id.zip(lanes).and_then(|(request_id, lanes)| {
+            if creates_entities || lanes.is_empty() {
+                return None;
+            }
+            let seed_lane = lanes.first().copied();
+            let kind = CheckpointKind::PluginOp {
+                plugin_id: plugin_id.clone(),
+                op_id: op.op_id.clone(),
+                display: display.clone(),
+            };
+            match self
+                .store
+                .begin_action(lanes, kind, display.clone(), request_id)
+            {
+                Ok(()) => Some((request_id, seed_lane)),
+                Err(e) => {
+                    log::trace!(
+                        "dispatch_op_inner({:?}): begin_action skipped: {e}",
+                        op.op_id
+                    );
+                    None
+                }
+            }
+        });
+
+        if preview {
+            if let Some((token, Some(lane_id))) = edit_token {
+                self.store.seed_inplace_preview(token, lane_id, display);
+            }
+        }
+        let edit_token = edit_token.map(|(request_id, _)| request_id);
+
+        match dispatch_outcome {
+            Ok(OpOutcome::Stream { request_id, .. }) => Some(request_id),
+            Ok(OpOutcome::Invoke { bytes, .. }) => {
+                self.apply_invoke_result(&bytes, edit_token);
+                None
+            }
+            Err(DispatchError::EntityLocked { entity }) => {
+                log::warn!(
+                    "dispatch_op_inner({:?}): dispatch refused, entity {entity} locked",
+                    op.op_id
+                );
+                None
+            }
+            Err(DispatchError::BackendBusy { plugin_id }) => {
+                log::info!("dispatch refused: backend {plugin_id} busy");
+                None
+            }
+            Err(DispatchError::Failed(s)) => {
+                log::error!("dispatch_op_inner({:?}): dispatch failed: {s}", op.op_id);
+                None
+            }
         }
     }
 

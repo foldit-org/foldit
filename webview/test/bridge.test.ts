@@ -21,6 +21,9 @@ const transportMock = vi.hoisted(() => {
     setSelection: vi.fn(),
     viewportInput: vi.fn(),
     request: vi.fn(),
+    startStream: vi.fn(),
+    updateStream: vi.fn(),
+    cancelStream: vi.fn(),
     openSessionDialog: vi.fn(),
   };
 });
@@ -35,6 +38,9 @@ vi.mock('../src/transport', () => ({
   setSelection: transportMock.setSelection,
   viewportInput: transportMock.viewportInput,
   request: transportMock.request,
+  startStream: transportMock.startStream,
+  updateStream: transportMock.updateStream,
+  cancelStream: transportMock.cancelStream,
   openSessionDialog: transportMock.openSessionDialog,
 }));
 

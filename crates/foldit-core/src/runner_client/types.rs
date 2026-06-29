@@ -158,6 +158,46 @@ pub fn edit_scope_from_targets(
     }
 }
 
+/// Build the orchestrator's `DispatchContext` from a focus plus the
+/// per-entity selection and designable residue maps. Both maps flatten to
+/// `ResidueRef`s the same way (entity-major, in map order); the focus passes
+/// straight through. Shared by `dispatch_op`, `actions_catalog`, and the
+/// plugin-query path so every dispatch resolves against an identically-built
+/// context.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_dispatch_context(
+    focus: Option<molex::EntityId>,
+    selection: &std::collections::BTreeMap<
+        molex::EntityId,
+        std::collections::BTreeSet<u32>,
+    >,
+    designable: &std::collections::BTreeMap<
+        molex::EntityId,
+        std::collections::BTreeSet<u32>,
+    >,
+) -> foldit_runner::orchestrator::DispatchContext {
+    use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
+    let flatten = |map: &std::collections::BTreeMap<
+        molex::EntityId,
+        std::collections::BTreeSet<u32>,
+    >| -> Vec<ResidueRef> {
+        map.iter()
+            .flat_map(|(entity, residues)| {
+                let id = *entity;
+                residues.iter().map(move |&residue_index| ResidueRef {
+                    entity_id: id,
+                    residue_index,
+                })
+            })
+            .collect()
+    };
+    DispatchContext {
+        focused_entity_id: focus,
+        selection: flatten(selection),
+        designable: flatten(designable),
+    }
+}
+
 /// Core-side projection of inbound plugin traffic, produced by
 /// [`RunnerClient::drain_op_events`]. Each variant enumerates one of
 /// core's edit-lifecycle verbs keyed by the dispatch `request_id` (the

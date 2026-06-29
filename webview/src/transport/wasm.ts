@@ -4,7 +4,7 @@
  * (`transport/index.ts`) selects between them based on FOLDIT_TARGET.
  */
 
-import type { FrontendState, ViewportInput, AppCommand, EntitySelection } from '../types';
+import type { FrontendState, ViewportInput, AppCommand, EntitySelection, ParamValue } from '../types';
 import type { DispatchableOp, RequestKind } from '@foldit/plugin-bridge';
 
 // The wasm-pack output lives at /pkg/foldit_web.js relative to the served
@@ -18,6 +18,7 @@ interface FolditApp {
   start(canvas: HTMLCanvasElement): Promise<void>;
   viewportInput(json: string): void;
   dispatchOp(json: string): void;
+  updateStream(json: string): void;
   appCommand(json: string): void;
   setSelection(json: string): void;
   request(kind: string, payload: string): Promise<string>;
@@ -131,6 +132,32 @@ export function viewportInput(input: ViewportInput): void {
  *  `None` on the Rust side, so click-to-fire buttons post `{ op_id }`. */
 export function dispatchOp(op: DispatchableOp): void {
   loadApp().then(app => app.dispatchOp(JSON.stringify(op)));
+}
+
+/**
+ * Start a streaming op via the async request channel and resolve with the
+ * stream's `request_id`. Rejects (with the backend message) when the op is
+ * not a stream or fails to start.
+ */
+export function startStream(op: DispatchableOp): Promise<number> {
+  return request<{ request_id: number }>('start_stream', { op }).then((r) => r.request_id);
+}
+
+/**
+ * Fire-and-forget frame update to a live stream. The wasm path has no
+ * generic postMessage channel, so this calls the dedicated bindgen method;
+ * drop-tolerant, so no reply is awaited.
+ */
+export function updateStream(rid: number, params: Record<string, ParamValue>): void {
+  loadApp().then(app => app.updateStream(JSON.stringify({ request_id: rid, params })));
+}
+
+/**
+ * Cancel (= commit) a live stream via the async request channel. Awaited so
+ * a dropped cancel cannot strand an open stream.
+ */
+export function cancelStream(rid: number): Promise<void> {
+  return request('cancel_stream', { request_id: rid }).then(() => undefined);
 }
 
 /** Send a native GUI / chrome command (history nav, bubble advance, view options, load). */

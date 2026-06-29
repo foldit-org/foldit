@@ -2,6 +2,7 @@ import type {
   AppCommand,
   EntitySelection,
   OpDispatch,
+  ParamValue,
   ViewportInput,
 } from './wire';
 import type { FrontendState } from './state';
@@ -16,7 +17,10 @@ export type RequestKind =
   | 'server_request'
   | 'get_hotkey_text'
   | 'panels_catalog'
-  | 'settings_catalog';
+  | 'settings_catalog'
+  | 'plugin_query'
+  | 'start_stream'
+  | 'cancel_stream';
 
 /**
  * An `OpDispatch` with `focused_entity_id` omittable: a missing key
@@ -50,6 +54,22 @@ export type PluginBridge = {
   setSelection: (entries: EntitySelection[]) => void;
   viewportInput: (input: ViewportInput) => void;
   request: <T = unknown>(kind: RequestKind, payload?: object, timeoutMs?: number) => Promise<T>;
+  /**
+   * Start a streaming op and resolve with its `request_id`. Drive the live
+   * stream with `updateStream(rid, ...)` and end it with `cancelStream(rid)`
+   * (cancel-as-commit). Rejects if the op is not a stream or fails to start.
+   */
+  startStream: (op: DispatchableOp) => Promise<number>;
+  /**
+   * Fire-and-forget frame update to a live stream. Drop-tolerant: a lost
+   * update is just a stale frame, so this does not await a reply.
+   */
+  updateStream: (rid: number, params: Record<string, ParamValue>) => void;
+  /**
+   * Cancel (= commit) a live stream. Awaitable so a dropped cancel cannot
+   * strand an open stream; resolves once the host has sent the cancel.
+   */
+  cancelStream: (rid: number) => Promise<void>;
   openSessionDialog: () => void;
   readonly contractVersion: number;
 };

@@ -8,8 +8,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::types::{
-    edit_scope_from_handle, edit_scope_from_targets, ActiveStreamEntry, DispatchError,
-    DispatchIntent, OpEvent, OpOutcome, StreamStartIntent,
+    build_dispatch_context, edit_scope_from_handle, edit_scope_from_targets, ActiveStreamEntry,
+    DispatchError, DispatchIntent, OpEvent, OpOutcome, StreamStartIntent,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::RunnerClient;
@@ -217,9 +217,7 @@ impl RunnerClient {
         plugin_id: String,
         entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
     ) -> Result<OpOutcome, DispatchError> {
-        use foldit_runner::orchestrator::{
-            DispatchContext, OpKind, ResidueRef,
-        };
+        use foldit_runner::orchestrator::OpKind;
         // Read the manifest `preview` flag off the catalog before the mutable
         // orchestrator borrow below; it is stamped onto the stream entry so
         // the terminal arm routes the frames to a discardable ghost.
@@ -242,38 +240,11 @@ impl RunnerClient {
         };
         let kind = cached.kind;
 
-        let selection: Vec<ResidueRef> = intent
-            .selection
-            .iter()
-            .flat_map(|(entity, residues)| {
-                let id = *entity;
-                residues.iter().map(move |&residue_index| ResidueRef {
-                    entity_id: id,
-                    residue_index,
-                })
-            })
-            .collect();
-
-        // Flatten the puzzle's design mask the same way: the residues the
-        // plugin may redesign, carried alongside the selection so the engine
-        // can gate identity changes.
-        let designable: Vec<ResidueRef> = intent
-            .designable
-            .iter()
-            .flat_map(|(entity, residues)| {
-                let id = *entity;
-                residues.iter().map(move |&residue_index| ResidueRef {
-                    entity_id: id,
-                    residue_index,
-                })
-            })
-            .collect();
-
-        let ctx = DispatchContext {
-            focused_entity_id: intent.focused_entity_id,
-            selection,
-            designable,
-        };
+        let ctx = build_dispatch_context(
+            intent.focused_entity_id,
+            &intent.selection,
+            &intent.designable,
+        );
         let params: std::collections::HashMap<
             String,
             foldit_runner::orchestrator::ParamValue,
@@ -376,20 +347,20 @@ impl RunnerClient {
         Ok((rid, plugin_id))
     }
 
-    /// Push a single-key `endpoint` `Vec3` update to a running pull stream.
-    /// The `"endpoint"` param key is a bridge-protocol detail and lives
-    /// behind this barrier, not in `App`. No-op (logged at trace) when no
-    /// orchestrator is wired up or the dispatch is rejected.
-    pub(crate) fn update_stream(&self, rid: u64, plugin_id: &str, endpoint: glam::Vec3) {
-        use foldit_runner::orchestrator::ParamValue;
+    /// Push an arbitrary param-map update to a running stream. The caller
+    /// owns the param shape (e.g. pull-drag sends a single `endpoint`
+    /// `Vec3`); this barrier only forwards it to the orchestrator. No-op
+    /// (logged at trace) when no orchestrator is wired up or the dispatch
+    /// is rejected.
+    pub(crate) fn update_stream(
+        &self,
+        rid: u64,
+        plugin_id: &str,
+        params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue>,
+    ) {
         let Some(orch) = self.orchestrator.as_ref() else {
             return;
         };
-        let mut params = std::collections::HashMap::new();
-        let _ = params.insert(
-            String::from("endpoint"),
-            ParamValue::Vec3([endpoint.x, endpoint.y, endpoint.z]),
-        );
         if let Err(e) = orch.dispatch_update_stream(plugin_id, rid, params) {
             log::trace!("update_stream: dispatch_update_stream rid={rid} failed: {e}");
         }
@@ -406,6 +377,35 @@ impl RunnerClient {
         if let Err(e) = orch.dispatch_cancel_stream(plugin_id, rid) {
             log::trace!("end_stream: dispatch_cancel_stream rid={rid} failed: {e}");
         }
+    }
+
+    /// Update a running stream by its `rid` alone: resolve the owning
+    /// plugin from the active-streams table and forward `params`. The
+    /// frontend carries only the opaque rid, never the plugin id. No-op
+    /// (logged at trace) when the rid has no live stream - it may have
+    /// already terminated.
+    pub(crate) fn update_stream_by_rid(
+        &self,
+        rid: u64,
+        params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue>,
+    ) {
+        let Some(entry) = self.stream_host.active_streams.get(&rid) else {
+            log::trace!("update_stream_by_rid: no active stream rid={rid}");
+            return;
+        };
+        self.update_stream(rid, &entry.plugin_id, params);
+    }
+
+    /// Cancel a running stream by its `rid` alone: resolve the owning plugin
+    /// from the active-streams table and send the cancel (the terminal
+    /// commit flows back through `drain_op_events`). No-op (logged at trace)
+    /// when the rid has no live stream.
+    pub(crate) fn end_stream_by_rid(&self, rid: u64) {
+        let Some(entry) = self.stream_host.active_streams.get(&rid) else {
+            log::trace!("end_stream_by_rid: no active stream rid={rid}");
+            return;
+        };
+        self.end_stream(rid, &entry.plugin_id);
     }
 
     /// Allocate a dispatch `request_id` from the orchestrator (the single

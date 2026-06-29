@@ -36,6 +36,15 @@ pub fn from_json(body: &str) -> Option<IpcMessage> {
                 .and_then(|e| serde_json::from_value(e.clone()).ok())?;
             Some(IpcMessage::SetSelection { entries })
         }
+        "update_stream" => {
+            let data = val.get("data")?;
+            let request_id = data.get("request_id").and_then(Value::as_u64)?;
+            let params = data
+                .get("params")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default();
+            Some(IpcMessage::UpdateStream { request_id, params })
+        }
         "open_session_dialog" => Some(IpcMessage::OpenSessionDialog),
         "request" => {
             let wish_id = val.get("wish_id").and_then(Value::as_str)?.to_owned();

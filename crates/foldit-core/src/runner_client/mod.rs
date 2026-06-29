@@ -138,6 +138,60 @@ impl RunnerClient {
         }
     }
 
+    /// Forward a panel-initiated query `id` against the supplied focus /
+    /// selection context and return the plugin's raw opaque reply bytes for
+    /// the caller to relay undecoded. The orchestrator routes the query to
+    /// its owning plugin by id; this layer never interprets the query or its
+    /// bytes. The `DispatchContext` is built from the caller's real focus /
+    /// selection the same way [`Self::dispatch_op`] builds it (flatten the
+    /// per-entity residue maps to `ResidueRef`s), and the wire-form params are
+    /// converted to the orchestrator's native `ParamValue` through the shared
+    /// [`crate::wire_params::param_value_from_wire`].
+    ///
+    /// Unlike [`Self::request_query_bytes`], the error is surfaced rather than
+    /// swallowed so the caller can reject the originating request.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when no plugin registers `id`, no orchestrator is
+    /// installed, or the query dispatch fails.
+    ///
+    /// [`Self::dispatch_op`]: super::RunnerClient::dispatch_op
+    pub(crate) fn dispatch_plugin_query(
+        &mut self,
+        id: &str,
+        focus: Option<molex::EntityId>,
+        selection: &std::collections::BTreeMap<
+            molex::EntityId,
+            std::collections::BTreeSet<u32>,
+        >,
+        designable: &std::collections::BTreeMap<
+            molex::EntityId,
+            std::collections::BTreeSet<u32>,
+        >,
+        params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+    ) -> Result<Vec<u8>, String> {
+        if !self.supports_query(id) {
+            return Err(format!("query '{id}' is not registered"));
+        }
+        let ctx = types::build_dispatch_context(focus, selection, designable);
+        let orch = self
+            .orchestrator
+            .as_mut()
+            .ok_or_else(|| String::from("orchestrator not initialized"))?;
+
+        let params: std::collections::HashMap<
+            String,
+            foldit_runner::orchestrator::ParamValue,
+        > = params
+            .into_iter()
+            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+            .collect();
+
+        orch.dispatch_query(id, ctx, params)
+            .map_err(|e| format!("query '{id}' failed: {e}"))
+    }
+
     /// Fire the query `id` non-blocking against the live session pose. The
     /// reply lands on a stored receiver drained by
     /// [`Self::poll_query_results`]; the caller decodes and applies it then.

@@ -41,30 +41,20 @@ impl RunnerClient {
         F: Fn(molex::EntityId) -> Option<molex::EntityKind>,
     {
         use foldit_gui::state::ActionInfo;
-        use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
+        use super::types::build_dispatch_context;
 
         let Some(orch) = self.orchestrator.as_ref() else {
             return vec![];
         };
 
-        let flat: Vec<ResidueRef> = selection
-            .iter()
-            .flat_map(|(entity, residues)| {
-                let id = *entity;
-                residues.iter().map(move |&residue_index| ResidueRef {
-                    entity_id: id,
-                    residue_index,
-                })
-            })
-            .collect();
-        let ctx = DispatchContext {
-            focused_entity_id: focus,
-            selection: flat,
-            // Availability resolution never reaches a plugin, so the design
-            // mask is not transmitted here; the host-side design gate is
-            // folded into `enabled` below instead.
-            designable: Vec::new(),
-        };
+        // Availability resolution never reaches a plugin, so the design mask
+        // is not transmitted here (empty designable map); the host-side design
+        // gate is folded into `enabled` below instead.
+        let ctx = build_dispatch_context(
+            focus,
+            selection,
+            &std::collections::BTreeMap::new(),
+        );
 
         orch.actions_catalog(&ctx, entity_type_of)
             .into_iter()

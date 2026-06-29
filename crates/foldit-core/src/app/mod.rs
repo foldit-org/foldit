@@ -75,6 +75,14 @@ pub struct App {
     pub(in crate::app) pending_dispatches: Vec<foldit_gui::OpDispatch>,
 }
 
+/// Wrap raw bytes as the `{ "encoding": "base64", "content": ... }` envelope
+/// the JS request path expects for a binary reply.
+fn base64_result(bytes: &[u8]) -> serde_json::Value {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    serde_json::json!({ "encoding": "base64", "content": b64 })
+}
+
 impl App {
     #[must_use]
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
@@ -136,6 +144,31 @@ impl App {
         self.pending_dispatches.push(op);
     }
 
+    /// Fire-and-forget update to a live stream identified by `request_id`:
+    /// convert the wire params to the orchestrator param map and forward
+    /// them. A dropped update is just a stale frame, so this never replies.
+    pub fn on_update_stream(
+        &mut self,
+        request_id: u64,
+        params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let params: std::collections::HashMap<
+                String,
+                foldit_runner::orchestrator::ParamValue,
+            > = params
+                .into_iter()
+                .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+                .collect();
+            self.runner_client.update_stream_by_rid(request_id, params);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (request_id, params);
+        }
+    }
+
     /// Synchronously resolve a JS-side request.
     ///
     /// # Errors
@@ -152,7 +185,6 @@ impl App {
         use foldit_gui::RequestKind;
         match kind {
             RequestKind::ReadResourceFile => {
-                use base64::Engine;
                 let filepath = payload
                     .get("filepath")
                     .and_then(|v| v.as_str())
@@ -161,8 +193,7 @@ impl App {
                     .host
                     .read_file(filepath)
                     .map_err(|e| format!("read {filepath}: {e}"))?;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                Ok(serde_json::json!({ "encoding": "base64", "content": b64 }))
+                Ok(base64_result(&bytes))
             }
             RequestKind::PanelsCatalog => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -179,6 +210,75 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 let tabs: Vec<foldit_gui::state::SettingsTabInfo> = Vec::new();
                 Ok(serde_json::to_value(tabs).map_err(|e| e.to_string())?)
+            }
+            RequestKind::PluginQuery => {
+                let query_id = payload
+                    .get("query_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "missing 'query_id'".to_owned())?;
+                let params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
+                    match payload.get("params") {
+                        Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                        None => std::collections::HashMap::new(),
+                    };
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let focus = match self.store.focus() {
+                        viso::Focus::Entity(eid) => Some(eid),
+                        viso::Focus::All => None,
+                    };
+                    let selection = self.store.selection().clone();
+                    let designable = self.store.designable_residues();
+                    let bytes = self.runner_client.dispatch_plugin_query(
+                        query_id,
+                        focus,
+                        &selection,
+                        &designable,
+                        params,
+                    )?;
+                    Ok(base64_result(&bytes))
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (query_id, params);
+                    Err(String::from("plugin queries are unavailable on this platform"))
+                }
+            }
+            RequestKind::StartStream => {
+                let op: foldit_gui::OpDispatch = payload
+                    .get("op")
+                    .ok_or_else(|| "missing 'op'".to_owned())
+                    .and_then(|v| {
+                        serde_json::from_value(v.clone()).map_err(|e| format!("invalid 'op': {e}"))
+                    })?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match self.dispatch_op_inner(op) {
+                        Some(request_id) => Ok(serde_json::json!({ "request_id": request_id })),
+                        None => Err(String::from("op did not start a stream")),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = op;
+                    Err(String::from("streams are unavailable on this platform"))
+                }
+            }
+            RequestKind::CancelStream => {
+                let request_id = payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "missing 'request_id'".to_owned())?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.runner_client.end_stream_by_rid(request_id);
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = request_id;
+                    Err(String::from("streams are unavailable on this platform"))
+                }
             }
         }
     }

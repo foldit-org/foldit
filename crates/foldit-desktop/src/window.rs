@@ -156,6 +156,9 @@ impl AppRunner {
                 IpcMessage::DispatchOp(op) => self.app.on_dispatch_op(op),
                 IpcMessage::AppCommand(command) => self.app.handle_app_command(command),
                 IpcMessage::SetSelection { entries } => self.app.handle_set_selection(entries),
+                IpcMessage::UpdateStream { request_id, params } => {
+                    self.app.on_update_stream(request_id, params);
+                }
                 IpcMessage::OpenSessionDialog => self.open_session_dialog(),
                 IpcMessage::Request { wish_id, kind, payload } => {
                     let result = self.app.handle_request(kind, payload);

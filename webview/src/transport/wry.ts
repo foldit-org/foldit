@@ -1,4 +1,4 @@
-import type { FrontendState, ViewportInput, AppCommand, EntitySelection } from '../types';
+import type { FrontendState, ViewportInput, AppCommand, EntitySelection, ParamValue } from '../types';
 import type { DispatchableOp, RequestKind } from '@foldit/plugin-bridge';
 
 declare global {
@@ -50,6 +50,32 @@ export function viewportInput(input: ViewportInput): void {
  *  `None` on the Rust side, so click-to-fire buttons post `{ op_id }`. */
 export function dispatchOp(op: DispatchableOp): void {
   window.ipc.postMessage(JSON.stringify({ cmd: 'dispatch_op', data: op }));
+}
+
+/**
+ * Start a streaming op via the async request channel and resolve with the
+ * stream's `request_id`. Rejects (with the backend message) when the op is
+ * not a stream or fails to start.
+ */
+export function startStream(op: DispatchableOp): Promise<number> {
+  return request<{ request_id: number }>('start_stream', { op }).then((r) => r.request_id);
+}
+
+/**
+ * Fire-and-forget frame update to a live stream. Drop-tolerant — a lost
+ * update is just a stale frame — so this posts without awaiting a reply.
+ */
+export function updateStream(rid: number, params: Record<string, ParamValue>): void {
+  window.ipc.postMessage(JSON.stringify({ cmd: 'update_stream', data: { request_id: rid, params } }));
+}
+
+/**
+ * Cancel (= commit) a live stream via the async request channel. Awaited so
+ * a dropped cancel cannot strand an open stream; resolves once the host has
+ * acknowledged the cancel.
+ */
+export function cancelStream(rid: number): Promise<void> {
+  return request('cancel_stream', { request_id: rid }).then(() => undefined);
 }
 
 /** Send a native GUI / chrome command (history nav, bubble advance, view options, load). */

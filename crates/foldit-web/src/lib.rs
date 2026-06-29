@@ -9,7 +9,7 @@
 //!
 //! All host-agnostic state and dispatch logic lives in `foldit_core::App`
 //! (shared with the desktop binary). This crate is a thin wasm-bindgen
-//! shell over it — engine construction, rAF loop, and JS↔Rust glue.
+//! shell over it: engine construction, rAF loop, and JS-to-Rust glue.
 //!
 //! # Lifecycle
 //!
@@ -190,6 +190,26 @@ impl FolditApp {
         Ok(())
     }
 
+    /// Forward a fire-and-forget stream-frame update. `json` is the
+    /// `{ request_id, params }` payload (the wasm transport has no generic
+    /// postMessage channel, so this is a dedicated method rather than the
+    /// `IpcMessage::UpdateStream` decode arm the desktop path uses).
+    #[wasm_bindgen(js_name = updateStream)]
+    pub fn update_stream(&self, json: &str) -> Result<(), JsValue> {
+        #[derive(serde::Deserialize)]
+        struct UpdateStreamArgs {
+            request_id: u64,
+            #[serde(default)]
+            params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+        }
+        let args: UpdateStreamArgs = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("update_stream parse: {e}")))?;
+        self.app
+            .borrow_mut()
+            .on_update_stream(args.request_id, args.params);
+        Ok(())
+    }
+
     /// Round-trip an async request to the backend. Returns a JS Promise
     /// (via `wasm-bindgen-futures`) that resolves with the JSON payload
     /// or rejects with the backend-provided error string.
@@ -286,7 +306,7 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: Progre
     let window = match web_sys::window() {
         Some(w) => w,
         None => {
-            log::error!("[foldit-web] no `window` — render loop not spawned");
+            log::error!("[foldit-web] no `window`; render loop not spawned");
             return;
         }
     };
