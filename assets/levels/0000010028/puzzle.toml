@@ -24,6 +24,12 @@ center = [-11, 31, 13]
 eye = [-59, -14, 54]
 up = [-0.26, 0.78, 0.56]
 
+[[puzzle.filter]]
+type = "HBondCount"
+plugin = "rosetta"
+bonus = -200
+min_bonds = 12
+
 [[sequence]]
 text = "Wiggle doesn't always work by itself!"
 point_to = "backbone"

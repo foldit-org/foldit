@@ -1,22 +1,21 @@
-//! Eviction + linear-undo prune + best-cursor recompute. All three
-//! are History-internal policies that run from `record` (prune
-//! after push, evict at the tail of every dispatch, recompute_best
-//! on commit).
+//! Eviction + linear-undo prune. Both are History-internal policies
+//! that run from `record` (prune after push, evict at the tail of
+//! every dispatch).
 
 use std::collections::HashSet;
 
 use molex::entity::molecule::id::EntityId;
 
-use super::{CheckpointId, EntitySnapshotId, FilterStatus, History};
+use super::{CheckpointId, EntitySnapshotId, History};
 
 impl History {
-    // ── Linear-undo prune ─────────────────────────────────────────────
-
     /// Drop every checkpoint that isn't an ancestor of the current
     /// `head`, and every snapshot that isn't an ancestor of its lane's
     /// `head`. Called after a push mutation so the resulting history
-    /// is a single linear chain — the redo path that existed before
+    /// is a single linear chain - the redo path that existed before
     /// the push is now gone (classic editor-undo semantics).
+    // `expect`s here remove ids drawn from the lane's own iteration above.
+    #[allow(clippy::expect_used)]
     pub(super) fn prune_to_head_path(&mut self) {
         // Checkpoints: build the ancestor set, evict the rest.
         let head = self.checkpoints.head;
@@ -29,15 +28,6 @@ impl History {
             .filter(|id| !keep_ckpts.contains(id))
             .collect();
         for victim in victims {
-            // The tentative checkpoint must never be evicted: if a
-            // begin_action just pushed, the new tentative IS the head
-            // and is in `keep_ckpts`, so this won't fire on it. Defense
-            // in depth — a tentative not on the head path would mean
-            // an internal invariant violation, not a state we want to
-            // silently destroy.
-            if self.checkpoints.checkpoints[victim].tentative {
-                continue;
-            }
             self.dec_refs_for_checkpoint(victim);
             self.detach_checkpoint(victim);
             let _ = self.checkpoints.checkpoints.remove(victim);
@@ -50,9 +40,9 @@ impl History {
         // Snapshots: only evict the ones whose `checkpoint_refs` hit
         // zero during the sweep above (i.e., the only checkpoints
         // referencing them were the redo-branch ones we just pruned).
-        // Snapshots still referenced by older ancestor checkpoints —
+        // Snapshots still referenced by older ancestor checkpoints -
         // for example, a `LaneUndo` checkpoint legitimately pointing
-        // back at an old snapshot — stay live; pruning them
+        // back at an old snapshot - stay live; pruning them
         // unconditionally would dangle that ancestor's
         // `entity_heads` reference and break the cross-DAG invariant.
         let lane_ids: Vec<EntityId> = self.lanes.keys().copied().collect();
@@ -62,9 +52,8 @@ impl History {
                 None => continue,
             };
             let lane_root = self.lanes[&eid].root;
-            let lane = match self.lanes.get_mut(&eid) {
-                Some(l) => l,
-                None => continue,
+            let Some(lane) = self.lanes.get_mut(&eid) else {
+                continue;
             };
             let snap_victims: Vec<EntitySnapshotId> = lane
                 .snapshots
@@ -91,13 +80,13 @@ impl History {
         }
     }
 
-    // ── Eviction ──────────────────────────────────────────────────────
-
     /// Evict checkpoints and snapshots until both budgets are satisfied.
     /// Called from `record` exactly once after each event.
+    // `expect`s here resolve ids picked by the eviction pass just above.
+    #[allow(clippy::expect_used)]
     pub(super) fn evict_to_budget(&mut self) {
         // Checkpoints: oldest-first; protected: root, head-path, pinned,
-        // best, best_that_counts, tentative.
+        // best, best_that_counts.
         while self.checkpoints.checkpoints.len() > self.checkpoints.budget.max_checkpoints {
             let Some(victim) = self.pick_checkpoint_eviction() else { break };
             self.dec_refs_for_checkpoint(victim);
@@ -126,19 +115,19 @@ impl History {
         }
     }
 
-    /// Pick a checkpoint to evict per the policy in the strategy doc.
+    /// Pick a checkpoint to evict: the oldest, excluding root, the head
+    /// path, pinned, and the best cursors.
     pub(super) fn pick_checkpoint_eviction(&self) -> Option<CheckpointId> {
         let head_path = self.checkpoint_head_path();
         self.checkpoints
             .checkpoints
             .iter()
-            .filter(|(id, ckpt)| {
+            .filter(|(id, _)| {
                 *id != self.checkpoints.root
                     && !head_path.contains(id)
                     && !self.checkpoints.pinned.contains(id)
                     && self.checkpoints.best != Some(*id)
                     && self.checkpoints.best_that_counts != Some(*id)
-                    && !ckpt.tentative
             })
             .min_by_key(|(_, ckpt)| ckpt.timestamp)
             .map(|(id, _)| id)
@@ -185,33 +174,5 @@ impl History {
             }
         }
         path
-    }
-
-    // ── Best cursor recompute ─────────────────────────────────────────
-
-    /// Recompute `best` and `best_that_counts` cursors.
-    /// `best` = highest `raw_score` across non-tentative, non-excluded
-    /// checkpoints. `best_that_counts` adds the constraint
-    /// `filter_status == Pass`.
-    pub(super) fn recompute_best(&mut self) {
-        let mut best: Option<(CheckpointId, f64)> = None;
-        let mut best_counts: Option<(CheckpointId, f64)> = None;
-        for (id, ckpt) in self.checkpoints.checkpoints.iter() {
-            if ckpt.tentative || ckpt.exclude_from_best {
-                continue;
-            }
-            if let Some(score) = ckpt.raw_score {
-                if best.is_none_or(|(_, b)| score > b) {
-                    best = Some((id, score));
-                }
-                if matches!(ckpt.filter_status, FilterStatus::Pass)
-                    && best_counts.is_none_or(|(_, b)| score > b)
-                {
-                    best_counts = Some((id, score));
-                }
-            }
-        }
-        self.checkpoints.best = best.map(|(id, _)| id);
-        self.checkpoints.best_that_counts = best_counts.map(|(id, _)| id);
     }
 }

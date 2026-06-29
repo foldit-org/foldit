@@ -23,6 +23,12 @@ center = [5.4, 18, 9.3]
 eye = [-4.6, -26, -13]
 up = [0.54, -0.47, 0.7]
 
+[[puzzle.filter]]
+type = "ClashCount"
+plugin = "rosetta"
+bonus = -200
+max_clashes = 0
+
 [[sequence]]
 text = "CLICK and DRAG the background to rotate your view."
 color = "game"

@@ -1,0 +1,91 @@
+[display]
+show_waters = false
+show_ions = false
+show_solvent = false
+lipid_mode = "coarse"
+show_sidechains = true
+show_hydrogens = false
+color_scheme = "score"
+sidechain_color_mode = "hydrophobicity"
+palette_preset = "green_yellow_red"
+palette_mode = "gradient"
+
+[lighting]
+light1_dir = [-0.3, 0.9, -0.3]
+light2_dir = [0.3, 0.6, -0.4]
+light1_intensity = 2.0
+light2_intensity = 1.1
+ambient = 0.45
+specular_intensity = 0.35
+shininess = 38.0
+rim_power = 5.0
+rim_intensity = 0.3
+rim_directionality = 0.3
+rim_color = [1.0, 0.85, 0.7]
+ibl_strength = 0.5
+rim_dir = [0.0, -0.7, 0.5]
+roughness = 0.5
+metalness = 0.5
+
+[post_processing]
+outline_thickness = 1.0
+outline_strength = 0.7
+ao_strength = 0.85
+ao_radius = 0.5
+ao_bias = 0.025
+ao_power = 2.0
+fog_start = 100.0
+fog_density = 0.005
+exposure = 1.0
+normal_outline_strength = 0.5
+bloom_intensity = 0.0
+bloom_threshold = 1.0
+
+[camera]
+fovy = 45.0
+znear = 5.0
+zfar = 2000.0
+rotate_speed = 0.5
+pan_speed = 0.5
+zoom_speed = 0.1
+
+[colors]
+lipid_carbon_tint = [0.76, 0.7, 0.5]
+hydrophobic_sidechain = [0.95, 0.6, 0.2]
+hydrophilic_sidechain = [0.3, 0.5, 0.9]
+nucleic_acid = [0.45, 0.55, 0.85]
+band_default = [0.5, 0.0, 0.5]
+band_backbone = [1.0, 0.75, 0.0]
+band_disulfide = [0.5, 1.0, 0.0]
+band_hbond = [0.0, 0.75, 1.0]
+solvent_color = [0.6, 0.6, 0.6]
+
+[colors.cofactor_tints]
+CLA = [0.2, 0.7, 0.3]
+CHL = [0.2, 0.6, 0.35]
+BCR = [0.9, 0.5, 0.1]
+BCB = [0.9, 0.5, 0.1]
+HEM = [0.7, 0.15, 0.15]
+HEC = [0.7, 0.15, 0.15]
+HEA = [0.7, 0.15, 0.15]
+HEB = [0.7, 0.15, 0.15]
+PHO = [0.5, 0.7, 0.3]
+PL9 = [0.6, 0.5, 0.2]
+PLQ = [0.6, 0.5, 0.2]
+
+[geometry]
+tube_radius = 0.3
+tube_radial_segments = 8
+solvent_radius = 0.15
+ligand_sphere_radius = 0.3
+ligand_bond_radius = 0.12
+
+[keybindings.bindings]
+recenter_camera = "KeyQ"
+toggle_trajectory = "KeyT"
+toggle_ions = "KeyI"
+toggle_waters = "KeyU"
+toggle_solvent = "KeyO"
+toggle_lipids = "KeyL"
+cycle_focus = "Tab"
+cancel = "Escape"

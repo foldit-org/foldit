@@ -3,28 +3,33 @@ name = "foldit-web"
 version = "0.1.0"
 edition = "2021"
 description = "Web (wasm32) entry crate: wasm-bindgen surface + canvas-mounted viso"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
 
 [dependencies]
 # Workspace crates
 foldit-core = { path = "../foldit-core" }
 foldit-gui = { path = "../foldit-gui" }
-foldit-runner = { path = "../foldit-runner", default-features = false }
 
 # Render engine. We deliberately do NOT enable viso's `web` feature here:
 # its `app::web::start` would conflict with our own canvas/rAF wiring.
 # `default-features = false` strips wry/winit/pollster.
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.4.2", features = ["serde", "specta"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
 
 # Universal
 log = "0.4"
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-anyhow = "1"
 wgpu = "26"
 
 # ── Wasm-only deps ───────────────────────────────────────────────────────────
@@ -38,6 +43,10 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # viso's pipeline processor parallelizes via rayon-on-web-workers and
 # requires the pool to exist before any RenderContext is constructed.
 wasm-bindgen-rayon = { version = "1", features = ["no-bundler"] }
+# Origin Private File System: persists the puzzle high-score progress map to
+# the origin-private OPFS root. Brings its own web-sys OPFS bindings, so no
+# web-sys feature additions are needed below.
+opfs = "0.2.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"

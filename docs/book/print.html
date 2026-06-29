@@ -1,0 +1,1334 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Foldit</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-72710268.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-337fa47a.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Foldit</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/foldit-org/foldit" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+<p>Foldit is a protein-folding client. A player loads a structure, manipulates it
+(pull residues, build bands, run minimizers and design tools), and is scored
+against a Rosetta-style energy function. This repository holds the client; the
+heavy molecular work runs in out-of-process plugins.</p>
+<p>The codebase is split so that one body of logic drives several front ends:</p>
+<ul>
+<li><strong><code>foldit-core</code></strong> is the host-agnostic application. It owns the session,
+the undo/redo history, the scoring coordinator, the plugin client, and the
+projectors that turn state changes into render, GUI, and plugin updates. It
+touches no window system and (outside structure loading) no filesystem.</li>
+<li><strong><code>foldit-desktop</code></strong> is the default binary, named <code>foldit</code>. It runs the core
+inside a winit event loop with a wry webview for the UI.</li>
+<li><strong><code>foldit-web</code></strong> is the wasm32 build. It mounts the same core in a browser
+canvas and exposes it to JavaScript through <code>wasm-bindgen</code>.</li>
+<li><strong><code>foldit-gui</code></strong> holds the wire and state types shared by both shells: the
+<code>GuiState</code> sections, the command/dispatch enums, and the JS-to-Rust bridge.</li>
+</ul>
+<p>Both shells construct one <code>foldit_core::App</code> and drive it the same way: feed it
+input, call <code>tick</code> once per frame, and forward the serialized state it pushes
+back to the front end. The desktop and web paths differ only in how bytes are
+delivered.</p>
+<p>Two larger subsystems live in their own repositories and are pulled in as git
+submodules:</p>
+<ul>
+<li><strong>viso</strong> is the GPU render engine (wgpu). It takes a molecule assembly and
+produces a 2D texture. See the <a href="https://github.com/foldit-org/viso">viso book</a> (mdbook source under <code>crates/viso/docs/</code>).</li>
+<li><strong>molex</strong> is the molecule model and structure-format codec. See the
+<a href="https://github.com/foldit-org/molex">molex book</a> (mdbook source under <code>crates/molex/docs/</code>).</li>
+</ul>
+<p>The molecular backends (Rosetta, and the structure-prediction and design
+models) are not built into the client. They run as plugins hosted by
+<strong>foldit-runner</strong>, which speaks one protocol to every plugin regardless of
+language. Rosetta is itself a plugin; there is no in-process Rosetta executor.</p>
+<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
+<ul>
+<li>New to the repo: <a href="#build-and-run">Build and Run</a>, then
+<a href="#workspace-layout">Workspace Layout</a>.</li>
+<li>Understanding the runtime: <a href="#overview">Architecture Overview</a>
+and <a href="#the-per-frame-tick">The Per-Frame Tick</a>.</li>
+<li>Working on a backend: <a href="#the-plugin-runner">The Plugin Runner</a>.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="build-and-run"><a class="header" href="#build-and-run">Build and Run</a></h1>
+<h2 id="build"><a class="header" href="#build">Build</a></h2>
+<pre><code class="language-bash">cargo build
+</code></pre>
+<p>The workspace <code>default-members</code> is <code>foldit-desktop</code>, so a plain build produces
+the desktop binary, named <code>foldit</code> (<code>foldit-desktop</code>’s <code>[[bin]]</code> sets
+<code>name = "foldit"</code> and <code>default-run = "foldit"</code>). There is no root <code>src/</code>; the
+entry point is <code>crates/foldit-desktop/src/main.rs</code>.</p>
+<p>A plain <code>cargo build</code> does not build the plugin worker. The worker
+(<code>foldit-worker</code>) lives in the <code>foldit-runner</code> submodule, which is excluded
+from the workspace, and the Python host dylib is loaded at runtime rather than
+linked. Build both of those with:</p>
+<pre><code class="language-bash">cargo xtask build-host
+</code></pre>
+<p><code>build-host</code> puts <code>foldit-worker</code> and the <code>foldit-python-host</code> dylib next to
+the desktop exe under <code>target/&lt;profile&gt;/</code>, which is where the running app looks
+for them. Run it after pulling or changing runner code; <code>cargo run</code> rebuilds
+neither. See <a href="#xtask-commands">xtask Commands</a>.</p>
+<h2 id="run"><a class="header" href="#run">Run</a></h2>
+<pre><code class="language-bash">cargo run -- &lt;PDB_ID&gt;
+# example:
+cargo run -- 1bfe
+</code></pre>
+<p>The first CLI argument names the structure to load. <code>main.rs</code> resolves it
+through <code>foldit_core::puzzle::resolve_structure_path</code>: an existing file path is
+used as-is, and a four-character PDB id is downloaded from RCSB and cached under
+<code>assets/models/</code>.</p>
+<p>With no argument, the app starts at the menus (the <code>Landing</code> phase) and loads a
+structure later through the UI:</p>
+<pre><code class="language-bash">cargo run
+</code></pre>
+<h2 id="controls"><a class="header" href="#controls">Controls</a></h2>
+<p>The desktop key and mouse bindings (from <code>crates/foldit-desktop/src/main.rs</code>):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Input</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td><code>W</code></td><td>Wiggle (Rosetta minimize; toggle)</td></tr>
+<tr><td><code>S</code></td><td>Shake (Rosetta repack sidechains; toggle)</td></tr>
+<tr><td><code>P</code></td><td>Predict (structure prediction)</td></tr>
+<tr><td><code>M</code></td><td>MPNN (design a sequence for the structure)</td></tr>
+<tr><td><code>I</code></td><td>Toggle water and ion visibility</td></tr>
+<tr><td><code>Q</code></td><td>Recenter the camera on the focused entity</td></tr>
+<tr><td><code>T</code></td><td>Toggle trajectory playback (load with <code>--trajectory &lt;path.dcd&gt;</code>)</td></tr>
+<tr><td><code>Tab</code></td><td>Cycle focus (whole session, then each entity, then back)</td></tr>
+<tr><td><code>`</code></td><td>Reset focus to the full scene</td></tr>
+<tr><td><code>Esc</code></td><td>Cancel operation / clear selection / clear bands</td></tr>
+<tr><td>Left-drag on a residue</td><td>Pull</td></tr>
+<tr><td>Right-drag residue to residue</td><td>Create a band</td></tr>
+<tr><td>Mouse</td><td>Rotate / zoom the camera</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="release-build"><a class="header" href="#release-build">Release build</a></h2>
+<pre><code class="language-bash">cargo build --release
+</code></pre>
+<p>For OS installers (a packaged <code>.app</code>, <code>.dmg</code>, <code>.deb</code>, AppImage, MSI), use
+<code>cargo xtask package</code>; see <a href="#assets-and-bundling">Assets and Bundling</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="workspace-layout"><a class="header" href="#workspace-layout">Workspace Layout</a></h1>
+<p>The root <code>Cargo.toml</code> defines the workspace. Its members are all root-owned:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Member</th><th>Path</th><th>Kind</th><th>Role</th></tr>
+</thead>
+<tbody>
+<tr><td><code>foldit-core</code></td><td><code>crates/foldit-core</code></td><td>lib</td><td>Host-agnostic application logic</td></tr>
+<tr><td><code>foldit-desktop</code></td><td><code>crates/foldit-desktop</code></td><td>bin (<code>foldit</code>)</td><td>winit + wry + wgpu desktop shell</td></tr>
+<tr><td><code>foldit-web</code></td><td><code>crates/foldit-web</code></td><td>cdylib + rlib</td><td>wasm32 entry, canvas-mounted</td></tr>
+<tr><td><code>foldit-gui</code></td><td><code>crates/foldit-gui</code></td><td>lib</td><td>Wire and state types, JS-to-Rust bridge</td></tr>
+<tr><td><code>foldit-python-host</code></td><td><code>crates/foldit-runner/python-host</code></td><td>cdylib</td><td>Python plugin host dylib</td></tr>
+<tr><td><code>xtask</code></td><td><code>xtask</code></td><td>bin</td><td>Build and packaging automation</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>default-members = ["crates/foldit-desktop"]</code>, so bare cargo commands target the
+desktop binary.</p>
+<h2 id="two-non-obvious-members"><a class="header" href="#two-non-obvious-members">Two non-obvious members</a></h2>
+<ul>
+<li><strong><code>foldit-gui</code> is in-tree, not a submodule.</strong> It is absent from
+<code>.gitmodules</code>, tracked directly in this repository, and its <code>repository</code>
+field points at this repo. (A comment in the root <code>Cargo.toml</code> describes it
+as submodule-resident; that comment is stale.)</li>
+<li><strong><code>foldit-python-host</code> lives inside the <code>foldit-runner</code> submodule</strong> at
+<code>crates/foldit-runner/python-host</code>, yet it is a root workspace member. It is
+built from this workspace even though its source sits inside a submodule
+checkout.</li>
+</ul>
+<h2 id="submodules"><a class="header" href="#submodules">Submodules</a></h2>
+<p><code>.gitmodules</code> declares four submodules, each in its own repository:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Submodule</th><th>Path</th></tr>
+</thead>
+<tbody>
+<tr><td><code>foldit-runner</code></td><td><code>crates/foldit-runner</code></td></tr>
+<tr><td><code>molex</code></td><td><code>crates/molex</code></td></tr>
+<tr><td><code>viso</code></td><td><code>crates/viso</code></td></tr>
+<tr><td><code>foldit-plugin-sdk</code></td><td><code>crates/foldit-plugin-sdk</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>These are listed in the workspace <code>exclude</code> set. Without the exclude, cargo’s
+workspace discovery walks into them from the outside (for example when maturin
+runs <code>cargo metadata</code> on <code>crates/molex/Cargo.toml</code>) and errors. They build under
+their own manifests, not as members here.</p>
+<h2 id="how-the-submodule-crates-are-depended-on"><a class="header" href="#how-the-submodule-crates-are-depended-on">How the submodule crates are depended on</a></h2>
+<p>The root crates depend on viso, molex, and the plugin SDK as published crates,
+and <code>[patch]</code> redirects two of them to local checkouts:</p>
+<ul>
+<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.6"</code>). A
+<code>[patch."https://github.com/foldit-org/viso"]</code> block currently redirects it
+to the local <code>crates/viso</code> checkout.</li>
+<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.1</code>. A <code>[patch.crates-io]</code>
+block currently redirects it to the local <code>crates/foldit-plugin-sdk</code> checkout.</li>
+<li><strong>molex</strong>: declared as crates.io <code>0.7.1</code> in every crate that uses it. There
+is no molex <code>[patch]</code> block, so molex builds from the published crate even
+when the <code>crates/molex</code> checkout is present.</li>
+</ul>
+<p>To build against the published viso or plugin SDK instead of the local checkout,
+comment out the matching <code>[patch]</code> block. See
+<a href="#local-development-on-submodules">Local Development on Submodules</a>.</p>
+<h2 id="workspace-lints"><a class="header" href="#workspace-lints">Workspace lints</a></h2>
+<p><code>[workspace.lints.clippy]</code> mirrors viso’s clippy set but sets every level to
+<code>warn</code> rather than <code>deny</code>: the checks report the technical-debt picture across
+the root members without gating the build. Members opt in with
+<code>[lints]</code> plus <code>workspace = true</code>. The gates that do fail live in the
+<a href="#quality-gates">justfile</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="local-development-on-submodules"><a class="header" href="#local-development-on-submodules">Local Development on Submodules</a></h1>
+<p>A fresh clone does not populate the submodules. The root crates depend on viso
+and the plugin SDK through <code>[patch]</code> blocks that point at the local submodule
+paths, so those paths must exist for a default build. Populate them with the
+submodule update command:</p>
+<pre><code class="language-bash">git submodule update --init
+</code></pre>
+<p>or pull a single one by passing its path (for example <code>crates/viso</code>).</p>
+<h2 id="switching-a-dependency-between-local-and-published"><a class="header" href="#switching-a-dependency-between-local-and-published">Switching a dependency between local and published</a></h2>
+<p>Two <code>[patch]</code> blocks at the bottom of the root <code>Cargo.toml</code> redirect published
+dependencies to local submodule checkouts:</p>
+<pre><code class="language-toml">[patch."https://github.com/foldit-org/viso"]
+viso = { path = "crates/viso" }
+
+[patch.crates-io]
+foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+</code></pre>
+<p>While a block is active, cargo builds that dependency from the local checkout,
+so edits there take effect on the next build. Comment a block out to build
+against the published version (the git tag for viso, the crates.io release for
+the plugin SDK); the local checkout is then ignored.</p>
+<p>molex has no patch block. It always resolves to the published <code>0.7.1</code> crate. To
+hack on molex locally, add a <code>[patch.crates-io]</code> entry pointing <code>molex</code> at
+<code>crates/molex</code> after checking that submodule out.</p>
+<p>Each toggle is independent: viso can build from a local checkout while the
+plugin SDK builds from crates.io, or any other combination.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="overview"><a class="header" href="#overview">Overview</a></h1>
+<p>Everything that is not window-system or transport-specific lives in one type:
+<code>foldit_core::App</code>. A host constructs an <code>App</code>, attaches a render engine, feeds
+it input, and calls <code>tick</code> once per frame. The host learns about state changes
+only through the bytes the tick pushes back.</p>
+<h2 id="what-app-owns"><a class="header" href="#what-app-owns">What App owns</a></h2>
+<p>From <code>crates/foldit-core/src/app/mod.rs</code>, an <code>App</code> holds:</p>
+<ul>
+<li><strong><code>store: Session</code></strong> – the authoritative document for the loaded structure or
+puzzle: history, selection, focus, view options, transient previews, and the
+optional <code>Puzzle</code> add-on. See <a href="#the-change-event-stream">The Change-Event Stream</a>.</li>
+<li><strong><code>harness: EngineHarness</code></strong> – the viso engine handle plus the keybinding
+table.</li>
+<li><strong><code>runner_client: RunnerClient</code></strong> – the orchestrator handle (the plugin
+client) and the native stream bookkeeping. See
+<a href="#the-plugin-runner">The Plugin Runner</a>.</li>
+<li><strong><code>projectors: Projectors</code></strong> – the three consumers that translate session
+changes into render, GUI, and plugin updates.</li>
+<li><strong><code>scores: ScoreCoordinator</code></strong> – score-term weights, the in-flight
+composition-score targets, and the score-stamping methods. See
+<a href="#history-and-scoring">History and Scoring</a>.</li>
+<li><strong><code>viz: Viz</code></strong> – the derived overlay cache (connections plus the structural
+overlays: clashes, voids, exposed hydrophobics), driven from plugin queries.</li>
+<li><strong><code>gui: GuiState</code></strong> – the wire-shaped state mirror the front end renders.</li>
+<li><strong><code>host: Box&lt;dyn HostResources&gt;</code></strong> – the only path to the filesystem outside
+structure loading.</li>
+<li><strong><code>bringup: BringupState</code></strong> – the non-blocking startup state machine.</li>
+</ul>
+<h2 id="the-host-seam"><a class="header" href="#the-host-seam">The host seam</a></h2>
+<p>The same <code>App</code> runs in two shells. The split is two traits:</p>
+<ul>
+<li><strong><code>HostResources</code></strong> (<code>host_resources.rs</code>) is what the App pulls from the
+host: read a file, find the view-preset directory, name the initial structure
+path. Desktop reads the real filesystem; web returns <code>None</code> for the
+path-based pieces and feeds structure bytes in by a separate flow.</li>
+<li><strong><code>HostEffects</code></strong> (<code>host_effects.rs</code>) is what the App pushes to the host each
+tick: serialized dirty GUI sections, a segment-panel tail-tip change, a
+fullscreen flip, and a progress blob to persist. The desktop host applies
+these to its winit window and <code>~/.foldit/</code> data dir; the web host turns the
+state push into a JS callback and persists progress to OPFS, no-opping the
+desktop-only effects.</li>
+</ul>
+<p>Neither trait mentions a window, a webview, or wasm. That is the portability
+seam: <code>foldit-core</code> compiles for both the desktop target and <code>wasm32</code> without
+conditioning on the shell.</p>
+<h2 id="data-flow"><a class="header" href="#data-flow">Data flow</a></h2>
+<pre><code>        input (keys, mouse, commands, requests)
+                        |
+                        v
+  front end  &lt;----  foldit_core::App  ----&gt;  viso engine (texture)
+   (webview /        |   |   |   |
+    canvas)          |   |   |   +--&gt; RunnerClient --&gt; plugin workers
+        ^            |   |   |                          (rosetta, models)
+        |            |   |   +------&gt; ScoreCoordinator
+        |            |   +----------&gt; Viz overlays
+        |            +--------------&gt; Session (history, selection, focus)
+        |                                  |
+        |                                  v
+        |                          SessionUpdate batch
+        |                                  |
+        |          +------------+----------+-----------+
+        |          v            v                      v
+        |   RenderProjector  RunnerProjector     GuiProjector
+        |     (engine)        (plugin workers)    (GuiState)
+        |                                              |
+        +------------ HostEffects::push_state ---------+
+</code></pre>
+<p>Each frame, <code>App::tick</code> advances startup, applies plugin updates, drains queued
+commands, polls scores and viz replies, then drains the <code>Session</code>’s
+<code>SessionUpdate</code> batch once and routes it to the three projectors. The render
+projector writes to the viso engine, the runner projector broadcasts to plugin
+workers, and the GUI projector rebuilds the dirty <code>GuiState</code> sections, which are
+serialized and handed to <code>HostEffects::push_state</code>. The ordered walk is in
+<a href="#the-per-frame-tick">The Per-Frame Tick</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-per-frame-tick"><a class="header" href="#the-per-frame-tick">The Per-Frame Tick</a></h1>
+<p><code>App::tick(dt, fx)</code> is the single drive loop. The host calls it once per frame
+and passes a <code>&amp;mut dyn HostEffects</code> sink for the per-frame outputs. The order
+matters: several steps run before the change-event drain specifically so the
+state they mutate lands in this frame’s batch rather than the next. The walk
+below follows <code>crates/foldit-core/src/app/mod.rs</code>.</p>
+<ol>
+<li>
+<p><strong><code>advance_startup()</code></strong> – step the non-blocking bring-up state machine. It
+runs first so a publish a startup step triggers (the structure parse, the
+post-<code>Init</code> adoption) is in this frame’s batch. Inert once bring-up is done.
+See <a href="#history-and-scoring">History and Scoring</a> for the score side and
+<a href="#the-plugin-runner">The Plugin Runner</a> for the warm/init phases.</p>
+</li>
+<li>
+<p><strong><code>apply_backend_updates()</code></strong> – drain whatever plugin workers have streamed
+(op frames, completions) and apply them to the session.</p>
+</li>
+<li>
+<p><strong>Drain queued dispatches</strong> – ops enqueued this frame by
+<code>on_dispatch_op</code> are taken and run through <code>handle_dispatch_op</code>.</p>
+</li>
+<li>
+<p><strong><code>scores.poll(...)</code></strong> – apply this tick’s async score replies before the
+drain, so their <code>ScoresChanged</code> lands in this batch.</p>
+</li>
+<li>
+<p><strong><code>runner_client.poll_query_results()</code></strong> – collect async viz query replies;
+when any arrived, <code>viz.apply_replies(...)</code> decodes them into overlay payloads.</p>
+</li>
+<li>
+<p><strong><code>store.take_updates()</code></strong> – drain the <code>SessionUpdate</code> stream once. Everything
+downstream reads this one <code>changes</code> slice. <code>has_geometry</code> is set when the
+batch carries a scene-mutating variant (see
+<a href="#the-change-event-stream">The Change-Event Stream</a>).</p>
+</li>
+<li>
+<p><strong>At-rest viz refresh</strong> – when the engine exists, startup has settled, the
+batch has geometry, and no edit is pending, refresh held connections and step
+the structural overlays. A view-options toggle also reapplies options.</p>
+</li>
+<li>
+<p><strong><code>projectors.runner.consume(...)</code></strong> – broadcast the batch to plugin workers
+(Full or Delta snapshot diffs), skipping tentative per-cycle edits. Only when
+the batch is non-empty and an orchestrator is installed.</p>
+</li>
+<li>
+<p><strong><code>projectors.render.consume(...)</code> then <code>viz.push(engine)</code></strong> – republish
+scene geometry to viso and flush the overlay cache. The render projector
+consumes tentative edits (the streaming/live frames) that the runner
+projector skipped.</p>
+</li>
+<li>
+<p><strong><code>request_scores()</code></strong> – when settled, geometry changed, and nothing is
+pending or previewing, ask the scoring plugin for a fresh breakdown.</p>
+</li>
+<li>
+<p><strong><code>update_engine(dt)</code> and <code>update_frame_visuals()</code></strong> – advance viso (camera
+animation, mesh swaps) and the per-frame overlay visuals.</p>
+</li>
+<li>
+<p><strong>Tail tip</strong> – runs after the engine update so the camera is settled this
+frame. Core projects the open segment panel’s CA to a screen position
+(off-screen, closed, or no engine all resolve to <code>None</code>) and stages a change
+only when it moved; the debounce lives on the front end.</p>
+</li>
+<li>
+<p><strong><code>projectors.gui.consume(...)</code></strong> – rebuild the dirty <code>GuiState</code> sections
+from the batch and the App-owned dirty flags. Returns whether the open
+segment auto-closed (target evicted), which closes the panel.</p>
+</li>
+<li>
+<p><strong>Push to the host</strong> – <code>bridge::push::serialize_dirty</code> produces the JSON for
+just the dirty sections; <code>fx.push_state</code> ships it. The remaining
+<code>HostEffects</code> outputs (tail update, fullscreen flip, progress to persist) are
+drained and forwarded if set.</p>
+</li>
+</ol>
+<p>The function carries a <code>too_many_lines</code> allow with the reason that the frame
+order has to stay readable in one place; splitting it would scatter the
+sequencing that this list depends on.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-change-event-stream"><a class="header" href="#the-change-event-stream">The Change-Event Stream</a></h1>
+<p><code>Session</code> mutations do not call into the render engine, the plugin workers, or
+the GUI directly. Every observable mutation pushes one <code>SessionUpdate</code> onto an
+internal queue. Once per frame the tick drains that queue and hands the batch to
+each projector, which decides independently how to react.</p>
+<h2 id="sessionupdate"><a class="header" href="#sessionupdate">SessionUpdate</a></h2>
+<p><code>SessionUpdate</code> (in <code>crates/foldit-core/src/session/change.rs</code>) is signal-only:
+it names <em>what changed</em>, never the payload. Carrying payloads would duplicate
+state the projectors already read from <code>Session</code> and invite drift, so each
+projector re-derives what it needs from <code>Session</code> when it sees a relevant
+variant.</p>
+<p>The variants:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variant</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Edit { tentative }</code></td><td>A structural/coordinate edit. <code>tentative</code> marks per-cycle live edits (a pull-drag, a mid-action plugin frame); the plugin broadcaster and persistent projectors skip those, the render projector consumes them.</td></tr>
+<tr><td><code>HeadMoved</code></td><td>The history head moved (undo / redo / jump / commit / reset).</td></tr>
+<tr><td><code>PreviewAdded</code> / <code>PreviewUpdated</code> / <code>PreviewDiscarded</code></td><td>A transient overlay entity was added, had its geometry updated in place (a streaming frame), or was dropped.</td></tr>
+<tr><td><code>ScoresChanged</code></td><td>A head / edit / checkpoint score value changed.</td></tr>
+<tr><td><code>SelectionChanged</code></td><td>The residue selection changed.</td></tr>
+<tr><td><code>FocusChanged</code></td><td>Session focus changed (Tab-cycle or reset).</td></tr>
+<tr><td><code>BubbleChanged</code></td><td>The active tutorial bubble cursor advanced or stepped back.</td></tr>
+<tr><td><code>PuzzleChanged</code></td><td>A puzzle loaded, or a free-form load dropped the objective.</td></tr>
+<tr><td><code>ViewOptionsChanged</code></td><td>A render option toggled, or a preset applied.</td></tr>
+<tr><td><code>EntityAppearanceChanged</code></td><td>A per-entity ambient appearance override changed.</td></tr>
+<tr><td><code>CurationChanged</code></td><td>A history curation flag changed (pin / unpin / exclude-from-best).</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>SessionUpdate::is_geometry()</code> is true for the coordinate-mutating variants
+(<code>Edit</code>, <code>HeadMoved</code>, and the three <code>Preview</code> variants). The tick uses it as the
+single key for “the scene, scores, and overlays are now stale”: an assembly
+republish, an at-rest viz refresh, and a score request all gate on it.</p>
+<h2 id="the-consumer-contract"><a class="header" href="#the-consumer-contract">The consumer contract</a></h2>
+<p>Each projector implements <code>SessionUpdateConsumer</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait SessionUpdateConsumer {
+    type Sources&lt;'a&gt;;
+    type Sink;
+    type Out;
+    fn consume(
+        &amp;mut self,
+        updates: &amp;[SessionUpdate],
+        sources: Self::Sources&lt;'_&gt;,
+        sink: &amp;mut Self::Sink,
+    ) -&gt; Self::Out;
+}
+<span class="boring">}</span></code></pre>
+<p>A consumer reads the drained batch plus borrowed <code>Sources</code> (the <code>Session</code>, and
+whatever else it needs, such as the engine or the score state) and writes its
+one <code>Sink</code>. The three implementations:</p>
+<ul>
+<li><strong><code>RenderProjector</code></strong> – <code>Sink</code> is the viso engine; it republishes geometry
+and stamps connections.</li>
+<li><strong><code>RunnerProjector</code></strong> – <code>Sink</code> is the orchestrator; it broadcasts Full/Delta
+snapshots to plugin workers.</li>
+<li><strong><code>GuiProjector</code></strong> – <code>Sink</code> is <code>GuiState</code>; it rebuilds the dirty sections. See
+<a href="#state-and-the-gui-bridge">State and the GUI Bridge</a>.</li>
+</ul>
+<p>Because the batch is signal-only and the projectors are independent, adding a new
+observer means implementing the trait and adding one drain call to the tick; the
+mutation sites do not change.</p>
+<h2 id="what-session-owns"><a class="header" href="#what-session-owns">What Session owns</a></h2>
+<p><code>Session</code> (<code>crates/foldit-core/src/session/mod.rs</code>) is the authoritative document
+over the whole scene. It owns the two-layer <code>History</code>, the transient preview
+entities (presence in the <code>transient</code> map <em>is</em> the preview signal), per-entity
+display names, the residue selection, per-entity appearance overrides, the
+session focus, the title, the optional <code>Puzzle</code>, and the pending <code>SessionUpdate</code>
+queue. History and the puzzle add-on are covered in
+<a href="#history-and-scoring">History and Scoring</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="state-and-the-gui-bridge"><a class="header" href="#state-and-the-gui-bridge">State and the GUI Bridge</a></h1>
+<p>The front end never holds the authoritative game state. Core owns it in
+<code>GuiState</code> and pushes the parts that changed; the front end renders what it
+receives and sends intents back. Desktop and web use the same message shapes;
+only the byte-delivery channel differs.</p>
+<h2 id="guistate-and-dirtyflags"><a class="header" href="#guistate-and-dirtyflags">GuiState and DirtyFlags</a></h2>
+<p><code>GuiState</code> (in <code>crates/foldit-gui/src/lib.rs</code>) is a struct of named sections:
+<code>app_state</code>, <code>score</code>, <code>puzzle</code>, <code>selection</code>, <code>view</code>, <code>ui</code>, <code>actions</code>,
+<code>loading</code>, <code>scene</code>, <code>history</code>, <code>panels</code>, <code>progress</code>, plus the per-residue
+<code>segment_info</code>. Some fields are authoritative source-of-truth maps that are not
+serialized (marked <code>#[serde(skip)]</code>); their wire mirrors are regenerated on each
+mutation. For example <code>panels_open</code> and <code>panels_positions</code> are the truth, and
+the <code>panels</code> section is rebuilt from them.</p>
+<p>A <code>DirtyFlags</code> bitset tracks which sections changed since the last push:
+<code>SCORE</code>, <code>SELECTION</code>, <code>VIEW</code>, <code>UI</code>, <code>LOADING</code>, <code>ACTIONS</code>, <code>SCENE</code>, <code>PUZZLE</code>,
+<code>APP_STATE</code>, <code>HISTORY</code>, <code>HISTORY_LIVE</code>, <code>TEXT_BUBBLE</code>, <code>SEGMENT</code>, <code>PANELS</code>,
+<code>PROGRESS</code>. The GUI projector and the App raise bits; at the end of the tick
+<code>bridge::push::serialize_dirty</code> emits only the dirty sections as a partial JSON
+object and clears the flags. The front end merges that partial into its local
+copy. An unchanged section is never serialized.</p>
+<p><code>app_state</code> is the <code>AppPhase</code> lifecycle gate the front end keys its top-level
+view off: <code>Initializing</code> and <code>LoadingSession</code> show the loading screen, <code>Landing</code>
+is the menus with no session, and <code>InSession</code> is live play. (<code>Downloading</code> is
+defined but never entered; there is no App-orchestrated download boundary
+today.)</p>
+<h2 id="the-bridge"><a class="header" href="#the-bridge">The bridge</a></h2>
+<p><code>foldit_gui::bridge</code> (<code>crates/foldit-gui/src/bridge/</code>) is transport-agnostic.
+Both shells share its four submodules:</p>
+<ul>
+<li><strong><code>message</code></strong> – <code>IpcMessage</code> (the inbound envelope) and <code>RequestKind</code>.</li>
+<li><strong><code>decode</code></strong> – parse inbound JSON into typed commands.</li>
+<li><strong><code>push</code></strong> – <code>serialize_dirty</code>, the dirty-section serializer.</li>
+<li><strong><code>transport</code></strong> – the <code>Transport</code> trait and <code>RequestResult</code>; the per-platform
+delivery channel.</li>
+</ul>
+<p>Inbound traffic is one of: fire-and-forget commands (<code>AppCommand</code>,
+<code>ViewportInput</code>), op dispatches (<code>OpDispatch</code>, queued and drained on the next
+tick), and synchronous requests.</p>
+<h2 id="the-request-round-trip"><a class="header" href="#the-request-round-trip">The request round-trip</a></h2>
+<p><code>App::handle_request(kind, payload) -&gt; RequestResult</code> resolves a request
+synchronously and returns <code>Ok(json)</code> or <code>Err(message)</code>. <code>RequestKind</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Kind</th><th>Returns</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ReadResourceFile</code></td><td>base64-wrapped file bytes, read through <code>HostResources::read_file</code></td></tr>
+<tr><td><code>PanelsCatalog</code></td><td>the plugin-contributed panel list (empty on wasm)</td></tr>
+<tr><td><code>SettingsCatalog</code></td><td>the plugin settings tabs (empty on wasm)</td></tr>
+<tr><td><code>PluginQuery</code></td><td>base64-wrapped opaque plugin reply bytes for a query id, run against the live focus, selection, and designable set (rejected on wasm)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Binary replies are wrapped as <code>{ "encoding": "base64", "content": ... }</code>, the
+envelope the JS request path expects.</p>
+<h2 id="how-the-two-shells-deliver-bytes"><a class="header" href="#how-the-two-shells-deliver-bytes">How the two shells deliver bytes</a></h2>
+<p>The message shapes above are identical across shells. What differs:</p>
+<ul>
+<li><strong>Desktop</strong> (<code>crates/foldit-desktop/src/window.rs</code>): the wry webview posts IPC
+messages that arrive on an <code>mpsc</code> channel; the event loop decodes them and
+calls into <code>App</code>. State pushes are forwarded to the webview.</li>
+<li><strong>Web</strong> (<code>crates/foldit-web/src/lib.rs</code>): JS calls the <code>FolditApp</code>
+<code>wasm-bindgen</code> methods directly. State pushes invoke a registered JS callback
+with the JSON string; async requests resolve through a second callback. No
+JSON round-trips through a <code>window.ipc</code> shim.</li>
+</ul>
+<p>See <a href="#foldit-desktop">foldit-desktop</a> and
+<a href="#foldit-web">foldit-web</a> for the shell-specific lifecycles, and
+<a href="#the-frontend">The Frontend</a> for the JavaScript side.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="history-and-scoring"><a class="header" href="#history-and-scoring">History and Scoring</a></h1>
+<h2 id="two-layer-history"><a class="header" href="#two-layer-history">Two-layer history</a></h2>
+<p><code>History</code> (<code>crates/foldit-core/src/history/</code>) is two cooperating DAGs:</p>
+<ol>
+<li><strong>Entity timelines (lanes).</strong> Each <code>EntityId</code> has its own <code>EntityHistory</code>, a
+slotmap of <code>EntitySnapshot</code>s linked parent-to-children. A snapshot owns the
+entity payload as an <code>Arc&lt;MoleculeEntity&gt;</code>.</li>
+<li><strong>Checkpoint graph.</strong> A slotmap of <code>Checkpoint</code>s, also linked
+parent-to-children. Each checkpoint carries an
+<code>IndexMap&lt;EntityId, EntitySnapshotId&gt;</code> (which lane snapshot each entity was at)
+plus per-checkpoint state: scores and filter status. It does not own snapshot
+payloads; it points into the lanes.</li>
+</ol>
+<p>The cross-DAG invariant: for every entity in the checkpoint head, the lane head
+is either that committed snapshot or a tentative snapshot whose parent is it. An
+in-flight action’s open tentative sits one step past the committed head on its
+lane. This is asserted under <code>debug_assertions</code> at the tail of every
+DAG-bearing event.</p>
+<p>Every checkpoint-bearing operation (commit, undo, redo, jump, reset) funnels
+through one private <code>History::record</code>; the public methods are thin shims that
+build a <code>HistoryEvent</code> and delegate. Per-cycle byte mutation (the streaming
+<code>action_update</code>) and curation (pin, unpin, exclude-from-best, budget) change
+neither DAG topology and bypass the record root.</p>
+<p><code>History</code> enforces only the structural action lock: one open tentative per lane,
+and a frozen committed head (no navigation or immediate-commit mutation) while
+any action is in flight. Multi-client locking, where the runner is server-side
+and clients are remote, is the orchestrator’s <code>EntityLockTable</code>, not this
+module’s concern.</p>
+<p><code>HeadMoved</code> (or <code>Edit</code>) is emitted on each of these so the projectors rebuild.
+The history wire form is pushed to the front end as the <code>HISTORY</code> section, with a
+lighter <code>HISTORY_LIVE</code> patch for in-flight tentative score/label updates that
+should not reproject the whole graph.</p>
+<h2 id="scoring"><a class="header" href="#scoring">Scoring</a></h2>
+<p><code>ScoreCoordinator</code> (<code>crates/foldit-core/src/app/score_coordinator.rs</code>) owns the
+score-term weight map, the term-name alignment key, the labeled met-filter raw
+bonus, and the in-flight composition-score targets. The score types it weights
+are in <code>crates/foldit-core/src/scores.rs</code>.</p>
+<h3 id="raw-versus-game-score"><a class="header" href="#raw-versus-game-score">Raw versus game score</a></h3>
+<p>A plugin score report carries RAW (unweighted) per-term energies, both
+whole-pose and per-residue, plus the term-name list. Core does the weighting: it
+multiplies each raw term by the coordinator’s weight map to get the weighted
+total (<code>ScoreReport::weighted_total</code>) and the per-residue scalars used for
+coloring.</p>
+<p>The displayed <strong>game</strong> score is the weighted raw total run through
+<code>rosetta_raw_to_game</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>((-raw + 800.0) * 10.0).max(0.0)
+<span class="boring">}</span></code></pre>
+<p>so lower energy reads as a higher game score, floored at zero. For free-form
+(“scientist”) sessions the raw Rosetta number is what is surfaced; for
+tutorial/campaign/science puzzles the game framing and a target are shown
+(<code>ScoringMode</code>).</p>
+<p>Two raw bonuses fold into the game total before the conversion: the loaded
+puzzle’s met-filter bonus (summed across filters, held by the coordinator) and
+the per-report <code>bonus_breakdown</code> the plugin forwards. Both are in raw energy with
+the same sign convention as the terms.</p>
+<h3 id="stamping"><a class="header" href="#stamping">Stamping</a></h3>
+<p>Two paths land scores on the session:</p>
+<ul>
+<li><strong>Whole-assembly poll</strong> (<code>apply_score_reports</code>): weights the chosen report and
+stamps it onto the sole open edit if one is pending
+(<code>sole_pending_request_id</code>), otherwise onto the committed head.</li>
+<li><strong>Composition scores per checkpoint</strong>: a committed checkpoint’s score arrives
+asynchronously and is matched to its checkpoint through a
+<code>request_id -&gt; CheckpointId</code> join held in <code>score_targets</code>. The reply is
+weighted, the bonuses added, the result stamped with
+<code>set_checkpoint_scores</code>, and the spent target removed.</li>
+</ul>
+<p>Either way the RAW per-term breakdown is retained as a <code>StoredBreakdown</code>
+(whole-pose and per-residue, aligned to the session’s <code>term_names</code>), so the
+per-residue segment panel and per-term displays can be rebuilt without
+re-querying. A <code>debug_assert</code> checks breakdown/term-name alignment.</p>
+<p>The tick requests a fresh score only when startup has settled, the batch carried
+geometry, and nothing is pending or previewing. See
+<a href="#the-per-frame-tick">The Per-Frame Tick</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="foldit-core"><a class="header" href="#foldit-core">foldit-core</a></h1>
+<p>The host-agnostic application. <code>foldit-core</code> owns all game logic and state and
+compiles for both the desktop target and <code>wasm32</code>. Outside structure loading it
+makes no <code>std::fs</code> calls of its own; the host provides resource access through
+<code>HostResources</code>.</p>
+<p>The public surface (<code>crates/foldit-core/src/lib.rs</code>) is small: <code>App</code>,
+<code>TailUpdate</code>, <code>HostResources</code>, <code>HostEffects</code>, the <code>puzzle</code> (structure_io)
+module, and the native-only plugin-locator helpers. Everything else is
+<code>pub(crate)</code>.</p>
+<h2 id="module-map"><a class="header" href="#module-map">Module map</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Module</th><th>Owns</th></tr>
+</thead>
+<tbody>
+<tr><td><code>app</code></td><td><code>App</code> and the per-frame <code>tick</code>; command/dispatch handling, startup, preview, score coordination, view options</td></tr>
+<tr><td><code>session</code></td><td><code>Session</code>: the authoritative document (history, selection, focus, view options, transient previews, the optional <code>Puzzle</code>) and the <code>SessionUpdate</code> stream</td></tr>
+<tr><td><code>history</code></td><td>The two-layer undo/redo model: per-entity lanes plus the checkpoint graph</td></tr>
+<tr><td><code>runner_client</code></td><td><code>RunnerClient</code>: the orchestrator handle and native stream bookkeeping; the kick/poll bring-up pairs</td></tr>
+<tr><td><code>runner_projector</code></td><td>Broadcasts session changes to plugin workers as Full/Delta snapshots</td></tr>
+<tr><td><code>render_projector</code></td><td>Republishes geometry and connections to the viso engine</td></tr>
+<tr><td><code>gui_projector</code></td><td>Rebuilds the dirty <code>GuiState</code> sections (and the segment panel)</td></tr>
+<tr><td><code>scores</code></td><td>Core-owned score types: RAW per-term energies, weighting, the raw-to-game conversion</td></tr>
+<tr><td><code>viz</code></td><td>Plugin-sourced overlay decoders and the <code>Viz</code> overlay cache (native only)</td></tr>
+<tr><td><code>host_resources</code> / <code>host_effects</code></td><td>The two host-boundary traits</td></tr>
+<tr><td><code>puzzle_toml</code> / <code>puzzle_load</code> / <code>puzzle_setup</code></td><td>Puzzle manifest parsing, asset loading, and setup (filters, constraints, design gating)</td></tr>
+<tr><td><code>structure_io</code> (re-exported as <code>puzzle</code>)</td><td>Structure-path resolution and format loading; the one place core reads files</td></tr>
+<tr><td><code>wire_params</code></td><td>Conversion between wire <code>ParamValue</code> and the orchestrator’s native form</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="key-types"><a class="header" href="#key-types">Key types</a></h2>
+<ul>
+<li><strong><code>App</code></strong> – the single owner; see <a href="#overview">Architecture Overview</a>.</li>
+<li><strong><code>Session</code></strong> and <strong><code>SessionUpdate</code></strong> – see <a href="#the-change-event-stream">The Change-Event Stream</a>.</li>
+<li><strong><code>HostResources</code></strong> / <strong><code>HostEffects</code></strong> – the portability seam; see
+<a href="#overview">Architecture Overview</a>.</li>
+</ul>
+<h2 id="cross-platform-notes"><a class="header" href="#cross-platform-notes">Cross-platform notes</a></h2>
+<p>The scoring path is reachable on wasm, so the score types, their conversion, and
+the weighting methods build on every target; only the file-IO weight loader and
+the structural-viz overlays are native-gated (<code>#[cfg(not(target_arch = "wasm32"))]</code>).
+<code>structure_io</code> resolves an existing file path directly and downloads a PDB id
+from RCSB on native; on wasm the web entry crate fetches structure bytes and
+feeds them in instead.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="foldit-desktop"><a class="header" href="#foldit-desktop">foldit-desktop</a></h1>
+<p>The default binary, named <code>foldit</code> (<code>default-run = "foldit"</code>). It runs
+<code>foldit_core::App</code> inside a winit event loop with a wry webview for the UI and
+wgpu for rendering. All game logic lives in the core; this crate is the desktop
+shell.</p>
+<h2 id="entry-point"><a class="header" href="#entry-point">Entry point</a></h2>
+<p><code>main.rs</code> is thin: it sets up logging, resolves the structure path from argv
+(<code>foldit_core::puzzle::resolve_structure_path</code>), constructs the App with a
+<code>DesktopHost</code>, and hands it to <code>window::run</code>. With no argument the App settles at
+the menus (<code>Landing</code>). It also installs signal handlers that kill plugin worker
+process groups on <code>SIGINT</code>/<code>SIGTERM</code> so Python subprocesses are not orphaned.</p>
+<p>Before anything reads an asset, <code>init_bundle_resource_paths</code> probes a small
+candidate list relative to the executable for a packaged resource directory
+(macOS <code>Contents/Resources</code>, Linux <code>../lib/foldit</code> or <code>../share/foldit</code>, or next
+to the exe) and, if it finds one containing <code>assets/gui</code>, points the resource
+resolvers at it through their <code>FOLDIT_*_ROOT</code> environment overrides. A
+pre-existing env value always wins, and a dev <code>cargo run</code> matches no candidate,
+so this is a no-op outside a real bundle. See
+<a href="#assets-and-bundling">Assets and Bundling</a>.</p>
+<h2 id="desktophost"><a class="header" href="#desktophost">DesktopHost</a></h2>
+<p><code>host.rs</code> implements <code>foldit_core::HostResources</code>: real filesystem reads, a
+view-preset directory resolved relative to the executable (with a dev fallback
+that walks up to the repo-root <code>assets/view_presets</code>), and the bootstrap
+structure path from argv.</p>
+<h2 id="the-event-loop"><a class="header" href="#the-event-loop">The event loop</a></h2>
+<p><code>window.rs</code> holds <code>AppRunner</code>, which owns the <code>App</code> by value and implements
+winit’s <code>ApplicationHandler</code>. It owns the wry webview, the IPC receiver, frame
+timing, and the dev-server wiring. It also runs the <code>HostEffects</code> side: a small
+single-threaded tokio runtime persists the high-score progress map to
+<code>~/.foldit/progress.json</code> off the event-loop thread, and the structure load is
+deferred until the webview’s loading screen is visible. State pushes from the
+tick are forwarded into the webview.</p>
+<h2 id="worker-artifacts"><a class="header" href="#worker-artifacts">Worker artifacts</a></h2>
+<p>The desktop app spawns plugin workers and dlopens the Python host dylib at
+runtime. <code>cargo run</code> builds neither; build them next to the exe with
+<code>cargo xtask build-host</code>. The dylib file name is platform-specific
+(<code>libfoldit_python_host.dylib</code>, <code>.so</code>, or <code>.dll</code>) and mirrors the name xtask
+uses. See <a href="#python-and-native-plugins">Python and Native Plugins</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="foldit-web"><a class="header" href="#foldit-web">foldit-web</a></h1>
+<p>The wasm32 entry crate. It mounts viso into a host-provided <code>&lt;canvas&gt;</code>, owns the
+<code>requestAnimationFrame</code> loop, and exposes <code>foldit_core::App</code> to JavaScript
+through <code>wasm-bindgen</code>. The same core that runs on desktop runs here; this crate
+is the wasm shell around it.</p>
+<p>Built as a <code>cdylib</code> for wasm and an <code>rlib</code> otherwise, so a workspace-wide
+<code>cargo check</code> on the host succeeds without invoking wasm-bindgen. The wasm-only
+body is gated with <code>#![cfg(target_arch = "wasm32")]</code>.</p>
+<h2 id="folditapp"><a class="header" href="#folditapp">FolditApp</a></h2>
+<p><code>FolditApp</code> is the <code>#[wasm_bindgen]</code> handle. It wraps the <code>App</code> (in an
+<code>Rc&lt;RefCell&lt;...&gt;&gt;</code> since wasm is single-threaded) plus two JS callbacks: one for
+state-section pushes, one for resolving async requests. The JS lifecycle:</p>
+<pre><code class="language-ignore">await init();                                    // panic hook + console logging
+await initThreadPool(navigator.hardwareConcurrency);  // rayon pool
+const app = new FolditApp();
+app.setStateCallback(json =&gt; onState(JSON.parse(json)));
+app.setResponseCallback((wishId, ok, payload) =&gt; ...);
+await app.start(canvas);                          // mounts viso, starts the rAF loop
+</code></pre>
+<p><code>start</code> builds a wgpu <code>RenderContext</code> against the canvas, constructs a
+<code>VisoEngine</code>, hands it to the App, and starts the render loop.</p>
+<h2 id="host-implementation"><a class="header" href="#host-implementation">Host implementation</a></h2>
+<p>The web <code>HostResources</code> returns <code>None</code> for the path-based pieces (no filesystem,
+no path-based presets) and the host fetches structure bytes itself, feeding them
+in through the orchestrator rather than by path. The <code>HostEffects</code> state push
+becomes a JS callback; the desktop-only effects (fullscreen, tail) are no-ops on
+web. High-score progress is persisted to the origin-private OPFS file system: a
+startup task reads <code>progress.json</code> and the rAF loop merges it once via
+<code>App::import_progress</code>.</p>
+<h2 id="same-bridge-as-desktop"><a class="header" href="#same-bridge-as-desktop">Same bridge as desktop</a></h2>
+<p>The IPC envelope, the <code>RequestKind</code> request shapes, and the dirty-section
+serializer are <code>foldit_gui::bridge</code>, shared with the desktop transport. Only the
+delivery mechanism changes: JS calls Rust functions directly through wasm-bindgen
+instead of round-tripping JSON through a webview IPC shim. See
+<a href="#state-and-the-gui-bridge">State and the GUI Bridge</a>.</p>
+<h2 id="viso-web-feature"><a class="header" href="#viso-web-feature">viso web feature</a></h2>
+<p>This crate deliberately does not enable viso’s <code>web</code> feature (see the comment in
+<code>Cargo.toml</code>). The wasm build is produced through xtask; see
+<a href="#xtask-commands">xtask Commands</a> (<code>build-web</code> and <code>package-web</code>).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="foldit-gui"><a class="header" href="#foldit-gui">foldit-gui</a></h1>
+<p>The wire and state types shared by both shells. It holds <code>GuiState</code> and its
+sections, the command and dispatch enums, the JS-to-Rust bridge, and the
+serializable history wire types. It depends on neither viso nor a window system,
+so both <code>foldit-core</code> and the shells can pull it in cheaply.</p>
+<p>This crate is an in-tree root workspace member, not a submodule. (Its
+<code>Cargo.toml</code> repository field points at this repo, and it is absent from
+<code>.gitmodules</code>.)</p>
+<h2 id="what-it-exposes"><a class="header" href="#what-it-exposes">What it exposes</a></h2>
+<ul>
+<li><strong><code>GuiState</code></strong> and <code>DirtyFlags</code> – the section-shaped state mirror and the
+bitset that tracks which sections changed. See
+<a href="#state-and-the-gui-bridge">State and the GUI Bridge</a>.</li>
+<li><strong><code>AppPhase</code></strong> – the top-level lifecycle phase the front end gates its root
+view on (<code>Initializing</code>, <code>Landing</code>, <code>LoadingSession</code>, <code>InSession</code>; plus a
+reserved <code>Downloading</code>).</li>
+<li><strong><code>actions</code></strong> – <code>AppCommand</code>, <code>OpDispatch</code>, <code>ViewportInput</code>: the inbound
+intent types.</li>
+<li><strong><code>bridge</code></strong> – <code>IpcMessage</code>, <code>RequestKind</code>, <code>RequestResult</code>, <code>Transport</code>, the
+JSON decoder, and <code>push::serialize_dirty</code>. Transport-agnostic; desktop and web
+share it.</li>
+<li><strong><code>wire</code></strong> – the serializable history and checkpoint types
+(<code>CheckpointInfo</code>, <code>HistorySection</code>, <code>HistoryCommand</code>, <code>HistoryLiveUpdate</code>,
+<code>FilterStatus</code>, and friends) plus <code>WireId</code>.</li>
+</ul>
+<p>The state sections serialize to JSON for the front end; some authoritative
+fields are kept off the wire (<code>#[serde(skip)]</code>) and their wire mirrors are
+regenerated on mutation.</p>
+<h2 id="naming-note"><a class="header" href="#naming-note">Naming note</a></h2>
+<p>The JavaScript package under <code>webview/</code> is also named <code>foldit-gui</code>
+(<code>webview/package.json</code>). It is the SolidJS front end and is unrelated to this
+Rust crate beyond consuming the wire shapes this crate defines. See
+<a href="#the-frontend">The Frontend</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="render-engine-viso"><a class="header" href="#render-engine-viso">Render Engine (viso)</a></h1>
+<p>viso is the GPU render engine, pulled in as the <code>crates/viso</code> submodule. It
+takes a molecule assembly and produces a 2D texture; the host decides what to do
+with it (a winit window on desktop, an HTML canvas on web). Foldit constructs a
+<code>VisoEngine</code>, hands it to the <code>App</code> through the engine harness, and the render
+projector republishes geometry to it whenever the scene changes.</p>
+<p>Foldit depends on viso by git tag (<code>v0.3.6</code>), with a <code>[patch]</code> that currently
+redirects it to the local submodule checkout. See
+<a href="#workspace-layout">Workspace Layout</a>.</p>
+<p>This book does not re-derive viso’s internals (impostor rendering, the
+post-processing pipeline, GPU picking, the background mesh thread, the camera and
+animation systems). Those are documented in viso’s own book.</p>
+<ul>
+<li>Repository and book source: <a href="https://github.com/foldit-org/viso">https://github.com/foldit-org/viso</a> (mdbook under
+<code>crates/viso/docs/</code>).</li>
+</ul>
+<p>For how Foldit drives viso each frame, see
+<a href="#the-per-frame-tick">The Per-Frame Tick</a>; for the overlays Foldit
+layers on top (clashes, voids, exposed hydrophobics, connections), see the
+<code>viz</code> module in <a href="#foldit-core">foldit-core</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="molecule-model-molex"><a class="header" href="#molecule-model-molex">Molecule Model (molex)</a></h1>
+<p>molex is the molecule model and structure-format codec, pulled in as the
+<code>crates/molex</code> submodule. It defines the <code>Assembly</code>, <code>MoleculeEntity</code>, and
+<code>EntityId</code> types that flow through the whole client: the session stores entities
+as <code>Arc&lt;MoleculeEntity&gt;</code>, history snapshots own them, the render projector hands
+assemblies to viso, and the plugin protocol serializes them across the IPC
+boundary.</p>
+<p>Unlike viso and the plugin SDK, molex is depended on as the published crates.io
+crate (<code>0.7.1</code>) with no <code>[patch]</code> block, so it builds from the release even when
+the <code>crates/molex</code> submodule is checked out. See
+<a href="#workspace-layout">Workspace Layout</a>.</p>
+<p>This book does not re-derive molex’s internals (the entity and assembly model,
+the format adapters, analysis, the codec and wire format, the Python bindings).
+Those are documented in molex’s own book.</p>
+<ul>
+<li>Repository and book source: <a href="https://github.com/foldit-org/molex">https://github.com/foldit-org/molex</a> (mdbook
+under <code>crates/molex/docs/</code>).</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-plugin-runner"><a class="header" href="#the-plugin-runner">The Plugin Runner</a></h1>
+<p>The molecular backends are not compiled into the client. They run as
+out-of-process plugins hosted by <strong>foldit-runner</strong> (the <code>crates/foldit-runner</code>
+submodule). foldit-runner speaks one protocol to every plugin regardless of the
+language it is written in. Rosetta is itself a plugin under
+<code>crates/foldit-runner/plugins/rosetta/</code>; there is no in-process Rosetta executor.</p>
+<h2 id="orchestrator"><a class="header" href="#orchestrator">Orchestrator</a></h2>
+<p><code>foldit_runner::Orchestrator</code> is the host-facing type. The core’s <code>RunnerClient</code>
+holds one (<code>crates/foldit-core/src/runner_client/mod.rs</code>) and reaches into it to
+discover plugins, dispatch ops and queries, and pump per-frame updates. The
+orchestrator owns the worker process pool and the entity-lock table; dispatch
+flows through the unified plugin path, so adding a backend does not add a code
+path in core.</p>
+<p>A new orchestrator is installed on each structure load
+(<code>init_orchestrator</code>), and <code>reset_for_new_structure</code> releases locks and drops
+the per-plugin sessions (the warm workers stay up) so each plugin re-<code>Init</code>s
+against the new structure.</p>
+<h2 id="bring-up-kick-and-poll"><a class="header" href="#bring-up-kick-and-poll">Bring-up: kick and poll</a></h2>
+<p>Plugin bring-up is non-blocking; it never stalls the loading screen. Each phase
+is a kick that starts work and a poll that finishes whatever completed since the
+last frame. The startup state machine in
+<code>crates/foldit-core/src/app/startup.rs</code> accumulates completions across frames
+against an expected set while the host keeps rendering.</p>
+<ul>
+<li><strong>Warm</strong> (<code>kick_warms</code> / <code>poll_warms</code>). Discover plugins under the plugins
+root, then for each one bind a listener and spawn the worker child. The
+connects finish on later polls. A plugin whose kick fails is dropped from the
+expected set so bring-up cannot hang on it; failures degrade to “that plugin
+disabled”, never an abort.</li>
+<li><strong>Init</strong> (<code>kick_inits</code> / <code>poll_inits</code>). For each warmed plugin, send an <code>Init</code>
+against the loaded assembly, carrying the puzzle payload (ligand assets,
+catalytic constraints, and config params such as the weight patch and
+objective filters). Each plugin replies with its normalized post-<code>Init</code>
+assembly, which the host adopts.</li>
+<li><strong>Score</strong>. Once a session is up, the first score is requested and stamped, and
+the App flips to <code>InSession</code>.</li>
+</ul>
+<p>Ops dispatched during play follow the same model: streaming op frames arrive as
+tentative edits, and the orchestrator’s pump is drained each tick
+(<code>apply_backend_updates</code>). Queries (used by the structural overlays) can be fired
+non-blocking (<code>request_query</code> / <code>poll_query_results</code>) or resolved synchronously
+(<code>dispatch_plugin_query</code>) for panel-initiated reads.</p>
+<h2 id="workers-and-ipc"><a class="header" href="#workers-and-ipc">Workers and IPC</a></h2>
+<p>The worker binary is <strong><code>foldit-worker</code></strong> (<code>crates/foldit-runner</code>, built by
+<code>cargo xtask build-host</code>). Each plugin runs in its own worker process. The
+host-to-worker channel is native-only: control messages travel over an
+interprocess socket, and bulk data (assemblies, score payloads) travels over
+iceoryx2 shared memory (<code>crates/foldit-runner/src/ipc/</code>). On <code>SIGINT</code>/<code>SIGTERM</code>
+the desktop binary kills the worker process groups so Python subprocesses are not
+orphaned.</p>
+<p>See <a href="#python-and-native-plugins">Python and Native Plugins</a> for how a worker loads each plugin and
+<a href="#plugin-sdk-and-protocol">Plugin SDK and Protocol</a> for the protocol and manifest.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="python-and-native-plugins"><a class="header" href="#python-and-native-plugins">Python and Native Plugins</a></h1>
+<p>A plugin’s <code>plugin.toml</code> declares its <code>kind</code>. The worker loads the two kinds
+differently, and only the Python path pulls libpython into the process.</p>
+<h2 id="native-plugins"><a class="header" href="#native-plugins">Native plugins</a></h2>
+<p><code>kind = "native"</code> plugins are shared libraries that export the plugin vtable.
+The worker dlopens the library directly. Rosetta is the native plugin: its
+manifest names a <code>binary</code> basename that
+<code>PluginManifest::native_binary_name()</code> resolves to the platform-canonical file
+name (<code>librosetta_interactive.dylib</code>, <code>librosetta_interactive.so</code>, or
+<code>rosetta_interactive.dll</code>). The Rosetta plugin shim exports
+<code>foldit_plugin_vtable</code> from the existing <code>librosetta_interactive</code> dylib; there is
+no separate plugin dylib.</p>
+<h2 id="python-plugins"><a class="header" href="#python-plugins">Python plugins</a></h2>
+<p><code>kind = "python"</code> plugins (the <code>dummy</code>, <code>foundry</code>, and <code>simplefold</code> plugins
+under <code>crates/foldit-runner/plugins/</code>) run through <strong>foldit-python-host</strong>, a
+<code>cdylib</code> that links libpython. The worker dlopens it only when it is about to
+host a Python plugin, so libpython joins the process lazily; a session that uses
+only native plugins never loads it.</p>
+<p><code>foldit-python-host</code> is a root workspace member even though its source lives
+inside the <code>foldit-runner</code> submodule (<code>crates/foldit-runner/python-host</code>). It
+depends on <code>foldit-runner</code> for the <code>Plugin</code> trait, the proto and orchestrator
+types, and the C-ABI struct definitions, and on <code>foldit-plugin-sdk</code> for the
+<code>PluginError</code> value type its <code>impl Plugin for PyPlugin</code> builds.</p>
+<h2 id="locating-the-dylib"><a class="header" href="#locating-the-dylib">Locating the dylib</a></h2>
+<p>The dylib’s platform file name is a constant in <code>foldit-desktop</code>’s <code>main.rs</code>
+(<code>libfoldit_python_host.dylib</code> / <code>.so</code> / <code>.dll</code>), mirroring the name xtask
+builds. The worker finds it next to its own executable by default. When the
+dylib ships as a packaged resource instead, the desktop binary sets
+<code>FOLDIT_PYTHON_HOST_DYLIB</code> to its absolute path (inherited by the worker) during
+bundle-resource resolution. See <a href="#foldit-desktop">foldit-desktop</a>.</p>
+<p>The Python environments themselves are managed by pixi inside the runner
+submodule, not by the root pixi project; see
+<a href="#xtask-commands">xtask Commands</a> (<code>setup-envs</code>).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="plugin-sdk-and-protocol"><a class="header" href="#plugin-sdk-and-protocol">Plugin SDK and Protocol</a></h1>
+<p><strong>foldit-plugin-sdk</strong> (the <code>crates/foldit-plugin-sdk</code> submodule) defines the
+contract every plugin implements. It owns <code>plugin.proto</code>, the protocol types,
+and the <code>Plugin</code> trait, and it exposes a cbindgen C-ABI (consumed by the Rosetta
+C++ bridge) and pyo3 bindings, plus a <code>python/</code> layer of plugin-author
+utilities.</p>
+<p>The SDK is implemented and load-bearing, not a placeholder. <code>foldit-runner</code>
+depends on it and re-exports its proto types, the <code>Plugin</code> trait, the assembly
+payload, the C-ABI, and <code>PluginError</code>; <code>foldit-python-host</code> builds <code>PluginError</code>
+values against it directly. (The SDK’s own README still calls itself an early
+skeleton; that text is stale relative to the code.)</p>
+<h2 id="manifest"><a class="header" href="#manifest">Manifest</a></h2>
+<p>Each plugin ships a <code>plugin.toml</code> next to its assets. The manifest declares:</p>
+<ul>
+<li><code>id</code>, <code>name</code>, <code>kind</code> (<code>native</code> or <code>python</code>), and an <code>order</code>.</li>
+<li>A <code>[native]</code> or <code>[python]</code> block naming the binary or entry module.</li>
+<li><code>[[buttons]]</code> – user-facing action buttons. Each <code>op</code> matches a bridge action
+row; the entry also carries display text, an icon, an optional hotkey badge,
+and a tooltip.</li>
+<li><code>[[panels]]</code> – plugin-contributed UI panels. Each <code>entry</code> is a manifest-
+relative ES module path that the front end dynamically imports, deriving a
+launcher button from it. The runner resolves icon paths to absolute.</li>
+</ul>
+<p>The host reads manifests in two places: <code>Orchestrator::discover_plugins</code> builds
+the op/query/panel registry, and <code>foldit_core::locate_plugin_ui_entrypoints</code>
+walks <code>&lt;plugins_root&gt;/*/plugin.toml</code> to collect each declared panel <code>entry</code> as
+the <code>/plugins/&lt;id&gt;/&lt;entry&gt;</code> URL the release asset protocol is allowed to serve.</p>
+<h2 id="ops-queries-and-panels-at-runtime"><a class="header" href="#ops-queries-and-panels-at-runtime">Ops, queries, and panels at runtime</a></h2>
+<ul>
+<li><strong>Ops</strong> are dispatched actions (a minimize, a repack, a prediction). An op
+declares lock metadata, including whether it <code>creates_entities</code> (its output is
+a new entity to adopt rather than an edit of an existing lane).</li>
+<li><strong>Queries</strong> are read-only requests for derived data. The structural-viz
+overlays drive off queries, and a query stays inert until a plugin registers
+it (<code>RunnerClient::supports_query</code> gates the at-rest trigger).</li>
+<li><strong>Panels</strong> are plugin UI. The Rosetta plugin declares a <code>rama_map</code> panel; its
+panel module is built on demand by xtask and is not committed. The panel UI is
+currently a placeholder, and the manifest’s hotkey badges render but are not
+yet wired to dispatch.</li>
+</ul>
+<h2 id="es-module-build"><a class="header" href="#es-module-build">ES module build</a></h2>
+<p>Plugin panel modules are built with <code>cargo xtask build-rosetta-ui</code> (a <code>bun run build</code> in the plugin’s <code>ui/</code> directory) and copied into the staging bundle by
+<code>cargo xtask package</code>. See <a href="#xtask-commands">xtask Commands</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="quality-gates"><a class="header" href="#quality-gates">Quality Gates</a></h1>
+<p>The <code>justfile</code> collects the workspace checks. <code>just check-all</code> runs the four
+gates in sequence:</p>
+<pre><code>check-all: clippy deny machete file-lengths
+</code></pre>
+<ul>
+<li><strong><code>clippy</code></strong> – <code>cargo clippy --workspace --all-targets -- -D warnings</code>. Every
+warning is an error here, even though the workspace <code>[lints]</code> levels are
+<code>warn</code>: the lint table reports the debt picture, and this recipe is the gate
+that fails on it.</li>
+<li><strong><code>deny</code></strong> – <code>cargo deny check</code>. Advisory, license, and source audit.</li>
+<li><strong><code>machete</code></strong> – <code>cargo machete</code>. Unused-dependency report.</li>
+<li><strong><code>file-lengths</code></strong> – <code>python3 scripts/check_file_lengths.py</code>.</li>
+</ul>
+<p>Other recipes: <code>just check</code> (a plain <code>cargo check --workspace</code>, which stays green
+since warn-level lints do not break it), <code>just test</code>, <code>just doc</code>, <code>just warnings</code>
+(a clippy warning count), and <code>just lint</code> (per-rule, per-crate clippy
+breakdown). The <code>lint</code> recipe skips patched path deps (viso, molex): they are
+local sources dragged in by <code>[patch]</code>, are not lint-capped, and own their own
+gates in their own workspaces.</p>
+<h2 id="file-length-gate"><a class="header" href="#file-length-gate">File-length gate</a></h2>
+<p><code>scripts/check_file_lengths.py</code> fails if any root-member Rust source file exceeds
+800 lines. It walks only the root members’ <code>src</code> trees (<code>foldit-core</code>,
+<code>foldit-desktop</code>, <code>foldit-gui</code>, <code>foldit-web</code>, <code>xtask</code>, and
+<code>foldit-runner/python-host</code>); the excluded submodule directories are skipped. A
+file can opt out with the sentinel comment <code>// foldit:allow-long-file</code> in its
+first few lines, reserved for files whose length is intrinsic (an exhaustive test
+module), not as a way to dodge a real split.</p>
+<h2 id="deny-scoping"><a class="header" href="#deny-scoping">deny scoping</a></h2>
+<p><code>deny.toml</code> scopes the duplicate-version analysis to the native desktop targets
+(<code>aarch64-apple-darwin</code>, <code>x86_64-apple-darwin</code>), the platforms built and tested
+today. Without a target list, cargo-deny unions every target and counts
+Windows/Android/UEFI alternatives as duplicates. wasm32 is intentionally
+omitted; reqwest uses the browser fetch API there, which cargo-deny cannot model.
+When another platform is built, add its triple and re-run <code>cargo deny check bans</code> to enumerate the new skips to curate.</p>
+<h2 id="workspace-lint-policy"><a class="header" href="#workspace-lint-policy">Workspace lint policy</a></h2>
+<p><code>[workspace.lints.clippy]</code> in the root <code>Cargo.toml</code> mirrors viso’s clippy set
+(the broad groups plus a curated set of restriction lints) but every level is
+<code>warn</code>, not <code>deny</code>. The intent is to surface technical debt across the root
+members without the lint table itself gating the build; the <code>clippy</code> justfile
+recipe is where the gate bites. See
+<a href="#workspace-layout">Workspace Layout</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="xtask-commands"><a class="header" href="#xtask-commands">xtask Commands</a></h1>
+<p><code>xtask</code> is the build-automation binary. Run it with <code>cargo xtask &lt;command&gt;</code>. It
+pins the working directory to the workspace root, so the command works from any
+subdirectory. The full command set (<code>xtask/src/main.rs</code>):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Command</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td><code>setup-envs</code></td><td>Install the plugin Python environments in <code>crates/foldit-runner</code></td></tr>
+<tr><td><code>build-rosetta-interactive [--clean]</code></td><td>Build Rosetta from the rosetta-interactive checkout; <code>--clean</code> wipes the cmake build dir first</td></tr>
+<tr><td><code>package [--formats &lt;list&gt;] [--skip-assembly]</code></td><td>The desktop production path: assemble the staging payload, then build OS installers via cargo-packager</td></tr>
+<tr><td><code>build-molex</code></td><td>Rebuild the molex Python extension from local source</td></tr>
+<tr><td><code>build-gui</code></td><td>Build the front end (<code>bun run build</code>) and copy the dist into <code>assets/gui</code></td></tr>
+<tr><td><code>build-rosetta-ui</code></td><td>Build the Rosetta plugin’s panel ES module (<code>bun run build</code> in the plugin’s <code>ui/</code> dir)</td></tr>
+<tr><td><code>build-host [--debug]</code></td><td>Build the backend host artifacts (<code>foldit-worker</code> + the python-host dylib) into <code>target/&lt;profile&gt;/</code> next to the desktop exe</td></tr>
+<tr><td><code>build-web [--debug]</code></td><td>Build the <code>foldit-web</code> cdylib, run wasm-bindgen, emit JS glue to <code>webview/public/pkg/</code> (requires the nightly toolchain)</td></tr>
+<tr><td><code>package-web</code></td><td>The web production path: build the wasm artifact and run <code>bun run build:web</code> to produce a static site</td></tr>
+<tr><td><code>transcribe-filters</code></td><td>One-shot, idempotent transcription of legacy Rosetta puzzle filter/design-mask files into the curated level TOML</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="build-host"><a class="header" href="#build-host">build-host</a></h2>
+<p><code>build-host</code> matters for day-to-day desktop work. A plain <code>cargo run</code> rebuilds
+neither the worker nor the python-host dylib: the worker is a workspace-excluded
+binary, and the dylib is dlopened rather than linked. After pulling or changing
+runner code, run <code>cargo xtask build-host</code> so a fresh worker does not sit next to
+a stale dylib (which would fail to load on an ABI bump). It defaults to release;
+pass <code>--debug</code> to match a debug app build.</p>
+<h2 id="package"><a class="header" href="#package">package</a></h2>
+<p><code>cargo xtask package</code> is the desktop production path. It assembles a staging
+payload under <code>target/staging</code> and invokes cargo-packager (which needs
+<code>cargo install cargo-packager</code>) to produce installers: macOS <code>.app</code>/<code>.dmg</code>,
+Windows NSIS/MSI, Linux deb/AppImage. The cargo-packager config is
+<code>packager.json</code>. <code>--skip-assembly</code> packages the existing staging payload as-is
+for fast iteration on packaging config. See
+<a href="#assets-and-bundling">Assets and Bundling</a>.</p>
+<h2 id="pixi-aliases"><a class="header" href="#pixi-aliases">pixi aliases</a></h2>
+<p>The root <code>pixi.toml</code> exposes thin aliases over a subset of these commands
+(<code>setup-envs</code>, <code>build-rosetta-interactive</code>, <code>package</code>, <code>build-host</code>,
+<code>build-web</code>). They are conveniences; the work is done by xtask either way.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="assets-and-bundling"><a class="header" href="#assets-and-bundling">Assets and Bundling</a></h1>
+<h2 id="asset-layout"><a class="header" href="#asset-layout">Asset layout</a></h2>
+<p>Read-only assets live under <code>assets/</code> at the repo root:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Directory</th><th>Contents</th></tr>
+</thead>
+<tbody>
+<tr><td><code>assets/gui</code></td><td>The built front end (HTML/JS/wasm glue). Populated by <code>cargo xtask build-gui</code>; gitignored, not committed</td></tr>
+<tr><td><code>assets/levels</code></td><td>Per-puzzle level directories (the curated <code>puzzle.toml</code>, setup, and assets)</td></tr>
+<tr><td><code>assets/scoring</code></td><td>Score-term weight tables</td></tr>
+<tr><td><code>assets/view_presets</code></td><td>viso view-preset TOML files</td></tr>
+<tr><td><code>assets/models</code></td><td>Cached structure files (a PDB id fetched from RCSB lands here)</td></tr>
+<tr><td><code>assets/puzzle_setup</code></td><td>Puzzle setup inputs</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="resolver-env-overrides"><a class="header" href="#resolver-env-overrides">Resolver env overrides</a></h2>
+<p>Each asset root is resolved relative to the executable so a bundle launched from
+any working directory finds its files, with a dev fallback that walks up to the
+repo root. The resolution can be overridden by environment variable:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Points at</th></tr>
+</thead>
+<tbody>
+<tr><td><code>FOLDIT_GUI_ROOT</code></td><td><code>assets/gui</code></td></tr>
+<tr><td><code>FOLDIT_VIEW_PRESETS_DIR</code></td><td><code>assets/view_presets</code></td></tr>
+<tr><td><code>FOLDIT_LEVELS_ROOT</code></td><td><code>assets/levels</code></td></tr>
+<tr><td><code>FOLDIT_SCORING_DIR</code></td><td><code>assets/scoring</code></td></tr>
+<tr><td><code>FOLDIT_PLUGINS_ROOT</code></td><td><code>plugins</code></td></tr>
+<tr><td><code>FOLDIT_PYTHON_HOST_DYLIB</code></td><td>the python-host dylib (absolute path)</td></tr>
+</tbody>
+</table>
+</div>
+<p>On startup the desktop binary probes for a packaged resource directory and, if
+it finds one, sets the unset overrides to point inside it (see
+<a href="#foldit-desktop">foldit-desktop</a>). A pre-existing value always wins,
+and a dev <code>cargo run</code> finds no bundle, so the overrides stay unset in
+development and the repo-root <code>assets/</code> are used.</p>
+<h2 id="desktop-bundling"><a class="header" href="#desktop-bundling">Desktop bundling</a></h2>
+<p><code>cargo xtask package</code> assembles a staging payload under <code>target/staging</code> and runs
+cargo-packager. The cargo-packager config is <code>packager.json</code>: it names the main
+binary (<code>foldit</code>) and the <code>foldit-worker</code> sidecar, and copies <code>assets/</code>,
+<code>plugins/</code>, and the python-host dylib in as bundled resources. The output lands
+in <code>dist/</code>. See <a href="#xtask-commands">xtask Commands</a>.</p>
+<h2 id="web-bundling"><a class="header" href="#web-bundling">Web bundling</a></h2>
+<p><code>cargo xtask build-web</code> produces the wasm artifact and JS glue under
+<code>webview/public/pkg/</code>; <code>cargo xtask package-web</code> additionally runs the front
+end’s web build to produce a static site ready to deploy.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-frontend"><a class="header" href="#the-frontend">The Frontend</a></h1>
+<p>The UI lives under <code>webview/</code>. It is a SolidJS application built with Vite, with
+bun as the package manager and runtime (xtask’s <code>build-gui</code> runs <code>bun run build</code>). Its npm package is named <code>foldit-gui</code>, which is unrelated to the Rust
+crate of the same name beyond consuming the wire shapes that crate defines.</p>
+<p>The same front end serves both shells. On desktop it runs inside the wry
+webview; on web it talks to the wasm build. Its backend module abstracts the two
+delivery channels, but the message shapes are identical: it receives
+dirty-section pushes of <code>GuiState</code> and sends back commands, op dispatches, and
+requests. See <a href="#state-and-the-gui-bridge">State and the GUI Bridge</a>.</p>
+<h2 id="scripts"><a class="header" href="#scripts">Scripts</a></h2>
+<p>From <code>webview/package.json</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Script</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>dev</code></td><td>Vite dev server (desktop target)</td></tr>
+<tr><td><code>dev:web</code></td><td>Vite dev server with <code>FOLDIT_TARGET=wasm</code></td></tr>
+<tr><td><code>build</code></td><td>Production build (consumed by <code>xtask build-gui</code> into <code>assets/gui</code>)</td></tr>
+<tr><td><code>build:web</code></td><td>Production build for the wasm target (consumed by <code>xtask package-web</code>)</td></tr>
+<tr><td><code>test</code> / <code>test:watch</code> / <code>test:ui</code></td><td>Vitest</td></tr>
+<tr><td><code>lint</code></td><td>ESLint</td></tr>
+<tr><td><code>preview</code></td><td>Vite preview of a build</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="further-reading"><a class="header" href="#further-reading">Further reading</a></h2>
+<p>The front end has its own documentation in the <code>webview/</code> directory:</p>
+<ul>
+<li><code>webview/README.md</code> – overview and component layout.</li>
+<li><code>webview/DEVELOPMENT.md</code> – development workflow.</li>
+<li><code>webview/AGENTS.md</code> – conventions for working in the front end.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>

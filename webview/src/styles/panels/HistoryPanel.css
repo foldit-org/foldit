@@ -1,0 +1,24 @@
+.history-button {
+	@apply flex flex-col items-center justify-center;
+	@apply text-white text-[14px];
+	@apply mt-2;
+}
+
+.history-button p {
+	@apply mt-1;
+}
+
+@keyframes tentative-pulse {
+	0%   { opacity: 0.55; }
+	50%  { opacity: 1.0; }
+	100% { opacity: 0.55; }
+}
+
+.tentative-pulse {
+	animation: tentative-pulse 1.2s ease-in-out infinite;
+}
+
+.checkpoint-context-menu button {
+	font-size: 12px;
+	min-width: 160px;
+}

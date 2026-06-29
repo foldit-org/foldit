@@ -1,0 +1,33 @@
+.slider-container {
+	@apply relative w-full h-4 cursor-pointer select-none;
+}
+
+/* Track background — centered vertically in the container */
+.slider-container::before {
+	content: '';
+	@apply absolute left-0 right-0 h-1.5 rounded-full bg-neutral-700;
+	top: 50%;
+	transform: translateY(-50%);
+}
+
+/* Filled portion of the track */
+.slider-progress {
+	@apply absolute h-1.5 rounded-full;
+	top: 50%;
+	transform: translateY(-50%);
+	background: linear-gradient(to right, #4a8fe7, #6bb3f0);
+}
+
+/* Thumb — centered on the progress edge */
+.slider-thumb {
+	@apply absolute w-3.5 h-3.5 rounded-full border-2 border-blue-400 bg-neutral-900;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	transition: box-shadow 0.15s;
+}
+
+.slider-container:hover .slider-thumb,
+.slider-container:active .slider-thumb {
+	@apply border-blue-300;
+	box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.25);
+}

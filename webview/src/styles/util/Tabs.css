@@ -1,0 +1,15 @@
+.tabs {
+	@apply flex flex-row justify-center;
+}
+
+.tabs .container {
+	@apply relative flex bg-neutral-800 rounded-full p-1 w-full max-w-[300px];
+}
+
+.tabs .tab {
+	@apply z-10 relative py-1 text-sm font-medium rounded-full transition-colors duration-300;
+}
+
+.tabs .overlay {
+	@apply absolute top-0 left-0 h-full bg-white rounded-full transition-transform duration-300;
+}

@@ -1,0 +1,149 @@
+.electron-density-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.control-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.control-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.threshold-radius-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.threshold-radius-container .slider-container {
+  flex: 1;
+}
+
+.value-display {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 500;
+  min-width: 32px;
+  text-align: right;
+}
+
+/* Color Controls */
+.color-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.color-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.color-label {
+  font-size: 11px;
+  font-weight: 600;
+  width: 12px;
+  text-align: center;
+}
+
+.color-label.red {
+  color: #ff6b6b;
+}
+
+.color-label.green {
+  color: #51cf66;
+}
+
+.color-label.blue {
+  color: #74c0fc;
+}
+
+.color-label.alpha {
+  color: #d0d0d0;
+}
+
+/* Color Preview */
+.color-preview {
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  margin-top: 8px;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* Force Noto Sans font for buttons in this panel */
+.electron-density-content .action-buttons button {
+  font-family: 'Noto Sans', sans-serif !important;
+  font-size: 12px !important;
+  padding: 6px 12px !important;
+}
+
+/* Dropdown styling within the panel */
+.electron-density-content .options-dropdown {
+  position: relative;
+  margin-bottom: 0;
+}
+
+.electron-density-content .options-dropdown label {
+  display: none; /* Hide the label since we use control-label above */
+}
+
+.electron-density-content .options-dropdown select {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  border-radius: 4px;
+  padding: 8px 32px 8px 8px;
+  font-size: 11px;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+}
+
+.electron-density-content .options-dropdown select:focus {
+  border-color: rgba(255, 255, 255, 0.4);
+  outline: none;
+}
+
+/* Fix arrow positioning */
+.electron-density-content .options-dropdown > div {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Checkbox styling within the panel */
+.electron-density-content .checkbox-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.electron-density-content .checkbox-container input[type="checkbox"] {
+  accent-color: #74c0fc;
+}
+
+.electron-density-content .checkbox-container label {
+  font-size: 11px;
+  color: white;
+  font-weight: 400;
+}

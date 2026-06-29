@@ -2,7 +2,7 @@
 //!
 //! These are the data structures the rest of the module mutates.
 //! Pure structs + small accessors; the actual mutation logic lives
-//! in `super::record` and gets routed through `record` (G3).
+//! in `super::record` and gets routed through `record`.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -15,11 +15,9 @@ use molex::MoleculeEntity;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 
-use super::{CheckpointId, CheckpointKind, EntityActionKind, EntitySnapshotId, FilterStatus};
+use super::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus};
 
-// ── Storage structs ────────────────────────────────────────────────────
-
-/// Memory cap policy. Two budgets, two policies (per strategy doc § Eviction).
+/// Memory cap policy. Two budgets, two policies.
 #[derive(Debug, Clone, Copy)]
 pub struct HistoryBudget {
     /// Maximum live checkpoints before eviction kicks in.
@@ -42,18 +40,17 @@ impl Default for HistoryBudget {
 pub struct EntitySnapshot {
     /// Parent on this lane. `None` only for the lane root.
     pub parent: Option<EntitySnapshotId>,
-    /// Children — branches diverging from this snapshot.
+    /// Children - branches diverging from this snapshot.
     pub children: SmallVec<[EntitySnapshotId; 2]>,
     /// Entity payload at this point.
     pub payload: Arc<MoleculeEntity>,
-    /// Per-entity effect kind.
-    pub kind: EntityActionKind,
     /// Display label.
     pub label: Cow<'static, str>,
     /// Wall-clock timestamp.
     pub timestamp: SystemTime,
-    /// True iff this snapshot is the tentative of the running [`Active`]
-    /// action. Mutually exclusive with the [`OngoingState::Idle`] state.
+    /// True iff this snapshot is the open tentative of an in-flight
+    /// action (named by exactly one entry in `History::pending`). Always
+    /// the head of its lane while set; flipped to `false` at commit.
     pub tentative: bool,
     /// Number of live checkpoints whose `entity_heads` references this
     /// snapshot. Refuses eviction while > 0.
@@ -71,38 +68,14 @@ pub struct EntityHistory {
 impl EntityHistory {
     /// The current head snapshot id.
     #[must_use]
-    pub fn head(&self) -> EntitySnapshotId {
+    pub const fn head(&self) -> EntitySnapshotId {
         self.head
-    }
-
-    /// The root snapshot id.
-    #[must_use]
-    pub fn root(&self) -> EntitySnapshotId {
-        self.root
     }
 
     /// Look up a snapshot by id.
     #[must_use]
     pub fn snapshot(&self, id: EntitySnapshotId) -> Option<&EntitySnapshot> {
         self.snapshots.get(id)
-    }
-
-    /// Iterate all snapshots on this lane.
-    pub fn iter(&self) -> impl Iterator<Item = (EntitySnapshotId, &EntitySnapshot)> {
-        self.snapshots.iter()
-    }
-
-    /// Number of live snapshots on this lane.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.snapshots.len()
-    }
-
-    /// Whether this lane is empty (never true once seeded — root always
-    /// present until the lane is dropped).
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
     }
 }
 
@@ -113,7 +86,7 @@ pub struct Checkpoint {
     pub parent: Option<CheckpointId>,
     /// Branch children.
     pub children: SmallVec<[CheckpointId; 2]>,
-    /// Tuple of pointers into the entity timelines. IndexMap order is the
+    /// Tuple of pointers into the entity timelines. `IndexMap` order is the
     /// canonical entity order; preserved across pushes / lane undo /
     /// jump.
     pub entity_heads: IndexMap<EntityId, EntitySnapshotId>,
@@ -127,12 +100,16 @@ pub struct Checkpoint {
     pub raw_score: Option<f64>,
     /// Game-points score.
     pub game_score: Option<f64>,
+    /// RAW (unweighted) per-term breakdown of this checkpoint's
+    /// composition, the source of truth for per-residue coloring. `None`
+    /// until a score with a breakdown is stamped on this node; aligned to
+    /// the session's `term_names`. Crate-private (the type is): the render
+    /// projector re-derives the displayed colors from it on `ScoresChanged`.
+    pub(crate) breakdown: Option<crate::scores::StoredBreakdown>,
     /// Filter evaluation status.
     pub filter_status: FilterStatus,
     /// User-set "skip me when computing best" flag.
     pub exclude_from_best: bool,
-    /// Mirror of the matching tentative snapshot's flag.
-    pub tentative: bool,
 }
 
 /// The unified checkpoint graph plus its cursors.
@@ -150,13 +127,13 @@ pub struct CheckpointGraph {
 impl CheckpointGraph {
     /// Current head id.
     #[must_use]
-    pub fn head(&self) -> CheckpointId {
+    pub const fn head(&self) -> CheckpointId {
         self.head
     }
 
     /// Root id.
     #[must_use]
-    pub fn root(&self) -> CheckpointId {
+    pub const fn root(&self) -> CheckpointId {
         self.root
     }
 
@@ -173,13 +150,13 @@ impl CheckpointGraph {
 
     /// Best-by-raw cursor (`None` until scoring populates it).
     #[must_use]
-    pub fn best(&self) -> Option<CheckpointId> {
+    pub const fn best(&self) -> Option<CheckpointId> {
         self.best
     }
 
     /// Best-that-counts cursor (`None` until scoring populates it).
     #[must_use]
-    pub fn best_that_counts(&self) -> Option<CheckpointId> {
+    pub const fn best_that_counts(&self) -> Option<CheckpointId> {
         self.best_that_counts
     }
 
@@ -187,24 +164,6 @@ impl CheckpointGraph {
     #[must_use]
     pub fn is_pinned(&self, id: CheckpointId) -> bool {
         self.pinned.contains(&id)
-    }
-
-    /// Live checkpoint count.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.checkpoints.len()
-    }
-
-    /// Whether the graph holds zero checkpoints (impossible once seeded).
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.checkpoints.is_empty()
-    }
-
-    /// Read-only access to the budget config.
-    #[must_use]
-    pub fn budget(&self) -> HistoryBudget {
-        self.budget
     }
 }
 

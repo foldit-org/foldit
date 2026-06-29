@@ -1,0 +1,11 @@
+.options-checkbox-list h3 {
+	@apply text-[15px] font-semibold text-white;
+}
+
+.options-checkbox {
+	@apply flex items-center space-x-2;
+}
+
+.options-checkbox input[type="checkbox"] {
+	@apply accent-white w-4 h-4 rounded cursor-pointer;
+}

@@ -1,0 +1,21 @@
+.behavior-options-slider {
+	@apply w-full items-center justify-start;
+	@apply mb-2;
+}
+
+.behavior-options-slider h3 {
+	@apply mr-2;
+}
+
+.wiggle-power-buttons {
+	@apply mt-4 flex flex-col w-full items-start;
+}
+
+.wiggle-power-buttons button {
+	@apply mt-2 px-2 py-1 rounded-lg;
+}
+
+button.selected {
+	@apply bg-gray-600;
+}
+

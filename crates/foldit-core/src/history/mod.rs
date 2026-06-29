@@ -2,18 +2,20 @@
 //!
 //! Two cooperating DAGs.
 //!
-//! 1. **Entity timelines** ("swim lanes") — each [`EntityId`] has its own
+//! 1. **Entity timelines** ("swim lanes") - each [`EntityId`] has its own
 //!    [`EntityHistory`], a slotmap of [`EntitySnapshot`]s linked by
 //!    parent/children. Snapshots own the entity payload (an
 //!    `Arc<MoleculeEntity>`).
 //!
-//! 2. **Checkpoint graph** (the unified "river") — a slotmap of
+//! 2. **Checkpoint graph** (the unified "river") - a slotmap of
 //!    [`Checkpoint`]s linked by parent/children. Each checkpoint carries an
 //!    `IndexMap<EntityId, EntitySnapshotId>` plus per-checkpoint state
 //!    (score, filter status). It does **not** own snapshot payloads.
 //!
 //! **Cross-DAG invariant.** For every `e ∈ keys(checkpoint_head.entity_heads)`,
-//! `checkpoint_head.entity_heads[e] == lane_head(e)`. Asserted at the tail of
+//! the lane head is either that committed snapshot, or a tentative
+//! snapshot whose parent is it (an in-flight action's open tentative sits
+//! one step past the committed head on its lane). Asserted at the tail of
 //! every DAG-bearing event under `debug_assertions`.
 //!
 //! **Single record root.** Every checkpoint-bearing event funnels through
@@ -22,12 +24,13 @@
 //! mutation (`action_update`) and curation (pin / unpin / exclude / budget)
 //! do not change DAG topology and do not go through the root.
 //!
-//! **Lock layering.** `History` enforces only the *action lock* — refusing
-//! navigation/mutation that would touch the entity held by an in-flight
-//! [`OngoingState::Active`]. Multi-client locks (Orchestrator-owned
-//! `LockSet`, including the case where the runner is server-side and clients
-//! are remote) are layered above by `EntityStore`; do not push them into
-//! this module.
+//! **Lock layering.** `History` enforces only the structural *action
+//! lock* - one open tentative per lane, and a frozen committed graph head
+//! (no navigation / immediate-commit mutation) while any action is in
+//! flight. Multi-client locking (the case where the runner is
+//! server-side and clients are remote) is owned by the runner's
+//! orchestrator (its `EntityLockTable`), not by foldit-core; do not push it
+//! into this module.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -46,25 +49,19 @@ use smallvec::SmallVec;
 // inverting the dependency direction (foldit → foldit_gui, never
 // the reverse). Re-exported through this module for ergonomic
 // `foldit::history::CheckpointId` use sites.
-pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId, WireId};
+pub use foldit_gui::wire::{CheckpointId, EntitySnapshotId};
 
 mod types;
-pub use types::{
-    AminoAcid, CheckpointKind, EntityActionKind, FilterStatus, WiggleMask,
-};
+pub use types::{CheckpointKind, FilterStatus};
 
 mod storage;
-pub use storage::{
-    Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget,
-};
+pub use storage::{Checkpoint, CheckpointGraph, EntityHistory, EntitySnapshot, HistoryBudget};
 
-mod ongoing;
-pub use ongoing::OngoingState;
+mod pending;
+use pending::PendingEdit;
 
 mod error;
-pub use error::{BestKind, HistoryError};
-
-// ── History (the public type) ──────────────────────────────────────────
+pub use error::HistoryError;
 
 /// Two-layer history: per-entity timelines plus a unified checkpoint
 /// graph. Owns both DAGs; enforces the cross-DAG invariant; funnels every
@@ -74,16 +71,18 @@ pub use error::{BestKind, HistoryError};
 /// single event funnel.
 #[derive(Debug, Clone)]
 pub struct History {
-    /// Per-entity swim lanes. IndexMap so insertion order is the
+    /// Per-entity swim lanes. `IndexMap` so insertion order is the
     /// canonical entity order across the assembly.
     pub(super) lanes: IndexMap<EntityId, EntityHistory>,
     /// Unified checkpoint graph + cursors.
     pub(super) checkpoints: CheckpointGraph,
-    /// Streaming-action state machine (G2).
-    pub(super) ongoing: OngoingState,
-    /// Bumped on push / move / evict — full reproject on the wire.
+    /// In-flight actions keyed by request id. Empty in the resting
+    /// state; one entry per open action (0 or 1 until concurrent
+    /// dispatch lands, but the map and per-lane keying support fan-out).
+    pub(super) pending: IndexMap<u64, PendingEdit>,
+    /// Bumped on push / move / evict - full reproject on the wire.
     pub(super) topology_version: u64,
-    /// Bumped on tentative in-place byte mutation — small live-update
+    /// Bumped on tentative in-place byte mutation - small live-update
     /// payload on the wire.
     pub(super) live_version: u64,
 }
@@ -92,24 +91,20 @@ pub struct History {
 ///
 /// Every checkpoint-bearing event is one of these variants. Public
 /// methods are thin shims that build a variant and delegate. New
-/// operations land here, not on a sibling root (G3).
+/// operations land here, not on a sibling root.
 #[derive(Debug, Clone)]
 enum HistoryEvent {
     Begin {
-        entity: EntityId,
+        entities: SmallVec<[EntityId; 1]>,
         kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
+        request_id: u64,
     },
-    Commit,
-    Abort,
-    RecordEntityUpdate {
-        entity: EntityId,
-        kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
-        label: Cow<'static, str>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
+    Commit {
+        request_id: u64,
+    },
+    Abort {
+        request_id: u64,
     },
     LaneUndo {
         entity: EntityId,
@@ -143,6 +138,9 @@ enum HistoryEventOutcome {
         to: CheckpointId,
     },
     Aborted,
+    /// A `Begin` registered a new pending edit. Under the open-action
+    /// model a begin mints no checkpoint.
+    Began,
 }
 
 impl History {
@@ -165,7 +163,6 @@ impl History {
                 parent: None,
                 children: SmallVec::new(),
                 payload: Arc::new(entity),
-                kind: EntityActionKind::Loaded,
                 label: Cow::Borrowed("Loaded"),
                 timestamp: now,
                 tentative: false,
@@ -192,9 +189,9 @@ impl History {
             timestamp: now,
             raw_score: None,
             game_score: None,
+            breakdown: None,
             filter_status: FilterStatus::NotEvaluated,
             exclude_from_best: false,
-            tentative: false,
         });
 
         let history = Self {
@@ -208,7 +205,7 @@ impl History {
                 pinned: HashSet::new(),
                 budget: HistoryBudget::default(),
             },
-            ongoing: OngoingState::Idle,
+            pending: IndexMap::new(),
             topology_version: 0,
             live_version: 0,
         };
@@ -219,11 +216,9 @@ impl History {
         history
     }
 
-    // ── Read accessors ─────────────────────────────────────────────────
-
     /// Read access to the checkpoint graph.
     #[must_use]
-    pub fn checkpoints(&self) -> &CheckpointGraph {
+    pub const fn checkpoints(&self) -> &CheckpointGraph {
         &self.checkpoints
     }
 
@@ -233,28 +228,29 @@ impl History {
         self.lanes.get(&entity)
     }
 
-    /// Iterate (entity_id, lane) pairs in canonical order.
-    pub fn lanes(&self) -> impl Iterator<Item = (EntityId, &EntityHistory)> {
-        self.lanes.iter().map(|(eid, lane)| (*eid, lane))
-    }
-
-    /// Current ongoing-action state.
+    /// Whether any action is in flight.
     #[must_use]
-    pub fn ongoing(&self) -> &OngoingState {
-        &self.ongoing
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
-    /// Topology version — bumped on push / move / evict. Triggers full
+    /// Whether the action identified by `request_id` is in flight.
+    #[must_use]
+    pub fn is_pending(&self, request_id: u64) -> bool {
+        self.pending.contains_key(&request_id)
+    }
+
+    /// Topology version - bumped on push / move / evict. Triggers full
     /// reproject on the wire.
     #[must_use]
-    pub fn topology_version(&self) -> u64 {
+    pub const fn topology_version(&self) -> u64 {
         self.topology_version
     }
 
-    /// Live version — bumped on per-cycle in-place mutation. Triggers
+    /// Live version - bumped on per-cycle in-place mutation. Triggers
     /// the small live-update payload on the wire.
     #[must_use]
-    pub fn live_version(&self) -> u64 {
+    pub const fn live_version(&self) -> u64 {
         self.live_version
     }
 
@@ -264,84 +260,88 @@ impl History {
         self.checkpoints.checkpoint(id)
     }
 
-    /// Lookup helper.
-    #[must_use]
-    pub fn snapshot(&self, entity: EntityId, id: EntitySnapshotId) -> Option<&EntitySnapshot> {
-        self.lanes.get(&entity)?.snapshot(id)
-    }
-
-    // ── Public surface — thin shims over record ───────────────────────
-
-    /// Begin a streaming action on `entity`. Pushes a tentative snapshot
-    /// (parent = current lane head) and a tentative checkpoint
-    /// (parent = current graph head). Refused while another action is
-    /// in flight.
+    /// Begin a streaming action over `entities` under the caller-supplied
+    /// `request_id` (allocated by the orchestrator, the single id
+    /// authority). Opens one tentative lane per entity, each forked from
+    /// its own committed lane head (parent = current lane head), and
+    /// advances those lane heads, but mints no checkpoint and does not
+    /// move the committed graph head: the checkpoint is composed and
+    /// minted, already committed, at commit. Registers one multi-lane
+    /// pending edit under `request_id`. Refused if any named lane already
+    /// has an open tentative. A single-entity action passes a one-element
+    /// set.
     pub fn begin_action(
         &mut self,
-        entity: EntityId,
+        entities: impl IntoIterator<Item = EntityId>,
         kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
         label: Cow<'static, str>,
-    ) -> Result<CheckpointId, HistoryError> {
-        let result = self.record(HistoryEvent::Begin {
-            entity,
+        request_id: u64,
+    ) -> Result<(), HistoryError> {
+        match self.record(HistoryEvent::Begin {
+            entities: entities.into_iter().collect(),
             kind,
-            payload,
             label,
-        })?;
-        match result {
-            HistoryEventOutcome::Pushed(id) => Ok(id),
-            _ => unreachable!("Begin always pushes"),
+            request_id,
+        })? {
+            HistoryEventOutcome::Began => Ok(()),
+            _ => unreachable!("Begin always returns Began"),
         }
     }
 
-    /// Per-cycle update. Mutates the tentative snapshot's payload via
-    /// `Arc::make_mut`, updates the tentative checkpoint's score, bumps
-    /// `live_version` only. Does NOT change DAG topology and is not
-    /// routed through `record`.
+    /// Per-cycle update of the action identified by `request_id`. Mutates
+    /// each held lane's tentative snapshot payload via `Arc::make_mut`
+    /// (fanned across every lane in the edit), accumulates the live
+    /// composition score on the pending edit (no tentative checkpoint
+    /// exists to hold it), and bumps `live_version` only. Does NOT change
+    /// DAG topology and is not routed through `record`.
     ///
-    /// Returns `NoOngoingAction` if no action is in flight.
+    /// Returns `NoOngoingAction` if `request_id` names no in-flight action.
+    // `expect`s resolve the pending edit and its lane/snapshot, all of
+    // which the early `request_id` check above proved live.
+    #[allow(clippy::expect_used)]
     pub fn action_update(
         &mut self,
+        request_id: u64,
         raw_score: Option<f64>,
         game_score: Option<f64>,
         filter_status: Option<FilterStatus>,
-        mutate: impl FnOnce(&mut MoleculeEntity),
+        mut mutate: impl FnMut(&mut MoleculeEntity),
     ) -> Result<(), HistoryError> {
-        let (entity, snap_id, ckpt_id) = match &self.ongoing {
-            OngoingState::Idle => return Err(HistoryError::NoOngoingAction),
-            OngoingState::Active {
-                entity,
-                tentative_snapshot,
-                tentative_checkpoint,
-                ..
-            } => (*entity, *tentative_snapshot, *tentative_checkpoint),
-        };
-
-        let lane = self
+        // Snapshot the lane set up front so the per-lane mutation loop
+        // doesn't hold a borrow of `self.pending` while it borrows
+        // `self.lanes` mutably.
+        let lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]> = self
+            .pending
+            .get(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?
             .lanes
-            .get_mut(&entity)
-            .expect("active lane must exist (G8)");
-        let snap = lane
-            .snapshots
-            .get_mut(snap_id)
-            .expect("tentative snapshot must exist (G8)");
-        let payload = Arc::make_mut(&mut snap.payload);
-        mutate(payload);
+            .clone();
 
-        let ckpt = self
-            .checkpoints
-            .checkpoints
-            .get_mut(ckpt_id)
-            .expect("tentative checkpoint must exist (G8)");
+        for (entity, snap_id) in &lanes {
+            let lane = self
+                .lanes
+                .get_mut(entity)
+                .expect("pending lane must exist");
+            let snap = lane
+                .snapshots
+                .get_mut(*snap_id)
+                .expect("tentative snapshot must exist");
+            let payload = Arc::make_mut(&mut snap.payload);
+            mutate(payload);
+        }
+
+        let edit = self
+            .pending
+            .get_mut(&request_id)
+            .expect("checked above");
         if let Some(s) = raw_score {
-            ckpt.raw_score = Some(s);
+            edit.raw_score = Some(s);
         }
         if let Some(s) = game_score {
-            ckpt.game_score = Some(s);
+            edit.game_score = Some(s);
         }
         if let Some(fs) = filter_status {
-            ckpt.filter_status = fs;
+            edit.filter_status = fs;
         }
 
         self.live_version = self.live_version.saturating_add(1);
@@ -352,49 +352,81 @@ impl History {
         Ok(())
     }
 
-    /// Commit the in-flight action. Flips tentative flags to `false`;
-    /// recomputes best cursors; transitions back to `Idle`.
-    pub fn commit_action(&mut self) -> Result<CheckpointId, HistoryError> {
-        match self.record(HistoryEvent::Commit)? {
+    /// Commit the action identified by `request_id`. Flips each held
+    /// lane's tentative snapshot to committed, composes a new checkpoint
+    /// from the current committed graph head plus the edit's lanes (so
+    /// the committed node never references a peer's open tentative),
+    /// stamps the edit's accumulated score onto it, advances the graph
+    /// head, recomputes best cursors, and drops the pending edit.
+    pub fn commit_action(&mut self, request_id: u64) -> Result<CheckpointId, HistoryError> {
+        match self.record(HistoryEvent::Commit { request_id })? {
             HistoryEventOutcome::Pushed(id) => Ok(id),
             _ => unreachable!("Commit returns the now-real checkpoint"),
         }
     }
 
-    /// Abort the in-flight action. Removes the tentative snapshot from
-    /// its lane and the tentative checkpoint from the graph; head
-    /// pointers fall back to their parents; transitions to `Idle`.
-    pub fn abort_action(&mut self) -> Result<(), HistoryError> {
-        match self.record(HistoryEvent::Abort)? {
+    /// Commit the action identified by `request_id`, then immediately
+    /// re-open an edit over the same lanes under the same id, re-forking
+    /// each lane from its just-committed head. The reopened edit reuses the
+    /// committed edit's `kind` and label, so a multi-segment preview op
+    /// (rebuild / RFD3 accept-by-accept) advances its lane segment-by-
+    /// segment without the caller re-supplying the begin args. Returns the
+    /// committed checkpoint id (the value [`Self::commit_action`] returns).
+    pub fn commit_and_reopen(&mut self, request_id: u64) -> Result<CheckpointId, HistoryError> {
+        // Capture the prior edit's lanes, kind, and label while its
+        // `PendingEdit` is still live: the commit below `swap_remove`s it
+        // and moves its `kind` onto the minted checkpoint, leaving nothing
+        // for the reopen to fork from. Cloning the entity list and kind
+        // because the pending edit is consumed by the commit before the
+        // reopen needs them. The label comes from the first held lane's
+        // tentative snapshot, the same source `do_commit` recovers it from.
+        let edit = self
+            .pending
+            .get(&request_id)
+            .ok_or(HistoryError::NoOngoingAction)?;
+        let entities: SmallVec<[EntityId; 1]> = edit.lanes.iter().map(|(e, _)| *e).collect();
+        let kind = edit.kind.clone();
+        let label: Cow<'static, str> = edit
+            .lanes
+            .first()
+            .and_then(|(entity, snap_id)| {
+                self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id))
+            })
+            .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
+
+        let ckpt = self.commit_action(request_id)?;
+        self.begin_action(entities, kind, label, request_id)?;
+        Ok(ckpt)
+    }
+
+    /// Abort the action identified by `request_id`. Removes each held
+    /// lane's tentative snapshot; lane heads fall back to their parents.
+    /// No checkpoint is removed (a begin mints none) and the committed
+    /// graph head does not move.
+    pub fn abort_action(&mut self, request_id: u64) -> Result<(), HistoryError> {
+        match self.record(HistoryEvent::Abort { request_id })? {
             HistoryEventOutcome::Aborted => Ok(()),
             _ => unreachable!("Abort returns Aborted"),
         }
     }
 
-    /// Atomic non-streaming entity update — used by RFD3-final / MPNN
-    /// results, manual moves, etc. Pushes one snapshot + one checkpoint
-    /// with `tentative = false` immediately. Refused while `Active`.
-    /// Optional `raw_score` / `game_score` are stamped on the new
-    /// checkpoint (G7: caller carries both; projection picks at read).
-    pub fn record_entity_update(
-        &mut self,
-        entity: EntityId,
-        kind: CheckpointKind,
-        payload: Arc<MoleculeEntity>,
-        label: Cow<'static, str>,
-        raw_score: Option<f64>,
-        game_score: Option<f64>,
-    ) -> Result<CheckpointId, HistoryError> {
-        match self.record(HistoryEvent::RecordEntityUpdate {
-            entity,
-            kind,
-            payload,
-            label,
-            raw_score,
-            game_score,
-        })? {
-            HistoryEventOutcome::Pushed(id) => Ok(id),
-            _ => unreachable!("RecordEntityUpdate always pushes"),
+    /// The request ids of every open edit, in insertion order. Used by the
+    /// host to fire one composition score per open edit.
+    pub fn pending_request_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.keys().copied()
+    }
+
+    /// The lone open edit's request id, or `None` if zero or >1 edits are
+    /// open. When exactly one edit is open the worker's live pose IS that
+    /// edit's composition, so a whole-assembly score attributes to it.
+    #[must_use]
+    pub fn sole_pending_request_id(&self) -> Option<u64> {
+        let mut it = self.pending_request_ids();
+        let first = it.next()?;
+        if it.next().is_some() {
+            None
+        } else {
+            Some(first)
         }
     }
 
@@ -414,7 +446,7 @@ impl History {
 
     /// Move `entity`'s lane head to a child of the current lane head;
     /// `branch` picks among multiple children. Pushes a `LaneUndo`
-    /// checkpoint (the kind covers redo too — both directions move the
+    /// checkpoint (the kind covers redo too - both directions move the
     /// lane head along the lane DAG).
     pub fn lane_redo(
         &mut self,
@@ -454,10 +486,10 @@ impl History {
 
     /// Introduce a new entity (and its lane) into history. Pushes a
     /// fresh checkpoint whose `entity_heads` is the parent's plus
-    /// `entity_id → root_snapshot`. Refused while `Active` (the running
-    /// action freezes the assembly per § Lock semantics).
+    /// `entity_id → root_snapshot`. Refused while an action is in flight
+    /// (the committed head is frozen).
     ///
-    /// Used by [`crate::entity_store::EntityStore::promote_preview`] to
+    /// Used by [`crate::session::Session::promote_preview`] to
     /// move a previously-transient entity into history.
     pub fn add_entity(
         &mut self,
@@ -485,226 +517,15 @@ impl History {
         }
     }
 
-    // ── Curation (no DAG topology change — direct field writes) ───────
-
-    /// Pin a checkpoint as user-marked best.
-    pub fn pin_checkpoint(&mut self, id: CheckpointId) -> Result<(), HistoryError> {
-        if !self.checkpoints.checkpoints.contains_key(id) {
-            return Err(HistoryError::UnknownCheckpoint { id });
-        }
-        let _ = self.checkpoints.pinned.insert(id);
-        Ok(())
-    }
-
-    /// Unpin a checkpoint.
-    pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<(), HistoryError> {
-        if !self.checkpoints.checkpoints.contains_key(id) {
-            return Err(HistoryError::UnknownCheckpoint { id });
-        }
-        let _ = self.checkpoints.pinned.remove(&id);
-        Ok(())
-    }
-
-    /// Set the "exclude from best" flag.
-    pub fn set_exclude_from_best(
-        &mut self,
-        id: CheckpointId,
-        exclude: bool,
-    ) -> Result<(), HistoryError> {
-        let ckpt = self
-            .checkpoints
-            .checkpoints
-            .get_mut(id)
-            .ok_or(HistoryError::UnknownCheckpoint { id })?;
-        ckpt.exclude_from_best = exclude;
-        Ok(())
-    }
-
-    /// Replace the eviction budget.
-    pub fn set_budget(&mut self, budget: HistoryBudget) {
-        self.checkpoints.budget = budget;
-    }
-
-    /// Stamp `raw_score` / `game_score` on the current head checkpoint
-    /// in place. Bumps `live_version` only — DAG topology unchanged, no
-    /// new checkpoint, no new snapshot. Idempotent on `(None, None)`.
-    ///
-    /// This is the right call for cycle-zero scoring during session init
-    /// (Rosetta streams a score before the user takes any action). It
-    /// avoids the pre-fix behavior where every init cycle pushed a fresh
-    /// checkpoint on top of root + AddEntity.
-    pub fn set_head_scores(&mut self, raw_score: Option<f64>, game_score: Option<f64>) {
-        if raw_score.is_none() && game_score.is_none() {
-            return;
-        }
-        let head_id = self.checkpoints.head;
-        let ckpt = self
-            .checkpoints
-            .checkpoints
-            .get_mut(head_id)
-            .expect("head checkpoint must exist (G8)");
-        if let Some(s) = raw_score {
-            ckpt.raw_score = Some(s);
-        }
-        if let Some(s) = game_score {
-            ckpt.game_score = Some(s);
-        }
-        self.live_version = self.live_version.saturating_add(1);
-
-        if cfg!(debug_assertions) {
-            self.assert_invariant();
-        }
-    }
-
-    /// Overwrite the entity payload on the snapshot referenced by the
-    /// current head checkpoint's `entity_heads[entity]`, in place.
-    /// Bumps `live_version` only — no new checkpoint, no new snapshot.
-    ///
-    /// Used by the apply_ongoing_update Idle branch to absorb cycle-0
-    /// idealization shifts. Rosetta's `ri_session_create` does a small
-    /// idealization pass (hydrogen placement, sub-Å moves, sidechain
-    /// repack); without this method the head snapshot keeps the
-    /// pre-idealized coords, the next wiggle's `update_session_in_place`
-    /// overwrites Rosetta's idealized pose with those coords, and
-    /// fa_rep blows up on the clash-heavy starting state — the "huge
-    /// energy jump" symptom. Updating the snapshot payload in place
-    /// keeps both layers in sync without polluting history.
-    ///
-    /// Returns `true` if the head checkpoint references that entity
-    /// and the payload was applied; `false` if the entity isn't on
-    /// the current head (no-op for non-active entities).
-    pub fn set_head_entity(
-        &mut self,
-        entity: EntityId,
-        payload: MoleculeEntity,
-    ) -> bool {
-        let head_id = self.checkpoints.head;
-        let snap_id = match self
-            .checkpoints
-            .checkpoints
-            .get(head_id)
-            .and_then(|h| h.entity_heads.get(&entity).copied())
-        {
-            Some(id) => id,
-            None => return false,
-        };
-        let lane = match self.lanes.get_mut(&entity) {
-            Some(l) => l,
-            None => return false,
-        };
-        let snap = match lane.snapshots.get_mut(snap_id) {
-            Some(s) => s,
-            None => return false,
-        };
-        let snap_payload = Arc::make_mut(&mut snap.payload);
-        *snap_payload = payload;
-        self.live_version = self.live_version.saturating_add(1);
-
-        if cfg!(debug_assertions) {
-            self.assert_invariant();
-        }
-        true
-    }
-
-    // ── Private root: every DAG-bearing event funnels here (G3) ──────
-
-    /// The single root through which every checkpoint- or lane-DAG-
-    /// bearing event passes. Validates the [`OngoingState`]
-    /// preconditions, performs the mutation, updates `checkpoint_refs`,
-    /// runs eviction, bumps `topology_version`, and asserts the cross-
-    /// DAG invariant (G8).
-    ///
-    /// New events land here as a new [`HistoryEvent`] variant. A
-    /// sibling root would carry state this function doesn't know about
-    /// and is therefore illegal (G3).
-    fn record(
-        &mut self,
-        event: HistoryEvent,
-    ) -> Result<HistoryEventOutcome, HistoryError> {
-        // ── Action-lock pre-check ─────────────────────────────────────
-        // While Active, the only legal events are Commit / Abort.
-        // Per strategy doc § Lock semantics, the running action
-        // freezes every lane (not just its own); navigation and record
-        // updates are refused uniformly.
-        if let OngoingState::Active { entity: locked, .. } = &self.ongoing {
-            let locked = *locked;
-            match &event {
-                HistoryEvent::Commit | HistoryEvent::Abort => {}
-                HistoryEvent::Begin { .. } | HistoryEvent::RecordEntityUpdate { .. } => {
-                    return Err(HistoryError::ActiveActionInProgress)
-                }
-                HistoryEvent::LaneUndo { .. }
-                | HistoryEvent::LaneRedo { .. }
-                | HistoryEvent::Undo
-                | HistoryEvent::Redo { .. }
-                | HistoryEvent::JumpCheckpoint { .. } => {
-                    return Err(HistoryError::EntityLocked { entity: locked })
-                }
-                HistoryEvent::AddEntity { .. } => {
-                    return Err(HistoryError::ActiveActionInProgress)
-                }
-            }
-        }
-
-        // Linear-undo invariant: after a push, every checkpoint must
-        // lie on the root → head path, and every snapshot must lie on
-        // its lane's root → head path. Navigation-only events
-        // (Undo / Redo / JumpCheckpoint) skip the prune so the user
-        // can move the cursor without losing the redo path; the next
-        // *push* drops it (classic editor undo).
-        let is_push = matches!(
-            event,
-            HistoryEvent::Begin { .. }
-                | HistoryEvent::RecordEntityUpdate { .. }
-                | HistoryEvent::LaneUndo { .. }
-                | HistoryEvent::LaneRedo { .. }
-                | HistoryEvent::AddEntity { .. }
-        );
-
-        let result = match event {
-            HistoryEvent::Begin { entity, kind, payload, label } => {
-                self.do_begin(entity, kind, payload, label)?
-            }
-            HistoryEvent::Commit => self.do_commit()?,
-            HistoryEvent::Abort => self.do_abort()?,
-            HistoryEvent::RecordEntityUpdate {
-                entity,
-                kind,
-                payload,
-                label,
-                raw_score,
-                game_score,
-            } => self.do_record_entity_update(entity, kind, payload, label, raw_score, game_score)?,
-            HistoryEvent::LaneUndo { entity, target } => self.do_lane_undo(entity, target)?,
-            HistoryEvent::LaneRedo { entity, branch } => self.do_lane_redo(entity, branch)?,
-            HistoryEvent::Undo => self.do_undo()?,
-            HistoryEvent::Redo { branch } => self.do_redo(branch)?,
-            HistoryEvent::JumpCheckpoint { id } => self.do_jump(id)?,
-            HistoryEvent::AddEntity { entity_id, payload, kind, label } => {
-                self.do_add_entity(entity_id, payload, kind, label)?
-            }
-        };
-
-        if is_push {
-            self.prune_to_head_path();
-        }
-
-        self.evict_to_budget();
-        self.topology_version = self.topology_version.saturating_add(1);
-
-        if cfg!(debug_assertions) {
-            self.assert_invariant();
-        }
-
-        Ok(result)
-    }
 }
 
-mod record;
+mod best;
+mod composition;
+mod curation;
+mod record_root;
 mod eviction;
 mod invariant;
-
-// ── Tests ──────────────────────────────────────────────────────────────
+mod record;
 
 #[cfg(test)]
 mod tests;

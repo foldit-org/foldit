@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+	.text-bubble-container {
+		@apply font-["Noto_Sans"];
+		@apply relative; /* Parent handles absolute positioning, this enables z-index stacking */
+		@apply overflow-visible; /* Allow SVG tail to render outside container */
+		@apply w-fit; /* Size to fit content (preformatted text) */
+		@apply rounded-2xl; /* Match Panel's sophisticated corners */
+		@apply backdrop-blur-md; /* Add Panel's blur effect */
+		/* Removed ring - SVG stroke handles the border now */
+	}
+}
+
+.text-bubble-green {
+	@apply text-bubble-container;
+	@apply text-black;
+}
+
+.text-bubble-gray {
+	@apply text-bubble-container;
+	@apply text-white;
+}
+
+.text-bubble-purple {
+	@apply text-bubble-container;
+	@apply text-white;
+}
+
+.text-bubble-contents {
+	@apply relative w-full h-full;
+	@apply flex flex-col items-center justify-between;
+	@apply p-4;
+}
+
+.text-bubble-text {
+	@apply flex flex-row w-full items-center justify-start;
+	@apply text-[16px];
+	@apply max-w-[48ch] whitespace-pre-wrap;
+}
+
+.text-bubble-buttons {
+	@apply pt-3;
+	@apply flex flex-row w-full items-center justify-between;
+}
+

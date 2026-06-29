@@ -24,6 +24,16 @@ center = [2.1, 2.5, -2.9]
 eye = [-17, 34, 30]
 up = [-0.92, -0.33, -0.22]
 
+[[puzzle.filter]]
+type = "VoidSize"
+plugin = "rosetta"
+bonus = -1000
+max_void = 56
+
+[[puzzle.design_mask]]
+chain = "A"
+can_design = "32-43||"
+
 [[sequence]]
 text = "You've been trying to get a high score every level, but what does it mean?"
 point_to = "score"

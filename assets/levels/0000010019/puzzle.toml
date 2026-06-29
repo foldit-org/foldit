@@ -28,6 +28,12 @@ center = [-5.5, -3.2, -3.9]
 eye = [-50, -24, -17]
 up = [0.4, -0.91, 0.068]
 
+[[puzzle.filter]]
+type = "VoidSize"
+plugin = "rosetta"
+bonus = -200
+max_void = 25
+
 [[sequence]]
 text = "Other times the backbone is too far apart. VOIDS are an indicator that there is empty space that needs to be filled."
 color = "game"

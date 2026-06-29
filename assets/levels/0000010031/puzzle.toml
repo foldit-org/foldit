@@ -33,6 +33,52 @@ dark_background = true
 show_outlines = true
 sidechain_mode = "Don't Show (Fast)"
 
+[[puzzle.filter]]
+type = "ResidueCountScore"
+plugin = "rosetta"
+default_bonus = -55
+penalty_coeff = 5.5
+penalty_exp = 1
+residue_limit = -10
+residue_limit_relative_to_max = 1
+
+[[puzzle.filter]]
+type = "LayerScore"
+plugin = "rosetta"
+cutoff_min_core = 28
+default_bonus = -240
+display_name = "Core Existence"
+monomer_only = 1
+per_res_core_under_penalty = 10
+satisfied_bonus = 0
+selection = "118-192||"
+srbl_core = 3.5
+srbl_surface = 2
+use_cutoff_core_percent = 1
+use_sidechain_neighbors = 1
+
+[[puzzle.filter]]
+type = "Abego"
+plugin = "rosetta"
+default_bonus = -50
+penalty_per_bad_frag = 10
+selection = "118-192||"
+static_penalty = 0
+tolerant_sheets = 1
+
+[[puzzle.filter]]
+type = "RoScriptScore"
+plugin = "rosetta"
+bonus = 0
+bonus_func = "linear"
+default_bonus = -50
+display_name = "SS Design"
+residue_pre_mul = 5
+
+[[puzzle.design_mask]]
+chain = "B"
+can_design = "1-75||"
+
 [[sequence]]
 text = "In late 2019, a new highly-infections virus emerged out of Wuhan, China. This virus belongs to the coronavirus family, and is similar to the virus that caused the SARS epidemic in 2002."
 color = "science"

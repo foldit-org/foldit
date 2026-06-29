@@ -2,7 +2,21 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
+description = "Workspace automation tasks (build, bundle, codegen) for foldit"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../README.md"
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+toml_edit = "0.22"
+toml = "0.8"
+foldit-core = { path = "../crates/foldit-core" }

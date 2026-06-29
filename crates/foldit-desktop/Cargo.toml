@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2021"
 description = "Desktop binary (wry + winit + wgpu)"
 default-run = "foldit"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
 
 [[bin]]
 name = "foldit"
 path = "src/main.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
 # Workspace crates
@@ -16,44 +26,31 @@ foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner" }
 
 # External deps
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.4.2", features = ["serde", "specta"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
 
-anyhow = "1.0"
-
-# Async for background ML tasks
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-
-# Core
-glam = "0.30"
-indexmap = "2"
-slotmap = "1.0"
-smallvec = "1"
+# Windowing / event loop
 winit = "0.30"
 pollster = "0.4"
-bytemuck = { version = "1.21", features = ["derive"] }
-wgpu = "26"
-
-# Direct mmCIF parsing for atom names and residue info
-pdbtbx = "0.12"
 
 # Utilities
 log = "0.4"
-env_logger = "0.11"
-env_filter = "0.1"
-lazy_static = "1.4"
-
-# HTTP client for downloading from RCSB
-reqwest = { version = "0.11", features = ["blocking"] }
+env_filter = "1.0"
 
 # Embedded webview
 wry = { version = "0.50", features = ["transparent"] }
 
-# Serialization for IPC and FrontendState
-serde = { version = "1", features = ["derive"] }
+# Native cross-platform file dialog (macOS/Windows/Linux backends)
+rfd = "0.15"
+
+# Serialization for IPC and GuiState
 serde_json = "1"
-toml = "0.8"
-base64 = "0.22"
+
+# Host-owned puzzle-progress persistence. The host owns the async runtime and
+# drives opfs file I/O off the event-loop thread; foldit-core only serializes
+# and accepts bytes.
+opfs = "0.2.0"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs"] }
+dirs = "5"
 
 [dev-dependencies]
 proptest = "1"

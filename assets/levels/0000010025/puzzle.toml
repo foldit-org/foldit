@@ -28,6 +28,19 @@ up = [-0.99, -0.11, 0.097]
 [puzzle.view_options]
 current_visor = "Hydro/Score"
 
+[[puzzle.filter]]
+type = "DSSPToGuide"
+plugin = "rosetta"
+start_align_res = 1
+start_res = 1
+stop_align_res = 90
+stop_res = 90
+use_assigned_ss = 1
+value_per_helix = -3
+value_per_loop = 0
+value_per_match = -1
+value_per_sheet = -3
+
 [[sequence]]
 text = "In Foldit, we usually are just trying to find the NATIVE state by whatever means necessary."
 point_to = "backbone"

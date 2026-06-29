@@ -7,9 +7,10 @@ channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64", "win-64"]
 
 [tasks]
-# These just call cargo xtask
-setup-ml = "cargo xtask setup-ml"
+# These just call cargo xtask. Keep each entry pointed at a real xtask
+# subcommand (xtask/src/main.rs `enum Commands`); a stale alias fails at run.
+setup-envs = "cargo xtask setup-envs"
 build-rosetta-interactive = "cargo xtask build-rosetta-interactive"
-bundle = "cargo xtask bundle"
-bundle-cpu = "cargo xtask bundle --cpu-only"
-download-models = "cargo xtask download-models"
+build-host = "cargo xtask build-host"
+build-web = "cargo xtask build-web"
+package = "cargo xtask package"

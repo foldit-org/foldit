@@ -1,0 +1,127 @@
+/* NewsWidget markdown styling */
+.news-markdown {
+  color: #e5e7eb; /* gray-200 */
+  line-height: 1.7;
+}
+
+.news-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.news-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.news-markdown h1,
+.news-markdown h2,
+.news-markdown h3,
+.news-markdown h4,
+.news-markdown h5,
+.news-markdown h6 {
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  color: white;
+}
+
+.news-markdown h1 { font-size: 1.5em; }
+.news-markdown h2 { font-size: 1.3em; }
+.news-markdown h3 { font-size: 1.2em; }
+.news-markdown h4 { font-size: 1.1em; }
+.news-markdown h5 { font-size: 1em; }
+.news-markdown h6 { font-size: 0.9em; }
+
+.news-markdown p {
+  margin-bottom: 1em;
+}
+
+.news-markdown a {
+  color: #93c5fd; /* blue-300 */
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.news-markdown a:hover {
+  color: #bfdbfe; /* blue-200 */
+}
+
+.news-markdown ul,
+.news-markdown ol {
+  margin-left: 1.5em;
+  margin-bottom: 1em;
+}
+
+.news-markdown li {
+  margin-bottom: 0.5em;
+}
+
+.news-markdown code {
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 0.2em 0.4em;
+  border-radius: 0.25em;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.9em;
+}
+
+.news-markdown pre {
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 1em;
+  border-radius: 0.5em;
+  overflow-x: auto;
+  margin-bottom: 1em;
+}
+
+.news-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.news-markdown blockquote {
+  border-left: 4px solid #4b5563; /* gray-600 */
+  padding-left: 1em;
+  margin-left: 0;
+  margin-right: 0;
+  font-style: italic;
+  color: #d1d5db; /* gray-300 */
+}
+
+.news-markdown hr {
+  border: 0;
+  border-top: 1px solid #4b5563; /* gray-600 */
+  margin: 2em 0;
+}
+
+.news-markdown strong {
+  font-weight: 600;
+  color: white;
+}
+
+.news-markdown em {
+  font-style: italic;
+}
+
+.news-markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+  margin: 0.5em 0;
+}
+
+.news-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+}
+
+.news-markdown th,
+.news-markdown td {
+  border: 1px solid #4b5563;
+  padding: 0.5em;
+  text-align: left;
+}
+
+.news-markdown th {
+  background-color: rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}

@@ -4,12 +4,12 @@
 //! `requestAnimationFrame` loop, and exposes the [`FolditApp`] surface to
 //! JavaScript via `wasm-bindgen`. The IPC envelope is the same one used
 //! by the wry desktop transport (see `foldit_gui::bridge`); only the
-//! delivery mechanism changes — JS calls Rust functions directly via
+//! delivery mechanism changes; JS calls Rust functions directly via
 //! `wasm-bindgen` instead of round-tripping JSON through `window.ipc`.
 //!
 //! All host-agnostic state and dispatch logic lives in `foldit_core::App`
 //! (shared with the desktop binary). This crate is a thin wasm-bindgen
-//! shell over it — engine construction, rAF loop, and JS↔Rust glue.
+//! shell over it: engine construction, rAF loop, and JS-to-Rust glue.
 //!
 //! # Lifecycle
 //!
@@ -25,7 +25,16 @@
 //! Outside of wasm, this crate compiles as a thin rlib so workspace-wide
 //! `cargo check` succeeds on the host without invoking wasm-bindgen.
 
+// Many transitive deps (base64, bitflags, thiserror, wit-bindgen, and the
+// windows/foreign-types families pulled in by wgpu/winit) resolve at two
+// major versions in the tree; the duplication is not controllable here.
+#![allow(
+    clippy::multiple_crate_versions,
+    reason = "duplicate dep versions come from transitive deps, not controllable here"
+)]
 #![cfg(target_arch = "wasm32")]
+
+mod host;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -36,18 +45,11 @@ use web_sys::HtmlCanvasElement;
 
 pub use wasm_bindgen_rayon::init_thread_pool;
 
-use foldit_core::App;
+use foldit_core::{App, HostEffects};
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
-use foldit_gui::{
-    ActionId, Dispatcher, FrontendState, OpDispatch, ParameterizedAction, ViewportInput,
-};
+use foldit_gui::{AppCommand, EntitySelection, OpDispatch, ViewportInput};
 use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// One-shot init: panic hook + console_log. Call once before constructing
-// any FolditApp.
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[wasm_bindgen]
 pub fn init() {
@@ -55,17 +57,17 @@ pub fn init() {
     let _ = console_log::init_with_level(log::Level::Info);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared handles
-// ─────────────────────────────────────────────────────────────────────────────
-
 type AppHandle = Rc<RefCell<App>>;
-type FrontendHandle = Rc<RefCell<FrontendState>>;
 type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FolditApp — JS-facing handle
-// ─────────────────────────────────────────────────────────────────────────────
+/// Single-threaded handoff for the async OPFS progress load. The startup
+/// `spawn_local` task stashes the read bytes here; the rAF loop drains it
+/// once and merges via `App::import_progress`. No cross-thread channel is
+/// needed because wasm is single-threaded.
+type ProgressLoadCell = Rc<RefCell<Option<Vec<u8>>>>;
+
+/// Filename under the origin-private OPFS root for the persisted progress map.
+const PROGRESS_FILE: &str = "progress.json";
 
 /// JS-facing application handle. Owns the host-agnostic [`App`] (which
 /// in turn owns the orchestrator, entity store, and history) plus the
@@ -73,7 +75,6 @@ type JsCallback = Rc<RefCell<Option<js_sys::Function>>>;
 #[wasm_bindgen]
 pub struct FolditApp {
     app: AppHandle,
-    frontend: FrontendHandle,
     state_cb: JsCallback,
     response_cb: JsCallback,
 }
@@ -82,12 +83,11 @@ pub struct FolditApp {
 impl FolditApp {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // Empty pdb_path — web doesn't load by filesystem path; the host
-        // fetches structure bytes and feeds them in via the orchestrator.
-        let app = App::new(String::new());
+        // Web doesn't load by filesystem path; the host fetches
+        // structure bytes and feeds them in via the orchestrator.
+        let app = App::new(Box::new(host::WebHost));
         Self {
             app: Rc::new(RefCell::new(app)),
-            frontend: Rc::new(RefCell::new(FrontendState::new())),
             state_cb: Rc::new(RefCell::new(None)),
             response_cb: Rc::new(RefCell::new(None)),
         }
@@ -95,7 +95,7 @@ impl FolditApp {
 
     /// Register the JS callback that receives state-section pushes. The
     /// callback is invoked as `cb(jsonString)` where `jsonString` is the
-    /// stringified `Partial<FrontendState>`.
+    /// stringified `Partial<GuiState>`.
     #[wasm_bindgen(js_name = setStateCallback)]
     pub fn set_state_callback(&self, cb: js_sys::Function) {
         *self.state_cb.borrow_mut() = Some(cb);
@@ -137,14 +137,17 @@ impl FolditApp {
 
         self.app.borrow_mut().attach_engine(engine);
 
-        // rAF loop. Self-rescheduling closure that ticks the engine once
-        // per frame. Pattern lifted from viso/src/app/web/mod.rs.
-        spawn_render_loop(self.app.clone());
+        // Kick the one-shot async read of the persisted progress map. The
+        // result is stashed into the shared cell and merged by the rAF loop
+        // once it lands (a missing file on first run leaves the cell empty).
+        let progress_load: ProgressLoadCell = Rc::new(RefCell::new(None));
+        spawn_progress_load(progress_load.clone());
+
+        // start the render loop
+        spawn_render_loop(self.app.clone(), self.state_cb.clone(), progress_load);
 
         Ok(())
     }
-
-    // ── Inbound IPC (JS → Rust) ─────────────────────────────────────────────
 
     /// Forward a viewport input event. `json` is the JSON-encoded
     /// `ViewportInput` enum payload (same shape as the wry transport).
@@ -152,26 +155,17 @@ impl FolditApp {
     pub fn viewport_input(&self, json: &str) -> Result<(), JsValue> {
         let input: ViewportInput = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("viewport_input parse: {e}")))?;
-        self.app.borrow_mut().on_viewport_input(input);
+        self.app.borrow_mut().handle_viewport_input(input);
         Ok(())
     }
 
-    /// Forward a parameter-less action by id.
-    #[wasm_bindgen(js_name = triggerAction)]
-    pub fn trigger_action(&self, id: u32) -> Result<(), JsValue> {
-        let action = ActionId::try_from(id)
-            .map_err(|e| JsValue::from_str(&format!("trigger_action: unknown id ({e})")))?;
-        self.app.borrow_mut().on_trigger_action(action);
-        Ok(())
-    }
-
-    /// Forward a parameterized action. `json` is the JSON-encoded
-    /// `ParameterizedAction` enum.
-    #[wasm_bindgen(js_name = parameterizedAction)]
-    pub fn parameterized_action(&self, json: &str) -> Result<(), JsValue> {
-        let action: ParameterizedAction = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&format!("parameterized_action parse: {e}")))?;
-        self.app.borrow_mut().on_parameterized_action(action);
+    /// Forward a native GUI / chrome command. `json` is the JSON-encoded
+    /// `AppCommand` enum.
+    #[wasm_bindgen(js_name = appCommand)]
+    pub fn app_command(&self, json: &str) -> Result<(), JsValue> {
+        let command: AppCommand = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("app_command parse: {e}")))?;
+        self.app.borrow_mut().handle_app_command(command);
         Ok(())
     }
 
@@ -182,6 +176,37 @@ impl FolditApp {
         let op: OpDispatch = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("dispatch_op parse: {e}")))?;
         self.app.borrow_mut().on_dispatch_op(op);
+        Ok(())
+    }
+
+    /// Forward a panel-originated selection mutation. `json` is the
+    /// JSON-encoded `Vec<EntitySelection>` (matches the
+    /// `IpcMessage::SetSelection { entries }` payload).
+    #[wasm_bindgen(js_name = setSelection)]
+    pub fn set_selection(&self, json: &str) -> Result<(), JsValue> {
+        let entries: Vec<EntitySelection> = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("set_selection parse: {e}")))?;
+        self.app.borrow_mut().handle_set_selection(entries);
+        Ok(())
+    }
+
+    /// Forward a fire-and-forget stream-frame update. `json` is the
+    /// `{ request_id, params }` payload (the wasm transport has no generic
+    /// postMessage channel, so this is a dedicated method rather than the
+    /// `IpcMessage::UpdateStream` decode arm the desktop path uses).
+    #[wasm_bindgen(js_name = updateStream)]
+    pub fn update_stream(&self, json: &str) -> Result<(), JsValue> {
+        #[derive(serde::Deserialize)]
+        struct UpdateStreamArgs {
+            request_id: u64,
+            #[serde(default)]
+            params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+        }
+        let args: UpdateStreamArgs = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("update_stream parse: {e}")))?;
+        self.app
+            .borrow_mut()
+            .on_update_stream(args.request_id, args.params);
         Ok(())
     }
 
@@ -211,13 +236,10 @@ impl Default for FolditApp {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Outbound transport: state-push + async-request response delivery.
+// Outbound transport: async-request response delivery.
 //
-// Implemented against the JS callbacks. Currently only used internally;
-// when foldit_core::App grows a `populate_frontend(&mut FrontendState)`
-// call site here, this transport's `send_state` will fire.
-// ─────────────────────────────────────────────────────────────────────────────
+// State push is driven through `WebEffects` during `App::tick`; only the
+// response channel needs a long-lived JS-callback bridge here.
 
 #[allow(dead_code)]
 struct WebTransport {
@@ -251,15 +273,40 @@ impl bridge::Transport for WebTransport {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// rAF loop: self-rescheduling closure that ticks the engine each frame.
-// ─────────────────────────────────────────────────────────────────────────────
+/// Transient per-frame effect sink passed into `App::tick`. `push_tail` and
+/// `set_fullscreen` are no-ops on web; persistence fires a `spawn_local` write.
+struct WebEffects<'a> {
+    state_cb: &'a JsCallback,
+}
 
-fn spawn_render_loop(app: AppHandle) {
+impl HostEffects for WebEffects<'_> {
+    fn push_state(&mut self, json: &[u8]) {
+        let Some(cb) = self.state_cb.borrow().clone() else {
+            return;
+        };
+        if let Ok(s) = std::str::from_utf8(json) {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(s));
+        }
+    }
+
+    fn push_tail(&mut self, _update: foldit_core::TailUpdate) {}
+
+    fn set_fullscreen(&mut self, _value: bool) {}
+
+    fn persist_progress(&mut self, bytes: Vec<u8>) {
+        spawn_progress_save(bytes);
+    }
+}
+
+// rAF loop: self-rescheduling closure that drives App::tick(dt, fx) and
+// renders. The dirty GuiState diff and progress persistence are pushed
+// through `fx` during the tick.
+
+fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: ProgressLoadCell) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => {
-            log::error!("[foldit-web] no `window` — render loop not spawned");
+            log::error!("[foldit-web] no `window`; render loop not spawned");
             return;
         }
     };
@@ -272,13 +319,22 @@ fn spawn_render_loop(app: AppHandle) {
 
     *g.borrow_mut() = Some(Closure::new(move || {
         let now = perf.as_ref().map_or(0.0, |p| p.now());
-        let _dt = ((now - *last_ts.borrow()) / 1000.0).max(0.0) as f32;
+        let dt = ((now - *last_ts.borrow()) / 1000.0).max(0.0) as f32;
         *last_ts.borrow_mut() = now;
 
-        // Tick the App; it owns the engine and drives update + render.
-        // (Once App grows an explicit per-frame entry-point we'll call
-        // it here. For now the engine is reachable via App; iterate.)
-        let _ = app.borrow_mut();
+        {
+            let mut fx = WebEffects { state_cb: &state_cb };
+            {
+                let mut app = app.borrow_mut();
+                app.tick(dt, &mut fx);
+                app.render();
+            }
+            // Merge any landed progress load after the tick's state push
+            // (projects next frame).
+            if let Some(bytes) = progress_load.borrow_mut().take() {
+                app.borrow_mut().import_progress(&bytes);
+            }
+        }
 
         // Re-arm.
         if let Some(window) = web_sys::window() {
@@ -291,4 +347,85 @@ fn spawn_render_loop(app: AppHandle) {
     let _ = window.request_animation_frame(
         g.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
     );
+}
+
+// OPFS progress persistence: origin-private read at startup, fire-and-forget
+// write when the live map changes. Both run as `spawn_local` tasks off the rAF
+// frame. The OPFS error type is `JsValue` (no `io::ErrorKind`), so a missing
+// file on first run surfaces as a rejected open and is treated as "no saved
+// progress" rather than an error.
+
+/// Read the persisted progress map from the OPFS root and stash the bytes into
+/// the shared cell. A first-run miss (the file does not exist) leaves the cell
+/// empty and is not logged as an error.
+fn spawn_progress_load(cell: ProgressLoadCell) {
+    wasm_bindgen_futures::spawn_local(async move {
+        use opfs::persistent::{app_specific_dir, DirectoryHandle as DirHandle};
+        use opfs::{DirectoryHandle as _, FileHandle as _, GetFileHandleOptions};
+
+        let dir: DirHandle = match app_specific_dir().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open OPFS root: {e:?}");
+                return;
+            }
+        };
+        let opts = GetFileHandleOptions { create: false };
+        let file = match dir.get_file_handle_with_options(PROGRESS_FILE, &opts).await {
+            Ok(f) => f,
+            // A rejected open with `create: false` is the first-run "no file"
+            // signal; treat any error here as "no saved progress".
+            Err(_) => return,
+        };
+        match file.read().await {
+            Ok(bytes) => *cell.borrow_mut() = Some(bytes),
+            Err(e) => log::warn!("[foldit-web] could not read progress file: {e:?}"),
+        }
+    });
+}
+
+/// Write the serialized progress map to the OPFS root, fire-and-forget. Errors
+/// are logged and dropped; the next change re-attempts the save.
+fn spawn_progress_save(bytes: Vec<u8>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        use opfs::persistent::{app_specific_dir, DirectoryHandle as DirHandle};
+        use opfs::{
+            CreateWritableOptions, DirectoryHandle as _, FileHandle as _, GetFileHandleOptions,
+            WritableFileStream as _,
+        };
+
+        let dir: DirHandle = match app_specific_dir().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open OPFS root for write: {e:?}");
+                return;
+            }
+        };
+        let get_opts = GetFileHandleOptions { create: true };
+        let mut file = match dir
+            .get_file_handle_with_options(PROGRESS_FILE, &get_opts)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open progress file for write: {e:?}");
+                return;
+            }
+        };
+        let write_opts = CreateWritableOptions { keep_existing_data: false };
+        let mut writer = match file.create_writable_with_options(&write_opts).await {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("[foldit-web] could not open progress writer: {e:?}");
+                return;
+            }
+        };
+        if let Err(e) = writer.write_at_cursor_pos(&bytes).await {
+            log::warn!("[foldit-web] could not write progress: {e:?}");
+            return;
+        }
+        if let Err(e) = writer.close().await {
+            log::warn!("[foldit-web] could not flush progress: {e:?}");
+        }
+    });
 }

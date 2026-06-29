@@ -2,22 +2,29 @@
 name = "foldit-core"
 version = "0.1.0"
 edition = "2021"
-description = "Pure-logic core: entity store, focus, history, puzzle loading"
+description = "Pure-logic core: session, history, plugin driver, projectors, puzzle loading"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.0", default-features = false }
-molex = { version = "0.4.2", features = ["serde", "specta"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.6", default-features = false }
+molex = { version = "0.7.1", features = ["serde", "specta"] }
 
 # Core
 glam = "0.30"
 indexmap = "2"
 slotmap = "1.0"
 smallvec = "1"
-
-# Lock-free per-entity coord buffering
-triple_buffer = "8"
 
 # Utilities
 log = "0.4"
@@ -32,11 +39,18 @@ serde_json = "1"
 toml = "0.8"
 base64 = "0.22"
 
+# Error handling
+thiserror = "2"
+
 # Native-only HTTP client for downloading from RCSB. On wasm the equivalent
 # fetch() bridge belongs in foldit-web (mirrors viso's split: web entry uses
 # `web_sys::window().fetch_with_str`, native uses a sync HTTP client).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
+# Decodes the opaque `voids` query payload (proto `VoidField`) at the
+# native runner-client boundary; the void detection + render path is
+# native-only, mirroring how the score path names the runner's proto types.
+prost = "0.13"
 
 [dev-dependencies]
 proptest = "1"

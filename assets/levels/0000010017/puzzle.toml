@@ -31,6 +31,10 @@ show_other_hbonds = true
 show_sidechain_hbonds = true
 show_non_protein_hbonds = true
 
+[[puzzle.design_mask]]
+chain = "A"
+can_design = "6-12||"
+
 [[sequence]]
 text = "Helices and sheets have different preferred amino acids."
 color = "science"

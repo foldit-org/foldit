@@ -1,0 +1,4 @@
+.building-block-body {
+	@apply cursor-pointer;
+	@apply flex flex-col gap-2 overflow-y-scroll;
+}
