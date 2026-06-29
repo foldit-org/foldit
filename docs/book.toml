@@ -1,0 +1,8 @@
+[book]
+title = "Foldit"
+authors = ["Andreas Petrides"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/foldit-org/foldit"

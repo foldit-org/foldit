@@ -1,145 +1,88 @@
 # Foldit
 
-A reimagined Foldit decoupled into GUI, render engine, and backends for Rosetta and ML.
+A protein-folding client. A player loads a structure, manipulates it (pull
+residues, build bands, run minimizers and design tools), and is scored against a
+Rosetta-style energy function. One body of host-agnostic logic drives a desktop
+shell and a web (wasm) shell; the molecular backends run as out-of-process
+plugins.
+
+Full documentation is the mdbook under `docs/`. Build it with `mdbook build
+docs` and open `docs/book/index.html`, or read the source under `docs/src/`.
 
 ## Prerequisites
 
-- **Rust**: Install via [rustup](https://rustup.rs)
-- **Pixi**: For ML Python environments - [pixi.sh](https://pixi.sh) (optional, only for ML features)
+- Rust, via [rustup](https://rustup.rs).
+- [pixi](https://pixi.sh), only for the plugin Python environments.
 
-## Quick Start
-
-### Build
+## Build and run
 
 ```bash
-cargo build
+cargo build               # builds the default member, the `foldit` desktop binary
+cargo run -- 1bfe         # load a structure by PDB id (or a file path)
+cargo run                 # no argument: start at the menus
 ```
 
-This builds both:
-- `foldit` - Main application
-- `foldit-runner-worker` - ML worker process (needed at runtime)
-
-### Run
+`cargo build` does not build the plugin worker or the Python host dylib. Build
+those next to the desktop exe with:
 
 ```bash
-cargo run -- <PDB_ID>
-# Example:
-cargo run -- 1bfe
+cargo xtask build-host
 ```
 
-## ML Backend Setup
+`cargo run` rebuilds neither, so run `build-host` after changing runner code. See
+`docs/src/getting-started/build-and-run.md`.
 
-To use ML-based structure prediction:
+## Workspace
 
-### 1. Install Python Environment
+Root-owned members (in `crates/`, plus `xtask/`):
 
-```bash
-cd crates/foldit-runner
+| Member | Role |
+| --- | --- |
+| `foldit-core` | Host-agnostic application logic: session, history, scoring, plugin client, projectors |
+| `foldit-desktop` | The default binary `foldit`: winit + wry + wgpu shell |
+| `foldit-web` | wasm32 entry: canvas-mounted, wasm-bindgen surface |
+| `foldit-gui` | Wire and state types, the JS-to-Rust bridge (in-tree, not a submodule) |
+| `foldit-runner/python-host` | The Python plugin host dylib (a member living inside the runner submodule) |
+| `xtask` | Build and packaging automation |
 
-# GPU-enabled
-pixi install -e foundry
+Submodules (each in its own repo, excluded from the workspace): `foldit-runner`,
+`molex`, `viso`, `foldit-plugin-sdk`. See
+`docs/src/getting-started/workspace-layout.md`.
 
-# Or CPU-only
-pixi install -e foundry-cpu
-```
+## Architecture
 
-### 2. Generate Protobuf Bindings
+Both shells construct one `foldit_core::App`, attach a viso render engine, feed
+it input, and call `tick` once per frame. The App owns the session, the
+undo/redo history, the scoring coordinator, the plugin client, and three
+projectors that turn session changes into render, GUI, and plugin updates. The
+host boundary is two traits (`HostResources` for resource access in,
+`HostEffects` for per-frame outputs out), which is what lets the same core run in
+the wry/winit desktop shell and the wasm web shell. See
+`docs/src/architecture/`.
 
-```bash
-pixi run generate-proto
-```
+## Backends and plugins
 
-### 3. Run the Application
+The molecular backends are not compiled into the client. They run as plugins
+hosted by **foldit-runner**, which speaks one protocol to every plugin over an
+interprocess socket plus iceoryx2 shared memory. The worker binary is
+`foldit-worker`. Rosetta is itself a native plugin; the structure-prediction and
+design models are Python plugins loaded through `foldit-python-host`. See
+`docs/src/plugins/`.
 
-```bash
-cd ../..  # Back to workspace root
-cargo run -- 1bfe
-```
-
-The application will spawn `foldit-runner-worker` processes as needed.
-
-## Build Tasks (xtask)
-
-The project includes an xtask system for common operations:
-
-```bash
-cargo xtask setup-ml        # Install all Python environments
-cargo xtask bundle          # Create release bundle with ML runtime
-cargo xtask bundle --cpu-only  # CPU-only bundle
-cargo xtask download-models # Download model weights
-```
-
-Or via pixi (convenience wrappers):
-
-```bash
-pixi run setup-ml
-pixi run bundle
-pixi run download-models
-```
-
-## Project Structure
-
-```
-foldit/
-├── src/
-│   └── main.rs              # Main application
-├── crates/
-│   ├── foldit-runner/           # ML inference library
-│   ├── viso/                # GPU render engine (external; optional submodule)
-│   └── molex/               # Molecular structure parsing (external; optional submodule)
-├── xtask/                   # Build automation
-├── Cargo.toml               # Workspace manifest
-└── pixi.toml                # Pixi task aliases
-```
-
-## Features
-
-- **GPU-accelerated rendering** via wgpu
-- **ML structure prediction** via foldit-runner (SimpleFold, RFdiffusion)
-- **Zero-copy IPC** between main app and ML workers via Iceoryx2 shared memory
-- **Rosetta integration** (optional, requires separate Rosetta installation)
-- **Cross-platform**: macOS (Apple Silicon), Linux, Windows
+The plugin Python environments are managed by pixi inside `crates/foldit-runner`.
+Install them with `cargo xtask setup-envs`.
 
 ## Development
 
-### Release Build
-
 ```bash
-cargo build --release
+cargo build --release         # release build
+cargo test --workspace        # tests
+just check-all                # clippy + deny + machete + file-length gates
 ```
 
-### Run Tests
+To work on viso or the plugin SDK locally, populate the submodule and keep its
+`[patch]` block in `Cargo.toml` active; comment the block out to build against
+the published version. See `docs/src/getting-started/submodules.md`.
 
-```bash
-cargo test --workspace
-```
-
-### Working on viso or molex locally
-
-`viso` and `molex` are external crates (git tag and crates.io respectively); a
-plain clone builds against the published versions and does not need their
-submodules. To hack on either alongside foldit:
-
-```bash
-# 1. Pull the submodule you want to edit
-git submodule update --init crates/viso     # or crates/molex
-
-# 2. Uncomment the matching [patch] block at the bottom of Cargo.toml
-# 3. cargo build now uses your local checkout
-```
-
-Each toggle is independent — you can have viso local and molex published, or
-vice versa, or both local.
-
-### Create Distribution Bundle
-
-```bash
-cargo xtask bundle
-# Output: ./bundle/
-```
-
-The bundle includes:
-- `foldit` binary
-- `foldit-runner-worker` binary
-- Python ML runtime (bundled via pixi)
-- Model weights (if downloaded)
+For OS installers use `cargo xtask package` (output in `dist/`); for the static
+web build use `cargo xtask package-web`. See `docs/src/tooling/`.
