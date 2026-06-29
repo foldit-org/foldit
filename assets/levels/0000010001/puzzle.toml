@@ -16,7 +16,7 @@ up = [0.066, 1, 0.059]
 [[puzzle.filter]]
 type = "ClashCount"
 plugin = "rosetta"
-bonus = 200
+bonus = -200
 max_clashes = 1
 
 [[sequence]]
