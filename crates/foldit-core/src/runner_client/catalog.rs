@@ -40,7 +40,7 @@ impl RunnerClient {
     where
         F: Fn(molex::EntityId) -> Option<molex::EntityKind>,
     {
-        use foldit_gui::state::ActionInfo;
+        use foldit_gui::state::{ActionInfo, ActionOption, ParamValue};
         use super::types::build_dispatch_context;
 
         let Some(orch) = self.orchestrator.as_ref() else {
@@ -56,7 +56,8 @@ impl RunnerClient {
             &std::collections::BTreeMap::new(),
         );
 
-        orch.actions_catalog(&ctx, entity_type_of)
+        let mut rows: Vec<ActionInfo> = orch
+            .actions_catalog(&ctx, entity_type_of)
             .into_iter()
             .map(|entry| ActionInfo {
                 op_id: entry.op_id,
@@ -73,8 +74,66 @@ impl RunnerClient {
                     .into_iter()
                     .map(crate::wire_params::param_spec_to_wire)
                     .collect(),
+                options: Vec::new(),
             })
-            .collect()
+            .collect();
+
+        // Host-declared (non-plugin) action. Its non-empty `options` make it a
+        // 20-button amino-acid picker rather than a click-to-fire button: each
+        // option is a full dispatch in its own right. `color` encodes
+        // hydrophobicity, and the 3-letter `aa` param is what the dispatch
+        // reads back (there is no 1-letter residue constructor). Enabled only
+        // when exactly one designable residue is selected: it must pass the
+        // same design mask the plugin gate uses and be a single-residue
+        // selection, which is what the dispatch will accept.
+        let options = molex::chemistry::AminoAcid::ALL
+            .iter()
+            .map(|&aa| {
+                // `code()` is statically uppercase ASCII, so each byte maps
+                // straight to a char without a fallible UTF-8 decode.
+                let three_letter: String =
+                    aa.code().iter().map(|&b| b as char).collect();
+                // Foldit-owned residue icon, served under `/game-assets/`; the
+                // 3-letter code matches the icon filename (e.g. ALA.png).
+                let icon = format!("residue_icons/{three_letter}.png");
+                let mut params = std::collections::HashMap::new();
+                params.insert("aa".to_owned(), ParamValue::String(three_letter));
+                ActionOption {
+                    label: (aa.one_letter() as char).to_string(),
+                    color: if aa.is_hydrophobic() { "orange" } else { "blue" }
+                        .to_owned(),
+                    icon: Some(icon),
+                    hotkey: None,
+                    op_id: "mutate_residue".to_owned(),
+                    params,
+                }
+            })
+            .collect();
+        rows.push(ActionInfo {
+            op_id: "mutate_residue".to_owned(),
+            plugin_id: "native".to_owned(),
+            display: "Mutate".to_owned(),
+            // `builtin:<name>` selects a built-in GUI icon rather than a
+            // plugin-relative asset path, so this native action ships a glyph
+            // with no asset file.
+            icon_path: "builtin:replace".to_owned(),
+            enabled: selection_designable
+                && selection
+                    .values()
+                    .map(std::collections::BTreeSet::len)
+                    .sum::<usize>()
+                    == 1,
+            active: false,
+            // Badge wire: the friendly glyph the frontend prettifies to "M".
+            // Kept in sync with the resolution table in
+            // `native_hotkey_toggle`; the two are independent wires (badge
+            // display vs key resolution) for the same binding.
+            hotkey: Some("KeyM".to_owned()),
+            tooltip: Some("Mutate the selected residue".to_owned()),
+            params: Vec::new(),
+            options,
+        });
+        rows
     }
 
     /// Project the orchestrator's per-plugin group metadata into the GUI's
@@ -91,14 +150,25 @@ impl RunnerClient {
         let Some(orch) = self.orchestrator.as_ref() else {
             return vec![];
         };
-        orch.plugin_groups()
+        let mut groups: Vec<PluginGroupInfo> = orch
+            .plugin_groups()
             .into_iter()
             .map(|entry| PluginGroupInfo {
                 plugin_id: entry.plugin_id,
                 name: entry.name,
                 order: entry.order,
             })
-            .collect()
+            .collect();
+
+        // Group box titling the host-declared actions (joined on `plugin_id`
+        // against `ActionInfo`). Ordered last via a max sort key so it sits
+        // after every manifest plugin group deterministically.
+        groups.push(PluginGroupInfo {
+            plugin_id: "native".to_owned(),
+            name: Some("Design".to_owned()),
+            order: Some(u32::MAX),
+        });
+        groups
     }
 
     /// Project the orchestrator's custom-panel catalog into the GUI's
@@ -165,6 +235,21 @@ impl RunnerClient {
             .into_iter()
             .find(|e| e.hotkey.as_deref() == Some(key))
             .map(|e| (e.plugin_id, e.op_id))
+    }
+
+    /// Resolve a native (non-plugin) key to the op_id whose picker it
+    /// toggles. Separate from [`Self::hotkey_to_op`], which scans the plugin
+    /// `ops_catalog`: the native Mutate action is host-declared and never
+    /// appears there. Toggling a picker is not an op dispatch; the Mutate
+    /// dispatch needs an `aa` param, so this key must never route through the
+    /// op path. Kept in sync with the `KeyM` badge on the native Mutate
+    /// [`ActionInfo`]; the two are independent wires (badge vs resolution).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_hotkey_toggle(&self, key: &str) -> Option<String> {
+        match key {
+            "KeyM" => Some("mutate_residue".to_owned()),
+            _ => None,
+        }
     }
 
     /// Static display label for `(plugin_id, op_id)` from the op catalog.

@@ -147,6 +147,10 @@ pub enum CheckpointKindTag {
     /// (catalog join keyed by plugin id + op id, falling back to a
     /// generic icon).
     PluginOp,
+    /// Host-native edit applied in-process with no plugin involved (e.g. a
+    /// residue mutation). Labeled distinctly so history does not present it
+    /// as a plugin op. Display label rides on `CheckpointInfo::label`.
+    NativeEdit,
 }
 
 /// One node in the unified checkpoint graph.

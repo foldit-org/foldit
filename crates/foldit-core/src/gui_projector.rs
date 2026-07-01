@@ -96,6 +96,7 @@ const fn checkpoint_kind_tag(k: &CheckpointKind) -> CheckpointKindTag {
         CheckpointKind::AddEntity { .. } => CheckpointKindTag::AddEntity,
         CheckpointKind::LaneUndo { .. } => CheckpointKindTag::LaneUndo,
         CheckpointKind::PluginOp { .. } => CheckpointKindTag::PluginOp,
+        CheckpointKind::NativeEdit { .. } => CheckpointKindTag::NativeEdit,
     }
 }
 

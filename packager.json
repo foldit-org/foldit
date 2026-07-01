@@ -15,6 +15,7 @@
     { "src": "target/staging/libfoldit_python_host.dylib", "target": "libfoldit_python_host.dylib" }
   ],
   "macos": {
-    "minimumSystemVersion": "11.0"
+    "minimumSystemVersion": "11.0",
+    "entitlements": "packaging/macos.entitlements"
   }
 }

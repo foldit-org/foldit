@@ -371,6 +371,35 @@ pub struct ParamSpec {
     pub constraints: Option<ParamConstraint>,
 }
 
+/// One selectable entry in an action's button-list picker.
+///
+/// Each option is a self-contained dispatch: pressing it fires the op named
+/// by `op_id` with `params` as the envelope's parameter map. `params` keys
+/// and value tags match [`OpDispatch::params`], so an option dispatches as a
+/// normal op envelope with no extra translation. `label`, `color`, `icon`,
+/// and `hotkey` drive how the option renders inside the picker.
+///
+/// [`OpDispatch::params`]: crate::actions::OpDispatch
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct ActionOption {
+    /// Display label for this option.
+    pub label: String,
+    /// Render color (frontend-interpreted CSS color string).
+    pub color: String,
+    /// Optional icon asset path (manifest-relative). `None` = no icon.
+    pub icon: Option<String>,
+    /// Optional hotkey corner-badge string (winit `KeyCode` spelling).
+    /// `None` = no badge.
+    pub hotkey: Option<String>,
+    /// Op-id this option dispatches when chosen.
+    pub op_id: String,
+    /// Parameter values for the dispatch envelope, keyed by `ParamSpec.name`.
+    /// Matches [`OpDispatch::params`] so the option fires as a normal op.
+    ///
+    /// [`OpDispatch::params`]: crate::actions::OpDispatch
+    pub params: std::collections::HashMap<String, ParamValue>,
+}
+
 /// Information about an available action surfaced to the GUI.
 ///
 /// One entry per row in the orchestrator's
@@ -394,7 +423,9 @@ pub struct ActionInfo {
     pub display: String,
     /// Manifest-relative icon asset path (relative to the owning plugin
     /// directory). The GUI builds its fetch URL as
-    /// `/plugins/<plugin_id>/<icon_path>`.
+    /// `/plugins/<plugin_id>/<icon_path>`. A value beginning with `builtin:`
+    /// instead names a built-in GUI icon resolved by the frontend's icon set,
+    /// letting native actions ship a glyph with no plugin asset file.
     pub icon_path: String,
     /// True when the op can be dispatched in the current lock state.
     pub enabled: bool,
@@ -410,6 +441,11 @@ pub struct ActionInfo {
     /// Typed parameter schema (empty for click-to-fire ops). Drives
     /// schema-driven panel widgets without an extra round-trip.
     pub params: Vec<ParamSpec>,
+    /// Button-list picker entries. Empty => the action renders as a normal
+    /// button that dispatches `op_id` directly; non-empty => the action
+    /// renders a host-emitted picker where each [`ActionOption`] is a full
+    /// dispatch in its own right.
+    pub options: Vec<ActionOption>,
 }
 
 /// Per-plugin button-group metadata.
@@ -490,6 +526,10 @@ pub struct ActionsSection {
     pub available: Vec<ActionInfo>,
     /// Per-plugin group metadata, joined to `available` on `plugin_id`.
     pub groups: Vec<PluginGroupInfo>,
+    /// The `op_id` of the currently-open action picker, or `None` when no
+    /// picker is open. Rides the same `"actions"` wire push as `available`
+    /// and `groups`; the frontend renders one picker open at a time from it.
+    pub open_picker: Option<String>,
 }
 
 

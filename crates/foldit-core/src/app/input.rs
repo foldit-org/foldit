@@ -25,7 +25,10 @@ impl App {
             &self.runner_client,
         );
         #[cfg(not(target_arch = "wasm32"))]
-        let produced = out.escape || out.segment_toggle.is_some() || out.hotkey_op.is_some();
+        let produced = out.escape
+            || out.segment_toggle.is_some()
+            || out.hotkey_op.is_some()
+            || out.toggle_picker.is_some();
         #[cfg(target_arch = "wasm32")]
         let produced = out.escape || out.segment_toggle.is_some();
         self.apply_deferred_viewport_actions(
@@ -34,6 +37,8 @@ impl App {
             out.segment_toggle,
             #[cfg(not(target_arch = "wasm32"))]
             out.hotkey_op,
+            #[cfg(not(target_arch = "wasm32"))]
+            out.toggle_picker,
         );
         produced
     }
@@ -76,6 +81,8 @@ impl App {
         let mut pending_segment_toggle: Option<(EntityId, usize)> = None;
         #[cfg(not(target_arch = "wasm32"))]
         let mut pending_hotkey_op: Option<String> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut pending_toggle_picker: Option<String> = None;
 
         match input {
             ViewportInput::PointerDown {
@@ -145,6 +152,7 @@ impl App {
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             pending_hotkey_op = out.hotkey_op;
+                            pending_toggle_picker = out.toggle_picker;
                         }
                     }
                 }
@@ -166,6 +174,8 @@ impl App {
             pending_segment_toggle,
             #[cfg(not(target_arch = "wasm32"))]
             pending_hotkey_op,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_toggle_picker,
         );
     }
 

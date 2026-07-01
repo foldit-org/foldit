@@ -1,12 +1,12 @@
-import { Component, For, Show } from 'solid-js';
+import { Component, For, Show, type JSX } from 'solid-js';
 import "../../styles/util/ButtonListWidget.css";
-import ImageFromFS from "./ImageFromFS";
 
 // Types
 
 export interface ButtonListItem {
   id: string;
   icon?: string;
+  iconNode?: JSX.Element;
   content?: any;
   color?: string;
   hotkey?: string;
@@ -35,8 +35,9 @@ const ButtonListWidget: Component<ButtonListWidgetProps> = (props) => {
               data-tooltip={item.tooltip}
             >
               <Show when={item.icon}>
-                <ImageFromFS path={item.icon!} />
+                <img src={item.icon!} draggable={false} />
               </Show>
+              <Show when={item.iconNode}>{item.iconNode}</Show>
               <Show when={item.content}>
                 <div class="button-list-content">{item.content}</div>
               </Show>

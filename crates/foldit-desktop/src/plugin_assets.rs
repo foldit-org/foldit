@@ -40,35 +40,35 @@ pub enum AssetResponse {
 }
 
 /// Try to serve `request_path` (URL path component, e.g.
-/// `/plugins/rosetta/icons/wiggle.png`) from `plugins_root`. The caller
-/// is responsible for routing — only invoke this when the path begins
-/// with the `/plugins/` prefix.
+/// `/plugins/rosetta/icons/wiggle.png`) from `root`. `url_prefix` is the
+/// route prefix to strip (`/plugins/` or `/game-assets/`); the caller is
+/// responsible for routing — only invoke this when `request_path` begins
+/// with `url_prefix`.
 ///
 /// `mjs_allowlist` holds the servable `.mjs` URL paths (the
 /// manifest-declared `[[panels]]` entrypoints, from
 /// [`foldit_core::locate_plugin_ui_entrypoints`]). A `.mjs` request is
 /// served only when `request_path` is in the set; non-`.mjs` static assets
-/// (icons/css/fonts) ignore it.
+/// (icons/css/fonts) ignore it. A route with no UI modules (e.g. game
+/// assets) passes an empty set, so every `.mjs` fails closed.
 pub fn serve(
     request_path: &str,
-    plugins_root: &Path,
+    url_prefix: &str,
+    root: &Path,
     mjs_allowlist: &HashSet<String>,
 ) -> AssetResponse {
-    let Some(rel) = request_path
-        .strip_prefix('/')
-        .and_then(|p| p.strip_prefix("plugins/"))
-    else {
+    let Some(rel) = request_path.strip_prefix(url_prefix) else {
         return AssetResponse::NotFound;
     };
     if rel.is_empty() {
         return AssetResponse::NotFound;
     }
-    let asset_path = plugins_root.join(rel);
+    let asset_path = root.join(rel);
 
     let Ok(canonical_asset) = asset_path.canonicalize() else {
         return AssetResponse::NotFound;
     };
-    let Ok(canonical_root) = plugins_root.canonicalize() else {
+    let Ok(canonical_root) = root.canonicalize() else {
         return AssetResponse::NotFound;
     };
     if !canonical_asset.starts_with(&canonical_root) {
@@ -168,6 +168,12 @@ mod tests {
     /// Allowlist holding exactly the given URL paths.
     fn allow(paths: &[&str]) -> HashSet<String> {
         paths.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    /// Invoke [`serve`] pinned to the `/plugins/` route, the case these
+    /// tests exercise.
+    fn serve(path: &str, root: &Path, allow: &HashSet<String>) -> AssetResponse {
+        super::serve(path, "/plugins/", root, allow)
     }
 
     #[test]

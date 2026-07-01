@@ -34,7 +34,9 @@ export type ActionInfo = {
 	/**
 	 *  Manifest-relative icon asset path (relative to the owning plugin
 	 *  directory). The GUI builds its fetch URL as
-	 *  `/plugins/<plugin_id>/<icon_path>`.
+	 *  `/plugins/<plugin_id>/<icon_path>`. A value beginning with `builtin:`
+	 *  instead names a built-in GUI icon resolved by the frontend's icon set,
+	 *  letting native actions ship a glyph with no plugin asset file.
 	 */
 	icon_path: string,
 	/**  True when the op can be dispatched in the current lock state. */
@@ -57,6 +59,47 @@ export type ActionInfo = {
 	 *  schema-driven panel widgets without an extra round-trip.
 	 */
 	params: ParamSpec[],
+	/**
+	 *  Button-list picker entries. Empty => the action renders as a normal
+	 *  button that dispatches `op_id` directly; non-empty => the action
+	 *  renders a host-emitted picker where each [`ActionOption`] is a full
+	 *  dispatch in its own right.
+	 */
+	options: ActionOption[],
+};
+
+/**
+ *  One selectable entry in an action's button-list picker.
+ * 
+ *  Each option is a self-contained dispatch: pressing it fires the op named
+ *  by `op_id` with `params` as the envelope's parameter map. `params` keys
+ *  and value tags match [`OpDispatch::params`], so an option dispatches as a
+ *  normal op envelope with no extra translation. `label`, `color`, `icon`,
+ *  and `hotkey` drive how the option renders inside the picker.
+ * 
+ *  [`OpDispatch::params`]: crate::actions::OpDispatch
+ */
+export type ActionOption = {
+	/**  Display label for this option. */
+	label: string,
+	/**  Render color (frontend-interpreted CSS color string). */
+	color: string,
+	/**  Optional icon asset path (manifest-relative). `None` = no icon. */
+	icon: string | null,
+	/**
+	 *  Optional hotkey corner-badge string (winit `KeyCode` spelling).
+	 *  `None` = no badge.
+	 */
+	hotkey: string | null,
+	/**  Op-id this option dispatches when chosen. */
+	op_id: string,
+	/**
+	 *  Parameter values for the dispatch envelope, keyed by `ParamSpec.name`.
+	 *  Matches [`OpDispatch::params`] so the option fires as a normal op.
+	 * 
+	 *  [`OpDispatch::params`]: crate::actions::OpDispatch
+	 */
+	params: { [key in string]: ParamValue },
 };
 
 /**  Available actions and their current state */
@@ -64,6 +107,12 @@ export type ActionsSection = {
 	available: ActionInfo[],
 	/**  Per-plugin group metadata, joined to `available` on `plugin_id`. */
 	groups: PluginGroupInfo[],
+	/**
+	 *  The `op_id` of the currently-open action picker, or `None` when no
+	 *  picker is open. Rides the same `"actions"` wire push as `available`
+	 *  and `groups`; the frontend renders one picker open at a time from it.
+	 */
+	open_picker: string | null,
 };
 
 /**
@@ -127,6 +176,12 @@ export type AppCommand = { type: "SetViewOptions"; options: unknown } | { type: 
  *  owns the open/closed set so visibility survives a reload.
  */
 { type: "SetPanelVisible"; panel: string; visible: boolean } | 
+/**
+ *  Open the action picker for `op_id`, or close any open picker with
+ *  `None`. Pure UI state; the backend owns the open picker so it survives
+ *  a re-projection and can be toggled by a native hotkey too.
+ */
+{ type: "SetActionPickerOpen"; op_id: string | null } | 
 /**
  *  Record a panel's dragged top-left position (pixels, origin
  *  top-left). Pure UI state.
@@ -245,7 +300,13 @@ export type CheckpointKindTag =
  *  (catalog join keyed by plugin id + op id, falling back to a
  *  generic icon).
  */
-"plugin_op";
+"plugin_op" | 
+/**
+ *  Host-native edit applied in-process with no plugin involved (e.g. a
+ *  residue mutation). Labeled distinctly so history does not present it
+ *  as a plugin op. Display label rides on `CheckpointInfo::label`.
+ */
+"native_edit";
 
 /**
  *  Opaque entity identifier.
@@ -286,7 +347,7 @@ export type FilterStatus =
  *  `AppCommand::History(cmd)` and dispatched to the
  *  `EntityStore` methods.
  * 
- *  New variants are handled in `App::run_history_command`.
+ *  New variants are handled in `Session::apply_history_command`.
  */
 export type HistoryCommand = 
 /**  Move checkpoint head to the given checkpoint. */

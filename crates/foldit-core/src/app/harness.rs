@@ -198,6 +198,8 @@ impl EngineHarness {
             segment_toggle: None,
             #[cfg(not(target_arch = "wasm32"))]
             hotkey_op: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            toggle_picker: None,
         };
         match code {
             // Auto-rotate binding is intentionally dropped in foldit.
@@ -245,7 +247,13 @@ impl EngineHarness {
                             .hotkey_to_op(other)
                             .map(|(_plugin_id, op_id)| op_id);
                         if outcome.hotkey_op.is_none() {
-                            log::debug!("Unhandled key code from frontend: {other}");
+                            // No plugin op claims the key; try the native
+                            // picker-toggle table. This flips a host-owned
+                            // picker open/closed rather than dispatching an op.
+                            outcome.toggle_picker = runner_client.native_hotkey_toggle(other);
+                            if outcome.toggle_picker.is_none() {
+                                log::debug!("Unhandled key code from frontend: {other}");
+                            }
                         }
                     }
                     #[cfg(target_arch = "wasm32")]
@@ -264,6 +272,11 @@ pub(in crate::app) struct KeyOutcome {
     pub(in crate::app) segment_toggle: Option<(EntityId, usize)>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) hotkey_op: Option<String>,
+    /// A native key that toggles a host-owned action picker (op_id whose
+    /// picker to flip open/closed). Distinct from `hotkey_op`, which
+    /// dispatches an op.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) toggle_picker: Option<String>,
 }
 
 /// The trajectory path from command-line arguments, read on a `KeyT` press.

@@ -41,6 +41,13 @@ pub enum CheckpointKind {
         op_id: String,
         display: String,
     },
+    /// Host-native edit applied without any plugin dispatch (e.g. a
+    /// residue mutation performed in-process via molex). Distinct from
+    /// [`Self::PluginOp`] because that variant's `plugin_id` is read as a
+    /// broadcast routing key; a native edit has no originating plugin and
+    /// must not fabricate one. The touched lane set rides on the
+    /// checkpoint's `entity_heads`, like `PluginOp`.
+    NativeEdit { op_id: String, display: String },
 }
 
 impl CheckpointKind {
@@ -50,7 +57,7 @@ impl CheckpointKind {
     #[must_use]
     pub const fn entity(&self) -> Option<EntityId> {
         match self {
-            Self::Loaded { .. } | Self::PluginOp { .. } => None,
+            Self::Loaded { .. } | Self::PluginOp { .. } | Self::NativeEdit { .. } => None,
             Self::PromotedPreview { entity, .. }
             | Self::AddEntity { entity, .. }
             | Self::LaneUndo { entity, .. } => Some(*entity),

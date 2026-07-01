@@ -97,6 +97,104 @@ function resolvePluginsRoot(): string | null {
   }
 }
 
+// Resolve the repo-root `assets/` directory holding foldit-owned static
+// assets (residue icons, etc.). Mirrors `resolvePluginsRoot`, honoring a
+// FOLDIT_ASSETS_ROOT override consistent with the desktop release path.
+function resolveAssetsRoot(): string | null {
+  const env = process.env.FOLDIT_ASSETS_ROOT;
+  if (env && fs.existsSync(env) && fs.statSync(env).isDirectory()) {
+    try {
+      return fs.realpathSync(env);
+    } catch {
+      return null;
+    }
+  }
+  // Walk up from this config's directory looking for the in-tree assets root.
+  let cursor = __dirname;
+  for (;;) {
+    const candidate = path.join(cursor, 'assets');
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      try {
+        return fs.realpathSync(candidate);
+      } catch {
+        return null;
+      }
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+}
+
+// Strip `urlPrefix` from the request, resolve the remainder within `root`
+// under a realpath containment check, and stream the file with a
+// fail-closed PLUGIN_ASSET_MIME type. Shared by the plugin and game-asset
+// routes so both inherit the identical traversal defense and served-type
+// restriction; requests outside `urlPrefix` fall through to `next()`.
+function serveContained(
+  root: string,
+  urlPrefix: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  next: Connect.NextFunction
+) {
+  const url = req.url ?? '';
+  if (!url.startsWith(urlPrefix)) return next();
+
+  // Drop query string, then strip the route prefix.
+  const qIdx = url.indexOf('?');
+  const pathOnly = qIdx >= 0 ? url.slice(0, qIdx) : url;
+  const rel = pathOnly.slice(urlPrefix.length);
+  if (rel === '') {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+
+  const asset = path.join(root, rel);
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(asset);
+  } catch {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+  // Component-aware containment: the canonical path must equal root or
+  // have root as a strict directory ancestor. Comparing with the path
+  // separator appended defeats prefix-collision sibling directories
+  // (`plugins-evil` vs `plugins`).
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (canonical !== root && !canonical.startsWith(rootWithSep)) {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(canonical);
+  } catch {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+  if (!stat.isFile()) {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+
+  const ext = path.extname(canonical).toLowerCase();
+  const mime = PLUGIN_ASSET_MIME[ext];
+  if (!mime) {
+    res.statusCode = 404;
+    return res.end('Not Found');
+  }
+  // Dev intentionally has no per-entry allowlist: any `.mjs` whose ext is
+  // in the MIME table is served. Release gates `.mjs` to the
+  // manifest-declared `[[panels]]` entrypoints (see plugin_assets.rs).
+
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  fs.createReadStream(canonical).pipe(res);
+}
+
 function pluginAssetsPlugin(): Plugin {
   const root = resolvePluginsRoot();
   return {
@@ -112,63 +210,35 @@ function pluginAssetsPlugin(): Plugin {
       server.config.logger.info(
         `[plugin-assets] serving /plugins/* from ${root}`
       );
-      server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: Connect.NextFunction) => {
-        const url = req.url ?? '';
-        if (!url.startsWith('/plugins/')) return next();
+      server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: Connect.NextFunction) =>
+        serveContained(root, '/plugins/', req, res, next)
+      );
+    },
+  };
+}
 
-        // Drop query string, then strip the `/plugins/` prefix.
-        const qIdx = url.indexOf('?');
-        const pathOnly = qIdx >= 0 ? url.slice(0, qIdx) : url;
-        const rel = pathOnly.slice('/plugins/'.length);
-        if (rel === '') {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-
-        const asset = path.join(root, rel);
-        let canonical: string;
-        try {
-          canonical = fs.realpathSync(asset);
-        } catch {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-        // Component-aware containment: the canonical path must equal
-        // root or have root as a strict directory ancestor. Comparing
-        // with the path separator appended defeats prefix-collision
-        // sibling directories (`plugins-evil` vs `plugins`).
-        const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-        if (canonical !== root && !canonical.startsWith(rootWithSep)) {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-
-        let stat: fs.Stats;
-        try {
-          stat = fs.statSync(canonical);
-        } catch {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-        if (!stat.isFile()) {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-
-        const ext = path.extname(canonical).toLowerCase();
-        const mime = PLUGIN_ASSET_MIME[ext];
-        if (!mime) {
-          res.statusCode = 404;
-          return res.end('Not Found');
-        }
-        // Dev intentionally has no per-entry allowlist: any `.mjs` whose
-        // ext is in the MIME table is served. Release gates `.mjs` to the
-        // manifest-declared `[[panels]]` entrypoints (see plugin_assets.rs).
-
-        res.setHeader('Content-Type', mime);
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        fs.createReadStream(canonical).pipe(res);
-      });
+// Foldit-owned static assets under `/game-assets/*`, dev-mirror of the wry
+// release branch in `foldit-desktop/src/webview_assets.rs`. Kept off
+// `/assets/*` so it never shadows Vite's own emitted GUI bundle. Same
+// canonicalize + containment defense as the plugin middleware.
+function gameAssetsPlugin(): Plugin {
+  const root = resolveAssetsRoot();
+  return {
+    name: 'foldit-game-assets',
+    configureServer: (server: ViteDevServer) => {
+      if (!root) {
+        server.config.logger.warn(
+          '[game-assets] no assets root found (set FOLDIT_ASSETS_ROOT ' +
+            'or run from a workspace checkout); game assets will 404'
+        );
+        return;
+      }
+      server.config.logger.info(
+        `[game-assets] serving /game-assets/* from ${root}`
+      );
+      server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: Connect.NextFunction) =>
+        serveContained(root, '/game-assets/', req, res, next)
+      );
     },
   };
 }
@@ -202,7 +272,7 @@ function webEntryRewritePlugin(target: 'wry' | 'wasm'): Plugin {
 // https://vitejs.dev/config/
 export default defineConfig({
   base: './', // Use relative paths for CEF file:// protocol compatibility
-  plugins: [solid(), brotliMiddleWarePlugin(), pluginAssetsPlugin(), webEntryRewritePlugin(FOLDIT_TARGET)],
+  plugins: [solid(), brotliMiddleWarePlugin(), pluginAssetsPlugin(), gameAssetsPlugin(), webEntryRewritePlugin(FOLDIT_TARGET)],
   resolve: {
     alias: {
       'transport-impl': transportImpl,

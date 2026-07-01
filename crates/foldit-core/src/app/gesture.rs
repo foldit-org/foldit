@@ -285,6 +285,7 @@ impl App {
         pending_escape: bool,
         pending_segment_toggle: Option<(EntityId, usize)>,
         #[cfg(not(target_arch = "wasm32"))] pending_hotkey_op: Option<String>,
+        #[cfg(not(target_arch = "wasm32"))] pending_toggle_picker: Option<String>,
     ) {
         // Apply any pending click (a left-release that classified as a
         // click) to the selection; the empty-background case clears it, a
@@ -315,6 +316,19 @@ impl App {
                 focused_entity_id: None,
                 params: std::collections::HashMap::new(),
             });
+        }
+
+        // A native picker-toggle key flips the host-owned open picker rather
+        // than dispatching an op: open it if closed, close it if this op's
+        // picker is already open. No `OpDispatch` is pushed.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(op_id) = pending_toggle_picker {
+            let next = if self.gui.action_picker_open() == Some(op_id.as_str()) {
+                None
+            } else {
+                Some(op_id)
+            };
+            self.gui.set_action_picker_open(next);
         }
     }
 }

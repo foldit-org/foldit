@@ -70,6 +70,10 @@ impl App {
             self.gui.set_panel_position(panel, x, y);
             return;
         }
+        if let AppCommand::SetActionPickerOpen { op_id } = command {
+            self.gui.set_action_picker_open(op_id);
+            return;
+        }
 
         if let AppCommand::SetHintsVisible { visible } = command {
             self.gui.set_hints_visible(visible);
@@ -160,6 +164,7 @@ impl App {
             | AppCommand::CloseSegment
             | AppCommand::SetPanelVisible { .. }
             | AppCommand::SetPanelPosition { .. }
+            | AppCommand::SetActionPickerOpen { .. }
             | AppCommand::SetHintsVisible { .. }
             | AppCommand::SetFullscreen { .. }
             | AppCommand::ClearProgress => {

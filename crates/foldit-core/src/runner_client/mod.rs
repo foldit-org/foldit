@@ -63,6 +63,17 @@ impl RunnerClient {
             .map(|op| op.plugin_id.clone())
     }
 
+    /// Whether the orchestrator currently holds any entity lock. Read
+    /// immutably so a host-native edit can refuse while a plugin operation
+    /// is mid-flight (a concurrent native mutation would race it). `false`
+    /// when no orchestrator is wired up.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn any_lock_held(&self) -> bool {
+        self.orchestrator
+            .as_ref()
+            .is_some_and(|orch| !orch.locked_entities().is_empty())
+    }
+
     /// Whether `op_id` declares `creates_entities` (its output is a NEW
     /// entity to adopt, not an edit of an existing lane). `false` for an
     /// unknown op-id.

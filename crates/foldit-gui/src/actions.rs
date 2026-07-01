@@ -152,6 +152,12 @@ pub enum AppCommand {
         panel: String,
         visible: bool,
     },
+    /// Open the action picker for `op_id`, or close any open picker with
+    /// `None`. Pure UI state; the backend owns the open picker so it survives
+    /// a re-projection and can be toggled by a native hotkey too.
+    SetActionPickerOpen {
+        op_id: Option<String>,
+    },
     /// Record a panel's dragged top-left position (pixels, origin
     /// top-left). Pure UI state.
     SetPanelPosition {

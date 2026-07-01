@@ -6,23 +6,25 @@
  * buttons that open a plugin panel. Action buttons come from the backend's
  * `actions.available` (`Orchestrator::ops_catalog` joins each manifest's
  * `[[buttons]]` with its bridge-registered ops); a click dispatches
- * `{ op_id }`. Launcher toggles come from the plugin-panel catalog; a
- * click opens the panel via the panel-visibility toggle. A plugin with
- * only panels still gets a box.
+ * `{ op_id }`. An action carrying a non-empty `options` list instead opens
+ * a button-list picker, each entry dispatching its own full op
+ * (`op_id` + `params`). Launcher toggles come from the plugin-panel
+ * catalog; a click opens the panel via the panel-visibility toggle. A
+ * plugin with only panels still gets a box.
  */
 
 import { Component, createMemo, For, Show } from 'solid-js';
 import "../../styles/widgets/ActionButtonWidget.css";
 import { useBackendData, useUI } from '../../services/adapters';
-import { dispatchOp } from '../../adapter';
+import { state as backendState, dispatchOp, appCommand } from '../../adapter';
 import { pluginPanels } from '../../pluginPanelLoader';
 import { pluginSettings } from '../../pluginSettingsLoader';
 import { settingsPanelId } from '../viewport/panelRegistry';
 import { panelVisibilityKey } from '../../hooks/state';
-import { Icons } from '../../utils/iconMapping';
+import { Icons, builtinActionIcon } from '../../utils/iconMapping';
 import type { ActionInfo, PanelInfo, PluginGroupInfo, SettingsTabInfo } from '../../types';
 import ButtonListWidget, { type ButtonListItem } from "../util/ButtonListWidget";
-import { pluginAssetUrl } from '../../pluginAssets';
+import { pluginAssetUrl, gameAssetUrl } from '../../pluginAssets';
 
 /**
  * Prettify a winit `KeyCode` debug string for the corner badge. The
@@ -56,17 +58,49 @@ function prettifyPluginId(id: string): string {
     .join(' ');
 }
 
+/**
+ * Resolve a button's visual content from its `icon_path`. A path beginning
+ * with `builtin:` names a GUI icon rendered inline; any other non-empty path
+ * is a plugin-relative asset fetched from `/plugins/<pluginId>/<icon_path>`;
+ * empty falls back to the label text. The `builtin:` branch runs first so a
+ * built-in never resolves to a plugin asset URL.
+ */
+function iconContent(iconPath: string, pluginId: string, fallback: string) {
+  if (iconPath.startsWith('builtin:')) {
+    const Icon = builtinActionIcon(iconPath.slice('builtin:'.length));
+    return Icon ? <Icon /> : fallback;
+  }
+  return iconPath
+    ? <img src={pluginAssetUrl(pluginId, iconPath)} alt={fallback} />
+    : fallback;
+}
+
+interface ActionPicker {
+  opId: string;
+  // One ButtonListItem array per picker row. The mutate picker splits its
+  // options into two rows by hydrophobicity (hydrophobic first).
+  rows: ButtonListItem[][];
+}
+
 interface ActionGroup {
   pluginId: string;
   title: string;
   order: number;
   items: ButtonListItem[];
+  pickers: ActionPicker[];
 }
 
 const ActionButtonWidget: Component = () => {
   const actions = useBackendData(state => state.actions);
   const groupMeta = useBackendData(state => state.actionGroups);
   const toggleWidget = useUI(state => state.toggleWidget);
+
+  // Which options-carrying action has its picker open is backend-owned
+  // (`actions.open_picker`, one op_id or null): the toggle button and the
+  // native "M" hotkey both flip it through `SetActionPickerOpen`, so a click
+  // and a keypress share one source of truth. The `groups` memo does not read
+  // it, so toggling never rebuilds the button items.
+  const openPicker = () => backendState.actions.open_picker;
 
   // Bucket each plugin's buttons -- action buttons then panel launchers --
   // by plugin, then title + order each box from the parallel `groups`
@@ -77,13 +111,25 @@ const ActionButtonWidget: Component = () => {
   const groups = createMemo<ActionGroup[]>(() => {
     const byPluginActions = new Map<string, ButtonListItem[]>();
     const byPluginLaunchers = new Map<string, ButtonListItem[]>();
+    const byPluginPickers = new Map<string, ActionPicker[]>();
 
     for (const action of actions() as ActionInfo[]) {
+      // An action with options is a toggle that opens a picker; an action
+      // without options dispatches its op directly. Both gate on the host's
+      // `enabled` so the button disables live with the selection lock.
+      const hasOptions = action.options.length > 0;
+      // A built-in glyph is a JSX component, not a URL, so it renders through
+      // `iconNode` (flex-centered, button-filling) rather than the bottom-left
+      // `content` label slot. Plugin-asset and text buttons keep using `content`.
+      const BuiltinIcon = action.icon_path.startsWith('builtin:')
+        ? builtinActionIcon(action.icon_path.slice('builtin:'.length))
+        : undefined;
       const item: ButtonListItem = {
         id: `action-${action.op_id}`,
-        content: action.icon_path
-          ? <img src={pluginAssetUrl(action.plugin_id, action.icon_path)} alt={action.display} />
-          : action.display,
+        iconNode: BuiltinIcon ? <BuiltinIcon size={40} color="white" /> : undefined,
+        content: BuiltinIcon
+          ? undefined
+          : iconContent(action.icon_path, action.plugin_id, action.display),
         // Hotkey + tooltip ride on the plugin manifest's [[buttons]]
         // entries (ButtonEntry -> CatalogEntry -> ActionInfo). Badge text
         // is the friendly glyph; the raw winit string stays in the
@@ -91,7 +137,16 @@ const ActionButtonWidget: Component = () => {
         hotkey: action.hotkey ? formatHotkey(action.hotkey) : undefined,
         disabled: !action.enabled,
         tooltip: action.tooltip ?? action.display,
-        onClick: () => dispatchOp({ op_id: action.op_id }),
+        onClick: hasOptions
+          ? () =>
+              appCommand({
+                type: 'SetActionPickerOpen',
+                op_id:
+                  backendState.actions.open_picker === action.op_id
+                    ? null
+                    : action.op_id,
+              })
+          : () => dispatchOp({ op_id: action.op_id }),
       };
 
       let bucket = byPluginActions.get(action.plugin_id);
@@ -100,6 +155,35 @@ const ActionButtonWidget: Component = () => {
         byPluginActions.set(action.plugin_id, bucket);
       }
       bucket.push(item);
+
+      if (hasOptions) {
+        // Each option is a self-contained dispatch (op_id + params). Picking
+        // one fires it and closes the picker. The icon token the host emits is
+        // relative to the foldit assets root, resolved via `gameAssetUrl`.
+        const toItem = (option: (typeof action.options)[number]): ButtonListItem => ({
+          id: `${option.op_id}:${option.label}`,
+          content: option.label,
+          color: option.color,
+          icon: option.icon ? gameAssetUrl(option.icon) : undefined,
+          hotkey: option.hotkey ? formatHotkey(option.hotkey) : undefined,
+          onClick: () => {
+            dispatchOp({ op_id: option.op_id, params: option.params });
+            appCommand({ type: 'SetActionPickerOpen', op_id: null });
+          },
+        });
+
+        // Two rows split by hydrophobicity: hydrophobic (`orange`) on top,
+        // polar (`blue`) below. The `color` token also styles each button.
+        const hydrophobic = action.options.filter((o) => o.color === 'orange').map(toItem);
+        const polar = action.options.filter((o) => o.color === 'blue').map(toItem);
+
+        let pickers = byPluginPickers.get(action.plugin_id);
+        if (!pickers) {
+          pickers = [];
+          byPluginPickers.set(action.plugin_id, pickers);
+        }
+        pickers.push({ opId: action.op_id, rows: [hydrophobic, polar] });
+      }
     }
 
     for (const panel of pluginPanels() as PanelInfo[]) {
@@ -108,9 +192,7 @@ const ActionButtonWidget: Component = () => {
       // chrome uses, keyed by the panel's visibility key.
       const item: ButtonListItem = {
         id: `launcher-${panel.id}`,
-        content: panel.icon_path
-          ? <img src={pluginAssetUrl(panel.plugin_id, panel.icon_path)} alt={panel.title} />
-          : panel.title,
+        content: iconContent(panel.icon_path, panel.plugin_id, panel.title),
         tooltip: panel.tooltip ?? panel.title,
         onClick: () => toggleWidget()(panelVisibilityKey(panel.id)),
       };
@@ -160,6 +242,7 @@ const ActionButtonWidget: Component = () => {
             ...(byPluginLaunchers.get(pluginId) ?? []),
             ...settingsButton,
           ],
+          pickers: byPluginPickers.get(pluginId) ?? [],
         };
       })
       .sort((a, b) => a.order - b.order || a.pluginId.localeCompare(b.pluginId));
@@ -173,6 +256,15 @@ const ActionButtonWidget: Component = () => {
             <div class="action-group">
               <div class="action-group-title">{group.title}</div>
               <ButtonListWidget items={group.items} />
+              <For each={group.pickers}>
+                {(picker) => (
+                  <Show when={openPicker() === picker.opId}>
+                    <For each={picker.rows}>
+                      {(row) => <ButtonListWidget items={row} />}
+                    </For>
+                  </Show>
+                )}
+              </For>
             </div>
           )}
         </For>

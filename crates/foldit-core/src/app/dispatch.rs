@@ -114,6 +114,14 @@ impl App {
             Focus::All => None,
         };
 
+        // A handful of ops are performed in-process by the host with no plugin
+        // round-trip. They carry no plugin owner, so they must be intercepted
+        // here: `resolve_op_plugin_id` below drops any op-id the plugin
+        // registry doesn't know, which would silently discard a native op.
+        if op.op_id == "mutate_residue" {
+            return self.dispatch_native_mutate(&op);
+        }
+
         let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
             log::warn!(
                 "dispatch_op_inner({:?}): op not resolvable (no orchestrator or op-id not in registry)",
@@ -205,6 +213,101 @@ impl App {
             }
             Err(DispatchError::Failed(s)) => {
                 log::error!("dispatch_op_inner({:?}): dispatch failed: {s}", op.op_id);
+                None
+            }
+        }
+    }
+
+    /// Mutate the single selected residue entirely in the host: swap its
+    /// amino acid via molex, apply the rebuilt protein into the session,
+    /// commit, and fire a rosetta rescore on the committed checkpoint. No
+    /// plugin is involved in the edit; rosetta runs only for the score.
+    ///
+    /// Every unmet precondition is a refused no-op (`None`): a held plugin
+    /// lock, a selection that isn't exactly one designable residue, a
+    /// missing / unparseable amino-acid param, a non-protein target, or a
+    /// molex placement failure. None of these panic or leave a dangling
+    /// tentative. Returns the edit's `request_id` on success.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_native_mutate(&mut self, op: &foldit_gui::OpDispatch) -> Option<u64> {
+        // Refuse while a plugin operation holds a lock: a concurrent native
+        // mutation would race the in-flight edit. Read the lock state
+        // immutably, never taking the orchestrator's mutable handle.
+        if self.runner_client.any_lock_held() {
+            return None;
+        }
+
+        // Exactly one entity, exactly one selected residue, and that
+        // selection must be designable (the gate the action button shows).
+        if !self.store.selection_is_designable() {
+            return None;
+        }
+        let (eid, res_idx) = {
+            let selection = self.store.selection();
+            if selection.len() != 1 {
+                return None;
+            }
+            let (eid, residues) = selection.iter().next()?;
+            if residues.len() != 1 {
+                return None;
+            }
+            (*eid, *residues.iter().next()?)
+        };
+
+        // The 3-letter amino-acid code rides on the "aa" param; there is no
+        // 1-letter residue constructor.
+        let Some(foldit_gui::state::ParamValue::String(code)) = op.params.get("aa") else {
+            return None;
+        };
+        let code_bytes: [u8; 3] = code.as_bytes().try_into().ok()?;
+        let aa = molex::chemistry::AminoAcid::from_code(code_bytes)?;
+
+        // The selected residue's u32 is the same 0-based positional index
+        // molex `mutate_residue` takes. `mutate_residue` preserves the entity
+        // id, so the rebuilt protein re-applies onto the same lane.
+        let new_protein = self
+            .store
+            .entity(eid)?
+            .as_protein()?
+            .mutate_residue(res_idx as usize, aa)
+            .ok()?;
+        let assembly =
+            molex::Assembly::new(vec![molex::MoleculeEntity::Protein(new_protein)]);
+
+        // Host-internal action: no dispatch happened, so the edit's
+        // request_id is drawn straight from the orchestrator (the single id
+        // authority), then applied through the same begin/apply/commit
+        // sequence a plugin invoke uses.
+        let rid = self.runner_client.alloc_request_id()?;
+        let display = String::from("Mutate");
+        let kind = CheckpointKind::NativeEdit {
+            op_id: op.op_id.clone(),
+            display: display.clone(),
+        };
+        if let Err(e) = self.store.begin_action([eid], kind, display, rid) {
+            log::trace!("dispatch_native_mutate: begin_action skipped: {e}");
+            return None;
+        }
+        let applied = self.store.apply_streaming_assembly(&assembly, None, rid);
+        if !applied {
+            // The incoming assembly did not match the open lane, so no edit
+            // landed. Discard the tentative rather than committing it: a missed
+            // apply must be a true no-op, not a phantom checkpoint that moves
+            // the session head.
+            let _ = self.store.abort_action(rid);
+            return None;
+        }
+        match self.store.commit_action(rid) {
+            Ok(ckpt) => {
+                self.scores.score_committed_checkpoint(
+                    &mut self.runner_client,
+                    &self.store,
+                    ckpt,
+                );
+                Some(rid)
+            }
+            Err(e) => {
+                log::warn!("dispatch_native_mutate: commit_action failed: {e}");
                 None
             }
         }

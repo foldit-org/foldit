@@ -318,6 +318,20 @@ impl GuiState {
         self.refresh_panels_section();
     }
 
+    /// Open the action picker for `op_id`, or close any open picker when
+    /// `None`. Pure UI state on the `actions` section; marks `ACTIONS` dirty
+    /// so the next push carries the change.
+    pub fn set_action_picker_open(&mut self, op_id: Option<String>) {
+        self.actions.open_picker = op_id;
+        self.dirty |= DirtyFlags::ACTIONS;
+    }
+
+    /// The `op_id` of the currently-open action picker, or `None`.
+    #[must_use]
+    pub fn action_picker_open(&self) -> Option<&str> {
+        self.actions.open_picker.as_deref()
+    }
+
     /// Record a panel's dragged top-left position. Regenerates the wire
     /// `panels` section and marks `PANELS` dirty unconditionally.
     pub fn set_panel_position(&mut self, panel: String, x: f32, y: f32) {
@@ -534,6 +548,20 @@ impl GuiState {
     ) {
         self.actions.available = available;
         self.actions.groups = groups;
+        // Close an open picker whose trigger is gone from the re-projected
+        // catalog, or is present but no longer enabled (e.g. the selection
+        // grew past a single residue). The picker's open/closed flag is
+        // otherwise preserved across re-projection.
+        if let Some(op) = self.actions.open_picker.as_deref() {
+            let still_open = self
+                .actions
+                .available
+                .iter()
+                .any(|a| a.op_id == op && a.enabled);
+            if !still_open {
+                self.actions.open_picker = None;
+            }
+        }
         self.dirty |= DirtyFlags::ACTIONS;
     }
 

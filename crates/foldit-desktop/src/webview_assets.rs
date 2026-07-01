@@ -311,6 +311,39 @@ impl AppRunner {
         None
     }
 
+    /// Resolve the repo-root `assets/` directory holding foldit-owned static
+    /// assets (residue icons, etc.), served under `/game-assets/`. Mirrors
+    /// [`Self::resolve_gui_root`]'s bundle-vs-dev resolution:
+    ///
+    ///   * Bundle: `assets/` next to the executable (xtask `bundle()` stages it
+    ///     there).
+    ///   * Dev release build: a higher ancestor of the executable is the repo
+    ///     root whose `assets/` holds the tracked icons.
+    ///
+    /// `FOLDIT_ASSETS_ROOT` overrides both. Returns `None` if nothing resolves,
+    /// which the caller logs once and the protocol handler then 404s.
+    #[cfg(not(debug_assertions))]
+    fn resolve_assets_root() -> Option<std::path::PathBuf> {
+        if let Some(env) = std::env::var_os("FOLDIT_ASSETS_ROOT") {
+            let p = std::path::PathBuf::from(env);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        let exe = std::env::current_exe().ok()?;
+        let mut cursor = exe.parent()?.to_path_buf();
+        loop {
+            let candidate = cursor.join("assets");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            if !cursor.pop() {
+                break;
+            }
+        }
+        None
+    }
+
     /// Create the wry webview for release mode, serving assets via custom protocol.
     #[cfg(not(debug_assertions))]
     pub(super) fn create_webview_release(
@@ -338,6 +371,14 @@ impl AppRunner {
                      `cargo xtask build-gui`."
                 );
             }
+            let assets_root = Self::resolve_assets_root();
+            if assets_root.is_none() {
+                log::error!(
+                    "Foldit assets directory not found (looked for `assets/` next \
+                     to the executable and up-tree from it); `/game-assets/` \
+                     requests will 404. Set FOLDIT_ASSETS_ROOT."
+                );
+            }
 
             let builder = wry::WebViewBuilder::new()
                 .with_transparent(true)
@@ -354,7 +395,43 @@ impl AppRunner {
                                 .body(Cow::Borrowed(b"Not Found" as &[u8]))
                                 .unwrap();
                         };
-                        return match crate::plugin_assets::serve(request_path, root, &ui_entrypoints) {
+                        return match crate::plugin_assets::serve(request_path, "/plugins/", root, &ui_entrypoints) {
+                            crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
+                                wry::http::Response::builder()
+                                    .status(200)
+                                    .header("Content-Type", mime)
+                                    .header("Access-Control-Allow-Origin", "*")
+                                    .body(Cow::Owned(bytes))
+                                    .unwrap()
+                            }
+                            crate::plugin_assets::AssetResponse::NotFound => {
+                                wry::http::Response::builder()
+                                    .status(404)
+                                    .body(Cow::Borrowed(b"Not Found" as &[u8]))
+                                    .unwrap()
+                            }
+                        };
+                    }
+
+                    // Foldit-owned static assets (residue icons, etc.) under
+                    // `/game-assets/`. Kept off `/assets/` so it never shadows
+                    // the GUI's own Vite-emitted `/assets/` bundle handled by
+                    // the fallthrough below. Routes through the same tested
+                    // canonicalize + containment envelope and the same
+                    // fail-closed `plugin_asset_mime` whitelist as the plugin
+                    // branch, so game assets inherit the identical served-type
+                    // restriction. Game assets ship no `.mjs` panel modules, so
+                    // the entrypoint allowlist is empty and every `.mjs` fails
+                    // closed.
+                    if request_path.starts_with("/game-assets/") {
+                        let Some(root) = assets_root.as_ref() else {
+                            return wry::http::Response::builder()
+                                .status(404)
+                                .body(Cow::Borrowed(b"Not Found" as &[u8]))
+                                .unwrap();
+                        };
+                        let no_modules = std::collections::HashSet::new();
+                        return match crate::plugin_assets::serve(request_path, "/game-assets/", root, &no_modules) {
                             crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
                                 wry::http::Response::builder()
                                     .status(200)
