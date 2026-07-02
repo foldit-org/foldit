@@ -221,6 +221,33 @@ pub struct ProgressEntry {
     pub high_score: f64,
 }
 
+/// Severity of a host-raised notification. Drives the frontend's toast
+/// styling (`Error` renders red; `Warning` / `Info` render neutral).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub enum NotificationLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+/// A host-raised, user-facing notification.
+///
+/// `id` is a monotonic counter assigned by [`crate::GuiState::push_notification`].
+/// The frontend dedups on it: it toasts only ids greater than the highest it
+/// has already shown, so a reload replaying the retained list never re-toasts
+/// an already-seen message. The backend keeps only the most recent entries;
+/// dropping older ones is safe because their ids stay below the frontend's
+/// high-water mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct Notification {
+    // A session-monotonic counter; `u32` on the wire (specta forbids u64
+    // export) is ample and never wraps in a session's worth of toasts.
+    #[specta(type = u32)]
+    pub id: u64,
+    pub level: NotificationLevel,
+    pub text: String,
+}
+
 /// View display options — opaque JSON blob serialized from engine Options.
 ///
 /// The engine's `Options` struct (in viso crate) is the single source of truth.
@@ -519,6 +546,16 @@ pub struct SettingsTabInfo {
     pub on_update_op: String,
 }
 
+/// Live download progress for a plugin whose weights are streaming in.
+///
+/// `fraction` is 0..1 (0 at kick, 1 at completion); `stage` is a
+/// human-readable label for the current phase of the download.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct DownloadProgress {
+    pub fraction: f32,
+    pub stage: String,
+}
+
 /// Available actions and their current state
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[derive(Default)]
@@ -530,6 +567,10 @@ pub struct ActionsSection {
     /// picker is open. Rides the same `"actions"` wire push as `available`
     /// and `groups`; the frontend renders one picker open at a time from it.
     pub open_picker: Option<String>,
+    /// Per-plugin live download progress, keyed by `plugin_id`. Empty when
+    /// nothing is downloading; a plugin's host-injected download button reads
+    /// its entry to render a progress fill.
+    pub download_progress: std::collections::HashMap<String, DownloadProgress>,
 }
 
 

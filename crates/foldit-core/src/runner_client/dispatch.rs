@@ -45,11 +45,15 @@ impl RunnerClient {
                     score,
                 } => {
                     let Some(assembly) = latest_assembly else {
-                        log::trace!(
-                            "plugin update Pending rid={request_id} \
-                             progress={progress:?} stage={stage:?} \
-                             (skipped: no assembly)"
-                        );
+                        // A Pending with no pose is a non-geometry stream (a
+                        // weight download) reporting advancement. Surface it as
+                        // Progress so the host download state machine can
+                        // advance, rather than dropping the frame.
+                        events.push(OpEvent::Progress {
+                            token: request_id,
+                            progress,
+                            stage,
+                        });
                         continue;
                     };
                     // The dispatch id is the edit token.
@@ -245,14 +249,7 @@ impl RunnerClient {
             &intent.selection,
             &intent.designable,
         );
-        let params: std::collections::HashMap<
-            String,
-            foldit_runner::orchestrator::ParamValue,
-        > = intent
-            .params
-            .into_iter()
-            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
-            .collect();
+        let params = wire_params_to_orch(intent.params);
 
         match kind {
             OpKind::Invoke => orch
@@ -267,17 +264,12 @@ impl RunnerClient {
                 let (rid, handle) = orch
                     .dispatch_start_stream(&intent.op_id, ctx, params, entity_type_of)
                     .map_err(map_dispatch_error)?;
-                // Derive the edit scope from the handle (the set the op
-                // actually locked) before it is consumed into the table.
-                let scope = edit_scope_from_handle(&handle);
-                let _ = self.stream_host.active_streams.insert(
+                let scope = self.register_stream(
                     rid,
-                    ActiveStreamEntry {
-                        handle,
-                        plugin_id,
-                        creates_entities: cached.lock_meta.creates_entities,
-                        preview,
-                    },
+                    handle,
+                    plugin_id,
+                    cached.lock_meta.creates_entities,
+                    preview,
                 );
                 Ok(OpOutcome::Stream {
                     request_id: rid,
@@ -285,6 +277,98 @@ impl RunnerClient {
                 })
             }
         }
+    }
+
+    /// Dispatch a stream op to an explicitly named plugin, without any
+    /// entity/global lock (only the per-plugin backend lock), and register
+    /// the in-flight stream. For asset-provisioning ops such as the weights
+    /// download, which touch no geometry, so an in-flight run does not
+    /// disable every other action.
+    ///
+    /// Routing on an explicit `plugin_id` bypasses the flat op-registry
+    /// owner resolution: some ops (the weights download) are registered
+    /// under one shared op-id by every plugin that can perform them, so
+    /// resolving the id through the flat registry collapses them to a
+    /// single arbitrary last-writer owner and the dispatch reaches the
+    /// wrong plugin. The caller passes the intended `plugin_id` (the source
+    /// of the action that raised the op) so the dispatch lands on the right
+    /// plugin. Mirrors [`Self::dispatch_op`]'s Stream branch - same context
+    /// / param build and the same `register_stream` bookkeeping. Returns
+    /// the stream `request_id`, or `None` on any dispatch failure.
+    pub(crate) fn dispatch_stream_on_plugin_lockless(
+        &mut self,
+        plugin_id: &str,
+        intent: DispatchIntent,
+        entity_type_of: impl Fn(molex::EntityId) -> Option<molex::EntityKind>,
+    ) -> Option<u64> {
+        let preview = self.op_preview(plugin_id, &intent.op_id);
+        let Some(orch) = self.orchestrator.as_mut() else {
+            log::warn!("dispatch_stream_on_plugin_lockless: orchestrator not initialized");
+            return None;
+        };
+        let Some(cached) = orch.plugin_registry().get_op(&intent.op_id).cloned() else {
+            log::warn!(
+                "dispatch_stream_on_plugin_lockless({:?}): op-id not in registry",
+                intent.op_id
+            );
+            return None;
+        };
+        let ctx = build_dispatch_context(
+            intent.focused_entity_id,
+            &intent.selection,
+            &intent.designable,
+        );
+        let params = wire_params_to_orch(intent.params);
+        let (rid, handle) = match orch.dispatch_start_stream_on_plugin_lockless(
+            plugin_id,
+            &intent.op_id,
+            ctx,
+            params,
+            entity_type_of,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::warn!(
+                    "dispatch_stream_on_plugin_lockless(plugin={plugin_id}, op={:?}): {e}",
+                    intent.op_id
+                );
+                return None;
+            }
+        };
+        let _ = self.register_stream(
+            rid,
+            handle,
+            plugin_id.to_owned(),
+            cached.lock_meta.creates_entities,
+            preview,
+        );
+        Some(rid)
+    }
+
+    /// Record a freshly dispatched stream in the active-streams table and
+    /// return its [`EditScope`] (derived from the handle before the handle
+    /// is consumed into the table). Shared by [`Self::dispatch_op`]'s
+    /// Stream branch and [`Self::dispatch_stream_on_plugin_lockless`] so the
+    /// two dispatch paths cannot drift in what they stamp per stream.
+    fn register_stream(
+        &mut self,
+        rid: u64,
+        handle: foldit_runner::orchestrator::DispatchHandle,
+        plugin_id: String,
+        creates_entities: bool,
+        preview: bool,
+    ) -> super::types::EditScope {
+        let scope = edit_scope_from_handle(&handle);
+        let _ = self.stream_host.active_streams.insert(
+            rid,
+            ActiveStreamEntry {
+                handle,
+                plugin_id,
+                creates_entities,
+                preview,
+            },
+        );
+        scope
     }
 
     /// Pull-drag dispatch: take the core-shaped [`StreamStartIntent`],
@@ -460,6 +544,20 @@ impl RunnerClient {
     pub(crate) const fn take_pending_pull_origin(&mut self) -> Option<super::pull::PullRoute> {
         self.stream_host.pending_pull_origin.take()
     }
+}
+
+/// Convert a wire-shaped param map (`foldit_gui` values, as they arrive on
+/// an `OpDispatch`) into the orchestrator's native param map, per value via
+/// [`crate::wire_params::param_value_from_wire`]. Shared by both dispatch
+/// entry points so they cannot drift in how params cross the boundary.
+#[cfg(not(target_arch = "wasm32"))]
+fn wire_params_to_orch(
+    params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+) -> std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> {
+    params
+        .into_iter()
+        .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+        .collect()
 }
 
 /// Reshape a runner `OpDispatchError` into the core-side [`DispatchError`].

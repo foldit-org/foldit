@@ -41,6 +41,13 @@
 	@apply p-[5px];
 }
 
+/* Built-in glyphs render as inline <svg> (not <img>), so they escape the img
+   padding above. Give them the same 5px inset so a builtin sits at the same
+   visual weight as a plugin-asset PNG. */
+.button-list-item svg {
+	@apply p-[5px];
+}
+
 .button-list-content {
 	@apply absolute bottom-0 left-1;
 	@apply text-gray-200 text-xs;
@@ -49,6 +56,15 @@
 .button-list-hotkey {
 	@apply absolute top-0 left-1;
 	@apply text-gray-200 text-xs;
+}
+
+/* Thin download-progress fill along the button's bottom edge. Height and
+   color are tunable; kept low enough not to cover the centered icon. */
+.button-list-progress {
+	@apply absolute bottom-0 left-0;
+	@apply h-[3px] rounded-b-md;
+	@apply bg-blue-400;
+	@apply transition-all duration-150 ease-in-out;
 }
 
 .disabled {

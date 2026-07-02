@@ -83,6 +83,12 @@ pub fn serialize_dirty(state: &mut GuiState) -> Option<Value> {
             serde_json::to_value(&state.progress).unwrap(),
         );
     }
+    if dirty.contains(DirtyFlags::NOTIFICATIONS) {
+        update.insert(
+            "notifications".into(),
+            serde_json::to_value(&state.notifications).unwrap(),
+        );
+    }
 
     Some(Value::Object(update))
 }
@@ -114,6 +120,7 @@ mod tests {
         "segment_info",
         "panels",
         "progress",
+        "notifications",
     ];
 
     #[test]

@@ -6,7 +6,7 @@ use viso::{ClickEvent, Focus, KeyBindings, VisoEngine};
 use molex::entity::molecule::id::EntityId;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::runner_client::RunnerClient;
+use crate::runner_client::{HotkeyOwner, RunnerClient};
 use crate::session::Session;
 
 use super::input::{hovered_segment_target, next_focus};
@@ -243,15 +243,16 @@ impl EngineHarness {
                     // plugin hotkey catalog.
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        outcome.hotkey_op = runner_client
-                            .hotkey_to_op(other)
-                            .map(|(_plugin_id, op_id)| op_id);
-                        if outcome.hotkey_op.is_none() {
-                            // No plugin op claims the key; try the native
-                            // picker-toggle table. This flips a host-owned
-                            // picker open/closed rather than dispatching an op.
-                            outcome.toggle_picker = runner_client.native_hotkey_toggle(other);
-                            if outcome.toggle_picker.is_none() {
+                        // Native picker-toggle flips a host-owned picker
+                        // open/closed rather than dispatching an op.
+                        match runner_client.resolve_hotkey(other) {
+                            HotkeyOwner::Plugin { op_id, .. } => {
+                                outcome.hotkey_op = Some(op_id);
+                            }
+                            HotkeyOwner::Native { op_id } => {
+                                outcome.toggle_picker = Some(op_id);
+                            }
+                            HotkeyOwner::None => {
                                 log::debug!("Unhandled key code from frontend: {other}");
                             }
                         }

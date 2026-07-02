@@ -119,14 +119,23 @@ const ActionButtonWidget: Component = () => {
       // `enabled` so the button disables live with the selection lock.
       const hasOptions = action.options.length > 0;
       // A built-in glyph is a JSX component, not a URL, so it renders through
-      // `iconNode` (flex-centered, button-filling) rather than the bottom-left
-      // `content` label slot. Plugin-asset and text buttons keep using `content`.
+      // `iconNode` (flex-centered) rather than the bottom-left `content` label
+      // slot. Sized to sit at the same visual weight as the plugin-asset PNGs
+      // (which get a 5px inset); `.button-list-item svg` adds a matching inset.
+      // Plugin-asset and text buttons keep using `content`.
       const BuiltinIcon = action.icon_path.startsWith('builtin:')
         ? builtinActionIcon(action.icon_path.slice('builtin:'.length))
         : undefined;
+      // Live weights download surfaces on the host-injected download button
+      // (icon-only); its plugin's fraction drives a fill bar and the stage
+      // label rides the tooltip. Other ops carry no progress.
+      const download =
+        action.op_id === 'download_weights'
+          ? backendState.actions.download_progress[action.plugin_id]
+          : undefined;
       const item: ButtonListItem = {
         id: `action-${action.op_id}`,
-        iconNode: BuiltinIcon ? <BuiltinIcon size={40} color="white" /> : undefined,
+        iconNode: BuiltinIcon ? <BuiltinIcon size={32} color="white" /> : undefined,
         content: BuiltinIcon
           ? undefined
           : iconContent(action.icon_path, action.plugin_id, action.display),
@@ -136,7 +145,8 @@ const ActionButtonWidget: Component = () => {
         // catalog for the core-side resolver. Tooltip falls back to display.
         hotkey: action.hotkey ? formatHotkey(action.hotkey) : undefined,
         disabled: !action.enabled,
-        tooltip: action.tooltip ?? action.display,
+        tooltip: (download?.stage || action.tooltip) ?? action.display,
+        progress: download?.fraction ?? undefined,
         onClick: hasOptions
           ? () =>
               appCommand({
@@ -146,7 +156,16 @@ const ActionButtonWidget: Component = () => {
                     ? null
                     : action.op_id,
               })
-          : () => dispatchOp({ op_id: action.op_id }),
+          : () =>
+              dispatchOp({
+                op_id: action.op_id,
+                // Carry the action's source plugin so the host can route
+                // ops that several plugins register under one shared op-id
+                // (e.g. weight download) to this plugin rather than the
+                // flat registry's arbitrary last-writer owner. Benign extra
+                // param for ops that don't need it.
+                params: { plugin_id: { String: action.plugin_id } },
+              }),
       };
 
       let bucket = byPluginActions.get(action.plugin_id);

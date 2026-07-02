@@ -60,6 +60,15 @@ impl App {
                             self.promote_inplace_checkpoint(token, &assembly, score);
                         }
                     }
+                    OpEvent::Progress {
+                        token,
+                        progress,
+                        stage,
+                    } => {
+                        if self.runner_client.update_weights_progress(token, progress, stage) {
+                            self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+                        }
+                    }
                     OpEvent::Commit {
                         token,
                         assembly,
@@ -67,17 +76,41 @@ impl App {
                         creates_entities,
                         preview,
                     } => {
-                        self.apply_commit_event(token, &assembly, score, creates_entities, preview);
+                        if let Some(plugin_id) =
+                            token.and_then(|rid| self.runner_client.is_downloading_rid(rid))
+                        {
+                            self.on_weights_download_committed(&plugin_id);
+                        } else {
+                            self.apply_commit_event(
+                                token,
+                                &assembly,
+                                score,
+                                creates_entities,
+                                preview,
+                            );
+                        }
                     }
                     OpEvent::Abort { token, reason } => {
                         if let Some(token) = token {
-                            // Discard any in-progress creates-entities preview
-                            // or in-place ghost this stream was animating.
-                            self.store.discard_created_preview(token);
-                            self.store.discard_inplace_ghost(token);
-                            if self.store.is_pending(token) {
-                                if let Err(e) = self.store.abort_action(token) {
-                                    log::warn!("abort_action failed: {e}");
+                            // A failed weight download flips the plugin to
+                            // Failed (its download button stays as a retry); it
+                            // opened no history edit, so skip the preview / ghost
+                            // / abort-action cleanup a real op stream needs.
+                            if self.runner_client.set_weights_failed(token, reason.clone()) {
+                                self.gui.push_notification(
+                                    foldit_gui::NotificationLevel::Error,
+                                    reason.clone(),
+                                );
+                                self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+                            } else {
+                                // Discard any in-progress creates-entities preview
+                                // or in-place ghost this stream was animating.
+                                self.store.discard_created_preview(token);
+                                self.store.discard_inplace_ghost(token);
+                                if self.store.is_pending(token) {
+                                    if let Err(e) = self.store.abort_action(token) {
+                                        log::warn!("abort_action failed: {e}");
+                                    }
                                 }
                             }
                         }
@@ -86,6 +119,23 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Handle a weight-download stream's Commit terminal. A download terminal
+    /// carries no real geometry, so re-query `weights_status` rather than
+    /// assuming Ready: the fresh reply is authoritative about whether the
+    /// download produced usable weights (-> Ready, normal buttons return) or
+    /// not (-> back to Missing, download button stays). The Info toast is the
+    /// neutral success counterpart to the Error toast a failed download raises
+    /// on Abort.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_weights_download_committed(&mut self, plugin_id: &str) {
+        self.runner_client.request_weights_status();
+        self.gui.push_notification(
+            foldit_gui::NotificationLevel::Info,
+            format!("{plugin_id} weights downloaded"),
+        );
+        self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
     }
 
     /// Dispatch a plugin op by op-id (fire-and-forget; any stream rid is
@@ -121,6 +171,14 @@ impl App {
         if op.op_id == "mutate_residue" {
             return self.dispatch_native_mutate(&op);
         }
+        // Every ML plugin registers `download_weights` under the same op-id,
+        // so `resolve_op_plugin_id` collapses them to one arbitrary
+        // last-writer owner and the download would hit the wrong plugin.
+        // Route it to the plugin the button belongs to instead, read off
+        // the `plugin_id` param the action rides in on.
+        if op.op_id == "download_weights" {
+            return self.dispatch_native_download(&op, focused_entity_id);
+        }
 
         let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
             log::warn!(
@@ -134,13 +192,7 @@ impl App {
             .runner_client
             .op_display(&plugin_id, &op.op_id)
             .unwrap_or_else(|| op.op_id.clone());
-        let intent = DispatchIntent {
-            selection: self.store.selection().clone(),
-            designable: self.store.designable_residues(),
-            focused_entity_id,
-            op_id: op.op_id.clone(),
-            params: op.params,
-        };
+        let intent = self.dispatch_intent_from_op(op.op_id.clone(), op.params, focused_entity_id);
         let store = &self.store;
         let dispatch_outcome =
             self.runner_client
@@ -215,6 +267,29 @@ impl App {
                 log::error!("dispatch_op_inner({:?}): dispatch failed: {s}", op.op_id);
                 None
             }
+        }
+    }
+
+    /// Build the [`DispatchIntent`] for an op from the current selection and
+    /// designable set, tagged with the already-resolved `focused_entity_id`.
+    /// Both dispatch paths (registry-routed and the native download
+    /// intercept) assemble the intent identically through here, so the focus
+    /// lookup lives in exactly one place. Takes `op_id` and `params` by value
+    /// so the registry path can hand its owned params straight through; the
+    /// download intercept, which only borrows its op, clones at the call.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_intent_from_op(
+        &self,
+        op_id: String,
+        params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+        focused_entity_id: Option<molex::EntityId>,
+    ) -> DispatchIntent {
+        DispatchIntent {
+            selection: self.store.selection().clone(),
+            designable: self.store.designable_residues(),
+            focused_entity_id,
+            op_id,
+            params,
         }
     }
 
@@ -311,6 +386,54 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Route a weight download to the specific plugin named in the op's
+    /// `plugin_id` param, bypassing the flat op-registry resolution. The
+    /// download stream is registered like any other stream (so its
+    /// terminal releases the dispatch locks), but it opens no history
+    /// edit: a download changes no geometry. Returns the stream
+    /// `request_id`, or `None` when the `plugin_id` param is absent / not a
+    /// string, or the dispatch fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_native_download(
+        &mut self,
+        op: &foldit_gui::OpDispatch,
+        focused_entity_id: Option<molex::EntityId>,
+    ) -> Option<u64> {
+        let Some(foldit_gui::state::ParamValue::String(plugin_id)) =
+            op.params.get("plugin_id")
+        else {
+            log::warn!(
+                "download_weights dispatch missing string plugin_id param; refused"
+            );
+            return None;
+        };
+        let plugin_id = plugin_id.clone();
+
+        // Refuse a second download for a plugin whose download is already in
+        // flight: the button is disabled while Downloading, but a queued or
+        // racing click could still reach here and start a duplicate stream.
+        if self.runner_client.is_plugin_downloading(&plugin_id) {
+            log::warn!("download_weights refused: {plugin_id} weights already downloading");
+            return None;
+        }
+
+        let intent =
+            self.dispatch_intent_from_op(op.op_id.clone(), op.params.clone(), focused_entity_id);
+        let rid = {
+            let store = &self.store;
+            self.runner_client
+                .dispatch_stream_on_plugin_lockless(&plugin_id, intent, |id| store.entity_type(id))
+        };
+        if let Some(rid) = rid {
+            // Stamp Downloading at dispatch, not on the first progress frame:
+            // a download that terminates before any frame is still matched by
+            // rid at its terminal.
+            self.runner_client.set_weights_downloading(&plugin_id, rid);
+            self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+        }
+        rid
     }
 
     /// Resolve a dispatch's [`EditScope`] into the concrete set of lanes the

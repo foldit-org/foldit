@@ -3,7 +3,18 @@
 //! off the static op catalog. Read-only against the orchestrator.
 
 #[cfg(not(target_arch = "wasm32"))]
-use super::RunnerClient;
+use super::{RunnerClient, WeightsState};
+
+/// Which action, if any, owns a hotkey once press-time precedence is applied.
+/// Plugin catalog bindings win over the native picker-toggle table; a key
+/// bound by neither is `None`. Resolved in one place so the GUI badge and the
+/// key press agree on the winner.
+#[cfg(not(target_arch = "wasm32"))]
+pub enum HotkeyOwner {
+    Plugin { plugin_id: String, op_id: String },
+    Native { op_id: String },
+    None,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RunnerClient {
@@ -125,15 +136,70 @@ impl RunnerClient {
                     == 1,
             active: false,
             // Badge wire: the friendly glyph the frontend prettifies to "M".
-            // Kept in sync with the resolution table in
-            // `native_hotkey_toggle`; the two are independent wires (badge
-            // display vs key resolution) for the same binding.
+            // The trailing dedup pass reconciles this against `resolve_hotkey`,
+            // so the badge only survives if the key actually dispatches here.
             hotkey: Some("KeyM".to_owned()),
             tooltip: Some("Mutate the selected residue".to_owned()),
             params: Vec::new(),
             options,
         });
+
+        // Weights gate: an ML plugin whose model weights are not ready
+        // surfaces a single "Download weights" button in place of its normal
+        // buttons. This holds for every non-`Ready` state (a `Missing` or
+        // `Failed` retry, and while `Downloading` is in flight); only `Ready`
+        // restores the normal rows. Plugins absent from the map (readiness not
+        // yet reported, or non-ML plugins that never advertise
+        // `weights_status`) and the native host row keep their normal rows.
+        // The injected `download_weights` op is a registered stream op, so the
+        // button dispatches through the ordinary path with no special-casing.
+        // The button is disabled while `Downloading` so a second click cannot
+        // start a duplicate download; a `Missing` / `Failed` retry stays live.
+        for (plugin_id, state) in &self.weights {
+            if matches!(state, WeightsState::Ready) {
+                continue;
+            }
+            rows.retain(|r| &r.plugin_id != plugin_id);
+            rows.push(ActionInfo {
+                op_id: "download_weights".to_owned(),
+                plugin_id: plugin_id.clone(),
+                display: "Download weights".to_owned(),
+                icon_path: "builtin:download".to_owned(),
+                enabled: !matches!(state, WeightsState::Downloading { .. }),
+                active: false,
+                hotkey: None,
+                tooltip: Some("Download this plugin's model weights".to_owned()),
+                params: Vec::new(),
+                options: Vec::new(),
+            });
+        }
+
+        self.reconcile_hotkey_badges(&mut rows);
         rows
+    }
+
+    /// Drop the hotkey badge from any action whose key is actually owned by a
+    /// higher-precedence action, so the badge matches what the key dispatches
+    /// (resolved once in [`Self::resolve_hotkey`], the same order `handle_key`
+    /// applies).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reconcile_hotkey_badges(&self, rows: &mut [foldit_gui::state::ActionInfo]) {
+        for row in rows {
+            if let Some(key) = row.hotkey.clone() {
+                let owns = match self.resolve_hotkey(&key) {
+                    HotkeyOwner::Plugin { plugin_id, op_id } => {
+                        plugin_id == row.plugin_id && op_id == row.op_id
+                    }
+                    HotkeyOwner::Native { op_id } => {
+                        row.plugin_id == "native" && op_id == row.op_id
+                    }
+                    HotkeyOwner::None => false,
+                };
+                if !owns {
+                    row.hotkey = None;
+                }
+            }
+        }
     }
 
     /// Project the orchestrator's per-plugin group metadata into the GUI's
@@ -225,11 +291,26 @@ impl RunnerClient {
             .collect()
     }
 
+    /// Resolve a key to the single action that owns it, applying the same
+    /// precedence `handle_key` does: plugin catalog binding first, then the
+    /// native picker-toggle table. The one authority the GUI badge and the
+    /// key press both read, so the badge cannot advertise a shadowed action.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn resolve_hotkey(&self, key: &str) -> HotkeyOwner {
+        if let Some((plugin_id, op_id)) = self.hotkey_to_op(key) {
+            return HotkeyOwner::Plugin { plugin_id, op_id };
+        }
+        if let Some(op_id) = self.native_hotkey_toggle(key) {
+            return HotkeyOwner::Native { op_id };
+        }
+        HotkeyOwner::None
+    }
+
     /// Resolve a manifest hotkey string to its `(plugin_id, op_id)` via the
     /// static op catalog. `None` when no catalog button binds the key.
     /// Static identity only: no focus/selection/lock state involved.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn hotkey_to_op(&self, key: &str) -> Option<(String, String)> {
+    fn hotkey_to_op(&self, key: &str) -> Option<(String, String)> {
         let orch = self.orchestrator.as_ref()?;
         orch.ops_catalog()
             .into_iter()
@@ -242,10 +323,9 @@ impl RunnerClient {
     /// `ops_catalog`: the native Mutate action is host-declared and never
     /// appears there. Toggling a picker is not an op dispatch; the Mutate
     /// dispatch needs an `aa` param, so this key must never route through the
-    /// op path. Kept in sync with the `KeyM` badge on the native Mutate
-    /// [`ActionInfo`]; the two are independent wires (badge vs resolution).
+    /// op path.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn native_hotkey_toggle(&self, key: &str) -> Option<String> {
+    fn native_hotkey_toggle(&self, key: &str) -> Option<String> {
         match key {
             "KeyM" => Some("mutate_residue".to_owned()),
             _ => None,

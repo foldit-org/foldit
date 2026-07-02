@@ -17,10 +17,10 @@ const BRIDGE_CONTRACT_VERSION: u32 = 1;
 
 use foldit_gui::{
     ActionInfo, ActionsSection, AppCommand, AppPhase, CheckpointInfo, CheckpointKindTag,
-    EntitySelection, FilterStatus, HistoryCommand, HistoryLiveUpdate, HistorySection, OpDispatch,
-    PanelInfo, PanelPosition, PanelsSection, ParamConstraint, ParamSpec, ParamType, ParamValue,
-    PluginGroupInfo, ProgressEntry, ProgressSection, SceneEntityInfo, SegmentInfo, SelectionSection,
-    SettingsTabInfo, ViewSection, ViewportInput,
+    EntitySelection, FilterStatus, HistoryCommand, HistoryLiveUpdate, HistorySection, Notification,
+    NotificationLevel, OpDispatch, PanelInfo, PanelPosition, PanelsSection, ParamConstraint,
+    ParamSpec, ParamType, ParamValue, PluginGroupInfo, ProgressEntry, ProgressSection,
+    SceneEntityInfo, SegmentInfo, SelectionSection, SettingsTabInfo, ViewSection, ViewportInput,
 };
 
 #[test]
@@ -48,6 +48,8 @@ fn export_wire_types_to_ts() {
         .register::<PanelPosition>()
         .register::<ProgressSection>()
         .register::<ProgressEntry>()
+        .register::<Notification>()
+        .register::<NotificationLevel>()
         .register::<AppPhase>()
         .register::<AppCommand>()
         .register::<OpDispatch>()

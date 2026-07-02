@@ -61,9 +61,11 @@ str_to_string = "warn"
 #
 # Leave commented for the default "use published version" workflow.
 
-[patch."https://github.com/foldit-org/viso"]
-viso = { path = "crates/viso" }
-
-[patch.crates-io]
-foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
-molex = { path = "crates/molex" }
+# NOTE: local-path patches for dev only. NEVER commit with these uncommented.
+# Uncomment to build against local submodule checkouts; re-comment before commit.
+# [patch."https://github.com/foldit-org/viso"]
+# viso = { path = "crates/viso" }
+#
+# [patch.crates-io]
+# foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+# molex = { path = "crates/molex" }

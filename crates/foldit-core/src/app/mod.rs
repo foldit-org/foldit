@@ -365,6 +365,14 @@ impl App {
                 .apply_replies(&self.store, &mut self.scores, &opts, viz_results);
         }
 
+        // Drain per-plugin weights readiness. A state change swaps a plugin's
+        // buttons for (or back from) a download button, which is an action
+        // catalog change the SessionUpdate batch cannot express, so re-project
+        // the actions section explicitly.
+        if self.runner_client.poll_weights_status() {
+            self.mark_dirty(DirtyFlags::ACTIONS);
+        }
+
         // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();
 

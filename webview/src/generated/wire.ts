@@ -113,6 +113,12 @@ export type ActionsSection = {
 	 *  and `groups`; the frontend renders one picker open at a time from it.
 	 */
 	open_picker: string | null,
+	/**
+	 *  Per-plugin live download progress, keyed by `plugin_id`. Empty when
+	 *  nothing is downloading; a plugin's host-injected download button reads
+	 *  its entry to render a progress fill.
+	 */
+	download_progress: { [key in string]: DownloadProgress },
 };
 
 /**
@@ -309,6 +315,17 @@ export type CheckpointKindTag =
 "native_edit";
 
 /**
+ *  Live download progress for a plugin whose weights are streaming in.
+ * 
+ *  `fraction` is 0..1 (0 at kick, 1 at completion); `stage` is a
+ *  human-readable label for the current phase of the download.
+ */
+export type DownloadProgress = {
+	fraction: number | null,
+	stage: string,
+};
+
+/**
  *  Opaque entity identifier.
  * 
  *  Cannot be constructed directly, only through [`EntityIdAllocator`].
@@ -441,6 +458,28 @@ export type HistorySection = {
 	 */
 	topology_version: number | null,
 };
+
+/**
+ *  A host-raised, user-facing notification.
+ * 
+ *  `id` is a monotonic counter assigned by [`crate::GuiState::push_notification`].
+ *  The frontend dedups on it: it toasts only ids greater than the highest it
+ *  has already shown, so a reload replaying the retained list never re-toasts
+ *  an already-seen message. The backend keeps only the most recent entries;
+ *  dropping older ones is safe because their ids stay below the frontend's
+ *  high-water mark.
+ */
+export type Notification = {
+	id: number,
+	level: NotificationLevel,
+	text: string,
+};
+
+/**
+ *  Severity of a host-raised notification. Drives the frontend's toast
+ *  styling (`Error` renders red; `Warning` / `Info` render neutral).
+ */
+export type NotificationLevel = "Info" | "Warning" | "Error";
 
 /**
  *  GUI-side dispatch envelope for a plugin op-id.

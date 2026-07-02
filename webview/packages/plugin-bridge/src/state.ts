@@ -7,6 +7,7 @@ import type {
   AppPhase,
   HistoryLiveUpdate,
   HistorySection,
+  Notification,
   PanelsSection,
   ProgressSection,
   SceneEntityInfo,
@@ -76,4 +77,7 @@ export interface FrontendState {
   panels: PanelsSection;
   /** Backend-authoritative puzzle high-score progress (best score per puzzle). */
   progress: ProgressSection;
+  /** Host-raised user-facing notifications, oldest first. The frontend
+   *  toasts each entry whose id exceeds the highest already shown. */
+  notifications: Notification[];
 }

@@ -260,6 +260,15 @@ pub enum OpEvent {
     /// aborts the edit open under it (gated on `is_pending`), or accounts
     /// for the terminal with nothing to abort.
     Abort { token: Option<u64>, reason: String },
+    /// Assembly-less advancement from a non-geometry stream (e.g. a weight
+    /// download), keyed by the dispatch `request_id`. There is no pose to
+    /// apply; `App` folds `progress` / `stage` into the matching in-flight
+    /// download and drops the frame when the token matches no download.
+    Progress {
+        token: u64,
+        progress: Option<f32>,
+        stage: Option<String>,
+    },
 }
 
 /// Owns the in-flight stream bookkeeping that only exists on native

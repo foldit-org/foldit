@@ -49,6 +49,9 @@ bitflags! {
         /// Puzzle high-score progress changed (a new best recorded, or
         /// progress cleared).
         const PROGRESS     = 0b100_0000_0000_0000;
+        /// A host-raised notification was appended (the reusable app-wide
+        /// notification channel the frontend renders as a toast).
+        const NOTIFICATIONS = 0b1000_0000_0000_0000;
     }
 }
 
@@ -133,6 +136,12 @@ pub struct GuiState {
     /// empty until the player scores on a puzzle. The wire mirror of
     /// `progress_map`, regenerated on every mutation.
     pub progress: ProgressSection,
+    /// Host-raised user-facing notifications, oldest first. The first
+    /// reusable app-wide notification channel: any backend surface can
+    /// append via `push_notification` and the frontend toasts each new
+    /// entry. Bounded to the most recent few so a long session cannot
+    /// grow it unbounded; the frontend dedups by `Notification::id`.
+    pub notifications: Vec<Notification>,
     /// Authoritative open panel set. The `panels` wire section above is
     /// regenerated from this (together with `panels_positions`) on each
     /// mutation; a panel absent here is closed.
@@ -148,6 +157,11 @@ pub struct GuiState {
     /// mutation; this map is the source of truth.
     #[serde(skip)]
     progress_map: std::collections::BTreeMap<u32, f64>,
+    /// Monotonic id assigned to the next notification. Never reset, so ids
+    /// stay unique across the session and the frontend's dedup high-water
+    /// mark only ever advances.
+    #[serde(skip)]
+    notification_id: u64,
     /// One-shot flag that `progress_map` changed and must be flushed to disk.
     /// Set only by a real in-session record/clear, never by an import, so a
     /// load does not bounce back out as a save. Drained by
@@ -186,6 +200,8 @@ impl Default for GuiState {
             pending_tail: None,
             panels: PanelsSection::default(),
             progress: ProgressSection::default(),
+            notifications: Vec::new(),
+            notification_id: 0,
             panels_open: std::collections::BTreeSet::new(),
             panels_positions: std::collections::BTreeMap::new(),
             progress_map: std::collections::BTreeMap::new(),
@@ -197,6 +213,10 @@ impl Default for GuiState {
 }
 
 impl GuiState {
+    /// Cap on retained notifications. The frontend dedups by id, so keeping
+    /// only the most recent entries never drops an un-toasted message.
+    const MAX_NOTIFICATIONS: usize = 20;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -330,6 +350,17 @@ impl GuiState {
     #[must_use]
     pub fn action_picker_open(&self) -> Option<&str> {
         self.actions.open_picker.as_deref()
+    }
+
+    /// Replace the per-plugin download-progress map. Marks `ACTIONS` dirty
+    /// so the next push carries the change. Empty map clears all progress
+    /// fills.
+    pub fn set_download_progress(
+        &mut self,
+        map: std::collections::HashMap<String, DownloadProgress>,
+    ) {
+        self.actions.download_progress = map;
+        self.dirty |= DirtyFlags::ACTIONS;
     }
 
     /// Record a panel's dragged top-left position. Regenerates the wire
@@ -656,5 +687,24 @@ impl GuiState {
     pub fn set_history_live(&mut self, update: HistoryLiveUpdate) {
         self.history_live = Some(update);
         self.dirty |= DirtyFlags::HISTORY_LIVE;
+    }
+
+    /// Append a user-facing notification and mark `NOTIFICATIONS` dirty. Each
+    /// call assigns a fresh monotonic id; the frontend toasts only ids above
+    /// the highest it has shown. The retained list is capped at the most
+    /// recent [`Self::MAX_NOTIFICATIONS`] so it never grows unbounded, which
+    /// is safe because dropped entries keep ids below that high-water mark.
+    pub fn push_notification(&mut self, level: NotificationLevel, text: String) {
+        self.notification_id += 1;
+        self.notifications.push(Notification {
+            id: self.notification_id,
+            level,
+            text,
+        });
+        let len = self.notifications.len();
+        if len > Self::MAX_NOTIFICATIONS {
+            self.notifications.drain(0..len - Self::MAX_NOTIFICATIONS);
+        }
+        self.dirty |= DirtyFlags::NOTIFICATIONS;
     }
 }

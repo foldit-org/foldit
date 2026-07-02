@@ -15,6 +15,7 @@ import WidgetsLayer from './components/viewport/WidgetsLayer.tsx';
 import PanelsLayer from './components/viewport/PanelsLayer.tsx';
 import GlobalTooltipSystem from './components/viewport/GlobalTooltipSystem.tsx';
 import RisingTextManager from './components/util/RisingTextManager.tsx';
+import NotificationToaster from './components/util/NotificationToaster.tsx';
 
 // hook imports
 import { useMatomo } from './hooks/useMatomo.ts';
@@ -58,6 +59,9 @@ export default function App() {
 
 				{/* Rising text system */}
 				<RisingTextManager />
+
+				{/* Host notification toasts (top-right) */}
+				<NotificationToaster />
 			</div>
 		</div>
 	);

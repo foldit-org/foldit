@@ -32,6 +32,7 @@ export const initialState: FrontendState = {
   history_live: null,
   panels: { open: [], positions: [] },
   progress: { entries: [] },
+  notifications: [],
 };
 
 type Listener = (delta: Partial<FrontendState>) => void;

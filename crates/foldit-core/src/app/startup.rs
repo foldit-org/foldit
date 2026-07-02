@@ -278,6 +278,10 @@ impl App {
     /// loading screen identically.
     #[cfg(not(target_arch = "wasm32"))]
     fn kick_first_score_then_phase(&mut self) -> StartupPhase {
+        // Every plugin session is up; ask each whether its model weights are
+        // present so the tick's drain can swap a not-ready plugin's buttons
+        // for a download button. Fired once here; replies land per-tick.
+        self.runner_client.request_weights_status();
         self.runner_client.request_scores();
         if self.runner_client.has_pending_score_queries() {
             StartupPhase::Scoring

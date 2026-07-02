@@ -493,6 +493,7 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut GuiS
     );
     let groups = driver.plugin_groups();
     frontend.set_actions(actions, groups);
+    frontend.set_download_progress(driver.weights_download_progress());
 }
 
 /// Project the `VIEW` section: view options, the static schema, and the

@@ -12,6 +12,9 @@ export interface ButtonListItem {
   hotkey?: string;
   disabled?: boolean;
   tooltip?: string;
+  // Download-progress fraction (0..1). When set, a thin fill bar renders
+  // along the bottom of the button; absent leaves the button unchanged.
+  progress?: number;
   onClick: () => void;
 }
 
@@ -43,6 +46,12 @@ const ButtonListWidget: Component<ButtonListWidgetProps> = (props) => {
               </Show>
               <Show when={item.hotkey}>
                 <div class="button-list-hotkey">{item.hotkey}</div>
+              </Show>
+              <Show when={item.progress !== undefined}>
+                <div
+                  class="button-list-progress"
+                  style={{ width: `${Math.max(0, Math.min(1, item.progress!)) * 100}%` }}
+                />
               </Show>
             </button>
           );

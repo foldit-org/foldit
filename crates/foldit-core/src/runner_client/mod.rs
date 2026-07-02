@@ -8,13 +8,37 @@ mod catalog;
 mod pull;
 mod scores;
 mod types;
+#[cfg(not(target_arch = "wasm32"))]
+mod weights;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use catalog::HotkeyOwner;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pull::{build_pull_info, route_atom_pick, route_residue_pick, PullDrag, PullRoute};
 #[cfg(not(target_arch = "wasm32"))]
 pub use types::{
     DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome, StreamHost, StreamStartIntent,
 };
+
+/// Per-plugin model-weights readiness, decoded from each plugin's
+/// `weights_status` reply and advanced by an in-flight download's stream
+/// events. Gates the plugin's action buttons: any state other than `Ready`
+/// surfaces only a download button (a `Missing`/`Failed` retry, or the
+/// in-progress `Downloading`) in place of the plugin's normal buttons.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, PartialEq)]
+pub(crate) enum WeightsState {
+    Missing,
+    Ready,
+    /// A download is in flight for this plugin. `rid` is the stream
+    /// `request_id` the download dispatched under; it is retained so a stream
+    /// terminal can be matched back to the plugin that started it even when
+    /// the terminal arrives before any progress frame.
+    Downloading { progress: f32, stage: String, rid: u64 },
+    /// The last download attempt failed; the plugin keeps its download button
+    /// as a retry. `message` is the terminal's error text.
+    Failed { message: String },
+}
 
 /// Owns the orchestrator handle and the native-only stream bookkeeping.
 /// `App` holds one of these and reaches into its fields by direct path so
@@ -24,6 +48,11 @@ pub struct RunnerClient {
     orchestrator: Option<foldit_runner::Orchestrator>,
     #[cfg(not(target_arch = "wasm32"))]
     stream_host: StreamHost,
+    /// Weights readiness per plugin id. A plugin absent from the map has not
+    /// yet reported (or does not advertise `weights_status`); its buttons are
+    /// left untouched until a `Missing` reply swaps them.
+    #[cfg(not(target_arch = "wasm32"))]
+    weights: std::collections::HashMap<String, WeightsState>,
 }
 
 impl RunnerClient {
@@ -36,6 +65,8 @@ impl RunnerClient {
                 pull_drag: None,
                 pending_pull_origin: None,
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            weights: std::collections::HashMap::new(),
         }
     }
 
@@ -225,6 +256,109 @@ impl RunnerClient {
             .as_mut()
             .map(foldit_runner::Orchestrator::poll_query_results)
             .unwrap_or_default()
+    }
+
+    /// Stamp a plugin as downloading its weights under stream `rid`. Called
+    /// at dispatch time (not on the first progress frame) so a download that
+    /// terminates before any progress frame is still matched back by rid at
+    /// its terminal.
+    pub(crate) fn set_weights_downloading(&mut self, plugin_id: &str, rid: u64) {
+        self.weights.insert(
+            plugin_id.to_owned(),
+            WeightsState::Downloading {
+                progress: 0.0,
+                stage: String::new(),
+                rid,
+            },
+        );
+    }
+
+    /// Advance the in-flight download that is `Downloading` under stream
+    /// `rid`, folding in whatever `progress` / `stage` the frame carried.
+    /// Returns whether a plugin matched, so the caller re-projects the action
+    /// catalog only when something changed. A frame whose rid matches no
+    /// in-flight download is ignored (some other stream's assembly-less
+    /// progress).
+    pub(crate) fn update_weights_progress(
+        &mut self,
+        rid: u64,
+        progress: Option<f32>,
+        stage: Option<String>,
+    ) -> bool {
+        for state in self.weights.values_mut() {
+            if let WeightsState::Downloading {
+                rid: r,
+                progress: p,
+                stage: s,
+            } = state
+            {
+                if *r == rid {
+                    if let Some(progress) = progress {
+                        *p = progress;
+                    }
+                    if let Some(stage) = stage {
+                        *s = stage;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Per-plugin live download progress for the GUI, one entry per plugin
+    /// whose weights are currently `Downloading`. Non-`Downloading` states
+    /// contribute nothing, so the map is empty when no download is in flight.
+    pub(crate) fn weights_download_progress(
+        &self,
+    ) -> std::collections::HashMap<String, foldit_gui::state::DownloadProgress> {
+        self.weights
+            .iter()
+            .filter_map(|(plugin_id, state)| match state {
+                WeightsState::Downloading { progress, stage, .. } => Some((
+                    plugin_id.clone(),
+                    foldit_gui::state::DownloadProgress {
+                        fraction: *progress,
+                        stage: stage.clone(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The plugin whose download is in flight under stream `rid`, or `None`
+    /// when no plugin is `Downloading` under it. A stream terminal uses this
+    /// to tell a weight-download terminal apart from an ordinary op stream
+    /// (so it can drive the download state machine instead of the edit-commit
+    /// path) and to name the plugin in the completion notification.
+    pub(crate) fn is_downloading_rid(&self, rid: u64) -> Option<String> {
+        self.weights.iter().find_map(|(plugin_id, state)| {
+            matches!(state, WeightsState::Downloading { rid: r, .. } if *r == rid)
+                .then(|| plugin_id.clone())
+        })
+    }
+
+    /// Whether `plugin_id`'s weights are currently `Downloading`. The host
+    /// download intercept reads this to refuse a second download for a plugin
+    /// whose download is already in flight.
+    pub(crate) fn is_plugin_downloading(&self, plugin_id: &str) -> bool {
+        matches!(
+            self.weights.get(plugin_id),
+            Some(WeightsState::Downloading { .. })
+        )
+    }
+
+    /// Flip the plugin downloading under stream `rid` to `Failed` (its
+    /// download button stays as a retry). Returns whether a plugin matched.
+    pub(crate) fn set_weights_failed(&mut self, rid: u64, message: String) -> bool {
+        for state in self.weights.values_mut() {
+            if matches!(state, WeightsState::Downloading { rid: r, .. } if *r == rid) {
+                *state = WeightsState::Failed { message };
+                return true;
+            }
+        }
+        false
     }
 }
 
