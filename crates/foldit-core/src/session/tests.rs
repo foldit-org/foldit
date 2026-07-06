@@ -314,7 +314,15 @@ fn promote_preview_emits_head_moved() {
         )
         .expect("promote_preview");
     let changes = store.take_updates();
-    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
+    assert!(
+        matches!(
+            changes.as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Commit,
+            }]
+        ),
+        "got {changes:?}",
+    );
 }
 
 #[test]
@@ -377,7 +385,15 @@ fn commit_action_emits_head_moved() {
 
     store.commit_action(rid).expect("commit_action");
     let changes = store.take_updates();
-    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
+    assert!(
+        matches!(
+            changes.as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Commit,
+            }]
+        ),
+        "got {changes:?}",
+    );
 }
 
 #[test]
@@ -388,7 +404,15 @@ fn abort_action_emits_head_moved() {
     let _ = store.take_updates();
     store.abort_action(rid).expect("abort_action");
     let changes = store.take_updates();
-    assert!(matches!(changes.as_slice(), [SessionUpdate::HeadMoved]), "got {changes:?}");
+    assert!(
+        matches!(
+            changes.as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "got {changes:?}",
+    );
 }
 
 #[test]
@@ -404,13 +428,23 @@ fn undo_then_redo_each_emit_head_moved() {
 
     store.undo().expect("undo");
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
-        "undo emits HeadMoved",
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "undo emits a navigation HeadMoved",
     );
     store.redo(None).expect("redo");
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
-        "redo emits HeadMoved",
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "redo emits a navigation HeadMoved",
     );
 }
 
@@ -442,8 +476,13 @@ fn lane_undo_emits_head_moved() {
 
     store.lane_undo(id, original).expect("lane_undo");
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
-        "lane_undo emits HeadMoved",
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "lane_undo emits a navigation HeadMoved",
     );
 }
 
@@ -468,8 +507,13 @@ fn jump_checkpoint_emits_head_moved() {
 
     store.jump_checkpoint(first).expect("jump_checkpoint");
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::HeadMoved]),
-        "jump_checkpoint emits HeadMoved",
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "jump_checkpoint emits a navigation HeadMoved",
     );
 }
 
@@ -542,8 +586,13 @@ fn reset_clears_pending_then_emits_one_head_moved() {
 
     let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SessionUpdate::HeadMoved]),
-        "reset drops pending changes and emits exactly one HeadMoved, got {changes:?}",
+        matches!(
+            changes.as_slice(),
+            [SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            }]
+        ),
+        "reset drops pending changes and emits exactly one navigation HeadMoved, got {changes:?}",
     );
 }
 
@@ -891,6 +940,7 @@ fn mk_puzzle(bubble_count: usize) -> Puzzle {
         current_bubble,
         constraints: Vec::new(),
         ligands: Vec::new(),
+        density: None,
         design_gating: None,
     }
 }
@@ -973,6 +1023,7 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
         current_bubble: None,
         constraints: Vec::new(),
         ligands: Vec::new(),
+        density: None,
         design_gating: None,
     });
     assert!(
@@ -1065,6 +1116,7 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
             current_bubble: None,
             constraints: Vec::new(),
             ligands: Vec::new(),
+            density: None,
             design_gating: None,
         }),
     );
@@ -1185,6 +1237,7 @@ fn adopted_design_entity_registers_as_fully_designable() {
             ligands: Vec::new(),
             // Gating active (a design puzzle) but the new entity is absent.
             design_gating: Some(BTreeMap::new()),
+            density: None,
         }),
     );
     assert!(store.design_gating_active(), "the puzzle declares design gating");
@@ -1242,6 +1295,7 @@ fn register_full_designable_entity_is_noop_when_gating_inactive() {
             current_bubble: None,
             constraints: Vec::new(),
             ligands: Vec::new(),
+            density: None,
             design_gating: None,
         }),
     );

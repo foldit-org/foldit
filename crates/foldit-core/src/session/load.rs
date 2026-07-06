@@ -46,20 +46,24 @@ impl Session {
                 current_bubble,
                 constraints: data.constraints,
                 ligands: data.ligands,
+                density: data.density,
                 design_gating: None,
             }),
         );
 
-        let mut ids: Vec<EntityId> = Vec::new();
+        let chain_keys: Vec<Option<String>> = data
+            .entities
+            .iter()
+            .map(|e| e.pdb_chain_id().map(str::to_owned))
+            .collect();
+        let ids =
+            self.seed_history_with_entities(data.entities, std::path::PathBuf::new(), &outgoing_title);
+
         let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> = BTreeMap::new();
-        for entity in data.entities {
-            let chain_key = entity.pdb_chain_id().map(str::to_owned);
-            if let Some(eid) = self.load_entity_into_history(entity, &outgoing_title) {
-                ids.push(eid);
-                if let Some(key) = chain_key {
-                    if let Some(mask) = data.design_masks.get(&key) {
-                        gating.insert(eid, mask.clone());
-                    }
+        for (eid, chain_key) in ids.iter().zip(chain_keys) {
+            if let Some(key) = chain_key {
+                if let Some(mask) = data.design_masks.get(&key) {
+                    gating.insert(*eid, mask.clone());
                 }
             }
         }

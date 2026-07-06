@@ -204,7 +204,7 @@ impl SessionUpdateConsumer for RenderProjector {
             .any(|c| matches!(c, SessionUpdate::ScoresChanged));
         let committed_geometry = changes
             .iter()
-            .any(|c| matches!(c, SessionUpdate::HeadMoved));
+            .any(|c| matches!(c, SessionUpdate::HeadMoved { .. }));
 
         // Geometry republish first (moot for ordering since viso retains
         // scores across `replace_assembly`, but keeps the publish before the
@@ -256,19 +256,22 @@ impl SessionUpdateConsumer for RenderProjector {
             self.last_published_ids = new_ids;
         }
 
-        // A pure head-move (history nav) clears per-residue colors; a same-batch
-        // score re-pushes below.
+        // A navigation batch carries no `ScoresChanged`, so the `has_scores`
+        // push below never fires for it. This branch clears stale colors and
+        // re-derives from the navigated node's own retained breakdown; a
+        // never-scored node stays cleared until an async rescore lands.
         let head_nav_only = changes
             .iter()
-            .any(|c| matches!(c, SessionUpdate::HeadMoved))
+            .any(|c| matches!(c, SessionUpdate::HeadMoved { .. }))
             && !changes
                 .iter()
-                .any(|u| u.is_geometry() && !matches!(u, SessionUpdate::HeadMoved));
+                .any(|u| u.is_geometry() && !matches!(u, SessionUpdate::HeadMoved { .. }));
         if head_nav_only {
             let ids: Vec<molex::EntityId> = doc.ids().collect();
             for eid in ids {
                 engine.set_per_residue_scores(eid.raw(), None);
             }
+            Self::project_scores(doc, scores, engine);
         }
 
         if has_scores {

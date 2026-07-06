@@ -10,6 +10,17 @@
 //! Carrying payloads here would duplicate state that the projectors are
 //! already reading from `Session` and invite drift.
 
+/// Why the history head moved: a commit (a plugin produced the new pose
+/// and already holds it) versus a navigation (a reposition to a pose no
+/// plugin is guaranteed to hold). Only the plugin broadcaster reads this;
+/// it excludes the sourcing plugin from the resync on a commit and
+/// broadcasts to every plugin on a navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadMoveCause {
+    Commit,
+    Navigate,
+}
+
 /// A single observable change to the scene.
 #[derive(Debug, Clone)]
 pub enum SessionUpdate {
@@ -20,8 +31,10 @@ pub enum SessionUpdate {
     Edit { tentative: bool },
     /// The history head moved (undo / redo / jump / commit / reset).
     /// Projectors rebuild; the plugin broadcaster sends a Full/Delta
-    /// snapshot diff.
-    HeadMoved,
+    /// snapshot diff. `cause` distinguishes a commit (the sourcing plugin
+    /// already holds the post-op pose) from a navigation (every plugin
+    /// needs the destination pose).
+    HeadMoved { cause: HeadMoveCause },
     /// A preview (transient) entity was added to the overlay.
     PreviewAdded,
     /// A preview (transient) entity's geometry was updated in place
@@ -59,7 +72,7 @@ impl SessionUpdate {
         matches!(
             self,
             Self::Edit { .. }
-                | Self::HeadMoved
+                | Self::HeadMoved { .. }
                 | Self::PreviewAdded
                 | Self::PreviewUpdated
                 | Self::PreviewDiscarded

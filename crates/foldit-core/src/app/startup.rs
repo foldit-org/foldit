@@ -13,7 +13,7 @@ use super::App;
 use super::plugins::locate_plugins_root;
 use crate::history::CheckpointKind;
 use crate::render_projector::RenderSources;
-use crate::session::{SessionUpdate, SessionUpdateConsumer};
+use crate::session::{HeadMoveCause, SessionUpdate, SessionUpdateConsumer};
 
 /// The async-startup state App owns as one field: the per-frame phase
 /// machine plus the two terminal carryovers (camera intent + puzzle SS
@@ -344,7 +344,12 @@ impl App {
                 engine,
             );
             self.projectors.render.consume(
-                &[SessionUpdate::HeadMoved, SessionUpdate::ScoresChanged],
+                &[
+                    SessionUpdate::HeadMoved {
+                        cause: HeadMoveCause::Navigate,
+                    },
+                    SessionUpdate::ScoresChanged,
+                ],
                 RenderSources {
                     session: &mut self.store,
                     reapply_options: None,
@@ -380,9 +385,11 @@ impl App {
     fn warms_done_load_and_kick_inits(&mut self, path: &str) -> StartupPhase {
         match crate::structure_io::load_file_as_entities(path) {
             Ok((entities, name)) => {
-                for entity in entities {
-                    let _ = self.store.load_entity_into_history(entity, &name);
-                }
+                let _ = self.store.seed_history_with_entities(
+                    entities,
+                    std::path::PathBuf::new(),
+                    &name,
+                );
                 // Free-form initial load: set the title and ensure the
                 // free-form (no-puzzle) session through the create seam. The
                 // scientist puzzle panel + title reach the GUI at the
@@ -460,13 +467,13 @@ impl App {
         };
 
         // Source the puzzle-specific session payload (ligand asset bytes +
-        // catalytic constraints) from the loaded puzzle. A free-form
-        // structure load has no puzzle, so both default empty. Cloned out of
-        // the puzzle to release the `self.store` borrow before the
-        // `&mut self.runner_client` kick below.
-        let (ligands, constraints) = self.store.puzzle().map_or_else(
-            || (Vec::new(), Vec::new()),
-            |p| (p.ligands.clone(), p.constraints.clone()),
+        // catalytic constraints + electron-density map) from the loaded
+        // puzzle. A free-form structure load has no puzzle, so these default
+        // empty / `None`. Cloned out of the puzzle to release the
+        // `self.store` borrow before the `&mut self.runner_client` kick below.
+        let (ligands, constraints, density) = self.store.puzzle().map_or_else(
+            || (Vec::new(), Vec::new(), None),
+            |p| (p.ligands.clone(), p.constraints.clone(), p.density.clone()),
         );
 
         // Flatten the loaded puzzle's scorefunction weight patch and its
@@ -480,7 +487,7 @@ impl App {
 
         let expected: std::collections::BTreeSet<String> = self
             .runner_client
-            .kick_inits(&initial_assembly, &ligands, &constraints, &config_params)
+            .kick_inits(&initial_assembly, &ligands, &constraints, density.as_ref(), &config_params)
             .into_iter()
             .collect();
         if expected.is_empty() {

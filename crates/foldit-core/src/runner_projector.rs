@@ -4,7 +4,7 @@ use molex::ops::edit::AssemblyEdit;
 use molex::Assembly;
 
 use crate::history::CheckpointKind;
-use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
+use crate::session::{HeadMoveCause, Session, SessionUpdate, SessionUpdateConsumer};
 
 /// Plugin projection of the [`SessionUpdate`] stream.
 ///
@@ -48,7 +48,7 @@ impl RunnerProjector {
     const fn is_observable(change: &SessionUpdate) -> bool {
         matches!(
             change,
-            SessionUpdate::HeadMoved
+            SessionUpdate::HeadMoved { .. }
                 | SessionUpdate::PreviewAdded
                 | SessionUpdate::PreviewDiscarded
                 | SessionUpdate::Edit { tentative: false }
@@ -77,21 +77,36 @@ impl SessionUpdateConsumer for RunnerProjector {
             return;
         }
         let new = doc.head_assembly();
-        let Some(payload) = encode_payload(self.last_published.as_ref(), &new) else {
+        // A navigation moves the head to a pose a plugin may not currently
+        // hold; a coord delta can partially apply plugin-side with no recovery
+        // on the fire-and-forget broadcast path, so force a full (gen-agnostic,
+        // self-healing) resync and send it to every plugin. A commit keeps the
+        // delta and excludes the plugin that already holds the post-op pose (a
+        // host-internal edit carries no plugin source, so it broadcasts to
+        // everyone, "").
+        let is_nav = matches!(head_move_cause(changes), Some(HeadMoveCause::Navigate));
+        let prior = if is_nav { None } else { self.last_published.as_ref() };
+        let Some(payload) = encode_payload(prior, &new) else {
             // Serialize failure (currently impossible for in-memory
             // assemblies). Skip this drain and keep the prior snapshot so
             // the next drain diffs from the last payload plugins actually
             // received; STALE_GEN recovery covers the gap meanwhile.
             return;
         };
-        // Exclude the plugin that sourced this edit from the fan-out: it
-        // already holds the post-op assembly, so re-broadcasting it would
-        // land back as a destructive self-delta. A host-internal edit
-        // carries no plugin source, so it broadcasts to everyone ("").
-        let source_plugin_id = head_plugin_source(doc);
-        orch.broadcast_to_plugins(&payload, source_plugin_id);
+        let exclude = if is_nav { "" } else { head_plugin_source(doc) };
+        orch.broadcast_to_plugins(&payload, exclude);
         self.last_published = Some(new);
     }
+}
+
+/// The cause of the head-move in this drained batch, if any. A batch
+/// carries at most one `HeadMoved`; returns `None` when the batch moved
+/// no head (a preview add/discard or a non-tentative edit alone).
+fn head_move_cause(changes: &[SessionUpdate]) -> Option<HeadMoveCause> {
+    changes.iter().find_map(|c| match c {
+        SessionUpdate::HeadMoved { cause } => Some(*cause),
+        _ => None,
+    })
 }
 
 /// The plugin id that sourced the session's current head edit, or `""`

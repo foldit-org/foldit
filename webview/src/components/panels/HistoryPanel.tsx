@@ -19,7 +19,7 @@
  */
 
 import { Component, createMemo, createSignal, For, Show } from 'solid-js';
-import { ArrowLeft, ArrowRight, Star, Trophy } from '../../utils/iconMapping';
+import { ArrowLeft, ArrowRight, RotateCcw, Star, Trophy } from '../../utils/iconMapping';
 
 import '../../styles/panels/HistoryPanel.css';
 
@@ -119,6 +119,11 @@ const HistoryPanel: Component = () => {
 
   const closeMenu = () => setCtx({ visible: false, x: 0, y: 0, checkpoint: null });
 
+  const jumpToRoot = () => {
+    if (state.history.checkpoint_root) {
+      historyCommand({ kind: 'JumpCheckpoint', id: state.history.checkpoint_root });
+    }
+  };
   const jumpToBest = () => {
     if (state.history.best) {
       historyCommand({ kind: 'JumpCheckpoint', id: state.history.best });
@@ -264,6 +269,12 @@ const HistoryPanel: Component = () => {
             <div class="p-1"><ArrowRight size={24} /></div>
           </Button>
           <p class="text-xs">Redo</p>
+        </div>
+        <div class="history-button">
+          <Button color="green" callback={jumpToRoot}>
+            <div class="p-1"><RotateCcw size={24} /></div>
+          </Button>
+          <p class="text-xs">Reset</p>
         </div>
         <div class="history-button">
           <Button color="green" callback={jumpToBest}>

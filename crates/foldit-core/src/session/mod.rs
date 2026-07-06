@@ -29,7 +29,7 @@ mod load;
 mod mutators;
 mod previews;
 
-pub use change::{SessionUpdate, SessionUpdateConsumer};
+pub use change::{HeadMoveCause, SessionUpdate, SessionUpdateConsumer};
 use previews::Previews;
 
 use crate::history::{CheckpointId, History, HistoryError};
@@ -59,6 +59,7 @@ pub struct Puzzle {
     pub current_bubble: Option<usize>,
     pub constraints: Vec<crate::puzzle_setup::Constraint>,
     pub ligands: Vec<crate::puzzle_load::LigandAsset>,
+    pub density: Option<crate::puzzle_load::DensityAsset>,
     pub design_gating: Option<BTreeMap<EntityId, crate::puzzle_setup::DesignMask>>,
 }
 

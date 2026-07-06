@@ -283,7 +283,9 @@ fn compute_dirty(updates: &[SessionUpdate]) -> DirtyFlags {
             | SessionUpdate::PreviewAdded
             | SessionUpdate::PreviewDiscarded
             | SessionUpdate::FocusChanged => DirtyFlags::SCENE | DirtyFlags::ACTIONS,
-            SessionUpdate::HeadMoved => DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS,
+            SessionUpdate::HeadMoved { .. } => {
+                DirtyFlags::SCENE | DirtyFlags::SCORE | DirtyFlags::ACTIONS
+            }
             SessionUpdate::ViewOptionsChanged => DirtyFlags::VIEW,
             SessionUpdate::SelectionChanged => DirtyFlags::SELECTION | DirtyFlags::ACTIONS,
             SessionUpdate::BubbleChanged => DirtyFlags::TEXT_BUBBLE,

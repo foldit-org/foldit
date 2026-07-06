@@ -13,9 +13,12 @@ impl App {
         let loaded = match crate::structure_io::load_file_as_entities(path) {
             Ok((entities, name)) => {
                 log::info!("Loaded structure via IPC: {name}");
-                for entity in entities {
-                    let _ = self.store.load_entity_into_history(entity, &name);
-                }
+                self.store.reset();
+                let _ = self.store.seed_history_with_entities(
+                    entities,
+                    std::path::PathBuf::new(),
+                    &name,
+                );
 
                 self.store.start(name, None);
                 #[cfg(not(target_arch = "wasm32"))]

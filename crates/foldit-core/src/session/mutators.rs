@@ -18,6 +18,7 @@ use crate::history::{
     CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History,
 };
 
+use super::change::HeadMoveCause;
 use super::{Puzzle, Session, SessionError, SessionUpdate};
 
 impl Session {
@@ -70,7 +71,9 @@ impl Session {
     /// checkpoint id.
     pub fn commit_action(&mut self, request_id: u64) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.commit_action(request_id)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Commit,
+        });
         Ok(ckpt)
     }
 
@@ -82,7 +85,9 @@ impl Session {
     /// Returns the committed checkpoint id.
     pub fn commit_and_reopen(&mut self, request_id: u64) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.commit_and_reopen(request_id)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Commit,
+        });
         Ok(ckpt)
     }
 
@@ -90,7 +95,9 @@ impl Session {
     /// snapshot(s); lane heads fall back to their parents.
     pub fn abort_action(&mut self, request_id: u64) -> Result<(), SessionError> {
         self.history.abort_action(request_id)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Navigate,
+        });
         Ok(())
     }
 
@@ -99,7 +106,9 @@ impl Session {
     pub fn undo(&mut self) -> Result<Option<CheckpointId>, SessionError> {
         let moved = self.history.undo()?;
         if moved.is_some() {
-            self.apply(SessionUpdate::HeadMoved);
+            self.apply(SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            });
         }
         Ok(moved)
     }
@@ -113,7 +122,9 @@ impl Session {
     ) -> Result<Option<CheckpointId>, SessionError> {
         let moved = self.history.redo(branch)?;
         if moved.is_some() {
-            self.apply(SessionUpdate::HeadMoved);
+            self.apply(SessionUpdate::HeadMoved {
+                cause: HeadMoveCause::Navigate,
+            });
         }
         Ok(moved)
     }
@@ -121,7 +132,9 @@ impl Session {
     /// Jump checkpoint head to `id`.
     pub fn jump_checkpoint(&mut self, id: CheckpointId) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.jump_checkpoint(id)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Navigate,
+        });
         Ok(ckpt)
     }
 
@@ -133,7 +146,9 @@ impl Session {
         target: EntitySnapshotId,
     ) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.lane_undo(entity, target)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Navigate,
+        });
         Ok(ckpt)
     }
 
@@ -145,7 +160,9 @@ impl Session {
         branch: Option<EntitySnapshotId>,
     ) -> Result<CheckpointId, SessionError> {
         let ckpt = self.history.lane_redo(entity, branch)?;
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Navigate,
+        });
         Ok(ckpt)
     }
 
@@ -286,7 +303,9 @@ impl Session {
 
         match self.history.add_entity(id, payload, kind, label.into()) {
             Ok(ckpt) => {
-                self.apply(SessionUpdate::HeadMoved);
+                self.apply(SessionUpdate::HeadMoved {
+                    cause: HeadMoveCause::Commit,
+                });
                 Ok(ckpt)
             }
             Err(e) => {
@@ -345,6 +364,51 @@ impl Session {
                 None
             }
         }
+    }
+
+    /// Seed a fresh history with the loaded structure as its single "Initial
+    /// state" root: every non-ambient entity becomes a root snapshot under one
+    /// `Loaded` checkpoint, instead of each entity pushing its own `AddEntity`
+    /// dot atop a separate empty root.
+    ///
+    /// Ambient (water / ion / solvent) and zero-residue entities - the
+    /// het-residue stubs the parser emits for cofactors / waters - stay
+    /// transient (visible in viso, absent from history), mirroring
+    /// [`Self::load_entity_into_history`].
+    ///
+    /// The caller must present a clean allocator (call [`Self::reset`] first if
+    /// a prior structure was loaded) and hold no in-flight action. Returns one
+    /// id per input entity, in input order (ambient included).
+    pub(crate) fn seed_history_with_entities(
+        &mut self,
+        entities: impl IntoIterator<Item = molex::MoleculeEntity>,
+        source: std::path::PathBuf,
+        name: &str,
+    ) -> Vec<molex::EntityId> {
+        use molex::MoleculeType;
+        let mut ids: Vec<EntityId> = Vec::new();
+        let mut seed: Vec<(EntityId, MoleculeEntity)> = Vec::new();
+        for mut entity in entities {
+            let is_ambient = matches!(
+                entity.molecule_type(),
+                MoleculeType::Water | MoleculeType::Ion | MoleculeType::Solvent
+            );
+            let zero_residue = entity.residue_count() == 0;
+            if is_ambient || zero_residue {
+                ids.push(self.insert_preview(entity, name.to_owned()));
+            } else {
+                let id = self.allocator.allocate();
+                entity.set_id(id);
+                let _ = self.metadata.insert(id, Arc::from(name));
+                ids.push(id);
+                seed.push((id, entity));
+            }
+        }
+        self.history = History::new(seed.into_iter(), source);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Commit,
+        });
+        ids
     }
 
     /// Overwrite the ongoing action's tentative payload from a streaming
@@ -613,6 +677,8 @@ impl Session {
         // still advances the host's gen counter, so plugins never see
         // `from_gen` go backwards.
         self.pending_updates.clear();
-        self.apply(SessionUpdate::HeadMoved);
+        self.apply(SessionUpdate::HeadMoved {
+            cause: HeadMoveCause::Navigate,
+        });
     }
 }
