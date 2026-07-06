@@ -16,6 +16,7 @@
   ],
   "macos": {
     "minimumSystemVersion": "11.0",
-    "entitlements": "packaging/macos.entitlements"
+    "entitlements": "packaging/macos.entitlements",
+    "signingIdentity": "Developer ID Application: Firas Khatib (V57P8HL6FH)"
   }
 }

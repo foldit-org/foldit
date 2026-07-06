@@ -21,6 +21,9 @@ public/resources.*
 # wasm-bindgen bundle, emitted by `cargo xtask build-web`. Regenerable.
 public/pkg/
 
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
