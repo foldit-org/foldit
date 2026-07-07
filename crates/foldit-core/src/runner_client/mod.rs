@@ -2,8 +2,8 @@
 //! bookkeeping that drives plugin operations. Plugin bring-up is
 //! non-blocking, driven through the kick/poll pairs.
 
-mod dispatch;
 mod catalog;
+mod dispatch;
 #[cfg(not(target_arch = "wasm32"))]
 mod pull;
 mod scores;
@@ -34,10 +34,16 @@ pub(crate) enum WeightsState {
     /// `request_id` the download dispatched under; it is retained so a stream
     /// terminal can be matched back to the plugin that started it even when
     /// the terminal arrives before any progress frame.
-    Downloading { progress: f32, stage: String, rid: u64 },
+    Downloading {
+        progress: f32,
+        stage: String,
+        rid: u64,
+    },
     /// The last download attempt failed; the plugin keeps its download button
     /// as a retry. `message` is the terminal's error text.
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 /// Owns the orchestrator handle and the native-only stream bookkeeping.
@@ -171,7 +177,11 @@ impl RunnerClient {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
         };
-        match orch.dispatch_query(id, DispatchContext::default(), std::collections::HashMap::new()) {
+        match orch.dispatch_query(
+            id,
+            DispatchContext::default(),
+            std::collections::HashMap::new(),
+        ) {
             Ok(bytes) => bytes,
             Err(e) => {
                 log::trace!("query '{id}' failed: {e}");
@@ -203,14 +213,8 @@ impl RunnerClient {
         &mut self,
         id: &str,
         focus: Option<molex::EntityId>,
-        selection: &std::collections::BTreeMap<
-            molex::EntityId,
-            std::collections::BTreeSet<u32>,
-        >,
-        designable: &std::collections::BTreeMap<
-            molex::EntityId,
-            std::collections::BTreeSet<u32>,
-        >,
+        selection: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
+        designable: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
         params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
     ) -> Result<Vec<u8>, String> {
         if !self.supports_query(id) {
@@ -222,13 +226,11 @@ impl RunnerClient {
             .as_mut()
             .ok_or_else(|| String::from("orchestrator not initialized"))?;
 
-        let params: std::collections::HashMap<
-            String,
-            foldit_runner::orchestrator::ParamValue,
-        > = params
-            .into_iter()
-            .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
-            .collect();
+        let params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> =
+            params
+                .into_iter()
+                .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+                .collect();
 
         orch.dispatch_query(id, ctx, params)
             .map_err(|e| format!("query '{id}' failed: {e}"))
@@ -315,7 +317,9 @@ impl RunnerClient {
         self.weights
             .iter()
             .filter_map(|(plugin_id, state)| match state {
-                WeightsState::Downloading { progress, stage, .. } => Some((
+                WeightsState::Downloading {
+                    progress, stage, ..
+                } => Some((
                     plugin_id.clone(),
                     foldit_gui::state::DownloadProgress {
                         fraction: *progress,
@@ -455,6 +459,7 @@ impl RunnerClient {
         initial_assembly: &[u8],
         ligands: &[crate::puzzle_load::LigandAsset],
         constraints: &[crate::puzzle_setup::Constraint],
+        density: Option<&crate::puzzle_load::DensityAsset>,
         config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
     ) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
@@ -462,15 +467,23 @@ impl RunnerClient {
         };
         // Convert the core-side puzzle payload into the orchestrator's native
         // mirror types once; the per-plugin loop clones the payload per kick.
+        // The density map is per-plugin (only `uses_density` plugins receive
+        // it), so it is appended inside the loop rather than baked into the
+        // shared base payload.
         let payload = init_payload_from_puzzle(ligands, constraints, config_params);
         let discovered = orch.discovered_plugin_ids();
         let mut kicked = Vec::with_capacity(discovered.len());
         for plugin_id in &discovered {
-            match orch.kick_init_session(
-                plugin_id,
-                initial_assembly.to_owned(),
-                payload.clone(),
-            ) {
+            // Copy the opt-in bool out of the immutable descriptor borrow
+            // before the `&mut` kick call below.
+            let wants_density = orch
+                .plugin_descriptor(plugin_id)
+                .is_some_and(|d| d.uses_density());
+            let plugin_payload = match (wants_density, density) {
+                (true, Some(map)) => with_density(payload.clone(), map),
+                _ => payload.clone(),
+            };
+            match orch.kick_init_session(plugin_id, initial_assembly.to_owned(), plugin_payload) {
                 Ok(()) => kicked.push(plugin_id.clone()),
                 Err(e) => log::warn!(
                     "[RunnerClient] kick_init_session('{plugin_id}') failed: \
@@ -511,7 +524,6 @@ impl RunnerClient {
         }
         registered
     }
-
 }
 
 // The session-init kick delivers the loaded puzzle's ligand assets,
@@ -547,9 +559,42 @@ fn init_payload_from_puzzle(
         constraints: constraints.iter().map(constraint_to_runner).collect(),
         params: config_params
             .iter()
-            .map(|(k, v)| (k.clone(), crate::wire_params::param_value_from_wire(v.clone())))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    crate::wire_params::param_value_from_wire(v.clone()),
+                )
+            })
             .collect(),
     }
+}
+
+/// Append a puzzle's electron-density map to `payload`: the raw map bytes
+/// ride the same `PuzzleAsset` lane as ligand assets, and the map's
+/// resolution / grid spacing ride the generic `params` map as float
+/// scalars keyed `density.resolution` / `density.grid_spacing`.
+#[cfg(not(target_arch = "wasm32"))]
+fn with_density(
+    mut payload: foldit_runner::orchestrator::InitPayload,
+    density: &crate::puzzle_load::DensityAsset,
+) -> foldit_runner::orchestrator::InitPayload {
+    use foldit_runner::orchestrator::{ParamValue, PuzzleAsset};
+
+    payload.assets.push(PuzzleAsset {
+        name: density.name.clone(),
+        data: density.bytes.clone(),
+    });
+    let _ = payload.params.insert(
+        String::from("density.resolution"),
+        ParamValue::Float(density.resolution),
+    );
+    if let Some(spacing) = density.grid_spacing {
+        let _ = payload.params.insert(
+            String::from("density.grid_spacing"),
+            ParamValue::Float(spacing),
+        );
+    }
+    payload
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -557,9 +602,7 @@ fn constraint_to_runner(
     c: &crate::puzzle_setup::Constraint,
 ) -> foldit_runner::orchestrator::Constraint {
     use crate::puzzle_setup::{ConstraintFunc as CoreFunc, ConstraintKind as CoreKind};
-    use foldit_runner::orchestrator::{
-        Constraint, ConstraintAtom, ConstraintFunc, ConstraintKind,
-    };
+    use foldit_runner::orchestrator::{Constraint, ConstraintAtom, ConstraintFunc, ConstraintKind};
 
     let kind = match c.kind {
         CoreKind::AtomPair => ConstraintKind::AtomPair,
@@ -567,12 +610,8 @@ fn constraint_to_runner(
         CoreKind::Dihedral => ConstraintKind::Dihedral,
     };
     let func = match c.func {
-        CoreFunc::FlatHarmonic { x0, sd, tol } => {
-            ConstraintFunc::FlatHarmonic { x0, sd, tol }
-        }
-        CoreFunc::CircularHarmonic { x0, sd } => {
-            ConstraintFunc::CircularHarmonic { x0, sd }
-        }
+        CoreFunc::FlatHarmonic { x0, sd, tol } => ConstraintFunc::FlatHarmonic { x0, sd, tol },
+        CoreFunc::CircularHarmonic { x0, sd } => ConstraintFunc::CircularHarmonic { x0, sd },
     };
     Constraint {
         kind,

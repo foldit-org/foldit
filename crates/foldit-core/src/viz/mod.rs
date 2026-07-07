@@ -295,9 +295,9 @@ fn clash_endpoint(session: &Session, end: &clashes::ClashEnd) -> Option<viso::Cl
 /// overlay toggle: only this path writes `filter_bonus`.
 fn apply_exposed_score(session: &Session, scores: &mut ScoreCoordinator, count: usize) {
     let count = u32::try_from(count).unwrap_or(u32::MAX);
-    let bonus = session
-        .puzzle()
-        .map_or(0.0, |p| crate::scores::exposed_count_bonus(&p.filters, count));
+    let bonus = session.puzzle().map_or(0.0, |p| {
+        crate::scores::exposed_count_bonus(&p.filters, count)
+    });
     if bonus == 0.0 {
         scores.set_filter_bonus(Vec::new());
     } else {

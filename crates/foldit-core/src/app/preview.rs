@@ -54,8 +54,7 @@ impl App {
                 match self.store.commit_action(token) {
                     Ok(ckpt) => match score.filter(|_| sole) {
                         Some(report) => {
-                            let (raw, game, breakdown) =
-                                self.scores.prepare_score_stamp(report);
+                            let (raw, game, breakdown) = self.scores.prepare_score_stamp(report);
                             self.store.set_checkpoint_scores(
                                 ckpt,
                                 Some(raw),
@@ -111,14 +110,9 @@ impl App {
         match self.store.commit_and_reopen(token) {
             Ok(ckpt) => match score.filter(|_| sole) {
                 Some(report) => {
-                    let (raw, game, breakdown) =
-                        self.scores.prepare_score_stamp(report);
-                    self.store.set_checkpoint_scores(
-                        ckpt,
-                        Some(raw),
-                        Some(game),
-                        Some(breakdown),
-                    );
+                    let (raw, game, breakdown) = self.scores.prepare_score_stamp(report);
+                    self.store
+                        .set_checkpoint_scores(ckpt, Some(raw), Some(game), Some(breakdown));
                 }
                 None => self.scores.score_committed_checkpoint(
                     &mut self.runner_client,
@@ -169,7 +163,8 @@ impl App {
         let residue_count = payload.residue_count();
         let id = self.store.insert_design_preview(payload);
         if self.promote_adopted(id) {
-            self.store.register_full_designable_entity(id, residue_count);
+            self.store
+                .register_full_designable_entity(id, residue_count);
         }
     }
 

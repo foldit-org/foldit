@@ -168,6 +168,8 @@ mod tests {
     fn empty_and_garbage_bytes_yield_empty_report() {
         assert!(clashes_from_bytes(&[]).clashes.is_empty());
         // A short non-protobuf byte string fails to decode.
-        assert!(clashes_from_bytes(&[0xff, 0xff, 0xff, 0xff]).clashes.is_empty());
+        assert!(clashes_from_bytes(&[0xff, 0xff, 0xff, 0xff])
+            .clashes
+            .is_empty());
     }
 }

@@ -128,7 +128,12 @@ fn main() {
         log::info!("No structure argument; starting at the menus.");
     }
 
-    let host = Box::new(host::DesktopHost::new(structure_path));
+    // On a free-form pdbid load, `--with-density` fetches the structure-factor
+    // cif and computes an experimental-weighted density for the render and
+    // scoring lanes.
+    let with_density = std::env::args().any(|a| a == "--with-density");
+
+    let host = Box::new(host::DesktopHost::new(structure_path, with_density));
     let app = App::new(host);
     window::run(app, log_buffer);
 }

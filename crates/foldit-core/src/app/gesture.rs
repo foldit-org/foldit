@@ -89,7 +89,9 @@ impl App {
                     return true;
                 }
             }
-            ViewportInput::PointerMove { x, y, .. } if self.runner_client.has_active_pull_drag() => {
+            ViewportInput::PointerMove { x, y, .. }
+                if self.runner_client.has_active_pull_drag() =>
+            {
                 self.update_pull_drag(*x, *y);
                 self.finalize_viewport_input();
                 return true;
@@ -155,12 +157,7 @@ impl App {
     /// state. Returns true if the stream started (so the caller suppresses
     /// the regular viso input flow), false if `start_stream` failed (the
     /// gesture then falls through to camera handling).
-    fn begin_pull_drag_from_route(
-        &mut self,
-        route: &PullRoute,
-        x: f32,
-        y: f32,
-    ) -> bool {
+    fn begin_pull_drag_from_route(&mut self, route: &PullRoute, x: f32, y: f32) -> bool {
         let pull_info = build_pull_info(route, (x, y));
 
         let store = &self.store;
@@ -170,17 +167,19 @@ impl App {
             residue_in_entity: route.residue_in_entity,
             atom_name: route.atom_name.clone(),
         };
-        let (rid, plugin_id) =
-            match self.runner_client.start_stream(&intent, |id| store.entity_type(id)) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!(
-                        "begin_pull_drag_from_route: start_stream {:?} failed: {e:?}",
-                        route.op_id,
-                    );
-                    return false;
-                }
-            };
+        let (rid, plugin_id) = match self
+            .runner_client
+            .start_stream(&intent, |id| store.entity_type(id))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "begin_pull_drag_from_route: start_stream {:?} failed: {e:?}",
+                    route.op_id,
+                );
+                return false;
+            }
+        };
 
         // History side-effect - same shape as button-driven dispatch
         // so the drag's eventual commit_action lands as a regular
@@ -199,8 +198,9 @@ impl App {
             // Open the edit under the dispatch's request_id; the stream
             // table is keyed by the same id, so the terminal commit lands
             // on this edit.
-            if let Err(e) =
-                self.store.begin_action([entity], kind, String::from("Pull"), rid)
+            if let Err(e) = self
+                .store
+                .begin_action([entity], kind, String::from("Pull"), rid)
             {
                 log::trace!("begin_pull_drag_from_route: begin_action skipped: {e}");
             }
@@ -246,7 +246,8 @@ impl App {
             String::from("endpoint"),
             foldit_runner::orchestrator::ParamValue::Vec3([target.x, target.y, target.z]),
         );
-        self.runner_client.update_stream(request_id, &plugin_id, params);
+        self.runner_client
+            .update_stream(request_id, &plugin_id, params);
     }
 
     /// Pointer-up (or any cancel signal): tear down the drag state
@@ -258,7 +259,8 @@ impl App {
         let Some(drag) = self.runner_client.take_pull_drag() else {
             return;
         };
-        self.runner_client.end_stream(drag.request_id, &drag.plugin_id);
+        self.runner_client
+            .end_stream(drag.request_id, &drag.plugin_id);
     }
 
     /// Toggle the segment-info panel for `(eid, res)`: close it when it is

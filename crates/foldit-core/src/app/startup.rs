@@ -85,6 +85,134 @@ impl App {
         self.harness.attach(engine);
     }
 
+    /// Desktop GPU bring-up: create ONE wgpu device against `target`, build
+    /// and attach the renderer on it, and cache it for crystallographic GPU
+    /// compute so both consumers share a single device.
+    ///
+    /// The device is created with `required_limits: adapter.limits()` (the
+    /// adapter maximum) rather than the wgpu defaults: cubecl reads the handed
+    /// device's limits back to size its storage-buffer bindings, and the
+    /// default limit (8 storage buffers) is too small for its compute kernels.
+    /// The adapter maximum is a guaranteed superset.
+    ///
+    /// On device-creation failure this falls back to viso self-creating its
+    /// own device (renderer only) and leaves the shared device unset, so
+    /// density then computes on the CPU. Errors are logged here; the desktop
+    /// caller fires-and-forgets.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(
+        clippy::future_not_send,
+        reason = "block_on'd on the desktop main thread; the window-handle surface \
+                  target and the App's dyn HostResources are inherently not Send"
+    )]
+    pub async fn init_desktop_gpu(
+        &mut self,
+        target: impl Into<viso::wgpu::SurfaceTarget<'static>>,
+        size: (u32, u32),
+        render_scale: u32,
+    ) {
+        use viso::wgpu;
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            flags: wgpu::InstanceFlags::default().with_env(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+
+        // Build the shared handles without touching `target`; a failure here
+        // leaves `target` free for the self-create fallback below.
+        let handles = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(adapter) => match adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Shared Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok((device, queue)) => Some((adapter, device, queue)),
+                Err(e) => {
+                    log::error!("[App] shared device request failed: {e:?}; falling back to renderer-only self-create");
+                    None
+                }
+            },
+            Err(e) => {
+                log::error!("[App] shared adapter request failed: {e:?}; falling back to renderer-only self-create");
+                None
+            }
+        };
+
+        let Some((adapter, device, queue)) = handles else {
+            // Renderer-only fallback: viso creates its own device; the shared
+            // device stays unset so density stays on the CPU path.
+            match viso::RenderContext::new(target, size).await {
+                Ok(ctx) => {
+                    let mut engine =
+                        match viso::VisoEngine::new(ctx, viso::options::VisoOptions::default()) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                log::error!("[App] engine init failed (fallback): {e:?}");
+                                return;
+                            }
+                        };
+                    engine.set_render_scale(render_scale);
+                    self.attach_engine(engine);
+                }
+                Err(e) => log::error!("[App] fallback render context init failed: {e:?}"),
+            }
+            return;
+        };
+
+        // Shared-device path: build the renderer on this device, then hand the
+        // same handles to cubecl. `device`/`queue` are ref-counted; cloning
+        // gives the renderer its own copy while `WgpuSetup` takes the originals.
+        let ctx = match viso::RenderContext::new_with_device(
+            &instance,
+            &adapter,
+            device.clone(),
+            queue.clone(),
+            target,
+            size,
+        )
+        .await
+        {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                log::error!("[App] shared-device render context init failed: {e:?}");
+                return;
+            }
+        };
+        let mut engine = match viso::VisoEngine::new(ctx, viso::options::VisoOptions::default()) {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!("[App] engine init failed (shared device): {e:?}");
+                return;
+            }
+        };
+        engine.set_render_scale(render_scale);
+        self.attach_engine(engine);
+
+        let backend = adapter.get_info().backend;
+        let setup = molex::xtal::WgpuSetup {
+            instance,
+            adapter,
+            device,
+            queue,
+            backend,
+        };
+        self.shared_device = Some(molex::xtal::shared_gpu_device(setup));
+        log::info!(
+            "[App] shared wgpu device created; molex xtal compute will run on GPU"
+        );
+    }
+
     /// Begin app bring-up: the one host trigger that arms the non-blocking
     /// startup state-machine `advance_startup` drives one step per frame.
     /// Runs AFTER the webview's loading screen is visible so the user
@@ -385,6 +513,13 @@ impl App {
     fn warms_done_load_and_kick_inits(&mut self, path: &str) -> StartupPhase {
         match crate::structure_io::load_file_as_entities(path) {
             Ok((entities, name)) => {
+                // `--with-density`: fetch structure factors and compute an
+                // experimental-weighted map before `entities` is moved into
+                // history; warn-and-continue on any failure so the load never
+                // hard-fails on a missing sf.cif or unsupported space group.
+                if self.host.with_density() {
+                    self.load_with_density(&entities, &name);
+                }
                 let _ = self.store.seed_history_with_entities(
                     entities,
                     std::path::PathBuf::new(),
@@ -423,6 +558,103 @@ impl App {
         // `Init` against it. Every plugin inits against this one molex-canonical
         // snapshot.
         self.arm_plugin_bringup()
+    }
+
+    /// Fetch structure factors for `name`, compute an experimental-weighted
+    /// density against the just-loaded `entities`, and feed it to both lanes:
+    /// the scoring lane (an mrc [`DensityAsset`] stashed on the session for
+    /// `kick_inits`) and the render lane (the viso engine). Called before
+    /// `entities` is moved into history so the atom table can be built from
+    /// them by reference.
+    ///
+    /// Every failure branch warns and returns without touching either lane, so
+    /// a missing sf.cif, an unsupported space group, or an empty reflection set
+    /// degrades the load to viewer-only rather than aborting it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "map resolution narrows f64 Å -> f32 for the rosetta density asset"
+    )]
+    fn load_with_density(&mut self, entities: &[molex::MoleculeEntity], name: &str) {
+        let sf_path = match crate::structure_io::resolve_sf_cif(name) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("[App] --with-density: no structure factors for '{name}': {e}");
+                return;
+            }
+        };
+        let sf_text = match std::fs::read_to_string(&sf_path) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("[App] --with-density: failed to read {sf_path}: {e}");
+                return;
+            }
+        };
+
+        // The sf.cif commonly omits symmetry, so resolve the space group from
+        // the coordinate cif's Hermann-Mauguin name.
+        let coord_path = std::path::Path::new("assets/models").join(format!("{name}.cif"));
+        let Some(sg_number) = read_space_group_number(&coord_path) else {
+            log::warn!(
+                "[App] --with-density: could not resolve a supported space group from {}; \
+                 skipping density",
+                coord_path.display()
+            );
+            return;
+        };
+
+        let seed = molex::xtal::deterministic_free_flag_seed(name);
+        let Some(data) =
+            molex::ExperimentalData::from_sf_cif_with_spacegroup(&sf_text, sg_number, 0.05, seed)
+        else {
+            log::warn!(
+                "[App] --with-density: no usable reflections in {sf_path}; skipping density"
+            );
+            return;
+        };
+
+        let table = molex::adapters::table::AtomTable::from_entities(entities);
+        let grid_opt = match self.shared_device.as_ref() {
+            Some(dev) => {
+                log::info!("[App] --with-density: density on GPU (shared device)");
+                molex::xtal::density_from_atom_table_gpu(&data, &table, dev)
+            }
+            None => {
+                log::info!("[App] --with-density: density on CPU (no shared device)");
+                molex::xtal::density_from_atom_table(&data, &table)
+            }
+        };
+        let Some(grid) = grid_opt else {
+            log::warn!("[App] --with-density: density computation failed for '{name}'; skipping");
+            return;
+        };
+        let density =
+            molex::xtal::density_from_grid(&grid, &data.unit_cell, data.space_group_number());
+
+        // Scoring lane: encode the map to mrc bytes for `kick_inits` to ship to
+        // rosetta. Takes `density` by reference so it survives for the engine.
+        let asset = crate::puzzle_load::DensityAsset {
+            name: format!("{name}-density.mrc"),
+            bytes: molex::adapters::mrc::density_to_mrc_bytes(&density),
+            resolution: data.d_min() as f32,
+            grid_spacing: None,
+        };
+        self.store.set_session_density(Some(asset));
+
+        // Render lane: crop the whole-cell map to a sub-block around the model
+        // so symmetry-mate blobs drop out, then raise its opacity. The scoring
+        // lane keeps the full map above; rosetta re-crops internally.
+        let positions: Vec<[f32; 3]> = table.position.iter().map(glam::Vec3::to_array).collect();
+        let cropped = density.crop_to_points(&positions, 3);
+
+        // The engine is attached before startup advances to this seam
+        // (`begin_startup` requires it), so the borrow is always valid.
+        if let Some(engine) = self.harness.engine.as_mut() {
+            let map_id = engine.load_density(cropped);
+            engine.set_density_opacity(map_id, 0.7);
+        }
+        log::info!("[App] --with-density: loaded experimental map for '{name}'");
     }
 
     /// Set [`Self::bringup`] to drive plugin bring-up for an in-session load
@@ -471,10 +703,15 @@ impl App {
         // puzzle. A free-form structure load has no puzzle, so these default
         // empty / `None`. Cloned out of the puzzle to release the
         // `self.store` borrow before the `&mut self.runner_client` kick below.
-        let (ligands, constraints, density) = self.store.puzzle().map_or_else(
+        let (ligands, constraints, mut density) = self.store.puzzle().map_or_else(
             || (Vec::new(), Vec::new(), None),
             |p| (p.ligands.clone(), p.constraints.clone(), p.density.clone()),
         );
+        // Fall back to the free-form session density (a `--with-density` load)
+        // when the puzzle path supplied none.
+        if density.is_none() {
+            density = self.store.session_density().cloned();
+        }
 
         // Flatten the loaded puzzle's scorefunction weight patch and its
         // rosetta-targeted objective filters into the generic config-param
@@ -682,4 +919,25 @@ fn toml_value_to_plain_string(value: &toml::Value) -> String {
         toml::Value::Boolean(b) => b.to_string(),
         other => other.to_string(),
     }
+}
+
+/// Read a coordinate cif at `path` and map its Hermann-Mauguin space-group
+/// name to an International Tables number over the xtal module's supported
+/// groups. Reads `_symmetry.space_group_name_H-M`, falling back to
+/// `_space_group.name_H-M_full`. Returns `None` if the file is unreadable, the
+/// tag is absent, or the group is unsupported.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_space_group_number(path: &std::path::Path) -> Option<u16> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = molex::adapters::cif::parse(&text).ok()?;
+    let block = doc.blocks.first()?;
+    let hm = block
+        .get("_symmetry.space_group_name_H-M")
+        .and_then(molex::adapters::cif::Value::as_str)
+        .or_else(|| {
+            block
+                .get("_space_group.name_H-M_full")
+                .and_then(molex::adapters::cif::Value::as_str)
+        })?;
+    molex::xtal::space_group_number_from_name(hm)
 }

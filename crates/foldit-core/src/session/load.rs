@@ -56,8 +56,11 @@ impl Session {
             .iter()
             .map(|e| e.pdb_chain_id().map(str::to_owned))
             .collect();
-        let ids =
-            self.seed_history_with_entities(data.entities, std::path::PathBuf::new(), &outgoing_title);
+        let ids = self.seed_history_with_entities(
+            data.entities,
+            std::path::PathBuf::new(),
+            &outgoing_title,
+        );
 
         let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> = BTreeMap::new();
         for (eid, chain_key) in ids.iter().zip(chain_keys) {

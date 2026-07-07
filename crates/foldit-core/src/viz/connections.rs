@@ -140,7 +140,11 @@ mod tests {
         }
     }
 
-    const fn residue(name: [u8; 3], label_seq_id: i32, atom_range: std::ops::Range<usize>) -> Residue {
+    const fn residue(
+        name: [u8; 3],
+        label_seq_id: i32,
+        atom_range: std::ops::Range<usize>,
+    ) -> Residue {
         Residue {
             name,
             label_seq_id,
@@ -180,7 +184,11 @@ mod tests {
 
     /// The molex `AtomId` a direct trimmed-name scan of `residue_index`
     /// resolves `atom_name` to, for cross-checking the decoder output.
-    fn expect_atom_id(asm: &molex::Assembly, residue_index: usize, atom_name: &str) -> molex::AtomId {
+    fn expect_atom_id(
+        asm: &molex::Assembly,
+        residue_index: usize,
+        atom_name: &str,
+    ) -> molex::AtomId {
         let entity = &asm.entities()[0];
         let residue = &entity.residues().unwrap()[residue_index];
         let names = &entity.columns().name;

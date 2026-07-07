@@ -93,8 +93,7 @@ impl From<foldit_runner::proto::plugin::ScoreReport> for crate::scores::ScoreRep
                         // proto entity ids are uint64 on the wire;
                         // molex::EntityId is u32.
                         #[allow(clippy::cast_possible_truncation)]
-                        let entity_id =
-                            molex::EntityId::from_raw(rref.entity_id as u32);
+                        let entity_id = molex::EntityId::from_raw(rref.entity_id as u32);
                         crate::scores::ResidueTermScores {
                             entity_id,
                             residue_index: rref.residue_index,

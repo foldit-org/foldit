@@ -47,6 +47,10 @@ pub struct PuzzleMeta {
     /// referencing a `.cnstr` file in the puzzle dir.
     #[serde(default)]
     pub constraints: Option<ConstraintsRef>,
+    /// Optional electron-density map (`[puzzle.density]`), referencing a map
+    /// file in the puzzle dir. `None` for puzzles with no density fit target.
+    #[serde(default)]
+    pub density: Option<DensityRef>,
     /// Per-chain design masks (`[[puzzle.design_mask]]`) declaring which
     /// residues a designer may mutate
     #[serde(default)]
@@ -111,6 +115,21 @@ pub struct LigandRef {
 pub struct ConstraintsRef {
     /// Path (relative to the puzzle dir) to the `.cnstr` file.
     pub file: String,
+}
+
+/// The `[puzzle.density]` table: an electron-density map to fit against.
+#[derive(Debug, Deserialize)]
+pub struct DensityRef {
+    /// Path (relative to the puzzle dir) to the map file, e.g. "density.mrc".
+    pub path: String,
+    /// Explicit map format tag (e.g. "mrc" / "ccp4"). `None` infers from the
+    /// path extension.
+    pub format: Option<String>,
+    /// Map resolution in Angstroms (feeds rosetta `edensity::mapreso`).
+    pub resolution: f32,
+    /// Grid spacing in Angstroms (feeds rosetta `edensity::grid_spacing`).
+    /// `None` lets rosetta derive it from the map header.
+    pub grid_spacing: Option<f32>,
 }
 
 /// One `[[puzzle.design_mask]]` entry: the designable-residue specification

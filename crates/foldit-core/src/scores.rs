@@ -158,8 +158,7 @@ pub fn load_default_term_weights() -> Result<HashMap<String, f32>, String> {
             return Ok(parse_wts(&src));
         }
     }
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current_exe lookup failed: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe lookup failed: {e}"))?;
     let mut dir = exe.parent();
     while let Some(d) = dir {
         let candidate = d.join("assets/scoring/ref2015_cart.wts");
@@ -226,10 +225,9 @@ mod tests {
     #[allow(clippy::float_cmp)]
     #[test]
     fn weighting_matches_preweighted_fields() {
-        let weights: HashMap<String, f32> =
-            [("a".to_owned(), 0.5_f32), ("b".to_owned(), 1.0_f32)]
-                .into_iter()
-                .collect();
+        let weights: HashMap<String, f32> = [("a".to_owned(), 0.5_f32), ("b".to_owned(), 1.0_f32)]
+            .into_iter()
+            .collect();
 
         // whole pose: 10*0.5 + 20*1.0 = 25.0.
         // per residue: 4*0.5 + 6*1.0 = 8.0.
@@ -270,8 +268,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let term_names =
-            vec!["fa_atr".to_owned(), "fa_rep".to_owned(), "hbond".to_owned()];
+        let term_names = vec!["fa_atr".to_owned(), "fa_rep".to_owned(), "hbond".to_owned()];
 
         let report = ScoreReport {
             term_names: term_names.clone(),
@@ -314,8 +311,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     #[test]
     fn missing_weight_is_zero() {
-        let weights: HashMap<String, f32> =
-            std::iter::once(("a".to_owned(), 2.0_f32)).collect();
+        let weights: HashMap<String, f32> = std::iter::once(("a".to_owned(), 2.0_f32)).collect();
         let report = ScoreReport {
             term_names: vec!["a".to_owned(), "unknown".to_owned()],
             whole_pose_terms: vec![3.0, 100.0],

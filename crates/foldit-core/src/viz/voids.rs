@@ -63,10 +63,7 @@ fn field_data(field: &foldit_runner::proto::plugin::VoidField) -> VoidFieldData 
     let Some(origin) = field.origin.as_ref() else {
         return VoidFieldData::empty();
     };
-    let spacing = field
-        .spacing
-        .as_ref()
-        .map_or([0.0; 3], |s| [s.x, s.y, s.z]);
+    let spacing = field.spacing.as_ref().map_or([0.0; 3], |s| [s.x, s.y, s.z]);
     VoidFieldData {
         dims: [field.nx as usize, field.ny as usize, field.nz as usize],
         origin: [origin.x, origin.y, origin.z],
@@ -95,8 +92,16 @@ mod tests {
             nx: 2,
             ny: 3,
             nz: 4,
-            origin: Some(Vec3 { x: 1.0, y: -2.0, z: 0.5 }),
-            spacing: Some(Vec3 { x: 0.5, y: 0.5, z: 0.5 }),
+            origin: Some(Vec3 {
+                x: 1.0,
+                y: -2.0,
+                z: 0.5,
+            }),
+            spacing: Some(Vec3 {
+                x: 0.5,
+                y: 0.5,
+                z: 0.5,
+            }),
             phi: vec![0.0; 24],
             threshold: 1.0,
         };
@@ -118,7 +123,11 @@ mod tests {
             ny: 2,
             nz: 2,
             origin: None,
-            spacing: Some(Vec3 { x: 1.0, y: 1.0, z: 1.0 }),
+            spacing: Some(Vec3 {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            }),
             phi: vec![0.0; 8],
             threshold: 1.0,
         };
@@ -135,6 +144,8 @@ mod tests {
     fn empty_and_garbage_bytes_yield_cleared_field() {
         assert!(void_field_from_bytes(&[]).phi.is_empty());
         // A short non-protobuf byte string fails to decode.
-        assert!(void_field_from_bytes(&[0xff, 0xff, 0xff, 0xff]).phi.is_empty());
+        assert!(void_field_from_bytes(&[0xff, 0xff, 0xff, 0xff])
+            .phi
+            .is_empty());
     }
 }

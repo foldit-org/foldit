@@ -14,9 +14,7 @@ use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
 use molex::MoleculeEntity;
 use viso::Focus;
 
-use crate::history::{
-    CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History,
-};
+use crate::history::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History};
 
 use super::change::HeadMoveCause;
 use super::{Puzzle, Session, SessionError, SessionUpdate};
@@ -200,7 +198,10 @@ impl Session {
         game_score: Option<f64>,
         breakdown: Option<crate::scores::StoredBreakdown>,
     ) {
-        if self.history.set_head_scores(raw_score, game_score, breakdown) {
+        if self
+            .history
+            .set_head_scores(raw_score, game_score, breakdown)
+        {
             self.apply(SessionUpdate::ScoresChanged);
         }
     }
@@ -456,11 +457,7 @@ impl Session {
     /// Bulk-replace the selection on a single entity. The provided
     /// residues become the entity's full set (not merged into the
     /// existing one). An empty input removes the entity entry.
-    pub fn set_residues_on(
-        &mut self,
-        entity: EntityId,
-        residues: impl IntoIterator<Item = u32>,
-    ) {
+    pub fn set_residues_on(&mut self, entity: EntityId, residues: impl IntoIterator<Item = u32>) {
         let set: BTreeSet<u32> = residues.into_iter().collect();
         if set.is_empty() {
             self.selection.remove(&entity);
@@ -574,6 +571,13 @@ impl Session {
         self.apply(SessionUpdate::PuzzleChanged);
     }
 
+    /// Install (or clear) the free-form session density computed on a
+    /// `--with-density` load. Silent: it is load-time state consumed by the
+    /// plugin-bringup path, not a change signal any projector listens on.
+    pub fn set_session_density(&mut self, d: Option<crate::puzzle_load::DensityAsset>) {
+        self.density = d;
+    }
+
     /// Drop the puzzle add-on and revert to the free-form session (a
     /// free-form structure load). Emits [`SessionUpdate::PuzzleChanged`]
     /// only when there was a puzzle to clear.
@@ -594,9 +598,7 @@ impl Session {
     /// (free-form load).
     pub(crate) fn set_puzzle_design_gating(
         &mut self,
-        gating: Option<
-            std::collections::BTreeMap<EntityId, crate::puzzle_setup::DesignMask>,
-        >,
+        gating: Option<std::collections::BTreeMap<EntityId, crate::puzzle_setup::DesignMask>>,
     ) {
         if let Some(puzzle) = self.puzzle.as_mut() {
             puzzle.set_design_gating(gating);
@@ -667,6 +669,7 @@ impl Session {
         self.previews.clear();
         self.focus = Focus::default();
         self.puzzle = None;
+        self.density = None;
         // `title` and the view options + active preset are left untouched: the
         // following load re-sets the title via the `start` seam, and view state
         // lives on `App` and persists there, so each carries across the swap.

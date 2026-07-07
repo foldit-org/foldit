@@ -41,7 +41,12 @@ impl AppRunner {
                 .args(["-o", "pgid=", "-p", &pid.to_string()])
                 .output()
                 .ok()
-                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i32>().ok());
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<i32>()
+                        .ok()
+                });
             if let Some(pgid) = pgid {
                 log::warn!("Killing orphan dev server process group pgid={pgid}");
                 let _ = Command::new("kill")
@@ -49,7 +54,9 @@ impl AppRunner {
                     .status();
             } else {
                 log::warn!("Killing orphan dev server pid={pid}");
-                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
             }
         }
     }
@@ -59,11 +66,17 @@ impl AppRunner {
         use std::process::Command;
         // PowerShell: find PIDs owning TCP 5173 and force-kill each tree.
         let ps_cmd = "Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess";
-        let out = match Command::new("powershell").args(["-NoProfile", "-Command", ps_cmd]).output() {
+        let out = match Command::new("powershell")
+            .args(["-NoProfile", "-Command", ps_cmd])
+            .output()
+        {
             Ok(o) if o.status.success() => o.stdout,
             _ => return,
         };
-        for pid in String::from_utf8_lossy(&out).lines().filter_map(|s| s.trim().parse::<u32>().ok()) {
+        for pid in String::from_utf8_lossy(&out)
+            .lines()
+            .filter_map(|s| s.trim().parse::<u32>().ok())
+        {
             log::warn!("Killing orphan dev server pid={}", pid);
             let _ = Command::new("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string()])
@@ -395,7 +408,12 @@ impl AppRunner {
                                 .body(Cow::Borrowed(b"Not Found" as &[u8]))
                                 .unwrap();
                         };
-                        return match crate::plugin_assets::serve(request_path, "/plugins/", root, &ui_entrypoints) {
+                        return match crate::plugin_assets::serve(
+                            request_path,
+                            "/plugins/",
+                            root,
+                            &ui_entrypoints,
+                        ) {
                             crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
                                 wry::http::Response::builder()
                                     .status(200)
@@ -431,7 +449,12 @@ impl AppRunner {
                                 .unwrap();
                         };
                         let no_modules = std::collections::HashSet::new();
-                        return match crate::plugin_assets::serve(request_path, "/game-assets/", root, &no_modules) {
+                        return match crate::plugin_assets::serve(
+                            request_path,
+                            "/game-assets/",
+                            root,
+                            &no_modules,
+                        ) {
                             crate::plugin_assets::AssetResponse::Ok { bytes, mime } => {
                                 wry::http::Response::builder()
                                     .status(200)
@@ -465,7 +488,10 @@ impl AppRunner {
                     match std::fs::read(&asset_path) {
                         Ok(content) => {
                             let mime = Self::mime_from_ext(
-                                asset_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+                                asset_path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or(""),
                             );
                             wry::http::Response::builder()
                                 .status(200)
@@ -482,9 +508,13 @@ impl AppRunner {
                 })
                 .with_url({
                     #[cfg(windows)]
-                    { "http://foldit.localhost/index.html" }
+                    {
+                        "http://foldit.localhost/index.html"
+                    }
                     #[cfg(not(windows))]
-                    { "foldit://localhost/index.html" }
+                    {
+                        "foldit://localhost/index.html"
+                    }
                 })
                 .with_ipc_handler({
                     let ipc_tx = ipc_tx.clone();
@@ -563,7 +593,10 @@ impl AppRunner {
     ///
     /// `console` is handled inline as a desktop-only logging side effect.
     /// Everything else delegates to `foldit_gui::bridge::decode::from_json`.
-    pub(super) fn handle_ipc(ipc_tx: &std::sync::mpsc::Sender<IpcMessage>, req: &wry::http::Request<String>) {
+    pub(super) fn handle_ipc(
+        ipc_tx: &std::sync::mpsc::Sender<IpcMessage>,
+        req: &wry::http::Request<String>,
+    ) {
         let body = req.body();
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
             if val.get("cmd").and_then(|v| v.as_str()) == Some("console") {

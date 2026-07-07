@@ -318,10 +318,7 @@ impl History {
             .clone();
 
         for (entity, snap_id) in &lanes {
-            let lane = self
-                .lanes
-                .get_mut(entity)
-                .expect("pending lane must exist");
+            let lane = self.lanes.get_mut(entity).expect("pending lane must exist");
             let snap = lane
                 .snapshots
                 .get_mut(*snap_id)
@@ -330,10 +327,7 @@ impl History {
             mutate(payload);
         }
 
-        let edit = self
-            .pending
-            .get_mut(&request_id)
-            .expect("checked above");
+        let edit = self.pending.get_mut(&request_id).expect("checked above");
         if let Some(s) = raw_score {
             edit.raw_score = Some(s);
         }
@@ -389,9 +383,7 @@ impl History {
         let label: Cow<'static, str> = edit
             .lanes
             .first()
-            .and_then(|(entity, snap_id)| {
-                self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id))
-            })
+            .and_then(|(entity, snap_id)| self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id)))
             .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
 
         let ckpt = self.commit_action(request_id)?;
@@ -516,16 +508,15 @@ impl History {
             _ => unreachable!("JumpCheckpoint returns HeadMoved"),
         }
     }
-
 }
 
 mod best;
 mod composition;
 mod curation;
-mod record_root;
 mod eviction;
 mod invariant;
 mod record;
+mod record_root;
 
 #[cfg(test)]
 mod tests;

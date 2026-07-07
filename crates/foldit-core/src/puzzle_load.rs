@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::puzzle_toml::{Bubble, Camera, FilterSpec, PuzzleMeta, load_puzzle};
+use crate::puzzle_toml::{load_puzzle, Bubble, Camera, FilterSpec, PuzzleMeta};
 use crate::structure_io::load_entities_from_file;
 
 /// A loaded ligand's asset bytes, read from the puzzle dir at load time.
@@ -17,6 +17,24 @@ pub struct LigandAsset {
     pub params: Vec<u8>,
     /// Optional conformer PDB: `(file_name, bytes)`.
     pub conformers: Option<(String, Vec<u8>)>,
+}
+
+/// A loaded electron-density map's asset bytes, read from the puzzle dir at
+/// load time.
+///
+/// Carried to the session `Puzzle` so the session-init path can deliver the
+/// map to the worker. `bytes` is the raw map file (mrc/ccp4).
+#[derive(Debug, Clone)]
+pub struct DensityAsset {
+    /// Map file name (relative to the puzzle dir), e.g. "density.mrc".
+    pub name: String,
+    /// Raw map file bytes.
+    pub bytes: Vec<u8>,
+    /// Map resolution in Angstroms (feeds rosetta `edensity::mapreso`).
+    pub resolution: f32,
+    /// Grid spacing in Angstroms. `None` lets rosetta derive it from the
+    /// map header.
+    pub grid_spacing: Option<f32>,
 }
 
 /// Data returned from loading a puzzle.
@@ -54,6 +72,10 @@ pub struct PuzzleData {
     /// Empty for protein-only puzzles. Carried to the session `Puzzle` so the
     /// session-init path can deliver them to the worker.
     pub ligands: Vec<LigandAsset>,
+    /// Electron-density map bytes read from the puzzle dir (`[puzzle.density]`).
+    /// `None` for non-density puzzles. Carried to the session `Puzzle` so the
+    /// session-init path can deliver the map to the worker.
+    pub density: Option<DensityAsset>,
 }
 
 /// Resolve the absolute path to the `assets/levels` directory by
@@ -163,7 +185,8 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         ss
     });
 
-    let (constraints, design_masks, ligands) = load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
+    let (constraints, design_masks, ligands, density) =
+        load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
 
     Ok(PuzzleData {
         entities,
@@ -179,17 +202,18 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         constraints,
         design_masks,
         ligands,
+        density,
     })
 }
 
-/// Read a ligand asset file, warning (and returning `None`) on a missing /
+/// Read a puzzle asset file, warning (and returning `None`) on a missing /
 /// unreadable file rather than failing the load. `kind` labels the asset in
-/// the warning ("params" / "conformers").
+/// the warning ("ligand params" / "ligand conformers" / "density map").
 fn read_or_warn(path: &Path, title: &str, kind: &str) -> Option<Vec<u8>> {
     std::fs::read(path)
         .map_err(|_| {
             log::warn!(
-                "Puzzle '{title}': declared ligand {kind} {} not found",
+                "Puzzle '{title}': declared {kind} {} not found",
                 path.display()
             );
         })
@@ -197,11 +221,13 @@ fn read_or_warn(path: &Path, title: &str, kind: &str) -> Option<Vec<u8>> {
 }
 
 /// Parsed foldit-owned puzzle-setup inputs: catalytic constraints, the
-/// per-chain design masks, and the ligand asset bytes.
+/// per-chain design masks, the ligand asset bytes, and any electron-density
+/// map asset.
 type PuzzleSetup = (
     Vec<crate::puzzle_setup::Constraint>,
     BTreeMap<String, crate::puzzle_setup::DesignMask>,
     Vec<LigandAsset>,
+    Option<DensityAsset>,
 );
 
 /// Parse a puzzle's foldit-owned setup inputs: catalytic constraints
@@ -242,12 +268,13 @@ fn load_puzzle_setup(puzzle_dir: &Path, meta: &PuzzleMeta) -> Result<PuzzleSetup
     let mut ligands = Vec::new();
     for lig in &meta.ligand {
         let params_path = puzzle_dir.join(&lig.params);
-        let Some(params) = read_or_warn(&params_path, &meta.title, "params") else {
+        let Some(params) = read_or_warn(&params_path, &meta.title, "ligand params") else {
             continue;
         };
         let conformers = lig.conformers.as_ref().and_then(|conf| {
             let conf_path = puzzle_dir.join(conf);
-            read_or_warn(&conf_path, &meta.title, "conformers").map(|bytes| (conf.clone(), bytes))
+            read_or_warn(&conf_path, &meta.title, "ligand conformers")
+                .map(|bytes| (conf.clone(), bytes))
         });
         ligands.push(LigandAsset {
             name: lig.params.clone(),
@@ -256,15 +283,29 @@ fn load_puzzle_setup(puzzle_dir: &Path, meta: &PuzzleMeta) -> Result<PuzzleSetup
         });
     }
 
+    // Read the declared density map bytes; a missing map warns (doesn't fail)
+    // here. The loud fail-fast for a density puzzle lives later at the rosetta
+    // bridge.
+    let density = meta.density.as_ref().and_then(|dref| {
+        let map_path = puzzle_dir.join(&dref.path);
+        read_or_warn(&map_path, &meta.title, "density map").map(|bytes| DensityAsset {
+            name: dref.path.clone(),
+            bytes,
+            resolution: dref.resolution,
+            grid_spacing: dref.grid_spacing,
+        })
+    });
+
     log::info!(
-        "Puzzle '{}': {} catalytic constraints, {} designable chain(s), {} ligand(s)",
+        "Puzzle '{}': {} catalytic constraints, {} designable chain(s), {} ligand(s), density: {}",
         meta.title,
         constraints.len(),
         design_masks.len(),
-        ligands.len()
+        ligands.len(),
+        density.is_some()
     );
 
-    Ok((constraints, design_masks, ligands))
+    Ok((constraints, design_masks, ligands, density))
 }
 
 #[cfg(test)]

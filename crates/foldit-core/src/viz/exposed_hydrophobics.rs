@@ -33,14 +33,19 @@ pub fn exposed_from_bytes(bytes: &[u8]) -> ExposedHydroData {
         return ExposedHydroData::default();
     }
     <foldit_runner::proto::plugin::ExposedHydrophobicReport as prost::Message>::decode(bytes)
-        .map_or_else(|_| ExposedHydroData::default(), |report| report_data(&report))
+        .map_or_else(
+            |_| ExposedHydroData::default(),
+            |report| report_data(&report),
+        )
 }
 
 /// Map a decoded `ExposedHydrophobicReport` into an [`ExposedHydroData`].
 /// Split out from [`exposed_from_bytes`] so the decode and the field mapping
 /// can be exercised independently.
 #[cfg(not(target_arch = "wasm32"))]
-fn report_data(report: &foldit_runner::proto::plugin::ExposedHydrophobicReport) -> ExposedHydroData {
+fn report_data(
+    report: &foldit_runner::proto::plugin::ExposedHydrophobicReport,
+) -> ExposedHydroData {
     let exposed = report
         .exposed
         .iter()
@@ -89,6 +94,8 @@ mod tests {
     fn empty_and_garbage_bytes_yield_empty_report() {
         assert!(exposed_from_bytes(&[]).exposed.is_empty());
         // A short non-protobuf byte string fails to decode.
-        assert!(exposed_from_bytes(&[0xff, 0xff, 0xff, 0xff]).exposed.is_empty());
+        assert!(exposed_from_bytes(&[0xff, 0xff, 0xff, 0xff])
+            .exposed
+            .is_empty());
     }
 }

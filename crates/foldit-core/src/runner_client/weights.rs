@@ -50,7 +50,9 @@ impl RunnerClient {
             let reply: WeightsStatusReply = match serde_json::from_slice(&bytes) {
                 Ok(r) => r,
                 Err(e) => {
-                    log::warn!("[RunnerClient] weights_status decode failed for '{plugin_id}': {e}");
+                    log::warn!(
+                        "[RunnerClient] weights_status decode failed for '{plugin_id}': {e}"
+                    );
                     continue;
                 }
             };

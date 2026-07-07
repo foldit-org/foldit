@@ -99,25 +99,13 @@ impl RunnerClient {
                     request_id,
                     assembly,
                     score,
-                } => self.commit_terminal(
-                    &mut events,
-                    "Cancelled",
-                    request_id,
-                    assembly,
-                    score,
-                ),
+                } => self.commit_terminal(&mut events, "Cancelled", request_id, assembly, score),
                 PluginUpdate::Final {
                     request_id,
                     assembly,
                     score,
                     ..
-                } => self.commit_terminal(
-                    &mut events,
-                    "Final",
-                    request_id,
-                    assembly,
-                    score,
-                ),
+                } => self.commit_terminal(&mut events, "Final", request_id, assembly, score),
                 PluginUpdate::Error {
                     request_id,
                     message,
@@ -127,9 +115,7 @@ impl RunnerClient {
                         reason: message.clone(),
                     });
                     let _ = self.release_terminal_stream(request_id);
-                    log::warn!(
-                        "plugin update Error rid={request_id} message={message}"
-                    );
+                    log::warn!("plugin update Error rid={request_id} message={message}");
                 }
             }
         }
@@ -235,8 +221,7 @@ impl RunnerClient {
         // Resolve Invoke vs Stream off the op registry. An op-id the
         // registry can't surface is dropped as a failed dispatch (no
         // destructive side effect), matching the prior drop-and-warn.
-        let Some(cached) = orch.plugin_registry().get_op(&intent.op_id).cloned()
-        else {
+        let Some(cached) = orch.plugin_registry().get_op(&intent.op_id).cloned() else {
             return Err(DispatchError::Failed(format!(
                 "op-id {:?} not in registry",
                 intent.op_id
@@ -497,7 +482,9 @@ impl RunnerClient {
     /// going through dispatch - e.g. seeding a plugin's post-Init
     /// assembly. `None` when no orchestrator is wired up.
     pub(crate) fn alloc_request_id(&mut self) -> Option<u64> {
-        self.orchestrator.as_mut().map(foldit_runner::Orchestrator::alloc_request_id)
+        self.orchestrator
+            .as_mut()
+            .map(foldit_runner::Orchestrator::alloc_request_id)
     }
 
     /// Whether a pull-drag is currently live (the three input guards).
@@ -564,20 +551,17 @@ fn wire_params_to_orch(
 /// The lock-refusal arm is unwrapped to the bare entity id so no runner
 /// type crosses the boundary; everything else collapses to `Failed`.
 #[cfg(not(target_arch = "wasm32"))]
-fn map_dispatch_error(
-    e: foldit_runner::orchestrator::OpDispatchError,
-) -> DispatchError {
+fn map_dispatch_error(e: foldit_runner::orchestrator::OpDispatchError) -> DispatchError {
     use foldit_runner::orchestrator::{DispatchError as RunnerDispatchError, OpDispatchError};
     match e {
-        OpDispatchError::LockRefused(RunnerDispatchError::EntityLocked {
-            entity,
-            ..
-        }) => DispatchError::EntityLocked {
-            entity: u64::from(entity.raw()),
-        },
-        OpDispatchError::LockRefused(RunnerDispatchError::BackendBusy {
-            plugin_id,
-        }) => DispatchError::BackendBusy { plugin_id },
+        OpDispatchError::LockRefused(RunnerDispatchError::EntityLocked { entity, .. }) => {
+            DispatchError::EntityLocked {
+                entity: u64::from(entity.raw()),
+            }
+        }
+        OpDispatchError::LockRefused(RunnerDispatchError::BackendBusy { plugin_id }) => {
+            DispatchError::BackendBusy { plugin_id }
+        }
         other => DispatchError::Failed(other.to_string()),
     }
 }
@@ -591,15 +575,11 @@ mod tests {
     /// entity as advisory without ever naming a runner type.
     #[test]
     fn lock_refusal_maps_to_entity_locked() {
-        use foldit_runner::orchestrator::{
-            DispatchError as RunnerDispatchError, OpDispatchError,
-        };
-        let runner_err = OpDispatchError::LockRefused(
-            RunnerDispatchError::EntityLocked {
-                entity: molex::EntityId::from_raw(7),
-                current_op: None,
-            },
-        );
+        use foldit_runner::orchestrator::{DispatchError as RunnerDispatchError, OpDispatchError};
+        let runner_err = OpDispatchError::LockRefused(RunnerDispatchError::EntityLocked {
+            entity: molex::EntityId::from_raw(7),
+            current_op: None,
+        });
         match map_dispatch_error(runner_err) {
             DispatchError::EntityLocked { entity } => assert_eq!(entity, 7),
             DispatchError::BackendBusy { plugin_id } => {
@@ -613,14 +593,10 @@ mod tests {
     /// `BackendBusy` variant (advisory), not `Failed`.
     #[test]
     fn backend_busy_maps_to_backend_busy() {
-        use foldit_runner::orchestrator::{
-            DispatchError as RunnerDispatchError, OpDispatchError,
-        };
-        let runner_err = OpDispatchError::LockRefused(
-            RunnerDispatchError::BackendBusy {
-                plugin_id: String::from("rosetta"),
-            },
-        );
+        use foldit_runner::orchestrator::{DispatchError as RunnerDispatchError, OpDispatchError};
+        let runner_err = OpDispatchError::LockRefused(RunnerDispatchError::BackendBusy {
+            plugin_id: String::from("rosetta"),
+        });
         match map_dispatch_error(runner_err) {
             DispatchError::BackendBusy { plugin_id } => {
                 assert_eq!(plugin_id, "rosetta");

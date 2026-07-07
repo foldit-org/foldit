@@ -88,7 +88,9 @@ impl History {
         // Checkpoints: oldest-first; protected: root, head-path, pinned,
         // best, best_that_counts.
         while self.checkpoints.checkpoints.len() > self.checkpoints.budget.max_checkpoints {
-            let Some(victim) = self.pick_checkpoint_eviction() else { break };
+            let Some(victim) = self.pick_checkpoint_eviction() else {
+                break;
+            };
             self.dec_refs_for_checkpoint(victim);
             self.detach_checkpoint(victim);
             let _ = self.checkpoints.checkpoints.remove(victim);
@@ -103,7 +105,9 @@ impl History {
                 if lane_len <= self.checkpoints.budget.max_snapshots_per_lane {
                     break;
                 }
-                let Some(victim) = self.pick_snapshot_eviction(eid) else { break };
+                let Some(victim) = self.pick_snapshot_eviction(eid) else {
+                    break;
+                };
                 let lane = self.lanes.get_mut(&eid).expect("checked above");
                 let removed = lane.snapshots.remove(victim).expect("picked above");
                 if let Some(parent) = removed.parent {

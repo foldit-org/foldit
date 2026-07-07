@@ -99,9 +99,7 @@ impl History {
         let label = edit
             .lanes
             .first()
-            .and_then(|(entity, snap_id)| {
-                self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id))
-            })
+            .and_then(|(entity, snap_id)| self.lanes.get(entity).and_then(|l| l.snapshot(*snap_id)))
             .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
 
         // Flip each held lane's tentative snapshot to committed.
@@ -158,10 +156,7 @@ impl History {
         // moved, so nothing else unwinds.
         for (entity, snap_id) in &edit.lanes {
             let lane = self.lanes.get_mut(entity).expect("pending lane");
-            let removed = lane
-                .snapshots
-                .remove(*snap_id)
-                .expect("pending snap");
+            let removed = lane.snapshots.remove(*snap_id).expect("pending snap");
             let parent_snap = removed.parent.expect("tentative is never lane root");
             if let Some(parent) = lane.snapshots.get_mut(parent_snap) {
                 parent.children.retain(|c| c != snap_id);
@@ -232,8 +227,11 @@ impl History {
         branch: Option<CheckpointId>,
     ) -> Result<HistoryEventOutcome, HistoryError> {
         let head = self.checkpoints.head;
-        let kids: SmallVec<[CheckpointId; 2]> =
-            self.checkpoints.checkpoints[head].children.iter().copied().collect();
+        let kids: SmallVec<[CheckpointId; 2]> = self.checkpoints.checkpoints[head]
+            .children
+            .iter()
+            .copied()
+            .collect();
         let target = match (branch, kids.as_slice()) {
             (_, []) => return Err(HistoryError::NoChildren),
             (Some(b), kids) if kids.contains(&b) => b,
@@ -297,7 +295,10 @@ impl History {
         Ok(HistoryEventOutcome::Pushed(new_ckpt))
     }
 
-    pub(super) fn do_jump(&mut self, id: CheckpointId) -> Result<HistoryEventOutcome, HistoryError> {
+    pub(super) fn do_jump(
+        &mut self,
+        id: CheckpointId,
+    ) -> Result<HistoryEventOutcome, HistoryError> {
         if !self.checkpoints.checkpoints.contains_key(id) {
             return Err(HistoryError::UnknownCheckpoint { id });
         }
@@ -418,11 +419,7 @@ impl History {
     /// iterating an unsorted victim list); a missing parent is silently
     /// ignored - there's no live `children` list to update.
     pub(super) fn detach_checkpoint(&mut self, id: CheckpointId) {
-        let parent_id = self
-            .checkpoints
-            .checkpoints
-            .get(id)
-            .and_then(|c| c.parent);
+        let parent_id = self.checkpoints.checkpoints.get(id).and_then(|c| c.parent);
         if let Some(parent) = parent_id {
             if let Some(p) = self.checkpoints.checkpoints.get_mut(parent) {
                 p.children.retain(|c| *c != id);

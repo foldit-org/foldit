@@ -133,9 +133,7 @@ pub enum EditScope {
 /// [`EditScope`]: a `global_held` handle is whole-pose, otherwise the
 /// handle's locked entity set.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn edit_scope_from_handle(
-    handle: &foldit_runner::orchestrator::DispatchHandle,
-) -> EditScope {
+pub fn edit_scope_from_handle(handle: &foldit_runner::orchestrator::DispatchHandle) -> EditScope {
     if handle.global_held {
         EditScope::AllEntities
     } else {
@@ -148,9 +146,7 @@ pub fn edit_scope_from_handle(
 ///
 /// [`LockTargets`]: foldit_runner::orchestrator::LockTargets
 #[cfg(not(target_arch = "wasm32"))]
-pub fn edit_scope_from_targets(
-    targets: foldit_runner::orchestrator::LockTargets,
-) -> EditScope {
+pub fn edit_scope_from_targets(targets: foldit_runner::orchestrator::LockTargets) -> EditScope {
     use foldit_runner::orchestrator::LockTargets;
     match targets {
         LockTargets::Global => EditScope::AllEntities,
@@ -167,20 +163,15 @@ pub fn edit_scope_from_targets(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_dispatch_context(
     focus: Option<molex::EntityId>,
-    selection: &std::collections::BTreeMap<
-        molex::EntityId,
-        std::collections::BTreeSet<u32>,
-    >,
-    designable: &std::collections::BTreeMap<
-        molex::EntityId,
-        std::collections::BTreeSet<u32>,
-    >,
+    selection: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
+    designable: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
 ) -> foldit_runner::orchestrator::DispatchContext {
     use foldit_runner::orchestrator::{DispatchContext, ResidueRef};
     let flatten = |map: &std::collections::BTreeMap<
         molex::EntityId,
         std::collections::BTreeSet<u32>,
-    >| -> Vec<ResidueRef> {
+    >|
+     -> Vec<ResidueRef> {
         map.iter()
             .flat_map(|(entity, residues)| {
                 let id = *entity;
@@ -282,10 +273,7 @@ pub struct StreamHost {
     /// stream's terminal `PluginUpdate` arrives. The stored
     /// `plugin_id` is the dispatch target for `dispatch_cancel_stream`
     /// when the user hits ESC.
-    pub(crate) active_streams: std::collections::HashMap<
-        u64,
-        ActiveStreamEntry,
-    >,
+    pub(crate) active_streams: std::collections::HashMap<u64, ActiveStreamEntry>,
     /// Live pull-drag state. `Some(...)` between pointer-down on an
     /// atom and pointer-up / stream-terminal / ESC cancel. The drag's
     /// stream id also lives in `active_streams` so Final/Error

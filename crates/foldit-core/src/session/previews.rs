@@ -79,7 +79,10 @@ impl Session {
         let atom_count = self
             .entity(preview_id)
             .map_or(0, molex::MoleculeEntity::atom_count);
-        let _ = self.previews.inplace.insert(token, (preview_id, atom_count));
+        let _ = self
+            .previews
+            .inplace
+            .insert(token, (preview_id, atom_count));
     }
 
     /// Apply one streaming frame of a preview-style op to its discardable
@@ -97,7 +100,9 @@ impl Session {
         if prev_atoms == atoms {
             let _ = self.update_preview(preview_id, payload);
         } else {
-            let name = self.name(preview_id).map_or_else(String::new, str::to_owned);
+            let name = self
+                .name(preview_id)
+                .map_or_else(String::new, str::to_owned);
             let _ = self.remove_preview(preview_id);
             let id = self.insert_preview(payload, name);
             self.set_entity_provisional(id, true);
@@ -107,7 +112,10 @@ impl Session {
 
     /// Insert a streamed design frame as a transient preview, returning its id.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn insert_design_preview(&mut self, payload: molex::MoleculeEntity) -> molex::EntityId {
+    pub(crate) fn insert_design_preview(
+        &mut self,
+        payload: molex::MoleculeEntity,
+    ) -> molex::EntityId {
         self.insert_preview(payload, String::from("RFdiffusion3 design"))
     }
 

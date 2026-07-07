@@ -41,18 +41,15 @@ impl RunnerClient {
     pub(crate) fn actions_catalog<F>(
         &self,
         focus: Option<molex::EntityId>,
-        selection: &std::collections::BTreeMap<
-            molex::EntityId,
-            std::collections::BTreeSet<u32>,
-        >,
+        selection: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
         selection_designable: bool,
         entity_type_of: F,
     ) -> Vec<foldit_gui::state::ActionInfo>
     where
         F: Fn(molex::EntityId) -> Option<molex::EntityKind>,
     {
-        use foldit_gui::state::{ActionInfo, ActionOption, ParamValue};
         use super::types::build_dispatch_context;
+        use foldit_gui::state::{ActionInfo, ActionOption, ParamValue};
 
         let Some(orch) = self.orchestrator.as_ref() else {
             return vec![];
@@ -61,11 +58,7 @@ impl RunnerClient {
         // Availability resolution never reaches a plugin, so the design mask
         // is not transmitted here (empty designable map); the host-side design
         // gate is folded into `enabled` below instead.
-        let ctx = build_dispatch_context(
-            focus,
-            selection,
-            &std::collections::BTreeMap::new(),
-        );
+        let ctx = build_dispatch_context(focus, selection, &std::collections::BTreeMap::new());
 
         let mut rows: Vec<ActionInfo> = orch
             .actions_catalog(&ctx, entity_type_of)
@@ -75,8 +68,7 @@ impl RunnerClient {
                 plugin_id: entry.plugin_id,
                 display: entry.display,
                 icon_path: entry.icon_path.to_string_lossy().into_owned(),
-                enabled: entry.enabled
-                    && (!entry.requires_designable || selection_designable),
+                enabled: entry.enabled && (!entry.requires_designable || selection_designable),
                 active: false,
                 hotkey: entry.hotkey,
                 tooltip: entry.tooltip,
@@ -102,8 +94,7 @@ impl RunnerClient {
             .map(|&aa| {
                 // `code()` is statically uppercase ASCII, so each byte maps
                 // straight to a char without a fallible UTF-8 decode.
-                let three_letter: String =
-                    aa.code().iter().map(|&b| b as char).collect();
+                let three_letter: String = aa.code().iter().map(|&b| b as char).collect();
                 // Foldit-owned residue icon, served under `/game-assets/`; the
                 // 3-letter code matches the icon filename (e.g. ALA.png).
                 let icon = format!("residue_icons/{three_letter}.png");
@@ -111,8 +102,12 @@ impl RunnerClient {
                 params.insert("aa".to_owned(), ParamValue::String(three_letter));
                 ActionOption {
                     label: (aa.one_letter() as char).to_string(),
-                    color: if aa.is_hydrophobic() { "orange" } else { "blue" }
-                        .to_owned(),
+                    color: if aa.is_hydrophobic() {
+                        "orange"
+                    } else {
+                        "blue"
+                    }
+                    .to_owned(),
                     icon: Some(icon),
                     hotkey: None,
                     op_id: "mutate_residue".to_owned(),

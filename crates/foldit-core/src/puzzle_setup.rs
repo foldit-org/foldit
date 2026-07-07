@@ -80,9 +80,10 @@ pub fn parse_constraints(text: &str) -> Result<Vec<Constraint>, String> {
             continue;
         }
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        out.push(parse_constraint_line(&tokens).map_err(|e| {
-            format!("constraint line {}: {e}", i + 1)
-        })?);
+        out.push(
+            parse_constraint_line(&tokens)
+                .map_err(|e| format!("constraint line {}: {e}", i + 1))?,
+        );
     }
     Ok(out)
 }
@@ -230,15 +231,27 @@ Dihedral  CG  353A  CD  353A  OE2 353A  C5   1X   CIRCULARHARMONIC  3.141       
         assert_eq!(cs[0].atoms.len(), 2);
         assert_eq!(
             cs[0].atoms[0],
-            AtomRef { atom_name: "OE2".to_owned(), res_num: 353, chain: 'A' }
+            AtomRef {
+                atom_name: "OE2".to_owned(),
+                res_num: 353,
+                chain: 'A'
+            }
         );
         assert_eq!(
             cs[0].atoms[1],
-            AtomRef { atom_name: "C5".to_owned(), res_num: 1, chain: 'X' }
+            AtomRef {
+                atom_name: "C5".to_owned(),
+                res_num: 1,
+                chain: 'X'
+            }
         );
         assert_eq!(
             cs[0].func,
-            ConstraintFunc::FlatHarmonic { x0: 2.00, sd: 0.002, tol: 0.25 }
+            ConstraintFunc::FlatHarmonic {
+                x0: 2.00,
+                sd: 0.002,
+                tol: 0.25
+            }
         );
 
         // Angle: 3 atoms, CIRCULARHARMONIC.
@@ -246,7 +259,11 @@ Dihedral  CG  353A  CD  353A  OE2 353A  C5   1X   CIRCULARHARMONIC  3.141       
         assert_eq!(cs[1].atoms.len(), 3);
         assert_eq!(
             cs[1].atoms[2],
-            AtomRef { atom_name: "O2".to_owned(), res_num: 1, chain: 'X' }
+            AtomRef {
+                atom_name: "O2".to_owned(),
+                res_num: 1,
+                chain: 'X'
+            }
         );
         // The angular x0 in the data is `3.141` (a 3-dp truncation of pi);
         // derive the expected value rather than writing the bare literal,
@@ -263,7 +280,11 @@ Dihedral  CG  353A  CD  353A  OE2 353A  C5   1X   CIRCULARHARMONIC  3.141       
         assert_eq!(cs[2].atoms.len(), 4);
         assert_eq!(
             cs[2].atoms[0],
-            AtomRef { atom_name: "CG".to_owned(), res_num: 353, chain: 'A' }
+            AtomRef {
+                atom_name: "CG".to_owned(),
+                res_num: 353,
+                chain: 'A'
+            }
         );
         let ConstraintFunc::CircularHarmonic { x0, sd } = cs[2].func else {
             panic!("expected CircularHarmonic, got {:?}", cs[2].func);

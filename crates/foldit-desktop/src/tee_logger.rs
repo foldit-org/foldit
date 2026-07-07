@@ -56,9 +56,7 @@ impl Log for TeeLogger {
 pub fn init(filter_str: &str) -> LogBuffer {
     let buffer: LogBuffer = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LINES)));
 
-    let filter = env_filter::Builder::new()
-        .parse(filter_str)
-        .build();
+    let filter = env_filter::Builder::new().parse(filter_str).build();
 
     let max_level = filter.filter();
 

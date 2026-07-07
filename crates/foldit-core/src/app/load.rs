@@ -1,7 +1,7 @@
 use foldit_gui::AppPhase;
 
-use crate::app::App;
 use super::startup::StartupCamera;
+use crate::app::App;
 
 impl App {
     /// Free-form file load (Scientist mode). Ingest entities, set

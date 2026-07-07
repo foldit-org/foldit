@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod selection_tests {
     use crate::app::App;
-    use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
-    use std::io;
-    use std::path::Path;
     #[cfg(not(target_arch = "wasm32"))]
     use crate::runner_client::EditScope;
     #[cfg(not(target_arch = "wasm32"))]
     use crate::session::Session;
+    use molex::entity::molecule::id::{EntityId, EntityIdAllocator};
+    use std::io;
+    use std::path::Path;
 
     /// Minimal [`HostResources`] stub. `App` construction needs one;
     /// these tests never touch the filesystem.
@@ -82,14 +82,15 @@ mod selection_tests {
         use viso::Focus;
 
         let mut app = fresh_app();
-        let id = app
-            .store
-            .insert_preview(mk_bulk(), "e".to_owned());
+        let id = app.store.insert_preview(mk_bulk(), "e".to_owned());
 
         app.handle_app_command(foldit_gui::AppCommand::SetFocus {
             entity_id: Some(id.raw()),
         });
-        assert_eq!(app.store.focus(), Focus::Entity(EntityId::from_raw(id.raw())));
+        assert_eq!(
+            app.store.focus(),
+            Focus::Entity(EntityId::from_raw(id.raw()))
+        );
 
         app.handle_app_command(foldit_gui::AppCommand::SetFocus { entity_id: None });
         assert_eq!(app.store.focus(), Focus::All);
@@ -134,9 +135,7 @@ mod selection_tests {
         let mut app = fresh_app();
         // Commit one entity so the head is a real checkpoint, and stamp a
         // known score on it (the committed parent).
-        let id = app
-            .store
-            .insert_preview(mk_bulk(), "e".to_owned());
+        let id = app.store.insert_preview(mk_bulk(), "e".to_owned());
         app.store
             .promote_preview(
                 id,
@@ -189,7 +188,11 @@ mod selection_tests {
             Some(42.0)
         );
         assert_eq!(
-            app.store.history().checkpoint(committed).unwrap().game_score,
+            app.store
+                .history()
+                .checkpoint(committed)
+                .unwrap()
+                .game_score,
             Some(game)
         );
         assert_eq!(
@@ -214,11 +217,21 @@ mod selection_tests {
         // Two committed entities.
         let e1 = store.insert_preview(mk_bulk(), "a".to_owned());
         store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
+            .promote_preview(
+                e1,
+                CheckpointKind::PromotedPreview { entity: e1 },
+                None,
+                "a",
+            )
             .expect("promote a");
         let e2 = store.insert_preview(mk_bulk(), "b".to_owned());
         store
-            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, "b")
+            .promote_preview(
+                e2,
+                CheckpointKind::PromotedPreview { entity: e2 },
+                None,
+                "b",
+            )
             .expect("promote b");
         let ckpts_before = store.history().checkpoints().iter().count();
 
@@ -272,7 +285,10 @@ mod selection_tests {
 
         // Exactly one new checkpoint, and BOTH entities carry the moved
         // coordinates - not just the first.
-        assert_eq!(store.history().checkpoints().iter().count(), ckpts_before + 1);
+        assert_eq!(
+            store.history().checkpoints().iter().count(),
+            ckpts_before + 1
+        );
         let head = store.head_assembly();
         for e in [e1, e2] {
             let ent = head.entity(e).expect("entity present in head assembly");
@@ -299,23 +315,27 @@ mod selection_tests {
 
         let mut app = fresh_app();
         // Two committed entities.
-        let e1 = app
-            .store
-            .insert_preview(mk_bulk(), "a".to_owned());
+        let e1 = app.store.insert_preview(mk_bulk(), "a".to_owned());
         app.store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
+            .promote_preview(
+                e1,
+                CheckpointKind::PromotedPreview { entity: e1 },
+                None,
+                "a",
+            )
             .expect("promote a");
-        let e2 = app
-            .store
-            .insert_preview(mk_bulk(), "b".to_owned());
+        let e2 = app.store.insert_preview(mk_bulk(), "b".to_owned());
         app.store
-            .promote_preview(e2, CheckpointKind::PromotedPreview { entity: e2 }, None, "b")
+            .promote_preview(
+                e2,
+                CheckpointKind::PromotedPreview { entity: e2 },
+                None,
+                "b",
+            )
             .expect("promote b");
         // A preview that is never promoted: it has no committed lane and so
         // must be filtered out of a whole-pose edit's lane set.
-        let e_transient = app
-            .store
-            .insert_preview(mk_bulk(), "c".to_owned());
+        let e_transient = app.store.insert_preview(mk_bulk(), "c".to_owned());
 
         // AllEntities resolves to exactly the two committed lanes.
         let mut lanes = app.lanes_for_scope(&EditScope::AllEntities);
@@ -323,7 +343,10 @@ mod selection_tests {
         let mut expected = vec![e1, e2];
         expected.sort_unstable();
         assert_eq!(lanes, expected, "global scope spans committed lanes only");
-        assert!(!lanes.contains(&e_transient), "transient preview has no lane");
+        assert!(
+            !lanes.contains(&e_transient),
+            "transient preview has no lane"
+        );
 
         // Open ONE edit over the whole set, fan a multi-entity frame across
         // it, commit once. Every lane must carry the moved coordinates.
@@ -383,11 +406,14 @@ mod selection_tests {
         let mut app = fresh_app();
         // A committed head so there is a node to stamp onto (and so the
         // no-pending-edit branch of `apply_score_reports` runs).
-        let id = app
-            .store
-            .insert_preview(mk_bulk(), "e".to_owned());
+        let id = app.store.insert_preview(mk_bulk(), "e".to_owned());
         app.store
-            .promote_preview(id, CheckpointKind::PromotedPreview { entity: id }, None, "e")
+            .promote_preview(
+                id,
+                CheckpointKind::PromotedPreview { entity: id },
+                None,
+                "e",
+            )
             .expect("promote");
         assert!(
             app.store.current_composition_breakdown().is_none(),
@@ -443,15 +469,16 @@ mod selection_tests {
         use crate::history::CheckpointKind;
 
         let mut app = fresh_app();
-        let e1 = app
-            .store
-            .insert_preview(mk_bulk(), "a".to_owned());
+        let e1 = app.store.insert_preview(mk_bulk(), "a".to_owned());
         app.store
-            .promote_preview(e1, CheckpointKind::PromotedPreview { entity: e1 }, None, "a")
+            .promote_preview(
+                e1,
+                CheckpointKind::PromotedPreview { entity: e1 },
+                None,
+                "a",
+            )
             .expect("promote a");
-        let e_transient = app
-            .store
-            .insert_preview(mk_bulk(), "t".to_owned());
+        let e_transient = app.store.insert_preview(mk_bulk(), "t".to_owned());
 
         // The resolved set names a committed entity and a transient one;
         // only the committed lane survives the filter.

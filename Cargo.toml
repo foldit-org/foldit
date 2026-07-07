@@ -63,9 +63,19 @@ str_to_string = "warn"
 
 # NOTE: local-path patches for dev only. NEVER commit with these uncommented.
 # Uncomment to build against local submodule checkouts; re-comment before commit.
-# [patch."https://github.com/foldit-org/viso"]
-# viso = { path = "crates/viso" }
-#
-# [patch.crates-io]
-# foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
-# molex = { path = "crates/molex" }
+# Dev-cycle local override: foldit tracks the local wgpu-29 viso working tree
+# directly (instead of the v0.3.10 git tag) while molex/viso/sdk are all in flux.
+# Re-comment (and re-tag viso) at end-of-dev. Do NOT commit uncommented.
+[patch."https://github.com/foldit-org/viso"]
+viso = { path = "crates/viso" }
+
+# Dev-cycle local override: the density feature adds an arg to the plugin-sdk
+# `Plugin::init` trait; consumers must see the local SDK, not registry 0.1.4.
+# Re-comment (and bump/publish foldit-plugin-sdk) at end-of-dev. Do NOT commit
+# uncommented.
+[patch.crates-io]
+foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+# Dev-cycle local override: the xtal density feature consumes molex's unpublished
+# ExperimentalData / refine-density API (branch `xtal`). Re-comment (and publish
+# molex 0.8 with xtal) at end-of-dev. Do NOT commit uncommented.
+molex = { path = "crates/molex" }

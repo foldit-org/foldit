@@ -85,7 +85,11 @@ impl SessionUpdateConsumer for RunnerProjector {
         // host-internal edit carries no plugin source, so it broadcasts to
         // everyone, "").
         let is_nav = matches!(head_move_cause(changes), Some(HeadMoveCause::Navigate));
-        let prior = if is_nav { None } else { self.last_published.as_ref() };
+        let prior = if is_nav {
+            None
+        } else {
+            self.last_published.as_ref()
+        };
         let Some(payload) = encode_payload(prior, &new) else {
             // Serialize failure (currently impossible for in-memory
             // assemblies). Skip this drain and keep the prior snapshot so
@@ -116,10 +120,12 @@ fn head_move_cause(changes: &[SessionUpdate]) -> Option<HeadMoveCause> {
 fn head_plugin_source(doc: &Session) -> &str {
     let history = doc.history();
     let head_id = history.checkpoints().head();
-    history.checkpoint(head_id).map_or("", |ckpt| match &ckpt.kind {
-        CheckpointKind::PluginOp { plugin_id, .. } => plugin_id,
-        _ => "",
-    })
+    history
+        .checkpoint(head_id)
+        .map_or("", |ckpt| match &ckpt.kind {
+            CheckpointKind::PluginOp { plugin_id, .. } => plugin_id,
+            _ => "",
+        })
 }
 
 /// Encode the broadcast for one drain: a coord-only `Delta` when `prior`
@@ -265,7 +271,9 @@ mod tests {
     #[test]
     fn is_observable_filters_tentative() {
         assert!(RunnerProjector::is_observable(&SessionUpdate::PreviewAdded));
-        assert!(RunnerProjector::is_observable(&SessionUpdate::PreviewDiscarded));
+        assert!(RunnerProjector::is_observable(
+            &SessionUpdate::PreviewDiscarded
+        ));
         assert!(RunnerProjector::is_observable(&SessionUpdate::Edit {
             tentative: false,
         }));
@@ -281,7 +289,11 @@ mod tests {
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();
         bc.consume(&changes, &mut doc, &mut orch);
-        assert_eq!(orch.broadcast_gen(), 0, "tentative-only batch broadcasts nothing");
+        assert_eq!(
+            orch.broadcast_gen(),
+            0,
+            "tentative-only batch broadcasts nothing"
+        );
         assert!(bc.last_published.is_none());
     }
 
@@ -297,13 +309,19 @@ mod tests {
     #[test]
     fn broadcast_observable_batch_advances_gen_and_adopts_snapshot() {
         let mut doc = Session::new();
-        let _ = doc.insert_preview(mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO), "p".to_owned());
+        let _ = doc.insert_preview(
+            mk_bulk(mk_bulk_dummy_id(), glam::Vec3::ZERO),
+            "p".to_owned(),
+        );
         let changes = doc.take_updates(); // [PreviewAdded]
         let mut orch = foldit_runner::Orchestrator::new();
         let mut bc = RunnerProjector::new();
         bc.consume(&changes, &mut doc, &mut orch);
         assert_eq!(orch.broadcast_gen(), 1, "observable batch broadcasts once");
-        assert!(bc.last_published.is_some(), "projector adopts the new snapshot");
+        assert!(
+            bc.last_published.is_some(),
+            "projector adopts the new snapshot"
+        );
     }
 
     /// `insert_preview` overwrites the entity's id, so any valid id works.

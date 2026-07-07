@@ -1,11 +1,11 @@
 // foldit:allow-long-file: exhaustive history unit-test module; length is intrinsic.
 use super::*;
 use foldit_gui::wire::WireId;
+use molex::entity::molecule::atom::Atom;
 use molex::entity::molecule::bulk::BulkEntity;
 use molex::entity::molecule::EntityIdAllocator;
 use molex::Element;
 use molex::MoleculeType;
-use molex::entity::molecule::atom::Atom;
 use proptest::prelude::*;
 use slotmap::{Key, KeyData};
 
@@ -257,13 +257,8 @@ fn nav_during_active_is_refused_with_entity_locked() {
 
     // Begin an action on `e`.
     let rid = 1u64;
-    h.begin_action(
-        [e],
-        plugin_op("wiggle"),
-        Cow::Borrowed("w-active"),
-        rid,
-    )
-    .unwrap();
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w-active"), rid)
+        .unwrap();
 
     // Begin again → ActiveActionInProgress.
     assert!(matches!(
@@ -480,7 +475,10 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
 
     h.begin_action([e], plugin_op("rebuild"), Cow::Borrowed("Rebuild"), rid)
         .unwrap();
-    let committed_before_seg1 = h.lane(e).unwrap().snapshot(h.lane(e).unwrap().head())
+    let committed_before_seg1 = h
+        .lane(e)
+        .unwrap()
+        .snapshot(h.lane(e).unwrap().head())
         .unwrap()
         .parent
         .unwrap();
@@ -497,7 +495,13 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
     // not the pre-edit head.
     assert!(h.is_pending(rid));
     let tentative = h.lane(e).unwrap().head();
-    let reopened_parent = h.lane(e).unwrap().snapshot(tentative).unwrap().parent.unwrap();
+    let reopened_parent = h
+        .lane(e)
+        .unwrap()
+        .snapshot(tentative)
+        .unwrap()
+        .parent
+        .unwrap();
     assert_ne!(reopened_parent, committed_before_seg1);
     assert_eq!(reopened_parent, h.checkpoint(c1).unwrap().entity_heads[&e]);
 
@@ -547,15 +551,9 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
         CheckpointKind::LaneUndo { .. }
     ));
     // checkpoint head's entity_heads[e1] == target_e1.
-    assert_eq!(
-        h.checkpoint(lu).unwrap().entity_heads[&e1],
-        target_e1
-    );
+    assert_eq!(h.checkpoint(lu).unwrap().entity_heads[&e1], target_e1);
     // entity_heads[e2] preserved.
-    assert_eq!(
-        h.checkpoint(lu).unwrap().entity_heads[&e2],
-        e2_head_before
-    );
+    assert_eq!(h.checkpoint(lu).unwrap().entity_heads[&e2], e2_head_before);
 }
 
 // ── add_entity ───────────────────────────────────────────────────
@@ -622,7 +620,10 @@ fn wire_id_round_trip_via_serde_string() {
     let json = serde_json::to_string(&wire).unwrap();
     // Encoded as a JSON string, not a JSON number - that's the
     // whole point of WireId.
-    assert!(json.starts_with('"') && json.ends_with('"'), "expected string, got {json}");
+    assert!(
+        json.starts_with('"') && json.ends_with('"'),
+        "expected string, got {json}"
+    );
     let back: WireId<CheckpointId> = serde_json::from_str(&json).unwrap();
     assert_eq!(back.into_inner(), head);
 

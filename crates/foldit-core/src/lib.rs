@@ -20,19 +20,19 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub(crate) mod app;
-pub(crate) mod session;
 pub(crate) mod gui_projector;
 pub(crate) mod history;
 mod host_effects;
 mod host_resources;
+mod puzzle_load;
+mod puzzle_toml;
 pub(crate) mod runner_client;
 pub(crate) mod runner_projector;
 pub(crate) mod scores;
+pub(crate) mod session;
+pub mod structure_io;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod viz;
-mod puzzle_toml;
-mod puzzle_load;
-pub mod structure_io;
 pub use crate::structure_io as puzzle;
 pub mod puzzle_setup;
 pub(crate) mod render_projector;

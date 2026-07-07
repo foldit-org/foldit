@@ -3,8 +3,8 @@ use super::*;
 use crate::history::CheckpointKind;
 use molex::entity::molecule::atom::Atom;
 use molex::entity::molecule::bulk::BulkEntity;
-use molex::entity::molecule::protein::ProteinEntity;
 use molex::entity::molecule::polymer::Residue;
+use molex::entity::molecule::protein::ProteinEntity;
 use molex::Element;
 use molex::MoleculeType;
 
@@ -74,7 +74,12 @@ fn mk_protein(id: EntityId, n_residues: usize) -> MoleculeEntity {
             variants: Vec::new(),
         });
     }
-    MoleculeEntity::Protein(ProteinEntity::new_continuous(id, atoms, residues, "A".to_owned()))
+    MoleculeEntity::Protein(ProteinEntity::new_continuous(
+        id,
+        atoms,
+        residues,
+        "A".to_owned(),
+    ))
 }
 
 /// A plugin-op checkpoint kind standing in for a streaming action.
@@ -100,15 +105,15 @@ fn insert_preview_then_promote_lands_in_history() {
     };
     let _ = alloc_id;
 
-    let id = store.insert_preview(
-        mk_bulk(mk_dummy_id()),
-        "preview".to_owned(),
-    );
+    let id = store.insert_preview(mk_bulk(mk_dummy_id()), "preview".to_owned());
     // Preview is visible in head_assembly.
     let asm = store.head_assembly();
     assert_eq!(asm.entities().len(), 1);
     // Preview is NOT in the checkpoint head (not in history).
-    let head = store.history().checkpoint(store.history().checkpoints().head()).unwrap();
+    let head = store
+        .history()
+        .checkpoint(store.history().checkpoints().head())
+        .unwrap();
     assert!(!head.entity_heads.contains_key(&id));
 
     // Promote.
@@ -147,23 +152,12 @@ fn promote_preview_unknown_id_returns_not_a_preview() {
 fn live_membership_lists_committed_then_preview() {
     let mut store = Session::new();
     // Insert + promote A: a committed entity.
-    let a = store.insert_preview(
-        mk_protein(mk_dummy_id(), 2),
-        "a".to_owned(),
-    );
+    let a = store.insert_preview(mk_protein(mk_dummy_id(), 2), "a".to_owned());
     store
-        .promote_preview(
-            a,
-            CheckpointKind::PromotedPreview { entity: a },
-            None,
-            "a",
-        )
+        .promote_preview(a, CheckpointKind::PromotedPreview { entity: a }, None, "a")
         .expect("promote a");
     // Insert B and leave it as a preview.
-    let b = store.insert_preview(
-        mk_bulk(mk_dummy_id()),
-        "b".to_owned(),
-    );
+    let b = store.insert_preview(mk_bulk(mk_dummy_id()), "b".to_owned());
 
     assert_eq!(store.count(), 2);
     // Committed first, then preview.
@@ -177,17 +171,9 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
     // it from ids/count/iter - even though its side-table metadata is
     // never GC'd. The old metadata-keyed implementation got this wrong.
     let mut store = Session::new();
-    let x = store.insert_preview(
-        mk_protein(mk_dummy_id(), 2),
-        "x".to_owned(),
-    );
+    let x = store.insert_preview(mk_protein(mk_dummy_id(), 2), "x".to_owned());
     store
-        .promote_preview(
-            x,
-            CheckpointKind::PromotedPreview { entity: x },
-            None,
-            "x",
-        )
+        .promote_preview(x, CheckpointKind::PromotedPreview { entity: x }, None, "x")
         .expect("promote x");
     assert_eq!(store.count(), 1);
     assert!(store.ids().any(|id| id == x));
@@ -208,10 +194,7 @@ fn undone_entity_drops_from_membership_though_metadata_lingers() {
 #[test]
 fn reset_clears_history_metadata_and_transient() {
     let mut store = Session::new();
-    let _id = store.insert_preview(
-        mk_bulk(mk_dummy_id()),
-        "x".to_owned(),
-    );
+    let _id = store.insert_preview(mk_bulk(mk_dummy_id()), "x".to_owned());
     assert_eq!(store.count(), 1);
 
     store.reset();
@@ -236,10 +219,7 @@ fn reset_clears_history_metadata_and_transient() {
 /// is at a known-empty starting point.
 fn store_with_protein(n_residues: usize) -> (Session, EntityId) {
     let mut store = Session::new();
-    let id = store.insert_preview(
-        mk_protein(mk_dummy_id(), n_residues),
-        "p".to_owned(),
-    );
+    let id = store.insert_preview(mk_protein(mk_dummy_id(), n_residues), "p".to_owned());
     store
         .promote_preview(
             id,
@@ -261,10 +241,7 @@ fn pending_updates_empty_at_construction() {
 #[test]
 fn insert_preview_emits_preview_added() {
     let mut store = Session::new();
-    let _ = store.insert_preview(
-        mk_protein(mk_dummy_id(), 2),
-        "p".to_owned(),
-    );
+    let _ = store.insert_preview(mk_protein(mk_dummy_id(), 2), "p".to_owned());
     let changes = store.take_updates();
     assert!(
         matches!(changes.as_slice(), [SessionUpdate::PreviewAdded]),
@@ -277,10 +254,7 @@ fn insert_preview_emits_preview_added() {
 #[test]
 fn remove_preview_emits_preview_discarded() {
     let mut store = Session::new();
-    let id = store.insert_preview(
-        mk_protein(mk_dummy_id(), 1),
-        "p".to_owned(),
-    );
+    let id = store.insert_preview(mk_protein(mk_dummy_id(), 1), "p".to_owned());
     let _ = store.take_updates();
     assert!(store.remove_preview(id));
     let changes = store.take_updates();
@@ -300,10 +274,7 @@ fn remove_preview_unknown_emits_nothing() {
 #[test]
 fn promote_preview_emits_head_moved() {
     let mut store = Session::new();
-    let id = store.insert_preview(
-        mk_protein(mk_dummy_id(), 1),
-        "p".to_owned(),
-    );
+    let id = store.insert_preview(mk_protein(mk_dummy_id(), 1), "p".to_owned());
     let _ = store.take_updates();
     store
         .promote_preview(
@@ -328,7 +299,9 @@ fn promote_preview_emits_head_moved() {
 #[test]
 fn begin_action_emits_nothing() {
     let (mut store, id) = store_with_protein(2);
-    store.begin_action([id], wiggle(), "wiggle", 1).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", 1)
+        .expect("begin_action");
     assert!(store.take_updates().is_empty());
 }
 
@@ -341,7 +314,9 @@ fn action_update_emits_tentative_edit() {
     // payload itself is no longer on the `SessionUpdate` stream.
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     let _ = store.take_updates();
 
     store
@@ -354,7 +329,10 @@ fn action_update_emits_tentative_edit() {
 
     let changes = store.take_updates();
     assert!(
-        matches!(changes.as_slice(), [SessionUpdate::Edit { tentative: true }]),
+        matches!(
+            changes.as_slice(),
+            [SessionUpdate::Edit { tentative: true }]
+        ),
         "expected one tentative Edit, got {changes:?}",
     );
     let head = store.head_assembly();
@@ -371,7 +349,9 @@ fn action_update_emits_tentative_edit() {
 fn commit_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     store
         .action_update(rid, None, None, None, |e| {
             for pos in &mut e.columns_mut().position {
@@ -400,7 +380,9 @@ fn commit_action_emits_head_moved() {
 fn abort_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     let _ = store.take_updates();
     store.abort_action(rid).expect("abort_action");
     let changes = store.take_updates();
@@ -419,7 +401,9 @@ fn abort_action_emits_head_moved() {
 fn undo_then_redo_each_emit_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
         .expect("action_update");
@@ -467,7 +451,9 @@ fn lane_undo_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let original = store.history().lane(id).expect("lane").head();
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
         .expect("action_update");
@@ -491,10 +477,7 @@ fn jump_checkpoint_emits_head_moved() {
     let (mut store, _id) = store_with_protein(2);
     let first = store.history().checkpoints().head();
 
-    let id_b = store.insert_preview(
-        mk_protein(mk_dummy_id(), 3),
-        "b".to_owned(),
-    );
+    let id_b = store.insert_preview(mk_protein(mk_dummy_id(), 3), "b".to_owned());
     store
         .promote_preview(
             id_b,
@@ -555,12 +538,17 @@ fn set_edit_scores_emits_scores_changed() {
     let (mut store, id) = store_with_protein(2);
     let _ = store.take_updates();
     let rid = 1u64;
-    store.begin_action([id], wiggle(), "wiggle", rid).expect("begin_action");
+    store
+        .begin_action([id], wiggle(), "wiggle", rid)
+        .expect("begin_action");
     let _ = store.take_updates();
 
     store.set_edit_scores(rid, Some(3.0), Some(4.0), None);
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::ScoresChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::ScoresChanged]
+        ),
         "set_edit_scores on an open edit emits ScoresChanged",
     );
 
@@ -577,10 +565,7 @@ fn reset_clears_pending_then_emits_one_head_moved() {
     // Leave an undrained change in the queue. Use insert_preview (it
     // emits `PreviewAdded`); reset must drop that pending change before
     // emitting its own HeadMoved.
-    let _ = store.insert_preview(
-        mk_protein(mk_dummy_id(), 1),
-        "leftover".to_owned(),
-    );
+    let _ = store.insert_preview(mk_protein(mk_dummy_id(), 1), "leftover".to_owned());
 
     store.reset();
 
@@ -654,7 +639,10 @@ fn clear_selection_empties_the_map() {
     assert!(store.selection().is_empty());
     assert!(store.selection().get(&ids[0]).is_none());
     assert!(store.selection().get(&ids[1]).is_none());
-    assert!(!store.selection().get(&ids[0]).is_some_and(|s| s.contains(&0)));
+    assert!(!store
+        .selection()
+        .get(&ids[0])
+        .is_some_and(|s| s.contains(&0)));
 }
 
 #[test]
@@ -781,19 +769,28 @@ fn selection_mutation_emits_one_selection_changed() {
 
     store.select_residue(e, 1);
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::SelectionChanged]
+        ),
         "select_residue emits exactly SelectionChanged",
     );
 
     store.select_residue(e, 1);
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::SelectionChanged]
+        ),
         "an idempotent re-select still emits SelectionChanged",
     );
 
     store.clear_selection();
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::SelectionChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::SelectionChanged]
+        ),
         "clear_selection emits exactly SelectionChanged",
     );
 }
@@ -864,7 +861,10 @@ fn focus_mutation_emits_one_focus_changed_and_guards_idempotent() {
 
     store.set_focus(viso::Focus::Entity(e));
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::FocusChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::FocusChanged]
+        ),
         "set_focus to a new value emits exactly FocusChanged",
     );
 
@@ -876,7 +876,10 @@ fn focus_mutation_emits_one_focus_changed_and_guards_idempotent() {
 
     store.set_focus(viso::Focus::All);
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::FocusChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::FocusChanged]
+        ),
         "set_focus back to All emits FocusChanged",
     );
 }
@@ -967,7 +970,10 @@ fn bubble_cursor_advance_emits_one_bubble_changed() {
 
     store.advance_bubble(false);
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::BubbleChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::BubbleChanged]
+        ),
         "advance forward emits exactly BubbleChanged",
     );
     assert_eq!(store.puzzle().and_then(|p| p.current_bubble), Some(1));
@@ -1027,14 +1033,20 @@ fn puzzle_mutation_emits_one_puzzle_changed_and_guards_idempotent() {
         design_gating: None,
     });
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::PuzzleChanged]
+        ),
         "set_puzzle emits exactly PuzzleChanged",
     );
     assert_eq!(store.puzzle().map(|p| p.id), Some(7));
 
     store.clear_puzzle();
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::PuzzleChanged]
+        ),
         "clear_puzzle drops the puzzle add-on and emits PuzzleChanged",
     );
     assert!(store.puzzle().is_none());
@@ -1067,7 +1079,10 @@ fn start_sets_title_and_installs_puzzle() {
     assert_eq!(store.title(), "Intro");
     assert!(store.puzzle().is_some());
     assert!(
-        matches!(store.take_updates().as_slice(), [SessionUpdate::PuzzleChanged]),
+        matches!(
+            store.take_updates().as_slice(),
+            [SessionUpdate::PuzzleChanged]
+        ),
         "puzzle start emits exactly PuzzleChanged",
     );
 }
@@ -1098,10 +1113,10 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
     // chain against the puzzle's per-chain masks, install the gating, then
     // query. A protein entity on chain "A" is masked; the LG1 ligand has no
     // chain byte, so it never matches and stays locked (secure-by-default).
-    let bglb_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/levels/bglb");
-    let data = crate::puzzle_load::load_puzzle_data_from_dir(&bglb_dir)
-        .expect("BglB puzzle should load");
+    let bglb_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/levels/bglb");
+    let data =
+        crate::puzzle_load::load_puzzle_data_from_dir(&bglb_dir).expect("BglB puzzle should load");
 
     let mut store = Session::new();
     store.start(
@@ -1125,8 +1140,7 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
     // consumes it, resolve against the per-chain masks onto its EntityId.
     let mut protein_entity: Option<EntityId> = None;
     let mut ligand_entity: Option<EntityId> = None;
-    let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> =
-        BTreeMap::new();
+    let mut gating: BTreeMap<EntityId, crate::puzzle_setup::DesignMask> = BTreeMap::new();
     for entity in data.entities {
         let is_ligand = entity
             .as_small_molecule()
@@ -1154,7 +1168,10 @@ fn bglb_design_gating_locks_catalytic_residues_and_ligand() {
 
     // Protein residue 100 is designable; the catalytic gap (164/295/353) is
     // locked.
-    assert!(store.is_designable(protein, 100), "residue 100 is designable");
+    assert!(
+        store.is_designable(protein, 100),
+        "residue 100 is designable"
+    );
     assert!(!store.is_designable(protein, 164), "residue 164 is locked");
     assert!(!store.is_designable(protein, 295), "residue 295 is locked");
     assert!(!store.is_designable(protein, 353), "residue 353 is locked");
@@ -1240,7 +1257,10 @@ fn adopted_design_entity_registers_as_fully_designable() {
             density: None,
         }),
     );
-    assert!(store.design_gating_active(), "the puzzle declares design gating");
+    assert!(
+        store.design_gating_active(),
+        "the puzzle declares design gating"
+    );
 
     let design = store
         .load_entity_into_history(mk_protein(mk_dummy_id(), N), "rfd3")
@@ -1307,7 +1327,10 @@ fn register_full_designable_entity_is_noop_when_gating_inactive() {
 
     store.register_full_designable_entity(design, N);
 
-    assert!(!store.design_gating_active(), "registration fabricated no gating");
+    assert!(
+        !store.design_gating_active(),
+        "registration fabricated no gating"
+    );
     assert!(
         !store.is_designable(design, 0),
         "an ungated session stays secure-by-default",

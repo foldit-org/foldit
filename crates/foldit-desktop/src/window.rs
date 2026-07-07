@@ -708,23 +708,6 @@ fn create_render_context(app: &mut foldit_core::App, window: Arc<Window>) {
         scale
     );
 
-    let context = match pollster::block_on(viso::RenderContext::new(window, (size.width, size.height))) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            log::error!("Failed to initialize GPU render context: {e:?}");
-            return;
-        }
-    };
-
-    let mut engine = match viso::VisoEngine::new(context, viso::options::VisoOptions::default()) {
-        Ok(e) => e,
-        Err(e) => {
-            log::error!("Failed to initialize engine: {e:?}");
-            return;
-        }
-    };
-
-    engine.set_render_scale(if scale < 2.0 { 2 } else { 1 });
-
-    app.attach_engine(engine);
+    let render_scale = if scale < 2.0 { 2 } else { 1 };
+    pollster::block_on(app.init_desktop_gpu(window, (size.width, size.height), render_scale));
 }

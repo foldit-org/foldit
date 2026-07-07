@@ -16,8 +16,8 @@ use foldit_gui::state::{
     ParamValue as WireParamValue,
 };
 use foldit_runner::orchestrator::{
-    ParamConstraint as RunnerParamConstraint,
-    ParamSpec as RunnerParamSpec, ParamType as RunnerParamType, ParamValue,
+    ParamConstraint as RunnerParamConstraint, ParamSpec as RunnerParamSpec,
+    ParamType as RunnerParamType, ParamValue,
 };
 
 /// Generate a structural conversion `fn` between two enums that mirror
@@ -70,9 +70,7 @@ macro_rules! mirror_enum {
     };
 }
 
-pub fn param_spec_to_wire(
-    spec: RunnerParamSpec,
-) -> foldit_gui::state::ParamSpec {
+pub fn param_spec_to_wire(spec: RunnerParamSpec) -> foldit_gui::state::ParamSpec {
     foldit_gui::state::ParamSpec {
         name: spec.name,
         display_name: spec.display_name,

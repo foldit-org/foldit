@@ -90,8 +90,10 @@ pub fn serve(
         return AssetResponse::NotFound;
     }
 
-    std::fs::read(&canonical_asset)
-        .map_or(AssetResponse::NotFound, |bytes| AssetResponse::Ok { bytes, mime })
+    std::fs::read(&canonical_asset).map_or(AssetResponse::NotFound, |bytes| AssetResponse::Ok {
+        bytes,
+        mime,
+    })
 }
 
 /// Static-asset MIME whitelist. Any extension absent from this table
@@ -234,9 +236,17 @@ mod tests {
         // Present on disk + a valid MIME, but absent from the allowlist:
         // fails closed. The allowlist holds a *different* module.
         let allowed = allow(&["/plugins/rosetta/ui/declared.mjs"]);
-        assert!(!is_ok(serve("/plugins/rosetta/ui/sneaky.mjs", &root, &allowed)));
+        assert!(!is_ok(serve(
+            "/plugins/rosetta/ui/sneaky.mjs",
+            &root,
+            &allowed
+        )));
         // Empty allowlist refuses everything.
-        assert!(!is_ok(serve("/plugins/rosetta/ui/sneaky.mjs", &root, &no_modules())));
+        assert!(!is_ok(serve(
+            "/plugins/rosetta/ui/sneaky.mjs",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]
@@ -255,8 +265,16 @@ mod tests {
         write(&root, "evil/page.html", b"<script>");
         write(&root, "evil/mod.wasm", b"\0asm");
 
-        assert!(!is_ok(serve("/plugins/evil/page.html", &root, &no_modules())));
-        assert!(!is_ok(serve("/plugins/evil/mod.wasm", &root, &no_modules())));
+        assert!(!is_ok(serve(
+            "/plugins/evil/page.html",
+            &root,
+            &no_modules()
+        )));
+        assert!(!is_ok(serve(
+            "/plugins/evil/mod.wasm",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]
@@ -268,9 +286,17 @@ mod tests {
         write(&outer, "secret.png", b"NOT_FOR_WEBVIEW");
         write(&root, "rosetta/icons/wiggle.png", b"OK");
 
-        let r = serve("/plugins/rosetta/icons/../../../secret.png", &root, &no_modules());
+        let r = serve(
+            "/plugins/rosetta/icons/../../../secret.png",
+            &root,
+            &no_modules(),
+        );
         assert!(!is_ok(r));
-        assert!(is_ok(serve("/plugins/rosetta/icons/wiggle.png", &root, &no_modules())));
+        assert!(is_ok(serve(
+            "/plugins/rosetta/icons/wiggle.png",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]
@@ -310,7 +336,11 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&evil, root.join("link")).unwrap();
-            assert!(!is_ok(serve("/plugins/link/leak.png", &root, &no_modules())));
+            assert!(!is_ok(serve(
+                "/plugins/link/leak.png",
+                &root,
+                &no_modules()
+            )));
         }
     }
 
@@ -321,7 +351,11 @@ mod tests {
         write(&root, "rosetta/icons/wiggle.PNG", b"P");
         // The whitelist normalizes to lowercase, so .PNG is treated
         // the same as .png.
-        assert!(is_ok(serve("/plugins/rosetta/icons/wiggle.PNG", &root, &no_modules())));
+        assert!(is_ok(serve(
+            "/plugins/rosetta/icons/wiggle.PNG",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]
@@ -330,8 +364,16 @@ mod tests {
         let root = td.path().to_path_buf();
         fs::create_dir_all(root.join("rosetta/icons")).unwrap();
 
-        assert!(!is_ok(serve("/plugins/rosetta/icons", &root, &no_modules())));
-        assert!(!is_ok(serve("/plugins/rosetta/icons/", &root, &no_modules())));
+        assert!(!is_ok(serve(
+            "/plugins/rosetta/icons",
+            &root,
+            &no_modules()
+        )));
+        assert!(!is_ok(serve(
+            "/plugins/rosetta/icons/",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]
@@ -341,7 +383,11 @@ mod tests {
         write(&root, "rosetta/.hidden", b"x");
 
         // No extension, so the whitelist lookup fails closed.
-        assert!(!is_ok(serve("/plugins/rosetta/.hidden", &root, &no_modules())));
+        assert!(!is_ok(serve(
+            "/plugins/rosetta/.hidden",
+            &root,
+            &no_modules()
+        )));
     }
 
     #[test]

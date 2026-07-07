@@ -261,7 +261,12 @@ impl SessionUpdateConsumer for GuiProjector {
             false
         };
 
-        sync_history(&mut self.history_sync, sources.session, frontend, force_history);
+        sync_history(
+            &mut self.history_sync,
+            sources.session,
+            frontend,
+            force_history,
+        );
         auto_closed
     }
 }
@@ -365,9 +370,7 @@ fn project_segment(
     let Some(entity) = session.entity(target.entity) else {
         return (None, true);
     };
-    let still_present = entity
-        .residues()
-        .is_some_and(|r| target.residue < r.len());
+    let still_present = entity.residues().is_some_and(|r| target.residue < r.len());
     if !still_present {
         return (None, true);
     }
@@ -383,8 +386,7 @@ fn project_segment(
                 .per_residue_terms
                 .iter()
                 .find(|rts| {
-                    rts.entity_id == target.entity
-                        && rts.residue_index as usize == target.residue
+                    rts.entity_id == target.entity && rts.residue_index as usize == target.residue
                 })
                 .map(|row| row.terms.clone())
                 .unwrap_or_default();
@@ -423,10 +425,7 @@ fn project_segment(
 
 /// World position of a residue's CA atom, or `None` for a non-protein
 /// entity or a residue with no CA in its atom range.
-pub fn ca_world_position(
-    entity: &molex::MoleculeEntity,
-    residue: usize,
-) -> Option<glam::Vec3> {
+pub fn ca_world_position(entity: &molex::MoleculeEntity, residue: usize) -> Option<glam::Vec3> {
     let protein = entity.as_protein()?;
     let range = protein.residues.get(residue)?.atom_range.clone();
     let names = protein.columns.name.get(range.clone())?;
@@ -487,12 +486,9 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut GuiS
     // inside the driver. The design mask is host-owned and never reaches
     // the orchestrator.
     let selection_designable = session.selection_is_designable();
-    let actions = driver.actions_catalog(
-        focus,
-        session.selection(),
-        selection_designable,
-        |id| session.entity_type(id),
-    );
+    let actions = driver.actions_catalog(focus, session.selection(), selection_designable, |id| {
+        session.entity_type(id)
+    });
     let groups = driver.plugin_groups();
     frontend.set_actions(actions, groups);
     frontend.set_download_progress(driver.weights_download_progress());

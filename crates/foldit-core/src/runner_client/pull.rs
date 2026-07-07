@@ -60,14 +60,8 @@ pub struct PullDrag {
 ///   - picked atom is a hydrogen (atom name starts with `H`; covers
 ///     PDB v3 `HA`, `H`, `HB1`, `HG21`, …)
 #[must_use]
-pub fn route_atom_pick(
-    store: &Session,
-    entity_id: u32,
-    atom_idx: u32,
-) -> Option<PullRoute> {
-    let molex_id = store
-        .ids()
-        .find(|id| id.raw() == entity_id)?;
+pub fn route_atom_pick(store: &Session, entity_id: u32, atom_idx: u32) -> Option<PullRoute> {
+    let molex_id = store.ids().find(|id| id.raw() == entity_id)?;
     let MoleculeEntity::Protein(protein) = store.entity(molex_id)? else {
         return None;
     };
@@ -175,10 +169,7 @@ pub fn build_start_params(
 /// on its side; for protein picks the flat residue + PDB atom name
 /// land in viso's `ConstraintContext::resolve_atom_ref`.
 #[must_use]
-pub fn build_pull_info(
-    route: &PullRoute,
-    screen_target: (f32, f32),
-) -> PullInfo {
+pub fn build_pull_info(route: &PullRoute, screen_target: (f32, f32)) -> PullInfo {
     PullInfo {
         atom: AtomRef {
             residue: route.flat_residue,

@@ -166,4 +166,3 @@ impl CheckpointGraph {
         self.pinned.contains(&id)
     }
 }
-

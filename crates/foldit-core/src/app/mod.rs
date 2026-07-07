@@ -73,6 +73,13 @@ pub struct App {
 
     /// Dispatches queued this tick, drained on the next `tick`.
     pub(in crate::app) pending_dispatches: Vec<foldit_gui::OpDispatch>,
+
+    /// Shared wgpu device (created from the adapter's full limits) handed to
+    /// cubecl so crystallographic GPU compute runs on the same device the
+    /// renderer uses. `None` when device creation failed and the renderer
+    /// fell back to self-creating its own; density then computes on the CPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    shared_device: Option<molex::xtal::WgpuDevice>,
 }
 
 /// Wrap raw bytes as the `{ "encoding": "base64", "content": ... }` envelope
@@ -101,6 +108,8 @@ impl App {
             scores: ScoreCoordinator::new(),
             viz: Viz::new(),
             pending_dispatches: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_device: None,
         }
     }
 

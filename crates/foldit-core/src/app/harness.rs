@@ -59,8 +59,10 @@ impl EngineHarness {
 
     pub(in crate::app) fn render(&mut self) {
         if let Some(engine) = &mut self.engine {
-            if let Err(e) = engine.render() {
-                log::error!("Render error: {e:?}");
+            match engine.render() {
+                Ok(()) => {}
+                Err(viso::SurfaceError::Timeout) => {}
+                Err(e) => log::error!("Render error: {e:?}"),
             }
         }
     }
@@ -92,7 +94,9 @@ impl EngineHarness {
         residue: u32,
         atom_name: &str,
     ) -> Option<glam::Vec3> {
-        self.engine.as_ref()?.resolve_atom_position(residue, atom_name)
+        self.engine
+            .as_ref()?
+            .resolve_atom_position(residue, atom_name)
     }
 
     pub(in crate::app) fn feed_pointer_down(

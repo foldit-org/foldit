@@ -165,7 +165,10 @@ impl SessionUpdateConsumer for RenderProjector {
         {
             engine.set_selection(doc.selection());
         }
-        if changes.iter().any(|c| matches!(c, SessionUpdate::FocusChanged)) {
+        if changes
+            .iter()
+            .any(|c| matches!(c, SessionUpdate::FocusChanged))
+        {
             engine.set_focus(doc.focus());
             engine.fit_camera_to_focus();
         }
@@ -291,6 +294,7 @@ pub fn focus_description(doc: &Session, focus: viso::Focus) -> String {
             format!("All ({count} entities)")
         }
         viso::Focus::Entity(id) => doc
-            .name(id).map_or_else(|| format!("Entity {}", id.raw()), str::to_owned),
+            .name(id)
+            .map_or_else(|| format!("Entity {}", id.raw()), str::to_owned),
     }
 }

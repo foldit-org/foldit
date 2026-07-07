@@ -53,18 +53,13 @@ impl History {
                 // Commit / Abort resolve their own request_id in the arm.
                 HistoryEvent::Commit { .. } | HistoryEvent::Abort { .. } => {}
                 HistoryEvent::Begin { entities, .. } => {
-                    if entities
-                        .iter()
-                        .any(|e| self.lane_head_is_tentative(*e))
-                    {
+                    if entities.iter().any(|e| self.lane_head_is_tentative(*e)) {
                         return Err(HistoryError::ActiveActionInProgress);
                     }
                 }
                 // Moves the committed head, which would strand an open
                 // edit's commit composition.
-                HistoryEvent::AddEntity { .. } => {
-                    return Err(HistoryError::ActiveActionInProgress)
-                }
+                HistoryEvent::AddEntity { .. } => return Err(HistoryError::ActiveActionInProgress),
                 HistoryEvent::LaneUndo { .. }
                 | HistoryEvent::LaneRedo { .. }
                 | HistoryEvent::Undo

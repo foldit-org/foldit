@@ -24,11 +24,17 @@ pub enum CheckpointKind {
     /// Promoted a transient preview (e.g., a streamed ML result).
     PromotedPreview { entity: EntityId },
     /// New entity added to the assembly.
-    AddEntity { entity: EntityId, kind: MoleculeType },
+    AddEntity {
+        entity: EntityId,
+        kind: MoleculeType,
+    },
     /// Per-entity revert to an older snapshot. Lane head moves to
     /// `target`; no new snapshot pushed; this checkpoint references the
     /// existing target snapshot.
-    LaneUndo { entity: EntityId, target: EntitySnapshotId },
+    LaneUndo {
+        entity: EntityId,
+        target: EntitySnapshotId,
+    },
     /// Plugin-dispatched op. Identity carried by (`plugin_id`, `op_id`);
     /// `display` is the manifest-supplied label captured at dispatch time
     /// so the history projection doesn't have to look the plugin up later

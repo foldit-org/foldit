@@ -25,12 +25,12 @@ foldit-gui = { path = "../foldit-gui" }
 # Render engine. We deliberately do NOT enable viso's `web` feature here:
 # its `app::web::start` would conflict with our own canvas/rAF wiring.
 # `default-features = false` strips wry/winit/pollster.
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.7", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.10", default-features = false }
 
 # Universal
 log = "0.4"
 serde_json = "1"
-wgpu = "26"
+wgpu = "29"
 
 # ── Wasm-only deps ───────────────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]

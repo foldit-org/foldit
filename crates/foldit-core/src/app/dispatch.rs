@@ -65,7 +65,10 @@ impl App {
                         progress,
                         stage,
                     } => {
-                        if self.runner_client.update_weights_progress(token, progress, stage) {
+                        if self
+                            .runner_client
+                            .update_weights_progress(token, progress, stage)
+                        {
                             self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
                         }
                     }
@@ -194,9 +197,9 @@ impl App {
             .unwrap_or_else(|| op.op_id.clone());
         let intent = self.dispatch_intent_from_op(op.op_id.clone(), op.params, focused_entity_id);
         let store = &self.store;
-        let dispatch_outcome =
-            self.runner_client
-                .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
+        let dispatch_outcome = self
+            .runner_client
+            .dispatch_op(intent, plugin_id.clone(), |id| store.entity_type(id));
 
         let lanes: Option<Vec<EntityId>> = match &dispatch_outcome {
             Ok(OpOutcome::Stream { scope, .. } | OpOutcome::Invoke { scope, .. }) => {
@@ -346,8 +349,7 @@ impl App {
             .as_protein()?
             .mutate_residue(res_idx as usize, aa)
             .ok()?;
-        let assembly =
-            molex::Assembly::new(vec![molex::MoleculeEntity::Protein(new_protein)]);
+        let assembly = molex::Assembly::new(vec![molex::MoleculeEntity::Protein(new_protein)]);
 
         // Host-internal action: no dispatch happened, so the edit's
         // request_id is drawn straight from the orchestrator (the single id
@@ -374,11 +376,8 @@ impl App {
         }
         match self.store.commit_action(rid) {
             Ok(ckpt) => {
-                self.scores.score_committed_checkpoint(
-                    &mut self.runner_client,
-                    &self.store,
-                    ckpt,
-                );
+                self.scores
+                    .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
                 Some(rid)
             }
             Err(e) => {
@@ -401,12 +400,9 @@ impl App {
         op: &foldit_gui::OpDispatch,
         focused_entity_id: Option<molex::EntityId>,
     ) -> Option<u64> {
-        let Some(foldit_gui::state::ParamValue::String(plugin_id)) =
-            op.params.get("plugin_id")
+        let Some(foldit_gui::state::ParamValue::String(plugin_id)) = op.params.get("plugin_id")
         else {
-            log::warn!(
-                "download_weights dispatch missing string plugin_id param; refused"
-            );
+            log::warn!("download_weights dispatch missing string plugin_id param; refused");
             return None;
         };
         let plugin_id = plugin_id.clone();

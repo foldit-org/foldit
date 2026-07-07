@@ -25,16 +25,19 @@ impl History {
         //    a tentative snapshot whose parent is it (an open action's
         //    in-flight tentative sits one step past the committed head).
         for (eid, committed_snap) in &head_ckpt.entity_heads {
-            let lane = self
-                .lanes
-                .get(eid)
-                .unwrap_or_else(|| panic!("invariant: head ckpt references unknown entity {}", eid.raw()));
+            let lane = self.lanes.get(eid).unwrap_or_else(|| {
+                panic!(
+                    "invariant: head ckpt references unknown entity {}",
+                    eid.raw()
+                )
+            });
             if lane.head == *committed_snap {
                 continue;
             }
-            let head_snap = lane.snapshots.get(lane.head).unwrap_or_else(|| {
-                panic!("invariant: lane head missing for entity {}", eid.raw())
-            });
+            let head_snap = lane
+                .snapshots
+                .get(lane.head)
+                .unwrap_or_else(|| panic!("invariant: lane head missing for entity {}", eid.raw()));
             assert!(
                 head_snap.tentative && head_snap.parent == Some(*committed_snap),
                 "invariant: lane head for entity {} is neither the committed snap {:?} \
@@ -83,7 +86,8 @@ impl History {
             for (sid, snap) in &lane.snapshots {
                 if snap.tentative {
                     assert_eq!(
-                        lane.head, sid,
+                        lane.head,
+                        sid,
                         "invariant: tentative snapshot is not its lane head for entity {}",
                         eid.raw()
                     );
@@ -103,13 +107,19 @@ impl History {
                     .snapshots
                     .get(*sid)
                     .expect("invariant: pending edit references unknown snapshot");
-                assert!(snap.tentative, "invariant: pending edit lane head is not tentative");
+                assert!(
+                    snap.tentative,
+                    "invariant: pending edit lane head is not tentative"
+                );
                 assert_eq!(
                     lane.head, *sid,
                     "invariant: pending edit lane is not the lane head"
                 );
                 let fresh = pending_lane_heads.insert((*eid, *sid));
-                assert!(fresh, "invariant: a lane appears in more than one pending edit");
+                assert!(
+                    fresh,
+                    "invariant: a lane appears in more than one pending edit"
+                );
             }
         }
         assert_eq!(

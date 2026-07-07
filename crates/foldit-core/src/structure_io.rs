@@ -84,15 +84,16 @@ pub fn resolve_structure_path(input: &str) -> Result<String, String> {
     Err(format!("File not found: {input}"))
 }
 
-/// Native: download a PDB by id from RCSB, cache to `assets/models/`, return the path.
+/// Native: download `filename` from RCSB into `assets/models/`, returning the
+/// cached path. On a cache hit the local copy short-circuits the download.
+/// `what` labels the artifact in the log/error messages (e.g. "structure").
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_pdb_id(input: &str) -> Result<String, String> {
-    let pdb_id = input.to_lowercase();
+fn fetch_and_cache_rcsb(pdb_id: &str, filename: &str, what: &str) -> Result<String, String> {
     let models_dir = Path::new("assets/models");
-    let local_path = models_dir.join(format!("{pdb_id}.cif"));
+    let local_path = models_dir.join(filename);
 
     if local_path.exists() {
-        log::info!("Found local copy: {}", local_path.display());
+        log::info!("Found local {what}: {}", local_path.display());
         return Ok(local_path.to_string_lossy().to_string());
     }
 
@@ -101,16 +102,15 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
             .map_err(|e| format!("Failed to create models directory: {e}"))?;
     }
 
-    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif");
-    log::info!("Downloading {} from RCSB...", pdb_id.to_uppercase());
+    let url = format!("https://files.rcsb.org/download/{filename}");
+    log::info!("Downloading {what} for {}...", pdb_id.to_uppercase());
 
     let response =
-        reqwest::blocking::get(&url).map_err(|e| format!("Failed to download {pdb_id}: {e}"))?;
+        reqwest::blocking::get(&url).map_err(|e| format!("Failed to download {filename}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!(
-            "Failed to download {}: HTTP {}",
-            pdb_id,
+            "Failed to download {filename}: HTTP {}",
             response.status()
         ));
     }
@@ -119,23 +119,58 @@ fn resolve_pdb_id(input: &str) -> Result<String, String> {
         .text()
         .map_err(|e| format!("Failed to read response: {e}"))?;
 
-    std::fs::write(&local_path, &content).map_err(|e| format!("Failed to save CIF file: {e}"))?;
+    std::fs::write(&local_path, &content)
+        .map_err(|e| format!("Failed to save {what} file: {e}"))?;
 
     log::info!("Downloaded to {}", local_path.display());
     Ok(local_path.to_string_lossy().to_string())
 }
 
-/// Wasm: PDB-ID resolution from inside foldit-core isn't supported. The web
-/// entry crate (foldit-web) is responsible for fetching `.cif` bytes via
-/// `web_sys::window().fetch_with_str(...)` and feeding them through the
-/// bytes-loading entry point (`load_entities_from_file` after a temp write,
-/// or a future `load_entities_from_bytes`).
+/// Native: download a PDB by id from RCSB, cache to `assets/models/`, return the path.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_pdb_id(input: &str) -> Result<String, String> {
+    let pdb_id = input.to_lowercase();
+    fetch_and_cache_rcsb(&pdb_id, &format!("{pdb_id}.cif"), "structure")
+}
+
+/// Native: resolve the structure-factor cif for a PDB id, caching to
+/// `assets/models/<id>-sf.cif` and downloading from RCSB on a miss.
+///
+/// # Errors
+///
+/// Returns an `Err` if the directory cannot be created, the download fails or
+/// returns a non-success status, or the file cannot be written.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_sf_cif(pdb_id: &str) -> Result<String, String> {
+    let pdb_id = pdb_id.to_lowercase();
+    fetch_and_cache_rcsb(&pdb_id, &format!("{pdb_id}-sf.cif"), "structure factors")
+}
+
+/// Wasm: RCSB resolution from inside foldit-core isn't supported; foldit-core
+/// carries no HTTP client on wasm. The web entry crate (foldit-web) fetches the
+/// bytes via `web_sys::window().fetch_with_str(...)` and feeds them through the
+/// bytes-loading entry point. `what`/`id` label the artifact in the error.
+#[cfg(target_arch = "wasm32")]
+fn rcsb_unsupported_on_wasm(what: &str, id: &str) -> String {
+    format!(
+        "RCSB download of {what} for '{id}' must be performed by the host on \
+         web; foldit-core does not contain an HTTP client on wasm targets"
+    )
+}
+
 #[cfg(target_arch = "wasm32")]
 fn resolve_pdb_id(input: &str) -> Result<String, String> {
-    Err(format!(
-        "RCSB download for PDB id '{input}' must be performed by the host on web; \
-         foldit-core does not contain an HTTP client on wasm targets"
-    ))
+    Err(rcsb_unsupported_on_wasm("PDB id", input))
+}
+
+/// Wasm stub mirroring [`resolve_pdb_id`]; the web host owns any HTTP fetch.
+///
+/// # Errors
+///
+/// Always returns an `Err`: no HTTP client exists on wasm targets.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_sf_cif(pdb_id: &str) -> Result<String, String> {
+    Err(rcsb_unsupported_on_wasm("structure factors", pdb_id))
 }
 
 /// Load a structure file and return classified entities (auto-detecting format).
@@ -159,8 +194,8 @@ pub fn load_entities_from_file(path: &Path) -> Result<Vec<molex::MoleculeEntity>
             .map_err(|e| format!("Failed to parse mmCIF: {e:?}"))
             .map(molex::Assembly::into_entities),
         "bcif" => {
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("Failed to read BinaryCIF: {e}"))?;
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("Failed to read BinaryCIF: {e}"))?;
             molex::Assembly::from_bcif(&bytes)
                 .map_err(|e| format!("Failed to parse BinaryCIF: {e:?}"))
                 .map(molex::Assembly::into_entities)

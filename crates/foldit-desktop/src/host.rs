@@ -14,10 +14,11 @@ use foldit_core::HostResources;
 pub struct DesktopHost {
     view_presets_dir: Option<PathBuf>,
     initial_structure_path: Option<String>,
+    with_density: bool,
 }
 
 impl DesktopHost {
-    pub(crate) fn new(initial_structure_path: Option<String>) -> Self {
+    pub(crate) fn new(initial_structure_path: Option<String>, with_density: bool) -> Self {
         let view_presets_dir = Self::resolve_view_presets_dir();
         if view_presets_dir.is_none() {
             log::warn!(
@@ -30,6 +31,7 @@ impl DesktopHost {
         Self {
             view_presets_dir,
             initial_structure_path,
+            with_density,
         }
     }
 
@@ -82,5 +84,9 @@ impl HostResources for DesktopHost {
 
     fn initial_structure_path(&self) -> Option<String> {
         self.initial_structure_path.clone()
+    }
+
+    fn with_density(&self) -> bool {
+        self.with_density
     }
 }

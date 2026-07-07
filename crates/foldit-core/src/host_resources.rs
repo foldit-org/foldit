@@ -35,4 +35,13 @@ pub trait HostResources {
     /// no initial structure (e.g., web, which loads via a separate host
     /// flow), and the App settles at `Landing`.
     fn initial_structure_path(&self) -> Option<String>;
+
+    /// Whether to compute an experimental electron-density map on a free-form
+    /// initial load: fetch the structure-factor cif for the loaded pdbid and
+    /// feed the resulting map to both the render and scoring lanes. Defaults
+    /// `false`; only the desktop `--with-density` flag turns it on (web and
+    /// the test host have no density flow).
+    fn with_density(&self) -> bool {
+        false
+    }
 }

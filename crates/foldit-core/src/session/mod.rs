@@ -96,7 +96,9 @@ impl Puzzle {
         let end = u32::try_from(last).unwrap_or(u32::MAX);
         gating.insert(
             entity,
-            crate::puzzle_setup::DesignMask { ranges: vec![0..=end] },
+            crate::puzzle_setup::DesignMask {
+                ranges: vec![0..=end],
+            },
         );
     }
 
@@ -144,6 +146,10 @@ pub struct Session {
     title: String,
     /// Session state specific to game or intro puzzles.
     puzzle: Option<Puzzle>,
+    /// Experimental density for a free-form (no-puzzle) load, computed on a
+    /// `--with-density` pdbid load. The puzzle's own `density` takes
+    /// precedence when a puzzle is installed.
+    density: Option<crate::puzzle_load::DensityAsset>,
     /// Queue of [`SessionUpdate`]s emitted by this store's mutators
     pending_updates: Vec<SessionUpdate>,
     /// In-flight op-stream preview token maps.
@@ -172,6 +178,7 @@ impl Session {
             focus: Focus::default(),
             title: "Unknown".to_owned(),
             puzzle: None,
+            density: None,
             pending_updates: Vec::new(),
             previews: Previews::new(),
         }
@@ -368,6 +375,13 @@ impl Session {
         self.puzzle.as_ref()
     }
 
+    /// The free-form session density (a `--with-density` load). `None` for a
+    /// puzzle load or when no density was computed.
+    #[must_use]
+    pub const fn session_density(&self) -> Option<&crate::puzzle_load::DensityAsset> {
+        self.density.as_ref()
+    }
+
     // Is Residue N of Entity X designable?
     #[must_use]
     pub fn is_designable(&self, entity: EntityId, res: u32) -> bool {
@@ -420,8 +434,9 @@ impl Session {
         for entity in self.head_assembly().entities() {
             let eid = entity.id();
             let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
-            let residues: BTreeSet<u32> =
-                (0..count).filter(|&res| self.is_designable(eid, res)).collect();
+            let residues: BTreeSet<u32> = (0..count)
+                .filter(|&res| self.is_designable(eid, res))
+                .collect();
             if !residues.is_empty() {
                 let _ = designable.insert(eid, residues);
             }
