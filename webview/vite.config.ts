@@ -83,7 +83,7 @@ function resolvePluginsRoot(): string | null {
   // workspace-checkout fallback.
   let cursor = __dirname;
   for (;;) {
-    const candidate = path.join(cursor, 'crates/foldit-runner/plugins');
+    const candidate = path.join(cursor, 'plugins');
     if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
       try {
         return fs.realpathSync(candidate);
