@@ -5,6 +5,7 @@
 //! into `record`, which then delegates to one of these arms.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use web_time::SystemTime;
 
@@ -27,6 +28,7 @@ impl History {
         kind: CheckpointKind,
         label: &str,
         request_id: u64,
+        selection: BTreeMap<EntityId, BTreeSet<u32>>,
     ) -> Result<HistoryEventOutcome, HistoryError> {
         // The lane-not-busy precondition is enforced by the caller-side
         // pre-check; validate lane existence for every named entity up
@@ -70,6 +72,7 @@ impl History {
             request_id,
             PendingEdit {
                 lanes,
+                selection,
                 kind,
                 raw_score: None,
                 game_score: None,

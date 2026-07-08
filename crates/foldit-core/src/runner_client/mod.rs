@@ -65,6 +65,12 @@ pub struct RunnerClient {
     /// driver state; `App` syncs it each tick.
     #[cfg(not(target_arch = "wasm32"))]
     refine_available: bool,
+    /// Whether a native B-factor refine is currently running. Mirrors
+    /// `App::refine_in_flight` so `running_actions` can surface refine (which
+    /// is not an orchestrator stream) as a synthetic running action for the
+    /// button's cancel state. `App` syncs it each tick.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_running: bool,
 }
 
 impl RunnerClient {
@@ -81,7 +87,16 @@ impl RunnerClient {
             weights: std::collections::HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             refine_available: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_running: false,
         }
+    }
+
+    /// Sync the refine-running mirror (from `App::refine_in_flight`). Cheap,
+    /// called each tick; see [`Self::refine_running`] field doc.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_refine_running(&mut self, running: bool) {
+        self.refine_running = running;
     }
 
     /// Construct and install a fresh orchestrator handle. Called on
@@ -117,6 +132,39 @@ impl RunnerClient {
         self.orchestrator
             .as_ref()
             .is_some_and(|orch| !orch.locked_entities().is_empty())
+    }
+
+    /// Whether ANY lock is held - an entity lock OR the global lock.
+    /// [`Self::any_lock_held`] deliberately checks only entity locks (its
+    /// callers race per-entity native edits); the refine gate needs the
+    /// global lock counted too, since a refine (or another global op) must
+    /// block a fresh refine. `false` when no orchestrator is wired up.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn any_lock_or_global_held(&self) -> bool {
+        self.orchestrator.as_ref().is_some_and(|orch| {
+            !orch.locked_entities().is_empty() || orch.is_global_locked()
+        })
+    }
+
+    /// Acquire the orchestrator global lock for the native B-factor refine,
+    /// returning `true` on success (everything was free). Refine is not a
+    /// plugin stream, so it holds no `DispatchHandle`; release is the bare
+    /// [`Self::unlock_global_native`]. `false` (not acquired) when no
+    /// orchestrator is wired up or a lock is already held.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn lock_global_native(&mut self, label: &str) -> bool {
+        self.orchestrator
+            .as_mut()
+            .is_some_and(|orch| orch.try_lock_global(label))
+    }
+
+    /// Release the global lock taken by [`Self::lock_global_native`].
+    /// Idempotent; safe to call on every refine terminal.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unlock_global_native(&mut self) {
+        if let Some(orch) = self.orchestrator.as_mut() {
+            orch.unlock_global();
+        }
     }
 
     /// Whether `op_id` declares `creates_entities` (its output is a NEW

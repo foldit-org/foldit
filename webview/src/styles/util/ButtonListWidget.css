@@ -30,6 +30,14 @@
 	@apply border border-orange-800 border-opacity-70;
 }
 
+/* A running action's button in its cancel state: red so it reads as "click to
+   stop", and stays interactive (not greyed) while the other buttons disable. */
+.button-list-item.cancel {
+	@apply bg-red-600 bg-opacity-60;
+	@apply hover:bg-red-500 hover:bg-opacity-80;
+	@apply border border-red-800 border-opacity-70;
+}
+
 .button-list-item:hover {
 }
 

@@ -155,7 +155,6 @@ function _buildBackendData() {
 		actionGroups: () => state.actions.groups,
 		// Helpers
 		hasSelection: () => state.selection.entries.some(e => e.residues.length > 0),
-		hasActiveAction: () => state.actions.available.some(a => a.active),
 		sceneEntities: () => state.scene?.entities ?? [],
 		// Backend-driven puzzle context (mode + scores + title).
 		puzzleData: () => ({
@@ -319,4 +318,3 @@ export const getBackendOptions = () => ({
 });
 
 export const hasSelection = (): boolean => state.selection.entries.some(e => e.residues.length > 0);
-export const hasActiveAction = (): boolean => state.actions.available.some(a => a.active);

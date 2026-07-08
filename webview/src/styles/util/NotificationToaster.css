@@ -15,11 +15,32 @@
 }
 .dl-toast__row {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
 }
-.dl-toast__title { font-size: 13px; font-weight: 600; letter-spacing: 0.1px; }
+.dl-toast__title { font-size: 13px; font-weight: 600; letter-spacing: 0.1px; flex: 1 1 auto; }
+/* Top-left cancel X: dismisses the toast and cancels the action. Muted until
+   hover, then a red tint to signal the destructive intent. */
+.dl-toast__cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(230, 244, 236, 0.7);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dl-toast__cancel:hover {
+  background: rgba(220, 90, 90, 0.35);
+  color: #ffe3e3;
+}
 .dl-toast__pct {
   font-size: 12px;
   font-weight: 500;

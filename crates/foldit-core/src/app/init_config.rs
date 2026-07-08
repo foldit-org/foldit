@@ -139,10 +139,13 @@ impl App {
             );
             return;
         };
-        if let Err(e) =
-            self.store
-                .begin_action(target_entities, kind, String::from(display), request_id)
-        {
+        if let Err(e) = self.store.begin_action(
+            target_entities,
+            kind,
+            String::from(display),
+            request_id,
+            std::collections::BTreeMap::new(),
+        ) {
             log::warn!(
                 "[App] {plugin_id} post-Init begin_action failed: {e}; \
                  skipping normalization apply"

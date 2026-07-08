@@ -1,7 +1,8 @@
-import { createEffect, createSignal, untrack, Show } from 'solid-js';
+import { createEffect, createSignal, untrack, Show, type JSX } from 'solid-js';
 import { Toaster, toast } from 'solid-toast';
 import type { Notification } from '../../generated/wire';
-import { state } from '../../adapter';
+import { state, appCommand } from '../../adapter';
+import { Icons } from '../../utils/iconMapping';
 import '../../styles/util/NotificationToaster.css';
 
 // Shared toast body: compact font and rounded border so no level renders at
@@ -43,17 +44,33 @@ function fire(note: Notification): void {
 	}
 }
 
-// Live download bar for one plugin. Reads the store leaf inside JSX so the bar
-// tracks progress reactively without re-firing the toast.
-function DownloadToast(props: { pluginId: string }) {
-	const entry = () => state.actions.download_progress[props.pluginId];
-	const frac = () => entry()?.fraction ?? 0;
-	const known = () => entry()?.fraction != null;
-	const stage = () => entry()?.stage;
+// One unified progress toast body for every running thing (plugin action,
+// refine, download). All accessors are read inside JSX so the bar / title
+// track backend state reactively without re-firing the toast. A determinate
+// `fraction` (0..1) draws a fill bar; `null` draws the indeterminate sweep. An
+// `onCancel` renders the top-left X that cancels the action and dismisses the
+// toast; omit it for things that cannot be cancelled.
+function ProgressToast(props: {
+	title: () => string;
+	fraction: () => number | null;
+	stage?: () => string | undefined;
+	onCancel?: () => void;
+}) {
+	const known = () => props.fraction() != null;
+	const frac = () => props.fraction() ?? 0;
 	return (
 		<div class="dl-toast">
 			<div class="dl-toast__row">
-				<span class="dl-toast__title">Downloading {props.pluginId} weights</span>
+				<Show when={props.onCancel}>
+					<button
+						class="dl-toast__cancel"
+						title="Cancel"
+						onClick={() => props.onCancel?.()}
+					>
+						<Icons.X size={13} />
+					</button>
+				</Show>
+				<span class="dl-toast__title">{props.title()}</span>
 				<Show when={known()}>
 					<span class="dl-toast__pct">{Math.round(frac() * 100)}%</span>
 				</Show>
@@ -63,36 +80,87 @@ function DownloadToast(props: { pluginId: string }) {
 					<div class="dl-bar__fill" style={{ width: `${frac() * 100}%` }} />
 				</Show>
 			</div>
-			<Show when={stage()}>
-				<span class="dl-toast__pct">{stage()}</span>
+			<Show when={props.stage?.()}>
+				<span class="dl-toast__pct">{props.stage?.()}</span>
 			</Show>
 		</div>
 	);
 }
 
-// Live refine bar. Reads the store leaf inside JSX so the bar tracks progress
-// reactively without re-firing the toast. Only one refine runs at a time, so
-// there is no per-instance key.
+// Live download bar for one plugin. No cancel affordance: a weight download is
+// a background asset fetch, not an action (and ESC deliberately leaves it
+// alone), so it simply shows progress until it completes.
+function DownloadToast(props: { pluginId: string }) {
+	const entry = () => state.actions.download_progress[props.pluginId];
+	return (
+		<ProgressToast
+			title={() => `Downloading ${props.pluginId} weights`}
+			fraction={() => entry()?.fraction ?? null}
+			stage={() => entry()?.stage}
+		/>
+	);
+}
+
+// Live refine bar. Only one refine runs at a time. The X cancels the run
+// (aborts the molex solve) and dismisses the toast.
 function RefineToast() {
 	const entry = () => state.actions.refine_progress;
-	const frac = () => entry()?.fraction ?? 0;
-	const known = () => entry()?.fraction != null;
-	const label = () => entry()?.label ?? '';
 	return (
-		<div class="dl-toast">
-			<div class="dl-toast__row">
-				<span class="dl-toast__title">{label()}</span>
-				<Show when={known()}>
-					<span class="dl-toast__pct">{Math.round(frac() * 100)}%</span>
-				</Show>
-			</div>
-			<div class="dl-bar">
-				<Show when={known()} fallback={<div class="dl-bar__indeterminate" />}>
-					<div class="dl-bar__fill" style={{ width: `${frac() * 100}%` }} />
-				</Show>
-			</div>
-		</div>
+		<ProgressToast
+			title={() => entry()?.label ?? ''}
+			fraction={() => entry()?.fraction ?? null}
+			onCancel={() => {
+				appCommand({ type: 'CancelAction', request_id: null, refine: true });
+				toast.dismiss('refine-progress');
+			}}
+		/>
 	);
+}
+
+// Live toast for one running plugin-action instance, keyed by its request-id
+// (so two concurrent streams of the same op get two toasts). Plugin streams
+// report no fraction, so the bar is indeterminate. The X cancels just this
+// instance and dismisses the toast.
+function ActionToast(props: { requestId: number }) {
+	const entry = () => state.actions.running.find((r) => r.request_id === props.requestId);
+	return (
+		<ProgressToast
+			title={() => entry()?.display ?? ''}
+			fraction={() => null}
+			onCancel={() => {
+				appCommand({ type: 'CancelAction', request_id: props.requestId, refine: false });
+				toast.dismiss(`action-progress:${props.requestId}`);
+			}}
+		/>
+	);
+}
+
+// Keep a set of persistent (`duration: Infinity`) toasts in sync with a live
+// id set: fire one per newly-appeared id and dismiss one per id that dropped
+// out, keyed `<idPrefix>:<id>`. Backs both the download-progress toasts and
+// the per-action toasts, which differ only in their source ids and rendered
+// body. Call once per source during component setup.
+function reconcilePersistentToasts(
+	ids: () => string[],
+	idPrefix: string,
+	render: (id: string) => JSX.Element,
+): void {
+	const [shown, setShown] = createSignal<string[]>([]);
+	createEffect(() => {
+		const current = ids();
+		const prev = untrack(shown);
+		for (const id of current) {
+			if (!prev.includes(id)) {
+				toast.custom(() => render(id), { id: `${idPrefix}:${id}`, duration: Infinity });
+			}
+		}
+		for (const id of prev) {
+			if (!current.includes(id)) {
+				toast.dismiss(`${idPrefix}:${id}`);
+			}
+		}
+		setShown(current);
+	});
 }
 
 /**
@@ -125,33 +193,14 @@ export default function NotificationToaster() {
 		}
 	});
 
-	// Live download-progress toasts, distinct from the discrete-notification
-	// effect above. A custom toast is fired once per plugin that newly appears
-	// in `download_progress`, keyed by a stable id; the toast body binds to the
-	// store leaf so the bar animates in place without re-toasting each frame.
-	// When a plugin drops out of the map (download ended, success or failure)
-	// its toast is dismissed; the discrete success/error notification carries
-	// the outcome.
-	const [downloadingIds, setDownloadingIds] = createSignal<string[]>([]);
-	createEffect(() => {
-		const progress = state.actions.download_progress ?? {};
-		const currentIds = Object.keys(progress);
-		const prevIds = untrack(downloadingIds);
-		for (const pluginId of currentIds) {
-			if (!prevIds.includes(pluginId)) {
-				toast.custom(() => <DownloadToast pluginId={pluginId} />, {
-					id: `download-progress:${pluginId}`,
-					duration: Infinity,
-				});
-			}
-		}
-		for (const prevId of prevIds) {
-			if (!currentIds.includes(prevId)) {
-				toast.dismiss(`download-progress:${prevId}`);
-			}
-		}
-		setDownloadingIds(currentIds);
-	});
+	// Live download-progress toasts: one per plugin present in
+	// `download_progress`, dismissed when the download ends (the discrete
+	// success/error notification carries the outcome).
+	reconcilePersistentToasts(
+		() => Object.keys(state.actions.download_progress ?? {}),
+		'download-progress',
+		(pluginId) => <DownloadToast pluginId={pluginId} />,
+	);
 
 	// Live refine-progress toast. Fires once when a refine starts (refine_progress
 	// goes null -> Some) and dismisses when it ends (Some -> null); the toast body
@@ -170,6 +219,20 @@ export default function NotificationToaster() {
 		}
 		setRefineShowing(active);
 	});
+
+	// Live per-action toasts: one per running action instance, keyed by
+	// request-id. Downloads (their own toast above) are already excluded from
+	// `running`; the native refine appears there with a null request-id and is
+	// filtered out here so it shows only its determinate progress toast, not a
+	// second indeterminate one.
+	reconcilePersistentToasts(
+		() =>
+			state.actions.running
+				.filter((r) => r.request_id != null)
+				.map((r) => String(r.request_id)),
+		'action-progress',
+		(idStr) => <ActionToast requestId={Number(idStr)} />,
+	);
 
 	return <Toaster position="top-right" toastOptions={{ style: { 'font-size': '13px' } }} />;
 }

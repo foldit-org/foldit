@@ -89,11 +89,48 @@ impl App {
             return;
         }
 
+        if let AppCommand::CancelAction { request_id, refine } = command {
+            self.cancel_action(request_id, refine);
+            return;
+        }
+
         if self.harness.engine.is_none() {
             return;
         }
 
         self.handle_engine_command(command);
+    }
+
+    /// Cancel a running action. The three cases map to the three UI triggers:
+    /// `request_id = Some(rid)` cancels exactly that stream (a per-action toast
+    /// X / a running button's X); `refine = true` cancels the native B-factor
+    /// refine (its own toast/button X); both unset is the ESC path, cancelling
+    /// every cancellable action - the refine plus every stream except weight
+    /// downloads. Any in-progress preview geometry is dropped either way. The
+    /// one owner of the cancel teardown, so ESC and the toast/button X cannot
+    /// drift.
+    pub(in crate::app) fn cancel_action(&mut self, request_id: Option<u64>, refine: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match request_id {
+                Some(rid) => self.runner_client.cancel_streams(Some(rid)),
+                None => {
+                    if refine {
+                        // Refine-only cancel: leave other streams running.
+                        self.request_refine_cancel();
+                    } else {
+                        // ESC / cancel-all: refine plus every non-download stream.
+                        self.request_refine_cancel();
+                        self.runner_client.cancel_streams(None);
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (request_id, refine);
+        }
+        self.store.cancel_operations();
     }
 
     // Dispatch the engine-dependent commands. Reached only after the
@@ -167,6 +204,7 @@ impl App {
             | AppCommand::SetActionPickerOpen { .. }
             | AppCommand::SetHintsVisible { .. }
             | AppCommand::SetFullscreen { .. }
+            | AppCommand::CancelAction { .. }
             | AppCommand::ClearProgress => {
                 // Handled in the early-return block above. The match is
                 // exhaustive over `AppCommand`: a new variant

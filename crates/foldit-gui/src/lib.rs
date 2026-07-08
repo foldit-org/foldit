@@ -575,9 +575,13 @@ impl GuiState {
         &mut self,
         available: Vec<state::ActionInfo>,
         groups: Vec<state::PluginGroupInfo>,
+        running: Vec<state::RunningAction>,
+        focused_entity_id: Option<u32>,
     ) {
         self.actions.available = available;
         self.actions.groups = groups;
+        self.actions.running = running;
+        self.actions.focused_entity_id = focused_entity_id;
         // Close an open picker whose trigger is gone from the re-projected
         // catalog, or is present but no longer enabled (e.g. the selection
         // grew past a single residue). The picker's open/closed flag is

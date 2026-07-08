@@ -63,10 +63,10 @@ fn linear_push_undo_redo_single_lane() {
     let e = ids[0];
     let root = h.checkpoints().root();
 
-    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w1"), 1)
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w1"), 1, std::collections::BTreeMap::new())
         .unwrap();
     let c1 = h.commit_action(1).unwrap();
-    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w2"), 2)
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w2"), 2, std::collections::BTreeMap::new())
         .unwrap();
     let c2 = h.commit_action(2).unwrap();
     assert_eq!(h.checkpoints().head(), c2);
@@ -103,10 +103,10 @@ fn push_after_undo_drops_redo_path() {
     let (mut h, ids) = mk_history(1);
     let e = ids[0];
 
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s1"), 1)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s1"), 1, std::collections::BTreeMap::new())
         .unwrap();
     let c1 = h.commit_action(1).unwrap();
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2"), 2)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2"), 2, std::collections::BTreeMap::new())
         .unwrap();
     let c2 = h.commit_action(2).unwrap();
 
@@ -122,7 +122,7 @@ fn push_after_undo_drops_redo_path() {
     // replaces), and c1 must have exactly one child - the new
     // checkpoint.
     h.undo().unwrap();
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2b"), 3)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("s2b"), 3, std::collections::BTreeMap::new())
         .unwrap();
     let c2b = h.commit_action(3).unwrap();
     assert!(
@@ -148,10 +148,10 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
         max_snapshots_per_lane: 4,
     });
 
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1"), 1)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1"), 1, std::collections::BTreeMap::new())
         .unwrap();
     let c1 = h.commit_action(1).unwrap();
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c2"), 2)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c2"), 2, std::collections::BTreeMap::new())
         .unwrap();
     let c2 = h.commit_action(2).unwrap();
 
@@ -161,7 +161,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     // Branch off c1 to create something *off* the head path that
     // can be evicted later.
     h.undo().unwrap(); // back to c1
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1b"), 3)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("c1b"), 3, std::collections::BTreeMap::new())
         .unwrap();
     let c1b = h.commit_action(3).unwrap();
     // Mark c1b's checkpoint with a raw_score so best cursor latches.
@@ -170,7 +170,7 @@ fn eviction_respects_refs_pinned_best_and_head_path() {
     // Push enough to force eviction.
     for i in 0u64..6 {
         let rid = 4 + i;
-        h.begin_action([e], plugin_op("shake"), Cow::from(format!("extra{i}")), rid)
+        h.begin_action([e], plugin_op("shake"), Cow::from(format!("extra{i}")), rid, std::collections::BTreeMap::new())
             .unwrap();
         h.commit_action(rid).unwrap();
     }
@@ -226,7 +226,7 @@ fn snapshot_eviction_refuses_when_referenced() {
     // invariant must hold throughout.
     for i in 0u64..5 {
         let rid = i + 1;
-        h.begin_action([e], plugin_op("shake"), Cow::from(format!("s{i}")), rid)
+        h.begin_action([e], plugin_op("shake"), Cow::from(format!("s{i}")), rid, std::collections::BTreeMap::new())
             .unwrap();
         h.commit_action(rid).unwrap();
     }
@@ -251,18 +251,18 @@ fn nav_during_active_is_refused_with_entity_locked() {
     let root = h.checkpoints().root();
 
     // Push one regular checkpoint so undo has somewhere to go.
-    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("pre"), 10)
+    h.begin_action([e], plugin_op("shake"), Cow::Borrowed("pre"), 10, std::collections::BTreeMap::new())
         .unwrap();
     h.commit_action(10).unwrap();
 
     // Begin an action on `e`.
     let rid = 1u64;
-    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w-active"), rid)
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w-active"), rid, std::collections::BTreeMap::new())
         .unwrap();
 
     // Begin again → ActiveActionInProgress.
     assert!(matches!(
-        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 2),
+        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 2, std::collections::BTreeMap::new()),
         Err(HistoryError::ActiveActionInProgress)
     ));
 
@@ -288,7 +288,7 @@ fn nav_during_active_is_refused_with_entity_locked() {
 
     // Begin on the already-busy lane → ActiveActionInProgress.
     assert!(matches!(
-        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 3),
+        h.begin_action([e], plugin_op("shake"), Cow::Borrowed("nope"), 3, std::collections::BTreeMap::new()),
         Err(HistoryError::ActiveActionInProgress)
     ));
 
@@ -311,6 +311,7 @@ fn abort_action_drops_tentative() {
         plugin_op("wiggle"),
         Cow::Borrowed("about-to-abort"),
         rid,
+        std::collections::BTreeMap::new(),
     )
     .unwrap();
 
@@ -337,7 +338,7 @@ fn in_flight_score_spares_committed_parent_then_lands_on_commit() {
     assert_eq!(h.checkpoint(parent).unwrap().raw_score, Some(10.0));
 
     let rid = 1u64;
-    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w"), rid)
+    h.begin_action([e], plugin_op("wiggle"), Cow::Borrowed("w"), rid, std::collections::BTreeMap::new())
         .unwrap();
     // Stream a score into the open action.
     h.action_update(rid, Some(42.0), Some(420.0), None, |_| {})
@@ -368,10 +369,10 @@ fn committed_node_references_peer_committed_head_not_its_tentative() {
     // while another is open is allowed). Distinct ids: both edits are
     // pending at once.
     let rid1 = 1u64;
-    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1)
+    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1, std::collections::BTreeMap::new())
         .unwrap();
     let rid2 = 2u64;
-    h.begin_action([e2], plugin_op("wiggle"), Cow::Borrowed("w2"), rid2)
+    h.begin_action([e2], plugin_op("wiggle"), Cow::Borrowed("w2"), rid2, std::collections::BTreeMap::new())
         .unwrap();
     // e2's lane head is now its open tentative, distinct from its
     // committed head.
@@ -399,10 +400,10 @@ fn per_edit_scores_attribute_to_their_own_edit_not_first_wins() {
     let e2 = ids[1];
 
     let rid1 = 1u64;
-    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1)
+    h.begin_action([e1], plugin_op("wiggle"), Cow::Borrowed("w1"), rid1, std::collections::BTreeMap::new())
         .unwrap();
     let rid2 = 2u64;
-    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("w2"), rid2)
+    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("w2"), rid2, std::collections::BTreeMap::new())
         .unwrap();
 
     // Score each edit against its own composition, by request id. The
@@ -438,7 +439,7 @@ fn multi_lane_begin_opens_a_tentative_per_entity_and_commits_one_checkpoint() {
     let ckpt_len_before = h.checkpoints().iter().count();
 
     let rid = 7u64;
-    h.begin_action([e1, e2], plugin_op("init"), Cow::Borrowed("init"), rid)
+    h.begin_action([e1, e2], plugin_op("init"), Cow::Borrowed("init"), rid, std::collections::BTreeMap::new())
         .unwrap();
 
     // Both lanes now hold an open tentative; no checkpoint minted yet.
@@ -473,7 +474,7 @@ fn commit_and_reopen_mints_a_checkpoint_and_re_forks_the_same_edit() {
     let rid = 9u64;
     let ckpt_len_before = h.checkpoints().iter().count();
 
-    h.begin_action([e], plugin_op("rebuild"), Cow::Borrowed("Rebuild"), rid)
+    h.begin_action([e], plugin_op("rebuild"), Cow::Borrowed("Rebuild"), rid, std::collections::BTreeMap::new())
         .unwrap();
     let committed_before_seg1 = h
         .lane(e)
@@ -527,14 +528,14 @@ fn lane_undo_pushes_lane_undo_checkpoint() {
     let e2 = ids[1];
 
     // Two pushes on e1, one on e2 - three checkpoints + root.
-    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-1"), 1)
+    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-1"), 1, std::collections::BTreeMap::new())
         .unwrap();
     let _ = h.commit_action(1).unwrap();
     let target_e1 = h.lane(e1).unwrap().head();
-    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-2"), 2)
+    h.begin_action([e1], plugin_op("shake"), Cow::Borrowed("e1-2"), 2, std::collections::BTreeMap::new())
         .unwrap();
     let _ = h.commit_action(2).unwrap();
-    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("e2-1"), 3)
+    h.begin_action([e2], plugin_op("shake"), Cow::Borrowed("e2-1"), 3, std::collections::BTreeMap::new())
         .unwrap();
     let _ = h.commit_action(3).unwrap();
     let e2_head_before = h.lane(e2).unwrap().head();
@@ -740,7 +741,7 @@ proptest! {
                 Op::Record => {
                     let id = next_rid;
                     next_rid += 1;
-                    match h.begin_action([e], plugin_op("shake"), Cow::Borrowed("r"), id) {
+                    match h.begin_action([e], plugin_op("shake"), Cow::Borrowed("r"), id, std::collections::BTreeMap::new()) {
                         Ok(()) => h.commit_action(id).map(|_| ()),
                         Err(e) => Err(e),
                     }
@@ -753,6 +754,7 @@ proptest! {
                         plugin_op("wiggle"),
                         Cow::Borrowed("b"),
                         id,
+                        std::collections::BTreeMap::new(),
                     ) {
                         Ok(()) => {
                             rid = Some(id);

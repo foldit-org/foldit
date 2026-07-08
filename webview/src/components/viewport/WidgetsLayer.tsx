@@ -4,7 +4,6 @@ import ScoreBar from '../widgets/ScoreBar.tsx';
 import SideBar from '../widgets/SideBar.tsx';
 import TextBubble from '../widgets/TextBubble.tsx';
 import ActionButtonWidget from '../widgets/ActionButtonWidget.tsx';
-import ToolStatusWidget from '../widgets/ToolStatusWidget.tsx';
 
 export default function WidgetsLayer() {
 	// Note: inGame check is now handled by parent (App.tsx) to avoid subscribing to entire store
@@ -15,7 +14,6 @@ export default function WidgetsLayer() {
 			<SideBar />
 			<PuzzleComplete />
 			<TextBubble />
-			<ToolStatusWidget />
 			<ActionButtonWidget />
 		</div>
 	);

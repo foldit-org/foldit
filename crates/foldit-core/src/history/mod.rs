@@ -33,7 +33,7 @@
 //! into this module.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use web_time::SystemTime;
@@ -99,6 +99,7 @@ enum HistoryEvent {
         kind: CheckpointKind,
         label: Cow<'static, str>,
         request_id: u64,
+        selection: BTreeMap<EntityId, BTreeSet<u32>>,
     },
     Commit {
         request_id: u64,
@@ -142,6 +143,14 @@ enum HistoryEventOutcome {
     /// model a begin mints no checkpoint.
     Began,
 }
+
+/// One open edit's retained pulse data: its held lanes paired with the
+/// per-entity residue selection it operates on (an empty map marks a
+/// whole-lane op). Yielded by [`History::pending_pulse_data`].
+type PulseData<'a> = (
+    &'a [(EntityId, EntitySnapshotId)],
+    &'a BTreeMap<EntityId, BTreeSet<u32>>,
+);
 
 impl History {
     /// Build a new history seeded with one root checkpoint and one root
@@ -276,12 +285,14 @@ impl History {
         kind: CheckpointKind,
         label: Cow<'static, str>,
         request_id: u64,
+        selection: BTreeMap<EntityId, BTreeSet<u32>>,
     ) -> Result<(), HistoryError> {
         match self.record(HistoryEvent::Begin {
             entities: entities.into_iter().collect(),
             kind,
             label,
             request_id,
+            selection,
         })? {
             HistoryEventOutcome::Began => Ok(()),
             _ => unreachable!("Begin always returns Began"),
@@ -380,6 +391,7 @@ impl History {
             .ok_or(HistoryError::NoOngoingAction)?;
         let entities: SmallVec<[EntityId; 1]> = edit.lanes.iter().map(|(e, _)| *e).collect();
         let kind = edit.kind.clone();
+        let selection = edit.selection.clone();
         let label: Cow<'static, str> = edit
             .lanes
             .first()
@@ -387,7 +399,7 @@ impl History {
             .map_or(Cow::Borrowed("Action"), |s| s.label.clone());
 
         let ckpt = self.commit_action(request_id)?;
-        self.begin_action(entities, kind, label, request_id)?;
+        self.begin_action(entities, kind, label, request_id, selection)?;
         Ok(ckpt)
     }
 
@@ -406,6 +418,18 @@ impl History {
     /// host to fire one composition score per open edit.
     pub fn pending_request_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending.keys().copied()
+    }
+
+    /// Raw retained pulse data for every open edit: each edit's held lanes
+    /// paired with the per-entity residue selection it operates on. An empty
+    /// selection marks a whole-lane op; the caller (which owns the assembly)
+    /// expands it to every residue of each lane. Yielded in insertion order.
+    // Consumed only through `Session::pending_pulse_set`, whose own
+    // consumer is the viso pulse-overlay push.
+    pub(super) fn pending_pulse_data(&self) -> impl Iterator<Item = PulseData<'_>> + '_ {
+        self.pending
+            .values()
+            .map(|e| (e.lanes.as_slice(), &e.selection))
     }
 
     /// The lone open edit's request id, or `None` if zero or >1 edits are

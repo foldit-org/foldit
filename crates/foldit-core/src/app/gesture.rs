@@ -198,10 +198,13 @@ impl App {
             // Open the edit under the dispatch's request_id; the stream
             // table is keyed by the same id, so the terminal commit lands
             // on this edit.
-            if let Err(e) = self
-                .store
-                .begin_action([entity], kind, String::from("Pull"), rid)
-            {
+            if let Err(e) = self.store.begin_action(
+                [entity],
+                kind,
+                String::from("Pull"),
+                rid,
+                std::collections::BTreeMap::new(),
+            ) {
                 log::trace!("begin_pull_drag_from_route: begin_action skipped: {e}");
             }
         }
@@ -301,10 +304,10 @@ impl App {
         }
 
         if pending_escape {
-            // ESC is cancel-only.
-            #[cfg(not(target_arch = "wasm32"))]
-            self.runner_client.cancel_all_active_streams();
-            self.store.cancel_operations();
+            // ESC cancels everything cancellable (weight downloads excepted;
+            // see `cancel_streams`). Routes through the one cancel owner so it
+            // matches a toast's X button.
+            self.cancel_action(None, false);
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same

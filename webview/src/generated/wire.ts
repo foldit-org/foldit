@@ -11,7 +11,8 @@ export const BRIDGE_CONTRACT_VERSION = 1;
  *  One entry per row in the orchestrator's
  *  [`foldit_runner::orchestrator::CatalogEntry`] join. `display` and
  *  `icon_path` come from the plugin manifest's `[[buttons]]` array;
- *  `enabled` / `active` reflect the current orchestrator lock state;
+ *  `enabled` reflects the current orchestrator lock state (the running
+ *  state lives in [`ActionsSection::running`], keyed per live instance);
  *  `params` carries the typed schema declared on the plugin's
  *  `PluginOp.params` array (empty for click-to-fire ops).
  */
@@ -41,8 +42,6 @@ export type ActionInfo = {
 	icon_path: string,
 	/**  True when the op can be dispatched in the current lock state. */
 	enabled: boolean,
-	/**  True when an instance of this op is currently running. */
-	active: boolean,
 	/**
 	 *  Optional hotkey corner-badge string (winit `KeyCode` spelling,
 	 *  e.g. `"KeyW"`). `None` = no badge. Pressing the key does not
@@ -105,6 +104,17 @@ export type ActionOption = {
 /**  Available actions and their current state */
 export type ActionsSection = {
 	available: ActionInfo[],
+	/**
+	 *  Currently-running actions, one per held lock. Drives the per-instance
+	 *  cancel toasts and the buttons' running/cancel state.
+	 */
+	running: RunningAction[],
+	/**
+	 *  Raw id of the focused entity, or `None` for whole-session focus. Lets
+	 *  the frontend decide a button's running/cancel state: a button shows
+	 *  cancel when a `running` entry is `global` or locks this focused entity.
+	 */
+	focused_entity_id: number | null,
 	/**  Per-plugin group metadata, joined to `available` on `plugin_id`. */
 	groups: PluginGroupInfo[],
 	/**
@@ -215,7 +225,20 @@ export type AppCommand = { type: "SetViewOptions"; options: unknown } | { type: 
  *  the menu reads the projected map, so a reset round-trips through a
  *  tick.
  */
-{ type: "ClearProgress" };
+{ type: "ClearProgress" } | 
+/**
+ *  Cancel a running action from the GUI (a per-action toast X or a running
+ *  button's X). `request_id = Some(rid)` cancels exactly that one stream;
+ *  `refine = true` cancels the native B-factor refine (which is not a
+ *  stream and has no request-id); both unset cancels everything cancellable
+ *  (the ESC path). Drops any in-progress preview geometry either way.
+ */
+{ type: "CancelAction"; 
+/**
+ *  `u32` on the wire (specta forbids u64); matches
+ *  [`crate::state::RunningAction::request_id`].
+ */
+request_id: number | null; refine: boolean };
 
 /**
  *  Top-level GUI state machine: the App-lifetime lifecycle phase.
@@ -689,6 +712,36 @@ export type RFreeStatus = {
 export type RefineProgress = {
 	fraction: number | null,
 	label: string,
+};
+
+/**
+ *  One currently-running action, projected from a held lock (a live
+ *  orchestrator stream, or the native refine holding the global lock). The
+ *  single source of truth for the running UI: the per-instance cancel toasts
+ *  and each action button's cancel state both derive from this list, so a
+ *  button is "running" exactly when an entry here is `global` or locks the
+ *  focused entity.
+ */
+export type RunningAction = {
+	/**
+	 *  Dispatch request-id of the backing stream, used to cancel this one
+	 *  instance. `None` for the native refine, which is not a stream and is
+	 *  cancelled through the `refine` flag on [`crate::AppCommand::CancelAction`].
+	 *  `u32` on the wire (specta forbids u64); request-ids are a monotonic
+	 *  counter that never approaches the u32 ceiling.
+	 */
+	request_id: number | null,
+	/**  Op-id of the running action (joins to [`ActionInfo::op_id`]). */
+	op_id: string,
+	/**  Display label for the toast. */
+	display: string,
+	/**  Raw ids of the entities this action's lock holds. Empty when `global`. */
+	entities: number[],
+	/**
+	 *  True when the action holds the global lock (no specific entity): it
+	 *  blocks, and is blocked by, every other action.
+	 */
+	global: boolean,
 };
 
 /**  Information about a single entity in the scene */

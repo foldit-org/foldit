@@ -280,6 +280,13 @@ impl SessionUpdateConsumer for RenderProjector {
         if has_scores {
             Self::project_scores(doc, scores, engine);
         }
+
+        // Push the pulse overlay unconditionally every frame. The set is the
+        // union of residues under every open action, and empty when none is
+        // open, so this push both raises the overlay while an action runs and
+        // clears it (empty upload) the frame the action ends.
+        let pulse = doc.pending_pulse_set();
+        engine.set_pulsing_residues(&pulse);
     }
 }
 

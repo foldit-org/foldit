@@ -27,16 +27,19 @@ impl Session {
     /// caller already holds it). A single-entity action passes a
     /// one-element set; the multi-entity post-Init adoption passes
     /// the full touched set. Refused if any named entity has no committed
-    /// lane or already holds an open tentative.
+    /// lane or already holds an open tentative. `selection` is the per-entity
+    /// residue set the action operates on, retained on the pending edit for
+    /// the pulse overlay; an empty map marks a whole-lane op.
     pub fn begin_action(
         &mut self,
         entities: impl IntoIterator<Item = EntityId>,
         kind: CheckpointKind,
         label: impl Into<Cow<'static, str>>,
         request_id: u64,
+        selection: std::collections::BTreeMap<EntityId, BTreeSet<u32>>,
     ) -> Result<(), SessionError> {
         self.history
-            .begin_action(entities, kind, label.into(), request_id)?;
+            .begin_action(entities, kind, label.into(), request_id, selection)?;
         Ok(())
     }
 

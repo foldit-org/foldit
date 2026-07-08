@@ -300,7 +300,7 @@ fn promote_preview_emits_head_moved() {
 fn begin_action_emits_nothing() {
     let (mut store, id) = store_with_protein(2);
     store
-        .begin_action([id], wiggle(), "wiggle", 1)
+        .begin_action([id], wiggle(), "wiggle", 1, std::collections::BTreeMap::new())
         .expect("begin_action");
     assert!(store.take_updates().is_empty());
 }
@@ -315,7 +315,7 @@ fn action_update_emits_tentative_edit() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     let _ = store.take_updates();
 
@@ -350,7 +350,7 @@ fn commit_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     store
         .action_update(rid, None, None, None, |e| {
@@ -381,7 +381,7 @@ fn abort_action_emits_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     let _ = store.take_updates();
     store.abort_action(rid).expect("abort_action");
@@ -402,7 +402,7 @@ fn undo_then_redo_each_emit_head_moved() {
     let (mut store, id) = store_with_protein(2);
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
@@ -452,7 +452,7 @@ fn lane_undo_emits_head_moved() {
     let original = store.history().lane(id).expect("lane").head();
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     store
         .action_update(rid, None, None, None, |_| {})
@@ -539,7 +539,7 @@ fn set_edit_scores_emits_scores_changed() {
     let _ = store.take_updates();
     let rid = 1u64;
     store
-        .begin_action([id], wiggle(), "wiggle", rid)
+        .begin_action([id], wiggle(), "wiggle", rid, std::collections::BTreeMap::new())
         .expect("begin_action");
     let _ = store.take_updates();
 

@@ -174,15 +174,26 @@ impl RunnerClient {
         Some(plugin_id)
     }
 
-    /// Send a cancel to every in-flight stream's plugin. Used by the
-    /// ESC / `VisoCommand::ClearSelection` paths. Doesn't touch
-    /// `active_streams`: the terminal cleanup runs when the plugin's
-    /// `Cancelled` reply lands in the next drain.
-    pub(crate) fn cancel_all_active_streams(&mut self) {
+    /// Send a cancel to the plugin(s) behind in-flight streams. `only_rid =
+    /// Some(rid)` targets exactly that one stream (a per-action toast X, which
+    /// carries the instance's request-id); `None` cancels every action stream
+    /// EXCEPT weight downloads (the ESC / cancel-everything path — a download
+    /// is a background asset fetch, not an action, so a blanket cancel must
+    /// not abort it). A download is still cancellable by explicitly targeting
+    /// its request-id. Doesn't touch `active_streams`: terminal cleanup runs
+    /// when each plugin's `Cancelled` reply lands in the next drain.
+    pub(crate) fn cancel_streams(&mut self, only_rid: Option<u64>) {
         let Some(orch) = self.orchestrator.as_mut() else {
             return;
         };
         for (rid, entry) in &self.stream_host.active_streams {
+            let skip = match only_rid {
+                Some(target) => *rid != target,
+                None => entry.op_id == "download_weights",
+            };
+            if skip {
+                continue;
+            }
             if let Err(e) = orch.dispatch_cancel_stream(&entry.plugin_id, *rid) {
                 log::warn!(
                     "dispatch_cancel_stream plugin={} rid={rid} failed: {e}",
@@ -253,6 +264,7 @@ impl RunnerClient {
                     rid,
                     handle,
                     plugin_id,
+                    intent.op_id.clone(),
                     cached.lock_meta.creates_entities,
                     preview,
                 );
@@ -324,6 +336,7 @@ impl RunnerClient {
             rid,
             handle,
             plugin_id.to_owned(),
+            intent.op_id.clone(),
             cached.lock_meta.creates_entities,
             preview,
         );
@@ -340,6 +353,7 @@ impl RunnerClient {
         rid: u64,
         handle: foldit_runner::orchestrator::DispatchHandle,
         plugin_id: String,
+        op_id: String,
         creates_entities: bool,
         preview: bool,
     ) -> super::types::EditScope {
@@ -349,6 +363,7 @@ impl RunnerClient {
             ActiveStreamEntry {
                 handle,
                 plugin_id,
+                op_id,
                 creates_entities,
                 preview,
             },
@@ -407,6 +422,7 @@ impl RunnerClient {
             ActiveStreamEntry {
                 handle,
                 plugin_id: plugin_id.clone(),
+                op_id: intent.op_id.to_owned(),
                 // Pull-drag is an edit on an existing entity, never a
                 // create and never a preview.
                 creates_entities: false,

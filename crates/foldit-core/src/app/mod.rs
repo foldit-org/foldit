@@ -111,6 +111,13 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     refine_in_flight: bool,
 
+    /// Cancel signal for the running refine. The background thread's progress
+    /// callback returns `!load()` (so molex aborts the solve), and the thread
+    /// reads it after molex returns to report `Cancelled` rather than
+    /// `Failed`. Reset to `false` at each dispatch.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
     /// The dispatched refine's structural fingerprint (`(entity raw id, atom
     /// count)` per committed head entity, in flat order): the apply step
     /// discards the result if the committed model changed under it.
@@ -173,6 +180,7 @@ impl App {
             density_map_id: None,
             #[cfg(not(target_arch = "wasm32"))]
             refine_in_flight: false,
+            refine_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(not(target_arch = "wasm32"))]
             refine_fingerprint: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -468,17 +476,26 @@ impl App {
         }
 
         // The native b-factor-refine action is available only with a density
-        // load, a shared GPU device, and no refine already running. Kept live
-        // on the driver so the catalog's `enabled` reads the same state a
-        // dispatch would; a change re-projects the actions section.
+        // load, a shared GPU device, no refine already running, and NOTHING
+        // else locked - refine takes the global lock, so it needs every entity
+        // and the global lock free (symmetric to how a held global lock
+        // disables every other button). Kept live on the driver so the
+        // catalog's `enabled` reads the same state a dispatch would; a change
+        // re-projects the actions section.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let available = self.experimental_data.is_some()
                 && self.shared_device.is_some()
-                && !self.refine_in_flight;
+                && !self.refine_in_flight
+                && !self.runner_client.any_lock_or_global_held();
             if self.runner_client.set_refine_available(available) {
                 self.mark_dirty(DirtyFlags::ACTIONS);
             }
+            // Mirror refine-running so `running_actions` can surface refine as
+            // a synthetic running action. `refine_in_flight` transitions
+            // already dirty ACTIONS (dispatch start and every terminal), so no
+            // extra mark is needed here.
+            self.runner_client.set_refine_running(self.refine_in_flight);
         }
 
         // Drain the SessionUpdate stream once and route to projectors.

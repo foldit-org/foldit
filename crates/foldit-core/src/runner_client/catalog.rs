@@ -60,6 +60,10 @@ impl RunnerClient {
         // gate is folded into `enabled` below instead.
         let ctx = build_dispatch_context(focus, selection, &std::collections::BTreeMap::new());
 
+        // The running/cancel state is NOT on `ActionInfo`: it lives in the
+        // separate `running` list (one entry per held lock), which the
+        // frontend matches against the focused entity. That keeps a button's
+        // cancel state per-focus instead of global-by-op-id.
         let mut rows: Vec<ActionInfo> = orch
             .actions_catalog(&ctx, entity_type_of)
             .into_iter()
@@ -69,7 +73,6 @@ impl RunnerClient {
                 display: entry.display,
                 icon_path: entry.icon_path.to_string_lossy().into_owned(),
                 enabled: entry.enabled && (!entry.requires_designable || selection_designable),
-                active: false,
                 hotkey: entry.hotkey,
                 tooltip: entry.tooltip,
                 params: entry
@@ -129,7 +132,6 @@ impl RunnerClient {
                     .map(std::collections::BTreeSet::len)
                     .sum::<usize>()
                     == 1,
-            active: false,
             // Badge wire: the friendly glyph the frontend prettifies to "M".
             // The trailing dedup pass reconciles this against `resolve_hotkey`,
             // so the badge only survives if the key actually dispatches here.
@@ -149,7 +151,6 @@ impl RunnerClient {
             display: "B-factor Refine".to_owned(),
             icon_path: "builtin:cloud".to_owned(),
             enabled: self.refine_available,
-            active: false,
             hotkey: None,
             tooltip: Some("Refine per-atom B-factors against the loaded density".to_owned()),
             params: Vec::new(),
@@ -178,7 +179,6 @@ impl RunnerClient {
                 display: "Download weights".to_owned(),
                 icon_path: "builtin:download".to_owned(),
                 enabled: !matches!(state, WeightsState::Downloading { .. }),
-                active: false,
                 hotkey: None,
                 tooltip: Some("Download this plugin's model weights".to_owned()),
                 params: Vec::new(),
@@ -188,6 +188,51 @@ impl RunnerClient {
 
         self.reconcile_hotkey_badges(&mut rows);
         rows
+    }
+
+    /// Project the live streams into the GUI's [`RunningAction`] list: one
+    /// entry per held lock, carrying the request-id (to cancel just that
+    /// instance), the display label, and the locked entity set / global flag
+    /// (so the frontend can match a running action against the focused
+    /// entity). Weight downloads are excluded - they surface through their own
+    /// download toast, not the running-action list. The native refine is not
+    /// a stream and is appended by the projector, not here.
+    ///
+    /// [`RunningAction`]: foldit_gui::state::RunningAction
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn running_actions(&self) -> Vec<foldit_gui::state::RunningAction> {
+        let mut running: Vec<foldit_gui::state::RunningAction> = self
+            .stream_host
+            .active_streams
+            .iter()
+            .filter(|(_, e)| e.op_id != "download_weights")
+            .map(|(rid, e)| foldit_gui::state::RunningAction {
+                request_id: Some(*rid),
+                display: self
+                    .op_display(&e.plugin_id, &e.op_id)
+                    .unwrap_or_else(|| e.op_id.clone()),
+                op_id: e.op_id.clone(),
+                entities: e.handle.entities.iter().map(|id| id.raw()).collect(),
+                global: e.handle.global_held,
+            })
+            .collect();
+
+        // The native refine is not an orchestrator stream, so it never appears
+        // in `active_streams`; surface it as a synthetic global running action
+        // (it holds the global lock). `request_id: None` routes its cancel
+        // through the `refine` flag on `CancelAction`, not a stream teardown.
+        // Its progress toast rides `refine_progress`, so the frontend renders
+        // only its button cancel-state from this entry, not a second toast.
+        if self.refine_running {
+            running.push(foldit_gui::state::RunningAction {
+                request_id: None,
+                op_id: "refine_b".to_owned(),
+                display: "B-factor Refine".to_owned(),
+                entities: Vec::new(),
+                global: true,
+            });
+        }
+        running
     }
 
     /// Set whether the native B-factor-refine action is available, returning

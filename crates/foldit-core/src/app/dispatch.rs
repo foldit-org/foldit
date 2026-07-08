@@ -208,6 +208,9 @@ impl App {
             .op_display(&plugin_id, &op.op_id)
             .unwrap_or_else(|| op.op_id.clone());
         let intent = self.dispatch_intent_from_op(op.op_id.clone(), op.params, focused_entity_id);
+        // Retain the selection the action operates on before `intent` is moved
+        // into `dispatch_op`; it lands on the pending edit for the pulse overlay.
+        let action_selection = intent.selection.clone();
         let store = &self.store;
         let dispatch_outcome = self
             .runner_client
@@ -241,7 +244,7 @@ impl App {
             };
             match self
                 .store
-                .begin_action(lanes, kind, display.clone(), request_id)
+                .begin_action(lanes, kind, display.clone(), request_id, action_selection)
             {
                 Ok(()) => Some((request_id, seed_lane)),
                 Err(e) => {
@@ -262,7 +265,16 @@ impl App {
         let edit_token = edit_token.map(|(request_id, _)| request_id);
 
         match dispatch_outcome {
-            Ok(OpOutcome::Stream { request_id, .. }) => Some(request_id),
+            Ok(OpOutcome::Stream { request_id, .. }) => {
+                // The op now holds its lock and has a live stream. Re-project
+                // the action catalog so the other buttons disable and this
+                // op's own button flips to a running/cancel affordance; the
+                // tentative-edit stream frames only dirty SCENE, so without
+                // this the disabled state is never pushed until commit
+                // (by which point the lock is already released).
+                self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+                Some(request_id)
+            }
             Ok(OpOutcome::Invoke { bytes, .. }) => {
                 self.apply_invoke_result(&bytes, edit_token);
                 None
@@ -373,7 +385,10 @@ impl App {
             op_id: op.op_id.clone(),
             display: display.clone(),
         };
-        if let Err(e) = self.store.begin_action([eid], kind, display, rid) {
+        if let Err(e) = self
+            .store
+            .begin_action([eid], kind, display, rid, std::collections::BTreeMap::new())
+        {
             log::trace!("dispatch_native_mutate: begin_action skipped: {e}");
             return None;
         }
@@ -413,9 +428,10 @@ impl App {
     fn dispatch_native_refine(&mut self) -> Option<u64> {
         const N_MACRO_CYCLES: usize = 5;
 
-        // Refuse while a plugin operation holds a lock: applying the refined B
-        // on completion would race the in-flight edit.
-        if self.runner_client.any_lock_held() {
+        // Refuse while any operation holds a lock (entity or global): refine
+        // locks everything, so it needs a clean slate, and applying the
+        // refined B on completion would race any in-flight edit.
+        if self.runner_client.any_lock_or_global_held() {
             self.gui.push_notification(
                 foldit_gui::NotificationLevel::Error,
                 "Cannot refine while another operation is running".to_owned(),
@@ -461,7 +477,24 @@ impl App {
             .map(|e| (e.id().raw(), e.atom_count()))
             .collect();
 
+        // Take the global lock for the whole refine: it disables every entity
+        // and global action button (the catalog `enabled` rule keys off
+        // `is_global_locked`), and no action can start until refine releases
+        // it on its terminal. Placed after every precondition bail so no early
+        // return needs to unlock; `try_lock_global` is the authority (it also
+        // catches a global op that raced in past the guard above).
+        if !self.runner_client.lock_global_native("B-factor Refine") {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "Cannot refine while another operation is running".to_owned(),
+            );
+            return None;
+        }
+
         self.refine_in_flight = true;
+        // Arm a fresh cancel signal for this run.
+        self.refine_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.gui.actions.refine_progress = Some(foldit_gui::state::RefineProgress {
             fraction: 0.0,
             label: "Refining B-factors...".to_owned(),
@@ -469,8 +502,11 @@ impl App {
         self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
 
         let tx = self.refine_tx.clone();
+        let cancel = std::sync::Arc::clone(&self.refine_cancel);
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             let progress_tx = tx.clone();
+            let progress_cancel = std::sync::Arc::clone(&cancel);
             let result = molex::xtal::refine_b_from_atom_table_gpu(
                 &data,
                 &table,
@@ -482,15 +518,23 @@ impl App {
                         inner_iter,
                         inner_total,
                     });
+                    // Returning `false` aborts the molex solve.
+                    !progress_cancel.load(Ordering::Relaxed)
                 },
             );
-            let event = match result {
-                Some((full_b, r_work, r_free)) => RefineEvent::Done {
-                    full_b,
-                    r_work,
-                    r_free,
-                },
-                None => RefineEvent::Failed("B-factor refinement failed".to_owned()),
+            // A cancelled run comes back as `None` (the aborted solve); the
+            // flag tells it apart from a genuine failure.
+            let event = if cancel.load(Ordering::Relaxed) {
+                RefineEvent::Cancelled
+            } else {
+                match result {
+                    Some((full_b, r_work, r_free)) => RefineEvent::Done {
+                        full_b,
+                        r_work,
+                        r_free,
+                    },
+                    None => RefineEvent::Failed("B-factor refinement failed".to_owned()),
+                }
             };
             let _ = tx.send(event);
         });

@@ -297,6 +297,10 @@ pub struct StreamHost {
 pub struct ActiveStreamEntry {
     pub(crate) handle: foldit_runner::orchestrator::DispatchHandle,
     pub(crate) plugin_id: String,
+    /// Op-id that raised this stream. Lets the action-catalog projection mark
+    /// the originating button `active` (a running affordance) and lets a
+    /// per-op cancel target only this op's streams.
+    pub(crate) op_id: String,
     /// Whether the originating op declared `creates_entities`: its output is
     /// new entities to adopt, not an edit of an existing lane. Stamped onto
     /// every [`OpEvent`] this stream produces so `App` routes to the

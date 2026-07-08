@@ -163,6 +163,7 @@ mod selection_tests {
                 },
                 "w",
                 rid,
+                std::collections::BTreeMap::new(),
             )
             .expect("begin_action");
 
@@ -275,6 +276,7 @@ mod selection_tests {
                 },
                 "Init",
                 rid,
+                std::collections::BTreeMap::new(),
             )
             .expect("begin multi-lane edit");
         assert!(
@@ -372,6 +374,7 @@ mod selection_tests {
                 },
                 "Wiggle",
                 rid,
+                std::collections::BTreeMap::new(),
             )
             .expect("begin multi-lane edit");
         assert!(

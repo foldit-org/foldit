@@ -168,6 +168,34 @@ const ActionButtonWidget: Component = () => {
               }),
       };
 
+      // Is this action running in the currently-focused context? Grounded in
+      // the lock list: a `running` entry matches when it's global or locks the
+      // focused entity. If so, the button turns into a cancel "x" on a red
+      // background - clickable (overriding the lock's `!enabled`) and
+      // cancelling just that instance (its request_id, or the refine flag for
+      // the native refine). Every other button greys out via
+      // `disabled: !action.enabled`; a free focused entity is greenfield.
+      const focused = backendState.actions.focused_entity_id;
+      const runningMatch = backendState.actions.running.find(
+        (r) =>
+          r.op_id === action.op_id &&
+          (r.global || (focused != null && r.entities.includes(focused))),
+      );
+      if (runningMatch) {
+        item.iconNode = <Icons.X size={32} color="white" />;
+        item.content = undefined;
+        item.disabled = false;
+        item.progress = undefined;
+        item.color = 'cancel';
+        item.tooltip = 'Cancel';
+        item.onClick = () =>
+          appCommand(
+            runningMatch.request_id != null
+              ? { type: 'CancelAction', request_id: runningMatch.request_id, refine: false }
+              : { type: 'CancelAction', request_id: null, refine: true },
+          );
+      }
+
       let bucket = byPluginActions.get(action.plugin_id);
       if (!bucket) {
         bucket = [];

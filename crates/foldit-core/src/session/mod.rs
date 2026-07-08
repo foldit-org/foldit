@@ -322,6 +322,37 @@ impl Session {
         self.history.pending_request_ids()
     }
 
+    /// The per-residue set to pulse while actions are open: the union across
+    /// every open edit of the residues it operates on. An edit that retained a
+    /// non-empty selection contributes exactly those residues; an edit with an
+    /// empty selection is a whole-lane op and contributes every residue of each
+    /// lane it holds, resolved against the live assembly. Empty when no action
+    /// is open.
+    // Consumed by the viso pulse-overlay push.
+    #[must_use]
+    pub fn pending_pulse_set(&self) -> BTreeMap<EntityId, BTreeSet<u32>> {
+        let mut out: BTreeMap<EntityId, BTreeSet<u32>> = BTreeMap::new();
+        let mut assembly: Option<Assembly> = None;
+        for (lanes, selection) in self.history.pending_pulse_data() {
+            if selection.is_empty() {
+                let asm = assembly.get_or_insert_with(|| self.head_assembly());
+                for (entity_id, _) in lanes {
+                    if let Some(entity) = asm.entities().iter().find(|e| e.id() == *entity_id) {
+                        let count = u32::try_from(entity.residue_count()).unwrap_or(u32::MAX);
+                        out.entry(*entity_id).or_default().extend(0..count);
+                    }
+                }
+            } else {
+                for (entity_id, residues) in selection {
+                    out.entry(*entity_id)
+                        .or_default()
+                        .extend(residues.iter().copied());
+                }
+            }
+        }
+        out
+    }
+
     /// The lone open edit's request id, or `None` if zero or >1 edits are
     /// open.
     #[must_use]

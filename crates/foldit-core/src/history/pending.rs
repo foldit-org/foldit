@@ -14,6 +14,8 @@
 //! committed checkpoint). A lane appears in at most one pending edit at a
 //! time.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use molex::entity::molecule::id::EntityId;
 use smallvec::SmallVec;
 
@@ -26,6 +28,12 @@ pub struct PendingEdit {
     /// snapshot. One entry in the single-entity case; the `SmallVec`
     /// capacity anticipates multi-lane fan-out without a heap alloc.
     pub(crate) lanes: SmallVec<[(EntityId, EntitySnapshotId); 1]>,
+    /// The per-entity residue set this action operates on, retained from
+    /// the dispatch selection so the open edit's lifetime doubles as the
+    /// pulse-overlay's lifetime. Entity-local 0-based residue indices. An
+    /// empty map means a whole-lane op: every residue of each held lane
+    /// participates, resolved against the live assembly by the consumer.
+    pub(crate) selection: BTreeMap<EntityId, BTreeSet<u32>>,
     /// The action kind, mirrored onto the checkpoint minted at commit.
     pub(crate) kind: CheckpointKind,
     /// Live raw (REU) score streamed into the open composition. `None`

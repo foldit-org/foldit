@@ -538,6 +538,26 @@ impl Orchestrator {
         self.locks.locked_entities()
     }
 
+    /// Acquire the global lock for a host-native op (the B-factor refine),
+    /// returning `true` on success. Fails if any entity lock or the global
+    /// lock is already held, so a native global op needs everything free -
+    /// the same mutual exclusion a plugin global op gets. `label` is kept for
+    /// lock-conflict diagnostics. Release with [`Self::unlock_global`].
+    pub fn try_lock_global(&mut self, label: &str) -> bool {
+        self.locks.try_lock_global(label).is_some()
+    }
+
+    /// Release the global lock if held. Idempotent.
+    pub fn unlock_global(&mut self) {
+        self.locks.unlock_global();
+    }
+
+    /// Whether the global lock is currently held.
+    #[must_use]
+    pub fn is_global_locked(&self) -> bool {
+        self.locks.is_global_locked()
+    }
+
     /// Plugin id that originated a running stream, or `None` if the
     /// stream has already terminated or never existed. Lookup is into
     /// the `stream_plugins` map maintained by `dispatch_start_stream`

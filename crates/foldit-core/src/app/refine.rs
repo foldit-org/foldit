@@ -27,6 +27,9 @@ pub(in crate::app) enum RefineEvent {
         r_free: f64,
     },
     Failed(String),
+    /// The user cancelled the refine (its toast X or ESC). Clears the toast
+    /// without applying a partial result or raising an error.
+    Cancelled,
 }
 
 impl App {
@@ -69,16 +72,38 @@ impl App {
                     }
                     self.gui.actions.refine_progress = None;
                     self.refine_in_flight = false;
+                    self.runner_client.unlock_global_native();
                     self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
                 }
                 RefineEvent::Failed(msg) => {
                     self.gui.actions.refine_progress = None;
                     self.refine_in_flight = false;
+                    self.runner_client.unlock_global_native();
                     self.gui
                         .push_notification(foldit_gui::NotificationLevel::Error, msg);
                     self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
                 }
+                RefineEvent::Cancelled => {
+                    // User-initiated: drop the toast quietly, no error, no
+                    // partial apply.
+                    self.gui.actions.refine_progress = None;
+                    self.refine_in_flight = false;
+                    self.runner_client.unlock_global_native();
+                    self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+                }
             }
+        }
+    }
+
+    /// Request cancellation of the running refine (its toast X, or ESC). Flips
+    /// the shared flag the background thread's progress callback polls; the
+    /// thread then unwinds molex and reports [`RefineEvent::Cancelled`]. A
+    /// no-op when no refine is in flight.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn request_refine_cancel(&self) {
+        if self.refine_in_flight {
+            self.refine_cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -138,7 +163,10 @@ impl App {
             op_id: "refine_b".to_owned(),
             display: "Refine B".to_owned(),
         };
-        if let Err(e) = self.store.begin_action(head_ids, kind, "Refine B", rid) {
+        if let Err(e) =
+            self.store
+                .begin_action(head_ids, kind, "Refine B", rid, std::collections::BTreeMap::new())
+        {
             log::warn!("refine apply: begin_action failed: {e}");
             self.gui.push_notification(
                 foldit_gui::NotificationLevel::Error,
