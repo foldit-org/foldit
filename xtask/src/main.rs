@@ -306,6 +306,7 @@ fn setup_envs() -> Result<()> {
     println!("Building foldit-python-host dylib...");
     let status = Command::new("cargo")
         .args(["build", "-p", "foldit-python-host"])
+        .env("PYO3_PYTHON", python_host_build_python()?)
         .status()?;
     if !status.success() {
         anyhow::bail!("Failed to build foldit-python-host");
@@ -336,6 +337,30 @@ fn plugin_env_dirs() -> Result<Vec<std::path::PathBuf>> {
         dirs.push(dummy);
     }
     Ok(dirs)
+}
+
+/// Path to the conda-forge CPython 3.12 that foldit-python-host links libpython
+/// against, provisioned by the build-only pixi env at `python-host/`. Installs
+/// that env on first use, so building the host never depends on a system
+/// python being present. Set as `PYO3_PYTHON` on the python-host cargo build.
+fn python_host_build_python() -> Result<std::path::PathBuf> {
+    let host_dir = std::path::Path::new("crates/foldit-runner/python-host");
+    let py = if cfg!(target_os = "windows") {
+        host_dir.join(".pixi/envs/default/python.exe")
+    } else {
+        host_dir.join(".pixi/envs/default/bin/python3.12")
+    };
+    if !py.is_file() {
+        println!("  Provisioning the python-host build env (pixi install)...");
+        let status =
+            Command::new("pixi").arg("install").current_dir(host_dir).status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to provision the python-host build env");
+        }
+    }
+    // Absolute: pyo3-ffi's build script runs from its own cwd, so a relative
+    // PYO3_PYTHON would not resolve.
+    canonical_clean(&py)
 }
 
 fn build_molex() -> Result<()> {
@@ -526,7 +551,12 @@ fn assemble() -> Result<()> {
     ];
     for (desc, args) in builds {
         println!("  cargo {}", args.join(" "));
-        let status = Command::new("cargo").args(args).status()?;
+        let mut cmd = Command::new("cargo");
+        cmd.args(args);
+        if desc == "foldit-python-host" {
+            cmd.env("PYO3_PYTHON", python_host_build_python()?);
+        }
+        let status = cmd.status()?;
         if !status.success() {
             anyhow::bail!("Failed to build {desc}");
         }
@@ -755,7 +785,10 @@ fn build_host(debug: bool) -> Result<()> {
     println!("  Building foldit-python-host dylib...");
     let mut host_args = vec!["build", "-p", "foldit-python-host"];
     host_args.extend_from_slice(profile_flag);
-    let status = Command::new("cargo").args(&host_args).status()?;
+    let status = Command::new("cargo")
+        .args(&host_args)
+        .env("PYO3_PYTHON", python_host_build_python()?)
+        .status()?;
     if !status.success() {
         anyhow::bail!("Failed to build foldit-python-host");
     }

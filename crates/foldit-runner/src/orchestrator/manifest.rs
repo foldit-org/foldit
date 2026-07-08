@@ -761,7 +761,7 @@ mod tests {
     fn parses_on_disk_rosetta() {
         let toml = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("plugins")
+                .join("../../plugins")
                 .join("rosetta")
                 .join("plugin.toml"),
         )

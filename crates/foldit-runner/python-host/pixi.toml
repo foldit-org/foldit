@@ -1,0 +1,18 @@
+# Build-only environment for foldit-python-host.
+#
+# This crate EMBEDS CPython (it links libpython via pyo3), so building it needs
+# a CPython 3.12 to link against. Rather than depend on a system python being
+# installed, pixi provisions the conda-forge CPython 3.12 here — the same
+# distribution the plugin envs use, so the linked ABI matches exactly. pyo3
+# finds it via `PYO3_PYTHON` (the build drivers point it at this env's python).
+#
+# This is NOT a plugin and NOT a runtime env: at runtime the host loads the
+# plugin env's libpython off the loader path, never this one. `pixi install`
+# here materializes `.pixi/envs/default` with just python 3.12.
+[workspace]
+name = "foldit-python-host-buildenv"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = "3.12.*"

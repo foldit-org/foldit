@@ -24,16 +24,19 @@ test:
     #!/usr/bin/env bash
     set -euo pipefail
     # The dummy python plugin (round-trip fixture) owns its env at
-    # tests/fixtures/dummy/.pixi/envs/dummy. python-host's build.rs also needs
-    # an env present to link libpython.
+    # tests/fixtures/dummy/.pixi/envs/dummy; the round-trip tests spawn a
+    # worker that loads it at runtime.
     [ -d tests/fixtures/dummy/.pixi/envs/dummy ] || (cd tests/fixtures/dummy && pixi install -e dummy)
+    # python-host embeds CPython, so it links libpython against the conda-forge
+    # 3.12 from python-host's build-only pixi env, pointed at via PYO3_PYTHON.
+    [ -d python-host/.pixi/envs/default ] || (cd python-host && pixi install)
     # python-host is a parent-workspace member, so it builds to the PARENT
     # target, NOT next to the crate-target foldit-worker the tests spawn.
     # Build it AND the worker from the root workspace, then point
     # FOLDIT_PYTHON_HOST_DYLIB / FOLDIT_WORKER_BIN at the root-target
     # artifacts (resolved by plugin/mod.rs::locate_python_host_dylib and the
     # test's worker_binary_path).
-    cargo build --manifest-path ../../Cargo.toml -p foldit-python-host
+    PYO3_PYTHON="$(pwd)/python-host/.pixi/envs/default/bin/python3.12" cargo build --manifest-path ../../Cargo.toml -p foldit-python-host
     cargo build --manifest-path ../../Cargo.toml -p foldit-runner --bin foldit-worker
     case "$(uname -s)" in
         Darwin) lib=libfoldit_python_host.dylib ;;
