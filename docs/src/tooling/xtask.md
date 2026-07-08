@@ -6,16 +6,44 @@ subdirectory. The full command set (`xtask/src/main.rs`):
 
 | Command | What it does |
 | --- | --- |
-| `setup-envs` | Install the plugin Python environments in `crates/foldit-runner` |
-| `build-rosetta-interactive [--clean]` | Build Rosetta from the rosetta-interactive checkout; `--clean` wipes the cmake build dir first |
+| `setup` | Fresh-clone bootstrap: `build-host` (release) then `setup-plugins` (all). One command to make `cargo run` work |
+| `setup-plugins [id] [--from-source] [--clean]` | Walk `plugins/`, read each plugin's `plugin.build.toml`, and run the setup it declares (native binary, pixi env, panel UI). Optional `id` restricts to one plugin; default = all |
 | `package [--formats <list>] [--skip-assembly]` | The desktop production path: assemble the staging payload, then build OS installers via cargo-packager |
-| `build-molex` | Rebuild the molex Python extension from local source |
+| `build-molex` | Rebuild the molex Python extension into the plugin pixi environments |
 | `build-gui` | Build the front end (`bun run build`) and copy the dist into `assets/gui` |
-| `build-rosetta-ui` | Build the Rosetta plugin's panel ES module (`bun run build` in the plugin's `ui/` dir) |
 | `build-host [--debug]` | Build the backend host artifacts (`foldit-worker` + the python-host dylib) into `target/<profile>/` next to the desktop exe |
 | `build-web [--debug]` | Build the `foldit-web` cdylib, run wasm-bindgen, emit JS glue to `webview/public/pkg/` (requires the nightly toolchain) |
 | `package-web` | The web production path: build the wasm artifact and run `bun run build:web` to produce a static site |
 | `transcribe-filters` | One-shot, idempotent transcription of legacy Rosetta puzzle filter/design-mask files into the curated level TOML |
+
+## setup and setup-plugins
+
+`cargo xtask setup` is the fresh-clone bootstrap: it builds the backend host
+(release) and then provisions every plugin, so a clean checkout reaches a
+runnable state in one command.
+
+`setup-plugins` is the generic, per-plugin engine underneath it. It walks
+`plugins/`, reads each plugin's `plugin.build.toml`, and runs whatever that
+descriptor declares — dispatching by section rather than by hardcoded per-plugin
+commands:
+
+- `[native]` — runs the plugin's own build recipe (declared as
+  `recipe = "..."`), invoked with a `FOLDIT_*` env contract
+  (`FOLDIT_WORKSPACE_ROOT`, `FOLDIT_MOLEX_DIR`, `FOLDIT_PROTO_DIR`,
+  `FOLDIT_ABI_INCLUDE_DIR`, `FOLDIT_TARGET_TRIPLE`, `FOLDIT_PLUGIN_DIR`,
+  `FOLDIT_LOCAL_DIR`). The recipe installs its binary into the plugin's `local/`
+  dir. **The build is skipped when a binary already resolves** (a committed
+  `prebuilt/<target-triple>/` fallback or a prior `local/` build); pass
+  `--from-source` (or `--clean`, which implies it) to force a rebuild. So the
+  from-source native build is opt-in — the committed fallback is the default.
+- `[python]` — always runs `pixi install --all` in the plugin dir (Python
+  environments are solved locally, never vendored).
+- `[ui]` — runs `bun install` + `bun run build` for the plugin's panel module.
+  Also skipped when the built module is already present unless forced (the panel
+  is vendored alongside the native binary).
+
+xtask holds no plugin-specific build knowledge: the Rosetta cmake/molex recipe
+lives in `plugins/rosetta/scripts/build.sh`, owned by the plugin repo.
 
 ## build-host
 
@@ -39,5 +67,5 @@ for fast iteration on packaging config. See
 ## pixi aliases
 
 The root `pixi.toml` exposes thin aliases over a subset of these commands
-(`setup-envs`, `build-rosetta-interactive`, `package`, `build-host`,
-`build-web`). They are conveniences; the work is done by xtask either way.
+(`setup`, `setup-plugins`, `package`, `build-host`, `build-web`). They are
+conveniences; the work is done by xtask either way.

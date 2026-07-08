@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-72710268.js";
+            window.path_to_searchindex_js = "searchindex-70c37fe9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-337fa47a.js"></script>
@@ -253,29 +253,30 @@ structure later through the UI:</p>
 <pre><code class="language-bash">cargo run
 </code></pre>
 <h2 id="controls"><a class="header" href="#controls">Controls</a></h2>
-<p>The desktop key and mouse bindings (from <code>crates/foldit-desktop/src/main.rs</code>):</p>
+<p>Built-in camera, focus, and selection controls (handled by the engine and core,
+not the binary):</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Input</th><th>Action</th></tr>
 </thead>
 <tbody>
-<tr><td><code>W</code></td><td>Wiggle (Rosetta minimize; toggle)</td></tr>
-<tr><td><code>S</code></td><td>Shake (Rosetta repack sidechains; toggle)</td></tr>
-<tr><td><code>P</code></td><td>Predict (structure prediction)</td></tr>
-<tr><td><code>M</code></td><td>MPNN (design a sequence for the structure)</td></tr>
-<tr><td><code>I</code></td><td>Toggle water and ion visibility</td></tr>
 <tr><td><code>Q</code></td><td>Recenter the camera on the focused entity</td></tr>
-<tr><td><code>T</code></td><td>Toggle trajectory playback (load with <code>--trajectory &lt;path.dcd&gt;</code>)</td></tr>
-<tr><td><code>Tab</code></td><td>Cycle focus (whole session, then each entity, then back)</td></tr>
-<tr><td><code>`</code></td><td>Reset focus to the full scene</td></tr>
-<tr><td><code>Esc</code></td><td>Cancel operation / clear selection / clear bands</td></tr>
+<tr><td><code>Tab</code></td><td>Cycle focus (whole session, then each entity, then back); over a hovered residue, toggle its segment-info panel</td></tr>
+<tr><td><code>`</code></td><td>Reset focus to the whole scene</td></tr>
+<tr><td><code>Esc</code></td><td>Cancel the in-progress operation</td></tr>
 <tr><td>Left-drag on a residue</td><td>Pull</td></tr>
 <tr><td>Right-drag residue to residue</td><td>Create a band</td></tr>
 <tr><td>Mouse</td><td>Rotate / zoom the camera</td></tr>
 </tbody>
 </table>
 </div>
+<p>Action hotkeys are not hardcoded in the binary. Each plugin declares its own in
+its <code>plugin.toml</code> manifest, as a <code>hotkey</code> field on a button using the winit
+<code>KeyCode</code> spelling (<code>hotkey = "KeyW"</code>). The Rosetta plugin, for example, binds
+<code>W</code> to Wiggle, <code>S</code> to Shake, and <code>B</code> to Rebuild. On the desktop build a key
+press is resolved to the owning plugin op and dispatched; if two plugins claim
+the same key, the first one registered wins.</p>
 <h2 id="release-build"><a class="header" href="#release-build">Release build</a></h2>
 <pre><code class="language-bash">cargo build --release
 </code></pre>
@@ -1044,9 +1045,9 @@ builds. The worker finds it next to its own executable by default. When the
 dylib ships as a packaged resource instead, the desktop binary sets
 <code>FOLDIT_PYTHON_HOST_DYLIB</code> to its absolute path (inherited by the worker) during
 bundle-resource resolution. See <a href="#foldit-desktop">foldit-desktop</a>.</p>
-<p>The Python environments themselves are managed by pixi inside the runner
-submodule, not by the root pixi project; see
-<a href="#xtask-commands">xtask Commands</a> (<code>setup-envs</code>).</p>
+<p>The Python environments themselves are managed by pixi, one per plugin (each
+plugin’s own <code>pixi.toml</code>), not by the root pixi project; they are provisioned by
+<code>cargo xtask setup-plugins</code>. See <a href="#xtask-commands">xtask Commands</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="plugin-sdk-and-protocol"><a class="header" href="#plugin-sdk-and-protocol">Plugin SDK and Protocol</a></h1>
 <p><strong>foldit-plugin-sdk</strong> (the <code>crates/foldit-plugin-sdk</code> submodule) defines the
@@ -1066,7 +1067,9 @@ skeleton; that text is stale relative to the code.)</p>
 <li>A <code>[native]</code> or <code>[python]</code> block naming the binary or entry module.</li>
 <li><code>[[buttons]]</code> – user-facing action buttons. Each <code>op</code> matches a bridge action
 row; the entry also carries display text, an icon, an optional hotkey badge,
-and a tooltip.</li>
+and a tooltip. On the desktop build a hotkey press resolves to the owning op
+and dispatches (first registered binding wins if two plugins claim the same
+key); on the web build the badge renders but key dispatch is not yet wired.</li>
 <li><code>[[panels]]</code> – plugin-contributed UI panels. Each <code>entry</code> is a manifest-
 relative ES module path that the front end dynamically imports, deriving a
 launcher button from it. The runner resolves icon paths to absolute.</li>
@@ -1089,8 +1092,9 @@ currently a placeholder, and the manifest’s hotkey badges render but are not
 yet wired to dispatch.</li>
 </ul>
 <h2 id="es-module-build"><a class="header" href="#es-module-build">ES module build</a></h2>
-<p>Plugin panel modules are built with <code>cargo xtask build-rosetta-ui</code> (a <code>bun run build</code> in the plugin’s <code>ui/</code> directory) and copied into the staging bundle by
-<code>cargo xtask package</code>. See <a href="#xtask-commands">xtask Commands</a>.</p>
+<p>Plugin panel modules are built by <code>cargo xtask setup-plugins &lt;id&gt;</code> (a <code>bun run build</code> in the plugin’s <code>ui/</code> directory, from the <code>[ui]</code> section of its
+<code>plugin.build.toml</code>) and copied into the staging bundle by <code>cargo xtask package</code>. A prebuilt copy is committed as the default, so the build is skipped
+unless <code>--from-source</code> is passed. See <a href="#xtask-commands">xtask Commands</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="quality-gates"><a class="header" href="#quality-gates">Quality Gates</a></h1>
 <p>The <code>justfile</code> collects the workspace checks. <code>just check-all</code> runs the four
@@ -1145,12 +1149,11 @@ subdirectory. The full command set (<code>xtask/src/main.rs</code>):</p>
 <tr><th>Command</th><th>What it does</th></tr>
 </thead>
 <tbody>
-<tr><td><code>setup-envs</code></td><td>Install the plugin Python environments in <code>crates/foldit-runner</code></td></tr>
-<tr><td><code>build-rosetta-interactive [--clean]</code></td><td>Build Rosetta from the rosetta-interactive checkout; <code>--clean</code> wipes the cmake build dir first</td></tr>
+<tr><td><code>setup</code></td><td>Fresh-clone bootstrap: <code>build-host</code> (release) then <code>setup-plugins</code> (all). One command to make <code>cargo run</code> work</td></tr>
+<tr><td><code>setup-plugins [id] [--from-source] [--clean]</code></td><td>Walk <code>plugins/</code>, read each plugin’s <code>plugin.build.toml</code>, and run the setup it declares (native binary, pixi env, panel UI). Optional <code>id</code> restricts to one plugin; default = all</td></tr>
 <tr><td><code>package [--formats &lt;list&gt;] [--skip-assembly]</code></td><td>The desktop production path: assemble the staging payload, then build OS installers via cargo-packager</td></tr>
-<tr><td><code>build-molex</code></td><td>Rebuild the molex Python extension from local source</td></tr>
+<tr><td><code>build-molex</code></td><td>Rebuild the molex Python extension into the plugin pixi environments</td></tr>
 <tr><td><code>build-gui</code></td><td>Build the front end (<code>bun run build</code>) and copy the dist into <code>assets/gui</code></td></tr>
-<tr><td><code>build-rosetta-ui</code></td><td>Build the Rosetta plugin’s panel ES module (<code>bun run build</code> in the plugin’s <code>ui/</code> dir)</td></tr>
 <tr><td><code>build-host [--debug]</code></td><td>Build the backend host artifacts (<code>foldit-worker</code> + the python-host dylib) into <code>target/&lt;profile&gt;/</code> next to the desktop exe</td></tr>
 <tr><td><code>build-web [--debug]</code></td><td>Build the <code>foldit-web</code> cdylib, run wasm-bindgen, emit JS glue to <code>webview/public/pkg/</code> (requires the nightly toolchain)</td></tr>
 <tr><td><code>package-web</code></td><td>The web production path: build the wasm artifact and run <code>bun run build:web</code> to produce a static site</td></tr>
@@ -1158,6 +1161,32 @@ subdirectory. The full command set (<code>xtask/src/main.rs</code>):</p>
 </tbody>
 </table>
 </div>
+<h2 id="setup-and-setup-plugins"><a class="header" href="#setup-and-setup-plugins">setup and setup-plugins</a></h2>
+<p><code>cargo xtask setup</code> is the fresh-clone bootstrap: it builds the backend host
+(release) and then provisions every plugin, so a clean checkout reaches a
+runnable state in one command.</p>
+<p><code>setup-plugins</code> is the generic, per-plugin engine underneath it. It walks
+<code>plugins/</code>, reads each plugin’s <code>plugin.build.toml</code>, and runs whatever that
+descriptor declares — dispatching by section rather than by hardcoded per-plugin
+commands:</p>
+<ul>
+<li><code>[native]</code> — runs the plugin’s own build recipe (declared as
+<code>recipe = "..."</code>), invoked with a <code>FOLDIT_*</code> env contract
+(<code>FOLDIT_WORKSPACE_ROOT</code>, <code>FOLDIT_MOLEX_DIR</code>, <code>FOLDIT_PROTO_DIR</code>,
+<code>FOLDIT_ABI_INCLUDE_DIR</code>, <code>FOLDIT_TARGET_TRIPLE</code>, <code>FOLDIT_PLUGIN_DIR</code>,
+<code>FOLDIT_LOCAL_DIR</code>). The recipe installs its binary into the plugin’s <code>local/</code>
+dir. <strong>The build is skipped when a binary already resolves</strong> (a committed
+<code>prebuilt/&lt;target-triple&gt;/</code> fallback or a prior <code>local/</code> build); pass
+<code>--from-source</code> (or <code>--clean</code>, which implies it) to force a rebuild. So the
+from-source native build is opt-in — the committed fallback is the default.</li>
+<li><code>[python]</code> — always runs <code>pixi install --all</code> in the plugin dir (Python
+environments are solved locally, never vendored).</li>
+<li><code>[ui]</code> — runs <code>bun install</code> + <code>bun run build</code> for the plugin’s panel module.
+Also skipped when the built module is already present unless forced (the panel
+is vendored alongside the native binary).</li>
+</ul>
+<p>xtask holds no plugin-specific build knowledge: the Rosetta cmake/molex recipe
+lives in <code>plugins/rosetta/scripts/build.sh</code>, owned by the plugin repo.</p>
 <h2 id="build-host"><a class="header" href="#build-host">build-host</a></h2>
 <p><code>build-host</code> matters for day-to-day desktop work. A plain <code>cargo run</code> rebuilds
 neither the worker nor the python-host dylib: the worker is a workspace-excluded
@@ -1175,8 +1204,8 @@ for fast iteration on packaging config. See
 <a href="#assets-and-bundling">Assets and Bundling</a>.</p>
 <h2 id="pixi-aliases"><a class="header" href="#pixi-aliases">pixi aliases</a></h2>
 <p>The root <code>pixi.toml</code> exposes thin aliases over a subset of these commands
-(<code>setup-envs</code>, <code>build-rosetta-interactive</code>, <code>package</code>, <code>build-host</code>,
-<code>build-web</code>). They are conveniences; the work is done by xtask either way.</p>
+(<code>setup</code>, <code>setup-plugins</code>, <code>package</code>, <code>build-host</code>, <code>build-web</code>). They are
+conveniences; the work is done by xtask either way.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="assets-and-bundling"><a class="header" href="#assets-and-bundling">Assets and Bundling</a></h1>
 <h2 id="asset-layout"><a class="header" href="#asset-layout">Asset layout</a></h2>
@@ -1289,22 +1318,6 @@ requests. See <a href="#state-and-the-gui-bridge">State and the GUI Bridge</a>.<
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

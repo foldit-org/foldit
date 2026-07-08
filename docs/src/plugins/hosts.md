@@ -37,6 +37,6 @@ dylib ships as a packaged resource instead, the desktop binary sets
 `FOLDIT_PYTHON_HOST_DYLIB` to its absolute path (inherited by the worker) during
 bundle-resource resolution. See [foldit-desktop](../crates/foldit-desktop.md).
 
-The Python environments themselves are managed by pixi inside the runner
-submodule, not by the root pixi project; see
-[xtask Commands](../tooling/xtask.md) (`setup-envs`).
+The Python environments themselves are managed by pixi, one per plugin (each
+plugin's own `pixi.toml`), not by the root pixi project; they are provisioned by
+`cargo xtask setup-plugins`. See [xtask Commands](../tooling/xtask.md).

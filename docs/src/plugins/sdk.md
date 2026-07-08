@@ -47,6 +47,8 @@ the `/plugins/<id>/<entry>` URL the release asset protocol is allowed to serve.
 
 ## ES module build
 
-Plugin panel modules are built with `cargo xtask build-rosetta-ui` (a `bun run
-build` in the plugin's `ui/` directory) and copied into the staging bundle by
-`cargo xtask package`. See [xtask Commands](../tooling/xtask.md).
+Plugin panel modules are built by `cargo xtask setup-plugins <id>` (a `bun run
+build` in the plugin's `ui/` directory, from the `[ui]` section of its
+`plugin.build.toml`) and copied into the staging bundle by `cargo xtask
+package`. A prebuilt copy is committed as the default, so the build is skipped
+unless `--from-source` is passed. See [xtask Commands](../tooling/xtask.md).
