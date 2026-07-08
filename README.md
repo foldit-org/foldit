@@ -22,11 +22,20 @@ host (`foldit-worker` + the Python host dylib) and the plugins are built
 out-of-band by `xtask`. The fresh-clone path:
 
 ```bash
-cd webview && bun install && cd ..   # GUI frontend deps (once, and when they change)
-cargo xtask setup                    # backend host (release) + every plugin
-cargo run --release -- 1bfe          # load a structure by PDB id (or a file path)
-cargo run --release                  # no argument: start at the menus
+git submodule update --init --recursive   # viso/molex/sdk + plugin submodules
+cd webview && bun install && cd ..        # GUI frontend deps (once, and when they change)
+cargo xtask setup                         # backend host (release) + every plugin
+cargo run --release -- 1bfe               # load a structure by PDB id (or a file path)
+cargo run --release                       # no argument: start at the menus
 ```
+
+The explicit `--init --recursive` (rather than relying on a `submodule.recurse`
+git config, which differs between machines) clones the crates foldit builds
+against (viso, molex, the plugin SDK) and the plugin submodules, including
+`plugins/rosetta` with its committed binary and database. The Rosetta *source*
+(`plugins/rosetta/deps/rosetta-interactive`) is deliberately **not** a submodule
+-- a committed gitlink would be pulled by any recursive clone -- so `--recursive`
+does not pull it; it is cloned on demand only by a `--from-source` build (below).
 
 `cargo xtask setup` builds the host and provisions all plugins. The native
 Rosetta plugin ships a **committed prebuilt binary + database** per platform, so
@@ -54,10 +63,10 @@ without webview overlay" in the log).
 The Rosetta plugin is native code. Its per-platform shared library and 251 MB
 database are **committed into the plugin repo** (`plugins/rosetta/prebuilt/
 <target-triple>/` and `assets/database/`), so a fresh clone runs without a
-Rosetta build. The ~25 GB Rosetta source (`deps/rosetta-interactive`) is an
-opt-in submodule (`update = none`), so a recursive clone does **not** pull it —
-you only need it to build from source. To rebuild from source (needs a C++
-toolchain):
+Rosetta build. The Rosetta source (`deps/rosetta-interactive`, several GB to
+clone and much larger once built) is **not** a submodule (a gitlink would be
+pulled by any recursive clone); it is cloned on demand only when you build from
+source. To rebuild from source (needs a C++ toolchain):
 
 ```bash
 cargo xtask setup-plugins rosetta --from-source
