@@ -10,6 +10,3 @@
 [submodule "crates/foldit-plugin-sdk"]
 	path = crates/foldit-plugin-sdk
 	url = https://github.com/foldit-org/foldit-plugin-sdk
-[submodule "plugins/deps/foundry"]
-	path = plugins/deps/foundry
-	url = https://github.com/foldit-org/foundry
