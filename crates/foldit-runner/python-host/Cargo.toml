@@ -1,0 +1,50 @@
+[package]
+name = "foldit-python-host"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andreas Petrides"]
+license = "MIT"
+repository = "https://github.com/foldit-org/foldit-runner"
+keywords = ["protein", "folding", "molecular"]
+categories = ["science"]
+readme = "../README.md"
+publish = false
+description = "Python plugin host for foldit-worker. Loaded as a dylib via libloading only when the worker hosts a Python plugin; links libpython so libpython only joins the process when this dylib is loaded."
+
+[lib]
+name = "foldit_python_host"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Path-dep on foldit-runner: Plugin trait, proto types, orchestrator
+# types (DispatchContext, ParamValue, etc.), C ABI struct defs.
+foldit-runner = { path = ".." }
+
+# The Plugin trait returns `foldit_plugin_sdk::Result<_, PluginError>`, and
+# this crate's `impl Plugin for PyPlugin` builds those error values directly
+# (foldit-runner does not re-export PluginError / the SDK Result alias).
+foldit-plugin-sdk = "0.1.4"
+
+# Pyo3 lives here, NOT in foldit-runner. This crate is what brings
+# libpython into the process when it's dlopened.
+pyo3 = { version = "0.29", features = ["extension-module"] }
+
+# Encoding the registration / score / poll_stream payloads via prost.
+prost = "0.13"
+
+log = "0.4"
+anyhow = "1.0"
+
+# Windows-only: library.rs configures the DLL search path (SetDefaultDllDirectories
+# / AddDllDirectory) so libpython and its native deps (torch, numpy's OpenBLAS,
+# etc.) resolve from the pixi env. Scoped to cfg(windows) so it never enters the
+# macOS/Linux build graph. 0.59 reuses a version already in the lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader"] }
+
+[build-dependencies]
+# libpython link wiring lives here now (out of foldit-runner's build.rs).
+# This crate's binary IS the one that should have libpython as DT_NEEDED.

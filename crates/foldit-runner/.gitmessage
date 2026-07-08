@@ -1,0 +1,16 @@
+
+# <type>: <subject>
+#
+# Types: feat | fix | refactor | docs | test | ci | chore | perf
+#
+# Rules:
+#   - Subject line: imperative mood, lowercase, no period, max 50 chars
+#   - Blank line between subject and body
+#   - Body (optional): explain *why*, wrap at 72 chars
+#
+# Examples:
+#   feat: add camera orbit controls
+#   fix: prevent panic on empty mesh buffer
+#   refactor: extract uniform bind group into helper
+#
+# See CONTRIBUTING.md for full guidelines.

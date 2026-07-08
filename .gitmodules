@@ -1,6 +1,3 @@
-[submodule "crates/foldit-runner"]
-	path = crates/foldit-runner
-	url = https://github.com/foldit-org/foldit-runner
 [submodule "crates/molex"]
 	path = crates/molex
 	url = https://github.com/foldit-org/molex

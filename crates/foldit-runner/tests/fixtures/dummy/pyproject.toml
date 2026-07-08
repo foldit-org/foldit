@@ -1,0 +1,11 @@
+[project]
+name = "dummy"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "foldit-plugin-sdk",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

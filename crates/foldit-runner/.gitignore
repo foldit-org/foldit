@@ -1,0 +1,73 @@
+# Rust
+/target/
+# Ignore target directories in any crate subdirectory
+crates/*/target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+
+# Pixi
+.pixi/
+
+# Test outputs
+test_out/
+
+# Model weights (large files - should be downloaded)
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.pb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Local config
+bundle*/
+
+# Plugin build outputs (per-plugin bridge libraries built from deps/)
+plugins/*/*.dylib
+plugins/*/*.dll
+plugins/*/*.so
+
+# Plugin panel UI build outputs (built on demand, not committed; source stays)
+plugins/*/ui/dist/
+plugins/*/ui/node_modules/
+
+# Plugin bundled third-party assets (downloaded / extracted, not source)
+plugins/rosetta/assets/database/
+
+# Plugin model weights (multi-GB, download-on-first-run, not committed)
+plugins/*/assets/weights/

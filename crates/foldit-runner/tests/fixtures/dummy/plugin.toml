@@ -1,0 +1,5 @@
+id = "dummy"
+kind = "python"
+
+[python]
+entry = "dummy"
