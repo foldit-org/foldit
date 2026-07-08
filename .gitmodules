@@ -16,6 +16,6 @@
 [submodule "plugins/rosetta"]
     path = plugins/rosetta
     url = https://github.com/foldit-org/foldit-rosetta-plugin
-[submodule "plugins/foundry"]
+[submodule "plugins/simplefold"]
     path = plugins/simplefold
     url = https://github.com/foldit-org/foldit-simplefold-plugin
