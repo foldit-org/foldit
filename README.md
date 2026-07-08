@@ -54,16 +54,19 @@ without webview overlay" in the log).
 The Rosetta plugin is native code. Its per-platform shared library and 251 MB
 database are **committed into the plugin repo** (`plugins/rosetta/prebuilt/
 <target-triple>/` and `assets/database/`), so a fresh clone runs without a
-Rosetta build. To rebuild it from source (needs the `deps/rosetta-interactive`
-checkout and a C++ toolchain):
+Rosetta build. The ~25 GB Rosetta source (`deps/rosetta-interactive`) is an
+opt-in submodule (`update = none`), so a recursive clone does **not** pull it —
+you only need it to build from source. To rebuild from source (needs a C++
+toolchain):
 
 ```bash
 cargo xtask setup-plugins rosetta --from-source
 ```
 
-That runs the plugin's own build recipe and installs the result into
-`plugins/rosetta/local/` (gitignored), which the runtime prefers over the
-committed `prebuilt/` fallback. See `docs/src/plugins/`.
+That fetches the `deps/rosetta-interactive` source on demand, runs the plugin's
+own build recipe, and installs the result into `plugins/rosetta/local/`
+(gitignored), which the runtime prefers over the committed `prebuilt/` fallback.
+See `docs/src/plugins/`.
 
 ### xtask build commands
 
