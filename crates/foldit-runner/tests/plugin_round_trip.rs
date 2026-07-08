@@ -334,6 +334,22 @@ fn rosetta_dylib_filename() -> &'static str {
     }
 }
 
+/// True when the rosetta native binary is present at either resolved
+/// location the loader checks: `local/<name>` (from-source build) or
+/// `prebuilt/<host-triple>/<name>` (vendored fallback). Delegates to the
+/// canonical resolver so the location precedence lives in one place.
+fn rosetta_dylib_present(plugins_root: &std::path::Path) -> bool {
+    let rosetta = plugins_root.join("rosetta");
+    foldit_runner::plugin::resolve_native_binary_inner(
+        &rosetta,
+        "rosetta",
+        rosetta_dylib_filename(),
+        foldit_runner::plugin::host_target_triple(),
+        |p| p.exists(),
+    )
+    .is_ok()
+}
+
 /// Build a minimal assembly-bytes buffer from the workspace's puzzle 1
 /// `structure.pdb`. Used as the init payload for tests that exercise
 /// `bridge_init`'s real decode path. Returns `None` if the source PDB
@@ -362,14 +378,14 @@ fn rosetta_round_trip_via_orchestrator() {
 
     let runner_dir = workspace_runner_dir();
     let plugins_root = runner_dir.join("../../plugins");
-    let rosetta_dylib =
-        plugins_root.join("rosetta").join(rosetta_dylib_filename());
 
-    if !rosetta_dylib.exists() {
+    if !rosetta_dylib_present(&plugins_root) {
         eprintln!(
-            "skipping rosetta_round_trip: dylib not built at {} — run `cargo \
-             xtask build-rosetta-interactive`",
-            rosetta_dylib.display()
+            "skipping rosetta_round_trip: dylib not built under {}/rosetta \
+             (local/ or prebuilt/{}/) — run `cargo xtask \
+             build-rosetta-interactive`",
+            plugins_root.display(),
+            foldit_runner::plugin::host_target_triple(),
         );
         return;
     }
@@ -428,14 +444,14 @@ fn wiggle_round_trip_via_orchestrator() {
 
     let runner_dir = workspace_runner_dir();
     let plugins_root = runner_dir.join("../../plugins");
-    let rosetta_dylib =
-        plugins_root.join("rosetta").join(rosetta_dylib_filename());
 
-    if !rosetta_dylib.exists() {
+    if !rosetta_dylib_present(&plugins_root) {
         eprintln!(
-            "skipping wiggle_round_trip: dylib not built at {} — run `cargo \
-             xtask build-rosetta-interactive`",
-            rosetta_dylib.display()
+            "skipping wiggle_round_trip: dylib not built under {}/rosetta \
+             (local/ or prebuilt/{}/) — run `cargo xtask \
+             build-rosetta-interactive`",
+            plugins_root.display(),
+            foldit_runner::plugin::host_target_triple(),
         );
         return;
     }
