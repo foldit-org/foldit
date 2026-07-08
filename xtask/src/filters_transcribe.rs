@@ -122,8 +122,7 @@ pub fn transcribe_filters() -> Result<()> {
             let filters_path = filters_root.join(format!("{id}.ir_puzzle.filters"));
             let raw = std::fs::read_to_string(&filters_path)
                 .with_context(|| format!("reading {}", filters_path.display()))?;
-            parse_filters(&raw)
-                .with_context(|| format!("parsing {}", filters_path.display()))?
+            parse_filters(&raw).with_context(|| format!("parsing {}", filters_path.display()))?
         } else {
             Vec::new()
         };
@@ -273,7 +272,14 @@ fn parse_object(tokens: &[Token], start: usize) -> Result<(FilterSpec, usize)> {
         Some("rosetta".to_owned())
     };
 
-    Ok((FilterSpec { kind, plugin, params }, i))
+    Ok((
+        FilterSpec {
+            kind,
+            plugin,
+            params,
+        },
+        i,
+    ))
 }
 
 #[derive(Debug)]

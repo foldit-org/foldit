@@ -333,6 +333,11 @@ impl Session {
     /// undoable from the user's perspective; pushing one `AddEntity` per
     /// stub clutters the history (`1bfe` produced 3 root-level dots: one
     /// `Loaded` + two `AddEntity` for chain A and a water).
+    ///
+    /// The initial load now seeds through [`Self::seed_history_with_entities`];
+    /// this single-entity add path stays for the runtime add case (not yet
+    /// wired on a production path) and is exercised by the session tests.
+    #[allow(dead_code)]
     pub(crate) fn load_entity_into_history(
         &mut self,
         entity: molex::MoleculeEntity,
@@ -405,7 +410,7 @@ impl Session {
                 seed.push((id, entity));
             }
         }
-        self.history = History::new(seed.into_iter(), source);
+        self.history = History::new(seed, source);
         self.apply(SessionUpdate::HeadMoved {
             cause: HeadMoveCause::Commit,
         });

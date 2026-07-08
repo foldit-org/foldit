@@ -7,11 +7,9 @@
 use viso::VisoEngine;
 
 use foldit_gui::AppPhase;
-use molex::entity::molecule::id::EntityId;
 
-use super::App;
 use super::plugins::locate_plugins_root;
-use crate::history::CheckpointKind;
+use super::App;
 use crate::render_projector::RenderSources;
 use crate::session::{HeadMoveCause, SessionUpdate, SessionUpdateConsumer};
 
@@ -208,9 +206,7 @@ impl App {
             backend,
         };
         self.shared_device = Some(molex::xtal::shared_gpu_device(setup));
-        log::info!(
-            "[App] shared wgpu device created; molex xtal compute will run on GPU"
-        );
+        log::info!("[App] shared wgpu device created; molex xtal compute will run on GPU");
     }
 
     /// Begin app bring-up: the one host trigger that arms the non-blocking
@@ -252,10 +248,7 @@ impl App {
         if self.scores.term_weights().is_empty() {
             match crate::scores::load_default_term_weights() {
                 Ok(weights) => {
-                    log::info!(
-                        "[App] loaded {} default score-term weights",
-                        weights.len()
-                    );
+                    log::info!("[App] loaded {} default score-term weights", weights.len());
                     self.scores.set_term_weights(weights);
                 }
                 Err(e) => log::error!("[App] failed to load default score-term weights: {e}"),
@@ -269,7 +262,10 @@ impl App {
         // expected set, so the machine falls straight through to the parse).
         let expected: std::collections::BTreeSet<String> = if let Some(root) = locate_plugins_root()
         {
-            log::info!("[App] discovering + warming plugins under {}", root.display());
+            log::info!(
+                "[App] discovering + warming plugins under {}",
+                root.display()
+            );
             self.runner_client.kick_warms(&root).into_iter().collect()
         } else {
             log::warn!(
@@ -385,7 +381,10 @@ impl App {
                 if connected.is_superset(&expected) {
                     self.bringup.phase = StartupPhase::Done;
                 } else {
-                    self.bringup.phase = StartupPhase::WarmingForLanding { expected, connected };
+                    self.bringup.phase = StartupPhase::WarmingForLanding {
+                        expected,
+                        connected,
+                    };
                 }
             }
         }
@@ -440,8 +439,12 @@ impl App {
         // Fire every viz channel once for the freshly-settled session.
         if self.harness.engine.is_some() {
             let opts = self.view_options();
-            self.viz
-                .replay(&mut self.runner_client, &self.store, &mut self.scores, &opts);
+            self.viz.replay(
+                &mut self.runner_client,
+                &self.store,
+                &mut self.scores,
+                &opts,
+            );
         }
         if let Some(engine) = self.harness.engine.as_mut() {
             // Camera: a puzzle load supplies its saved eye/up (anchored on the
@@ -560,103 +563,6 @@ impl App {
         self.arm_plugin_bringup()
     }
 
-    /// Fetch structure factors for `name`, compute an experimental-weighted
-    /// density against the just-loaded `entities`, and feed it to both lanes:
-    /// the scoring lane (an mrc [`DensityAsset`] stashed on the session for
-    /// `kick_inits`) and the render lane (the viso engine). Called before
-    /// `entities` is moved into history so the atom table can be built from
-    /// them by reference.
-    ///
-    /// Every failure branch warns and returns without touching either lane, so
-    /// a missing sf.cif, an unsupported space group, or an empty reflection set
-    /// degrades the load to viewer-only rather than aborting it.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        reason = "map resolution narrows f64 Å -> f32 for the rosetta density asset"
-    )]
-    fn load_with_density(&mut self, entities: &[molex::MoleculeEntity], name: &str) {
-        let sf_path = match crate::structure_io::resolve_sf_cif(name) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("[App] --with-density: no structure factors for '{name}': {e}");
-                return;
-            }
-        };
-        let sf_text = match std::fs::read_to_string(&sf_path) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("[App] --with-density: failed to read {sf_path}: {e}");
-                return;
-            }
-        };
-
-        // The sf.cif commonly omits symmetry, so resolve the space group from
-        // the coordinate cif's Hermann-Mauguin name.
-        let coord_path = std::path::Path::new("assets/models").join(format!("{name}.cif"));
-        let Some(sg_number) = read_space_group_number(&coord_path) else {
-            log::warn!(
-                "[App] --with-density: could not resolve a supported space group from {}; \
-                 skipping density",
-                coord_path.display()
-            );
-            return;
-        };
-
-        let seed = molex::xtal::deterministic_free_flag_seed(name);
-        let Some(data) =
-            molex::ExperimentalData::from_sf_cif_with_spacegroup(&sf_text, sg_number, 0.05, seed)
-        else {
-            log::warn!(
-                "[App] --with-density: no usable reflections in {sf_path}; skipping density"
-            );
-            return;
-        };
-
-        let table = molex::adapters::table::AtomTable::from_entities(entities);
-        let grid_opt = match self.shared_device.as_ref() {
-            Some(dev) => {
-                log::info!("[App] --with-density: density on GPU (shared device)");
-                molex::xtal::density_from_atom_table_gpu(&data, &table, dev)
-            }
-            None => {
-                log::info!("[App] --with-density: density on CPU (no shared device)");
-                molex::xtal::density_from_atom_table(&data, &table)
-            }
-        };
-        let Some(grid) = grid_opt else {
-            log::warn!("[App] --with-density: density computation failed for '{name}'; skipping");
-            return;
-        };
-        let density =
-            molex::xtal::density_from_grid(&grid, &data.unit_cell, data.space_group_number());
-
-        // Scoring lane: encode the map to mrc bytes for `kick_inits` to ship to
-        // rosetta. Takes `density` by reference so it survives for the engine.
-        let asset = crate::puzzle_load::DensityAsset {
-            name: format!("{name}-density.mrc"),
-            bytes: molex::adapters::mrc::density_to_mrc_bytes(&density),
-            resolution: data.d_min() as f32,
-            grid_spacing: None,
-        };
-        self.store.set_session_density(Some(asset));
-
-        // Render lane: crop the whole-cell map to a sub-block around the model
-        // so symmetry-mate blobs drop out, then raise its opacity. The scoring
-        // lane keeps the full map above; rosetta re-crops internally.
-        let positions: Vec<[f32; 3]> = table.position.iter().map(glam::Vec3::to_array).collect();
-        let cropped = density.crop_to_points(&positions, 3);
-
-        // The engine is attached before startup advances to this seam
-        // (`begin_startup` requires it), so the borrow is always valid.
-        if let Some(engine) = self.harness.engine.as_mut() {
-            let map_id = engine.load_density(cropped);
-            engine.set_density_opacity(map_id, 0.7);
-        }
-        log::info!("[App] --with-density: loaded experimental map for '{name}'");
-    }
-
     /// Set [`Self::bringup`] to drive plugin bring-up for an in-session load
     /// (file / puzzle). When `loaded`, arms the same `Init` -> score ->
     /// `InSession` sequence the launch path runs (the plugins are
@@ -724,7 +630,13 @@ impl App {
 
         let expected: std::collections::BTreeSet<String> = self
             .runner_client
-            .kick_inits(&initial_assembly, &ligands, &constraints, density.as_ref(), &config_params)
+            .kick_inits(
+                &initial_assembly,
+                &ligands,
+                &constraints,
+                density.as_ref(),
+                &config_params,
+            )
             .into_iter()
             .collect();
         if expected.is_empty() {
@@ -736,208 +648,4 @@ impl App {
             adopted: std::collections::BTreeSet::new(),
         }
     }
-
-    /// Build the loaded puzzle's generic config-param channel for the Init
-    /// payload: the scorefunction weight patch as `weight.<scoretype>` ->
-    /// `Float(weight)` entries, plus the rosetta-targeted objective filters
-    /// as `filter.<i>.*` String entries. Empty when the session carries no
-    /// puzzle (a free-form structure load) or the puzzle declares neither.
-    ///
-    /// Weight patch: one entry per patched term, so weight-zero terms (e.g.
-    /// `envsmooth`) ship and are optimized against.
-    ///
-    /// Filters: only those naming `plugin = "rosetta"` are forwarded; each
-    /// takes a contiguous index `i` over the forwarded filters, and the
-    /// bridge decodes `filter.<i>.type` for the filter kind and
-    /// `filter.<i>.<key>` for each flattened param, all String-typed. A
-    /// non-rosetta plugin is unsupported: warn (naming it) and skip rather
-    /// than forward to a bridge that cannot score it.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn build_init_config_params(
-        &self,
-    ) -> std::collections::HashMap<String, foldit_gui::state::ParamValue> {
-        let mut params: std::collections::HashMap<String, foldit_gui::state::ParamValue> = self
-            .store
-            .puzzle()
-            .and_then(|p| p.weight_patch.as_ref())
-            .map(|patch| {
-                patch
-                    .iter()
-                    .map(|(name, &w)| {
-                        (
-                            format!("weight.{name}"),
-                            foldit_gui::state::ParamValue::Float(w),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if let Some(filters) = self.store.puzzle().map(|p| p.filters.clone()) {
-            let mut i = 0;
-            for spec in &filters {
-                match spec.plugin.as_deref() {
-                    None => {}
-                    Some("rosetta") => {
-                        params.insert(
-                            format!("filter.{i}.type"),
-                            foldit_gui::state::ParamValue::String(spec.kind.clone()),
-                        );
-                        for (key, value) in &spec.params {
-                            params.insert(
-                                format!("filter.{i}.{key}"),
-                                foldit_gui::state::ParamValue::String(
-                                    toml_value_to_plain_string(value),
-                                ),
-                            );
-                        }
-                        i += 1;
-                    }
-                    Some(other) => {
-                        log::warn!(
-                            "[App] puzzle filter '{}' names unknown plugin '{other}'; \
-                             skipping (only 'rosetta' is forwarded)",
-                            spec.kind,
-                        );
-                    }
-                }
-            }
-        }
-
-        params
-    }
-
-    /// Apply a plugin's post-Init normalized assembly (full-atom pose) so
-    /// the host's canonical assembly matches the plugin's internal pose
-    /// before any user action runs. Every entity the normalized assembly
-    /// touches that has a committed lane in the store is normalized inside
-    /// a single multi-lane edit.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn apply_post_init(
-        &mut self,
-        plugin_id: &str,
-        post_init_bytes: &[u8],
-        op_id: &str,
-        display: &str,
-    ) {
-        if post_init_bytes.is_empty() {
-            log::warn!(
-                "[App] {plugin_id} post-Init returned no normalized assembly; \
-                 first user action will likely snap because scene.positions \
-                 stays at the pre-Init atom count."
-            );
-            return;
-        }
-        let normalized = match molex::Assembly::from_bytes(post_init_bytes) {
-            Ok(a) => a,
-            Err(e) => {
-                log::warn!(
-                    "[App] {plugin_id} post-Init assembly decode failed: {e:?}; \
-                     skipping normalization apply"
-                );
-                return;
-            }
-        };
-        // Every entity the normalized assembly names that has a committed
-        // lane in the store. A protein has a lane (loaded into history);
-        // ambient / zero-residue stubs stay transient and have none, so
-        // they're skipped here.
-        let target_entities: Vec<EntityId> = normalized
-            .entities()
-            .iter()
-            .map(|e| e.id())
-            .filter(|id| self.store.history().lane(*id).is_some())
-            .collect();
-        if target_entities.is_empty() {
-            log::warn!(
-                "[App] {plugin_id} post-Init: no store entity matches the \
-                 normalized assembly; skipping normalization apply"
-            );
-            return;
-        }
-        let kind = CheckpointKind::PluginOp {
-            plugin_id: String::from(plugin_id),
-            op_id: String::from(op_id),
-            display: String::from(display),
-        };
-        // Host-internal action: no dispatch happened, so draw the edit's
-        // request_id straight from the orchestrator (the single id
-        // authority).
-        let Some(request_id) = self.runner_client.alloc_request_id() else {
-            log::warn!(
-                "[App] {plugin_id} post-Init: no orchestrator to allocate a \
-                 request id; skipping normalization apply"
-            );
-            return;
-        };
-        if let Err(e) =
-            self.store
-                .begin_action(target_entities, kind, String::from(display), request_id)
-        {
-            log::warn!(
-                "[App] {plugin_id} post-Init begin_action failed: {e}; \
-                 skipping normalization apply"
-            );
-            return;
-        }
-        let applied = self.store.apply_streaming_assembly(&normalized, None, request_id);
-        if !applied {
-            log::warn!(
-                "[App] {plugin_id} post-Init apply_streaming_assembly did not \
-                 update any entity; rolling back tentative. This usually means \
-                 the {plugin_id}-returned entity ID does not match any store \
-                 entity ID."
-            );
-            let _ = self.store.commit_action(request_id);
-            return;
-        }
-        if let Err(e) = self.store.commit_action(request_id) {
-            log::warn!("[App] {plugin_id} post-Init commit_action failed: {e}");
-            return;
-        }
-        log::info!(
-            "[App] {plugin_id} post-Init assembly applied ({} bytes)",
-            post_init_bytes.len()
-        );
-        // Republish is stream-driven: the HeadMoved from commit_action
-        // rides through the next tick's render projector.
-    }
-}
-
-/// Render a `toml::Value` as the bare string the forwarded-filter param
-/// convention expects: an `Integer(-100)` becomes `"-100"`, a `Float` its
-/// decimal string, and a `String` its bare contents (no surrounding quotes,
-/// unlike `Value::to_string`). Other variants fall back to their `Display`
-/// form. Used to flatten a `FilterSpec.params` entry into a `filter.<i>.<key>`
-/// String param.
-#[cfg(not(target_arch = "wasm32"))]
-fn toml_value_to_plain_string(value: &toml::Value) -> String {
-    match value {
-        toml::Value::String(s) => s.clone(),
-        toml::Value::Integer(n) => n.to_string(),
-        toml::Value::Float(f) => f.to_string(),
-        toml::Value::Boolean(b) => b.to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Read a coordinate cif at `path` and map its Hermann-Mauguin space-group
-/// name to an International Tables number over the xtal module's supported
-/// groups. Reads `_symmetry.space_group_name_H-M`, falling back to
-/// `_space_group.name_H-M_full`. Returns `None` if the file is unreadable, the
-/// tag is absent, or the group is unsupported.
-#[cfg(not(target_arch = "wasm32"))]
-fn read_space_group_number(path: &std::path::Path) -> Option<u16> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc = molex::adapters::cif::parse(&text).ok()?;
-    let block = doc.blocks.first()?;
-    let hm = block
-        .get("_symmetry.space_group_name_H-M")
-        .and_then(molex::adapters::cif::Value::as_str)
-        .or_else(|| {
-            block
-                .get("_space_group.name_H-M_full")
-                .and_then(molex::adapters::cif::Value::as_str)
-        })?;
-    molex::xtal::space_group_number_from_name(hm)
 }

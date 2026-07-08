@@ -27,7 +27,10 @@ pub fn serialize_dirty(state: &mut GuiState) -> Option<Value> {
         update.insert("score".into(), serde_json::to_value(&state.score).unwrap());
     }
     if dirty.contains(DirtyFlags::PUZZLE) {
-        update.insert("puzzle".into(), serde_json::to_value(&state.puzzle).unwrap());
+        update.insert(
+            "puzzle".into(),
+            serde_json::to_value(&state.puzzle).unwrap(),
+        );
     }
     if dirty.contains(DirtyFlags::SELECTION) {
         update.insert(
@@ -75,7 +78,10 @@ pub fn serialize_dirty(state: &mut GuiState) -> Option<Value> {
         );
     }
     if dirty.contains(DirtyFlags::PANELS) {
-        update.insert("panels".into(), serde_json::to_value(&state.panels).unwrap());
+        update.insert(
+            "panels".into(),
+            serde_json::to_value(&state.panels).unwrap(),
+        );
     }
     if dirty.contains(DirtyFlags::PROGRESS) {
         update.insert(

@@ -128,7 +128,7 @@ impl Viz {
     /// overlay (gated on its toggle) and the puzzle met-filter bonus (gated on
     /// an active `ExposedCount` filter), so it requests on `show || filter`.
     /// When neither is wanted, or no plugin advertises it, clear the beads and
-    /// the bonus as two explicit writes.
+    /// drop the `exposed_count` bonus entry as two explicit writes.
     fn fire_exposed(
         &mut self,
         rc: &mut RunnerClient,
@@ -145,7 +145,7 @@ impl Viz {
         if (!show && !filter_active) || !rc.supports_query("exposed_hydrophobics") {
             self.exposed = Vec::new();
             self.dirty = true;
-            scores.set_filter_bonus(Vec::new());
+            scores.set_filter_bonus_entry("exposed_count", 0.0);
             return;
         }
         rc.request_query("exposed_hydrophobics");
@@ -290,19 +290,18 @@ fn clash_endpoint(session: &Session, end: &clashes::ClashEnd) -> Option<viso::Cl
     })
 }
 
-/// Recompute the puzzle met-filter bonus from the raw flagged `count`. The
-/// score consumer of the `exposed_hydrophobics` reply, independent of the bead
-/// overlay toggle: only this path writes `filter_bonus`.
+/// Recompute the puzzle met-filter bonus from the raw flagged `count` and upsert
+/// it under the `exposed_count` label. The score consumer of the
+/// `exposed_hydrophobics` reply, independent of the bead overlay toggle. The
+/// `filter_bonus` channel has other writers (the async `r_free` result, and any
+/// future labeled objective), so this stays label-scoped and never bulk-replaces
+/// the channel, which would clobber their entries.
 fn apply_exposed_score(session: &Session, scores: &mut ScoreCoordinator, count: usize) {
     let count = u32::try_from(count).unwrap_or(u32::MAX);
     let bonus = session.puzzle().map_or(0.0, |p| {
         crate::scores::exposed_count_bonus(&p.filters, count)
     });
-    if bonus == 0.0 {
-        scores.set_filter_bonus(Vec::new());
-    } else {
-        scores.set_filter_bonus(vec![("exposed_count".to_owned(), bonus)]);
-    }
+    scores.set_filter_bonus_entry("exposed_count", bonus);
 }
 
 /// Resolve a decoded exposed-hydrophobic report into viso bead refs, dropping

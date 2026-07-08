@@ -441,8 +441,7 @@ impl GuiState {
     /// deliberately does not arm the persist signal, so a load does not bounce
     /// back out as a save.
     pub fn import_progress(&mut self, bytes: &[u8]) {
-        let Ok(loaded) =
-            serde_json::from_slice::<std::collections::BTreeMap<u32, f64>>(bytes)
+        let Ok(loaded) = serde_json::from_slice::<std::collections::BTreeMap<u32, f64>>(bytes)
         else {
             return;
         };

@@ -37,6 +37,25 @@ pub struct DensityAsset {
     pub grid_spacing: Option<f32>,
 }
 
+/// Structure-factor inputs read from the puzzle dir at load time
+/// (`[puzzle.reflns]`).
+///
+/// Carried to the host so the puzzle-load path can build the experimental data
+/// the R-free objective needs and compute the `elec_dens` map in-process. The
+/// space group is resolved host-side (the sf.cif commonly omits symmetry), so
+/// the coordinate cif path rides along for the Hermann-Mauguin lookup.
+#[derive(Debug, Clone)]
+pub struct ReflnsAsset {
+    /// The structure-factor cif text.
+    pub sf_text: String,
+    /// Path to the coordinate cif, read for the space group when
+    /// `space_group` is `None`. `None` when the structure was inlined (no
+    /// coordinate cif on disk to read symmetry from).
+    pub coord_path: Option<PathBuf>,
+    /// Explicit space-group number override from `[puzzle.reflns]`, else `None`.
+    pub space_group: Option<u16>,
+}
+
 /// Data returned from loading a puzzle.
 pub struct PuzzleData {
     pub entities: Vec<molex::MoleculeEntity>,
@@ -74,8 +93,13 @@ pub struct PuzzleData {
     pub ligands: Vec<LigandAsset>,
     /// Electron-density map bytes read from the puzzle dir (`[puzzle.density]`).
     /// `None` for non-density puzzles. Carried to the session `Puzzle` so the
-    /// session-init path can deliver the map to the worker.
+    /// session-init path can deliver the map to the worker. Dropped (with a
+    /// warning) when `reflns` is also present, since reflns supersedes it.
     pub density: Option<DensityAsset>,
+    /// Structure-factor inputs read from the puzzle dir (`[puzzle.reflns]`).
+    /// `None` for non-crystallographic puzzles. Consumed on the host load path
+    /// to build experimental data (enabling R-free) and compute the map.
+    pub reflns: Option<ReflnsAsset>,
 }
 
 /// Resolve the absolute path to the `assets/levels` directory by
@@ -185,8 +209,22 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         ss
     });
 
-    let (constraints, design_masks, ligands, density) =
+    let (constraints, design_masks, ligands, mut density) =
         load_puzzle_setup(puzzle_dir, &puzzle.puzzle)?;
+
+    // Reflns supersedes a static density map: it yields the same elec_dens map
+    // plus the experimental data the R-free objective needs. When both are
+    // declared and the sf.cif read succeeds, drop the static map so the host's
+    // reflns-computed map is the one shipped to the worker.
+    let reflns = read_reflns(puzzle_dir, &puzzle.puzzle);
+    if reflns.is_some() && density.is_some() {
+        log::warn!(
+            "Puzzle '{}': [puzzle.reflns] and [puzzle.density] both declared; \
+             using [puzzle.reflns] (the static density map is ignored)",
+            puzzle.puzzle.title
+        );
+        density = None;
+    }
 
     Ok(PuzzleData {
         entities,
@@ -203,6 +241,32 @@ pub fn load_puzzle_data_from_dir(puzzle_dir: &Path) -> Result<PuzzleData, String
         design_masks,
         ligands,
         density,
+        reflns,
+    })
+}
+
+/// Read the `[puzzle.reflns]` structure-factor cif into a [`ReflnsAsset`],
+/// warning (and returning `None`) on a missing / unreadable / non-UTF-8 file
+/// rather than failing the load. The coordinate cif path (from
+/// `[puzzle.structure] path`) rides along so the host can read the space group
+/// when the TOML gives no override.
+fn read_reflns(puzzle_dir: &Path, meta: &PuzzleMeta) -> Option<ReflnsAsset> {
+    let rref = meta.reflns.as_ref()?;
+    let sf_path = puzzle_dir.join(&rref.path);
+    let sf_bytes = read_or_warn(&sf_path, &meta.title, "structure factors")?;
+    let Ok(sf_text) = String::from_utf8(sf_bytes) else {
+        log::warn!(
+            "Puzzle '{}': structure factors {} are not valid UTF-8",
+            meta.title,
+            sf_path.display()
+        );
+        return None;
+    };
+    let coord_path = meta.structure.path.as_ref().map(|p| puzzle_dir.join(p));
+    Some(ReflnsAsset {
+        sf_text,
+        coord_path,
+        space_group: rref.space_group,
     })
 }
 

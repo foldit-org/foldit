@@ -15,7 +15,7 @@ const initialHistory = {
 // so the LoadingScreen renders before the first snapshot arrives.
 export const initialState: FrontendState = {
   app_state: 'initializing',
-  score: { value: 0, invalid: true, title: '' },
+  score: { value: 0, invalid: true, title: '', r_free: null },
   puzzle: { mode: 'scientist', puzzle_id: 0, title: '', starting_score: 0, target_score: 0, complete: false },
   selection: { entries: [] },
   view: {

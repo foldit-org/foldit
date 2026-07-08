@@ -23,7 +23,10 @@ pub enum CheckpointKind {
     Loaded { source: PathBuf },
     /// Promoted a transient preview (e.g., a streamed ML result).
     PromotedPreview { entity: EntityId },
-    /// New entity added to the assembly.
+    /// New entity added to the assembly mid-session. The initial load seeds
+    /// every entity under one `Loaded` root instead, so this is only reached
+    /// once a runtime add path (e.g. a plugin materialising a ligand) is wired.
+    #[allow(dead_code)]
     AddEntity {
         entity: EntityId,
         kind: MoleculeType,

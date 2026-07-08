@@ -60,8 +60,7 @@ impl EngineHarness {
     pub(in crate::app) fn render(&mut self) {
         if let Some(engine) = &mut self.engine {
             match engine.render() {
-                Ok(()) => {}
-                Err(viso::SurfaceError::Timeout) => {}
+                Ok(()) | Err(viso::SurfaceError::Timeout) => {}
                 Err(e) => log::error!("Render error: {e:?}"),
             }
         }
@@ -277,7 +276,7 @@ pub(in crate::app) struct KeyOutcome {
     pub(in crate::app) segment_toggle: Option<(EntityId, usize)>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::app) hotkey_op: Option<String>,
-    /// A native key that toggles a host-owned action picker (op_id whose
+    /// A native key that toggles a host-owned action picker (`op_id` whose
     /// picker to flip open/closed). Distinct from `hotkey_op`, which
     /// dispatches an op.
     #[cfg(not(target_arch = "wasm32"))]

@@ -114,16 +114,22 @@ pub enum AppCommand {
     /// History navigation / curation. Wraps the typed [`HistoryCommand`]
     /// enum so the navigation surface rides the one `app_command` IPC
     /// envelope alongside the other native commands.
-    History { cmd: HistoryCommand },
+    History {
+        cmd: HistoryCommand,
+    },
     /// Step the active puzzle's tutorial-bubble cursor forward or back.
     /// `back == false` advances one; `back == true` retreats one
     /// (saturating at zero). The backend re-pushes the bubble at the
     /// new cursor, or `None` when the cursor walks past the end.
-    AdvanceBubble { back: bool },
+    AdvanceBubble {
+        back: bool,
+    },
     /// Set the active app focus. `None` is whole-session focus (all
     /// entities); `Some(raw)` focuses that entity by its raw id. Pure
     /// session state, so it needs no engine.
-    SetFocus { entity_id: Option<u32> },
+    SetFocus {
+        entity_id: Option<u32>,
+    },
     /// Edit one per-entity appearance override field. `entity_id` is the
     /// raw id; `field`/`value` are merged into that entity's overrides by
     /// the engine. Engine-dependent (the override map lives in viso).
@@ -197,8 +203,7 @@ mod tests {
     /// every zero-param button (wiggle, shake, ...) stops firing.
     #[test]
     fn opdispatch_without_params_defaults_empty() {
-        let op: OpDispatch =
-            serde_json::from_str(r#"{"op_id":"wiggle"}"#).unwrap();
+        let op: OpDispatch = serde_json::from_str(r#"{"op_id":"wiggle"}"#).unwrap();
         assert_eq!(op.op_id, "wiggle");
         assert!(op.params.is_empty());
         assert!(op.focused_entity_id.is_none());

@@ -1,3 +1,4 @@
+// foldit:allow-long-file -- CLI command dispatch; length-exempt.
 #![allow(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -539,7 +540,14 @@ fn assemble() -> Result<()> {
     //    is NOT here - it is build-time packaging input (`packaging/icon.png`).
     std::fs::create_dir_all(format!("{STAGING}/assets"))?;
 
-    let asset_dirs = ["gui", "view_presets", "levels", "scoring", "puzzle_setup", "residue_icons"];
+    let asset_dirs = [
+        "gui",
+        "view_presets",
+        "levels",
+        "scoring",
+        "puzzle_setup",
+        "residue_icons",
+    ];
     for name in asset_dirs {
         let src = format!("assets/{name}");
         let dst = format!("{STAGING}/assets/{name}");

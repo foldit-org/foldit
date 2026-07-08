@@ -70,6 +70,31 @@ function DownloadToast(props: { pluginId: string }) {
 	);
 }
 
+// Live refine bar. Reads the store leaf inside JSX so the bar tracks progress
+// reactively without re-firing the toast. Only one refine runs at a time, so
+// there is no per-instance key.
+function RefineToast() {
+	const entry = () => state.actions.refine_progress;
+	const frac = () => entry()?.fraction ?? 0;
+	const known = () => entry()?.fraction != null;
+	const label = () => entry()?.label ?? '';
+	return (
+		<div class="dl-toast">
+			<div class="dl-toast__row">
+				<span class="dl-toast__title">{label()}</span>
+				<Show when={known()}>
+					<span class="dl-toast__pct">{Math.round(frac() * 100)}%</span>
+				</Show>
+			</div>
+			<div class="dl-bar">
+				<Show when={known()} fallback={<div class="dl-bar__indeterminate" />}>
+					<div class="dl-bar__fill" style={{ width: `${frac() * 100}%` }} />
+				</Show>
+			</div>
+		</div>
+	);
+}
+
 /**
  * Mounts the top-right toast container and turns backend notifications into
  * toasts. Notifications are the host's reusable, append-only channel: each
@@ -126,6 +151,24 @@ export default function NotificationToaster() {
 			}
 		}
 		setDownloadingIds(currentIds);
+	});
+
+	// Live refine-progress toast. Fires once when a refine starts (refine_progress
+	// goes null -> Some) and dismisses when it ends (Some -> null); the toast body
+	// binds to the store leaf so the bar animates in place without re-toasting.
+	const [refineShowing, setRefineShowing] = createSignal(false);
+	createEffect(() => {
+		const active = state.actions.refine_progress != null;
+		const wasShowing = untrack(refineShowing);
+		if (active && !wasShowing) {
+			toast.custom(() => <RefineToast />, {
+				id: 'refine-progress',
+				duration: Infinity,
+			});
+		} else if (!active && wasShowing) {
+			toast.dismiss('refine-progress');
+		}
+		setRefineShowing(active);
 	});
 
 	return <Toaster position="top-right" toastOptions={{ style: { 'font-size': '13px' } }} />;

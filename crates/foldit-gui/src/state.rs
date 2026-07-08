@@ -27,7 +27,6 @@ pub enum AppPhase {
     InSession,
 }
 
-
 /// Which score the GUI displays and how it's framed.
 ///
 /// `Game` is for tutorial / campaign / science puzzles where the user sees the
@@ -41,7 +40,6 @@ pub enum ScoringMode {
     #[default]
     Scientist,
 }
-
 
 /// Active puzzle context. Always populated; in Scientist mode only `mode`
 /// and `title` are meaningful (target/starting are 0 and the GUI hides them).
@@ -71,12 +69,27 @@ impl Default for PuzzleSection {
     }
 }
 
+/// Live R-free readout shown under the score bar.
+///
+/// `value` is the current R-free (e.g. 0.28); `bonus` is the game-score
+/// points its objective is currently contributing (e.g. 140). Rust computes
+/// both; the frontend only renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct RFreeStatus {
+    pub value: f32,
+    pub bonus: f32,
+}
+
 /// Current score and validity state
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct ScoreSection {
     pub value: f64,
     pub invalid: bool,
     pub title: String,
+    /// Live R-free readout for the subheader under the score bar, or `None`
+    /// when unavailable. Filled by the host projector; the frontend renders
+    /// it from the same section the score value rides.
+    pub r_free: Option<RFreeStatus>,
 }
 
 impl Default for ScoreSection {
@@ -85,6 +98,7 @@ impl Default for ScoreSection {
             value: 0.0,
             invalid: true,
             title: String::new(),
+            r_free: None,
         }
     }
 }
@@ -162,13 +176,11 @@ pub enum TailUpdate {
 /// position of any panel the user has moved; a panel without an entry
 /// renders at its layout default. The backend owns this so panel
 /// visibility survives a reload and can be driven from either side.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type, Default)]
 pub struct PanelsSection {
     pub open: Vec<String>,
     pub positions: Vec<PanelPosition>,
 }
-
 
 /// Screen position of a single panel (top-left, pixels, origin top-left).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
@@ -181,12 +193,10 @@ pub struct PanelPosition {
 /// Per-entity residue selection state. One entry per entity that
 /// currently has at least one residue selected; entities with empty
 /// selections are absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 pub struct SelectionSection {
     pub entries: Vec<EntitySelection>,
 }
-
 
 /// Selected residues on a single entity.
 ///
@@ -207,12 +217,10 @@ pub struct EntitySelection {
 /// absent from `entries` has never been scored. The menu reads this to gate
 /// category unlocks (a puzzle counts as complete once its high score is
 /// positive).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type, Default)]
 pub struct ProgressSection {
     pub entries: Vec<ProgressEntry>,
 }
-
 
 /// One puzzle's best recorded score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
@@ -483,8 +491,7 @@ pub struct ActionInfo {
 /// frontend can title and order each plugin's group box. Both are optional;
 /// the frontend derives a title from `plugin_id` and sorts unordered groups
 /// last when absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 pub struct PluginGroupInfo {
     /// Join key against [`ActionInfo::plugin_id`].
     pub plugin_id: String,
@@ -556,9 +563,19 @@ pub struct DownloadProgress {
     pub stage: String,
 }
 
-/// Available actions and their current state
+/// Live progress for an in-flight b-factor refine.
+///
+/// Determinate: `fraction` is 0..1 (0 at kick, 1 at completion) and `label`
+/// is a ready-to-render phrase (e.g. "Refining B-factors (cycle 2/5)"). Rust
+/// computes both; the frontend only renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
-#[derive(Default)]
+pub struct RefineProgress {
+    pub fraction: f32,
+    pub label: String,
+}
+
+/// Available actions and their current state
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type, Default)]
 pub struct ActionsSection {
     pub available: Vec<ActionInfo>,
     /// Per-plugin group metadata, joined to `available` on `plugin_id`.
@@ -571,8 +588,11 @@ pub struct ActionsSection {
     /// nothing is downloading; a plugin's host-injected download button reads
     /// its entry to render a progress fill.
     pub download_progress: std::collections::HashMap<String, DownloadProgress>,
+    /// Live progress for the single in-flight b-factor refine, or `None` when
+    /// nothing is refining. Rides the same `"actions"` wire push as its
+    /// siblings; the frontend renders one determinate progress bar from it.
+    pub refine_progress: Option<RefineProgress>,
 }
-
 
 /// Information about a single entity in the scene
 // `appearance_values` is a `serde_json::Value`, which is not `Eq`, so `Eq`
@@ -602,22 +622,18 @@ pub struct SceneEntityInfo {
 /// `focused_entity` mirrors viso's `Focus`: `Some(eid)` when the user
 /// has zoomed/cycled to a specific entity, `None` for whole-session
 /// focus. Drives the `HistoryPanel` view choice (river vs swim lanes).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SceneSection {
     pub entities: Vec<SceneEntityInfo>,
     pub focused_entity: Option<u32>,
 }
 
-
 /// Loading/progress state
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LoadingSection {
     pub progress: Option<f32>,
     pub puzzle_loaded: bool,
 }
-
 
 // `HistorySection` and per-checkpoint / per-snapshot wire payloads
 // live in [`crate::wire`] and are re-exported from `lib.rs`.

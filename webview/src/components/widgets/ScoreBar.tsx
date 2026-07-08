@@ -6,6 +6,32 @@ import { Component, createMemo, createEffect, Show } from 'solid-js';
 import { Info } from '../../utils/iconMapping';
 import '../../styles/widgets/ScoreBar.css';
 import { useBackendOptions, useBackendData, useFrontendState } from '../../services/adapters';
+import { state as backendState } from '../../adapter';
+
+// Persistent line under the score bar: current R-free plus the game-score
+// bonus its objective is contributing. Hidden entirely when the backend
+// supplies no R-free status (no objective / not yet computed).
+const RFreeSubheader: Component = () => {
+  const rFree = createMemo(() => backendState.score.r_free);
+  const label = createMemo(() => {
+    const rf = rFree();
+    if (!rf) return '';
+    const parts: string[] = [];
+    if (rf.value != null) parts.push(`R-free ${rf.value.toFixed(2)}`);
+    if (rf.bonus != null && rf.bonus !== 0) {
+      parts.push(`(${rf.bonus > 0 ? '+' : ''}${rf.bonus})`);
+    }
+    return parts.join('  ');
+  });
+
+  return (
+    <Show when={label()}>
+      <div class="mt-0.5 text-xs text-white text-opacity-80 tracking-wide">
+        {label()}
+      </div>
+    </Show>
+  );
+};
 
 const ScoreBar: Component = () => {
   const exploreMode = useBackendOptions(state => state.exploreMode);
@@ -96,6 +122,8 @@ const ScoreBar: Component = () => {
           </Show>
         </div>
       </Show>
+
+      <RFreeSubheader />
     </div>
   );
 };

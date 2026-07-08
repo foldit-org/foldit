@@ -27,7 +27,7 @@ pub use types::{
 /// in-progress `Downloading`) in place of the plugin's normal buttons.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, PartialEq)]
-pub(crate) enum WeightsState {
+pub enum WeightsState {
     Missing,
     Ready,
     /// A download is in flight for this plugin. `rid` is the stream
@@ -59,6 +59,12 @@ pub struct RunnerClient {
     /// left untouched until a `Missing` reply swaps them.
     #[cfg(not(target_arch = "wasm32"))]
     weights: std::collections::HashMap<String, WeightsState>,
+    /// Whether the native B-factor-refine action is currently available (a
+    /// density is loaded, a GPU device exists, and no refine is running). Kept
+    /// here, like `weights`, so the action catalog resolves its `enabled` off
+    /// driver state; `App` syncs it each tick.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_available: bool,
 }
 
 impl RunnerClient {
@@ -73,6 +79,8 @@ impl RunnerClient {
             },
             #[cfg(not(target_arch = "wasm32"))]
             weights: std::collections::HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_available: false,
         }
     }
 
@@ -478,7 +486,7 @@ impl RunnerClient {
             // before the `&mut` kick call below.
             let wants_density = orch
                 .plugin_descriptor(plugin_id)
-                .is_some_and(|d| d.uses_density());
+                .is_some_and(foldit_runner::orchestrator::PluginSpawnDescriptor::uses_density);
             let plugin_payload = match (wants_density, density) {
                 (true, Some(map)) => with_density(payload.clone(), map),
                 _ => payload.clone(),

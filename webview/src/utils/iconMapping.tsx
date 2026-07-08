@@ -7,7 +7,7 @@ import {
   TbArrowLeft, TbArrowRight, TbRefresh, TbCheck, TbRefreshAlert,
   TbList, TbX, TbHelp, TbRotate, TbEye, TbSettings, TbInfoCircle,
   TbDeviceFloppy, TbLifebuoy, TbActivity, TbMinus, TbSquare, TbLogout,
-  TbChevronDown, TbStar, TbTrophy, TbTrash, TbReplace, TbDownload
+  TbChevronDown, TbStar, TbTrophy, TbTrash, TbReplace, TbDownload, TbCloud
 } from 'solid-icons/tb';
 
 // Icon size and styling props interface for consistency
@@ -50,6 +50,7 @@ export const Icons = {
   Trash: (props: IconProps = {}) => <TbTrash {...defaultIconProps} {...props} />,
   Replace: (props: IconProps = {}) => <TbReplace {...defaultIconProps} {...props} />,
   Download: (props: IconProps = {}) => <TbDownload {...defaultIconProps} {...props} />,
+  Cloud: (props: IconProps = {}) => <TbCloud {...defaultIconProps} {...props} />,
 };
 
 // Built-in GUI icons addressable by name from the backend. An ActionInfo /
@@ -59,6 +60,7 @@ export const Icons = {
 const BUILTIN_ACTION_ICONS: Record<string, (p?: IconProps) => JSX.Element> = {
   replace: Icons.Replace,
   download: Icons.Download,
+  cloud: Icons.Cloud,
 };
 
 export function builtinActionIcon(name: string): ((p?: IconProps) => JSX.Element) | undefined {

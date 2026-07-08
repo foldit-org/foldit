@@ -11,17 +11,14 @@ import type {
   PanelsSection,
   ProgressSection,
   SceneEntityInfo,
+  ScoreSection,
   SegmentInfo,
   SelectionSection,
   ViewSection,
 } from '../../../src/generated/wire';
 import type { TextBubbleType } from '../../../src/models/UI';
 
-export interface ScoreSection {
-  value: number;
-  invalid: boolean;
-  title: string;
-}
+export type { ScoreSection };
 
 /** Backend-driven puzzle context. `mode` is the active scoring mode tag. */
 export interface PuzzleSection {

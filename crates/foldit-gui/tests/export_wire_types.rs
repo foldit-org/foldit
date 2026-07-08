@@ -20,7 +20,8 @@ use foldit_gui::{
     EntitySelection, FilterStatus, HistoryCommand, HistoryLiveUpdate, HistorySection, Notification,
     NotificationLevel, OpDispatch, PanelInfo, PanelPosition, PanelsSection, ParamConstraint,
     ParamSpec, ParamType, ParamValue, PluginGroupInfo, ProgressEntry, ProgressSection,
-    SceneEntityInfo, SegmentInfo, SelectionSection, SettingsTabInfo, ViewSection, ViewportInput,
+    SceneEntityInfo, ScoreSection, SegmentInfo, SelectionSection, SettingsTabInfo, ViewSection,
+    ViewportInput,
 };
 
 #[test]
@@ -59,6 +60,7 @@ fn export_wire_types_to_ts() {
         .register::<PluginGroupInfo>()
         .register::<PanelInfo>()
         .register::<SettingsTabInfo>()
+        .register::<ScoreSection>()
         .register::<ActionsSection>();
 
     // The TS app lives at the workspace root (`webview/`), outside this

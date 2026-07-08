@@ -290,4 +290,3 @@ pub enum HistoryCommand {
     /// button).
     AbortAction,
 }
-

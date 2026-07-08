@@ -52,22 +52,26 @@ impl App {
                 // blend, so re-score the committed union for correct
                 // attribution.
                 match self.store.commit_action(token) {
-                    Ok(ckpt) => match score.filter(|_| sole) {
-                        Some(report) => {
-                            let (raw, game, breakdown) = self.scores.prepare_score_stamp(report);
-                            self.store.set_checkpoint_scores(
+                    Ok(ckpt) => {
+                        match score.filter(|_| sole) {
+                            Some(report) => {
+                                let (raw, game, breakdown) =
+                                    self.scores.prepare_score_stamp(report);
+                                self.store.set_checkpoint_scores(
+                                    ckpt,
+                                    Some(raw),
+                                    Some(game),
+                                    Some(breakdown),
+                                );
+                            }
+                            None => self.scores.score_committed_checkpoint(
+                                &mut self.runner_client,
+                                &self.store,
                                 ckpt,
-                                Some(raw),
-                                Some(game),
-                                Some(breakdown),
-                            );
+                            ),
                         }
-                        None => self.scores.score_committed_checkpoint(
-                            &mut self.runner_client,
-                            &self.store,
-                            ckpt,
-                        ),
-                    },
+                        self.spawn_rfree_compute(ckpt);
+                    }
                     Err(e) => log::warn!("commit_action failed: {e}"),
                 }
                 // The edit's correlation id is now spent; drop any lingering
@@ -108,18 +112,21 @@ impl App {
             return;
         }
         match self.store.commit_and_reopen(token) {
-            Ok(ckpt) => match score.filter(|_| sole) {
-                Some(report) => {
-                    let (raw, game, breakdown) = self.scores.prepare_score_stamp(report);
-                    self.store
-                        .set_checkpoint_scores(ckpt, Some(raw), Some(game), Some(breakdown));
+            Ok(ckpt) => {
+                match score.filter(|_| sole) {
+                    Some(report) => {
+                        let (raw, game, breakdown) = self.scores.prepare_score_stamp(report);
+                        self.store
+                            .set_checkpoint_scores(ckpt, Some(raw), Some(game), Some(breakdown));
+                    }
+                    None => self.scores.score_committed_checkpoint(
+                        &mut self.runner_client,
+                        &self.store,
+                        ckpt,
+                    ),
                 }
-                None => self.scores.score_committed_checkpoint(
-                    &mut self.runner_client,
-                    &self.store,
-                    ckpt,
-                ),
-            },
+                self.spawn_rfree_compute(ckpt);
+            }
             Err(e) => {
                 log::warn!("promote checkpoint rid={token}: commit_and_reopen failed: {e}");
             }
@@ -182,6 +189,7 @@ impl App {
             Ok(ckpt) => {
                 self.scores
                     .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
+                self.spawn_rfree_compute(ckpt);
                 true
             }
             Err(e) => {

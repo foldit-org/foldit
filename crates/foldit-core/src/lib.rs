@@ -26,6 +26,8 @@ mod host_effects;
 mod host_resources;
 mod puzzle_load;
 mod puzzle_toml;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod xtal;
 pub(crate) mod runner_client;
 pub(crate) mod runner_projector;
 pub(crate) mod scores;

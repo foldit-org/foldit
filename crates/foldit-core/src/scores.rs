@@ -213,6 +213,51 @@ pub fn exposed_count_bonus(filters: &[crate::puzzle_toml::FilterSpec], count: u3
         .sum()
 }
 
+/// A native `rfree_bonus` filter's parameters: the game-score objective that
+/// rewards driving the crystallographic R-free below `target`. `weight` scales
+/// the reward and `exponent` shapes the power curve.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RFreeBonus {
+    pub target: f64,
+    pub weight: f64,
+    pub exponent: f64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RFreeBonus {
+    /// Game-score points this objective awards at the given `r_free`:
+    /// `weight * (target - r_free)^exponent` while `r_free` is below `target`,
+    /// and `0` once `r_free` reaches or exceeds it. Always non-negative.
+    #[must_use]
+    pub fn reward_game(&self, r_free: f64) -> f64 {
+        self.weight * (self.target - r_free).max(0.0).powf(self.exponent)
+    }
+}
+
+/// The native `rfree_bonus` filter's parameters, or `None` when the puzzle
+/// declares no such native filter. Reads `target` and `weight` (both required);
+/// `exponent` defaults to `2.0` when absent. A filter that names a `plugin` is
+/// forwarded, not scored here, so it yields `None`; a non-`rfree_bonus` kind and
+/// one missing `target` or `weight` yield `None` too (forward-compatible: an
+/// unknown filter type parses but is inert).
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn rfree_bonus_spec(filters: &[crate::puzzle_toml::FilterSpec]) -> Option<RFreeBonus> {
+    filters
+        .iter()
+        .filter(|f| f.kind == "rfree_bonus" && f.plugin.is_none())
+        .find_map(|f| {
+            let target = toml_number(f.params.get("target")?)?;
+            let weight = toml_number(f.params.get("weight")?)?;
+            let exponent = f.params.get("exponent").and_then(toml_number).unwrap_or(2.0);
+            Some(RFreeBonus {
+                target,
+                weight,
+                exponent,
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

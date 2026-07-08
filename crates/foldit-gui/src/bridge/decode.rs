@@ -48,10 +48,13 @@ pub fn from_json(body: &str) -> Option<IpcMessage> {
         "open_session_dialog" => Some(IpcMessage::OpenSessionDialog),
         "request" => {
             let wish_id = val.get("wish_id").and_then(Value::as_str)?.to_owned();
-            let kind: RequestKind =
-                serde_json::from_value(val.get("kind")?.clone()).ok()?;
+            let kind: RequestKind = serde_json::from_value(val.get("kind")?.clone()).ok()?;
             let payload = val.get("payload").cloned().unwrap_or(Value::Null);
-            Some(IpcMessage::Request { wish_id, kind, payload })
+            Some(IpcMessage::Request {
+                wish_id,
+                kind,
+                payload,
+            })
         }
         _ => None,
     }

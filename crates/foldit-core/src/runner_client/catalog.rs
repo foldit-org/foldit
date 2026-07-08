@@ -139,6 +139,23 @@ impl RunnerClient {
             options,
         });
 
+        // Host-declared crystallographic B-factor refine: a click-to-fire
+        // button (no options). `enabled` reads the driver-side availability
+        // `App` syncs each tick (a loaded density, a GPU device, and no refine
+        // already running), so the button matches what a dispatch would accept.
+        rows.push(ActionInfo {
+            op_id: "refine_b".to_owned(),
+            plugin_id: "native".to_owned(),
+            display: "B-factor Refine".to_owned(),
+            icon_path: "builtin:cloud".to_owned(),
+            enabled: self.refine_available,
+            active: false,
+            hotkey: None,
+            tooltip: Some("Refine per-atom B-factors against the loaded density".to_owned()),
+            params: Vec::new(),
+            options: Vec::new(),
+        });
+
         // Weights gate: an ML plugin whose model weights are not ready
         // surfaces a single "Download weights" button in place of its normal
         // buttons. This holds for every non-`Ready` state (a `Missing` or
@@ -171,6 +188,18 @@ impl RunnerClient {
 
         self.reconcile_hotkey_badges(&mut rows);
         rows
+    }
+
+    /// Set whether the native B-factor-refine action is available, returning
+    /// `true` when the value changed (so the caller re-projects the actions
+    /// section only on a real transition).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn set_refine_available(&mut self, available: bool) -> bool {
+        if self.refine_available == available {
+            return false;
+        }
+        self.refine_available = available;
+        true
     }
 
     /// Drop the hotkey badge from any action whose key is actually owned by a
@@ -295,7 +324,7 @@ impl RunnerClient {
         if let Some((plugin_id, op_id)) = self.hotkey_to_op(key) {
             return HotkeyOwner::Plugin { plugin_id, op_id };
         }
-        if let Some(op_id) = self.native_hotkey_toggle(key) {
+        if let Some(op_id) = Self::native_hotkey_toggle(key) {
             return HotkeyOwner::Native { op_id };
         }
         HotkeyOwner::None
@@ -313,14 +342,14 @@ impl RunnerClient {
             .map(|e| (e.plugin_id, e.op_id))
     }
 
-    /// Resolve a native (non-plugin) key to the op_id whose picker it
+    /// Resolve a native (non-plugin) key to the `op_id` whose picker it
     /// toggles. Separate from [`Self::hotkey_to_op`], which scans the plugin
     /// `ops_catalog`: the native Mutate action is host-declared and never
     /// appears there. Toggling a picker is not an op dispatch; the Mutate
     /// dispatch needs an `aa` param, so this key must never route through the
     /// op path.
     #[cfg(not(target_arch = "wasm32"))]
-    fn native_hotkey_toggle(&self, key: &str) -> Option<String> {
+    fn native_hotkey_toggle(key: &str) -> Option<String> {
         match key {
             "KeyM" => Some("mutate_residue".to_owned()),
             _ => None,

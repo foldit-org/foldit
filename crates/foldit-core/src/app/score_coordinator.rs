@@ -84,9 +84,17 @@ impl ScoreCoordinator {
         self.term_names = names;
     }
 
-    /// Replace the met-filter raw bonus breakdown.
-    pub fn set_filter_bonus(&mut self, breakdown: Vec<(String, f64)>) {
-        self.filter_bonus = breakdown;
+    /// Upsert one labeled raw-bonus entry, replacing an existing entry with the
+    /// same label or appending a new one; a `0.0` value drops the label. Every
+    /// other filter's entry stays intact, so objectives updated on independent
+    /// schedules (the exposed-count reply and the async R-free result) coexist
+    /// in the one summed raw-bonus channel. Every writer of this channel must go
+    /// through here, never a bulk replace, or it would clobber the others.
+    pub(crate) fn set_filter_bonus_entry(&mut self, label: &str, value: f64) {
+        self.filter_bonus.retain(|(k, _)| k != label);
+        if value != 0.0 {
+            self.filter_bonus.push((label.to_owned(), value));
+        }
     }
 
     /// Clear the met-filter raw bonus.

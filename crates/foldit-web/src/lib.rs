@@ -48,8 +48,8 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 use foldit_core::{App, HostEffects};
 use foldit_gui::bridge::{self, RequestKind, RequestResult};
 use foldit_gui::{AppCommand, EntitySelection, OpDispatch, ViewportInput};
-use viso::{RenderContext, VisoEngine};
 use viso::options::VisoOptions;
+use viso::{RenderContext, VisoEngine};
 
 #[wasm_bindgen]
 pub fn init() {
@@ -323,7 +323,9 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: Progre
         *last_ts.borrow_mut() = now;
 
         {
-            let mut fx = WebEffects { state_cb: &state_cb };
+            let mut fx = WebEffects {
+                state_cb: &state_cb,
+            };
             {
                 let mut app = app.borrow_mut();
                 app.tick(dt, &mut fx);
@@ -338,15 +340,12 @@ fn spawn_render_loop(app: AppHandle, state_cb: JsCallback, progress_load: Progre
 
         // Re-arm.
         if let Some(window) = web_sys::window() {
-            let _ = window.request_animation_frame(
-                f.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
-            );
+            let _ = window
+                .request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref());
         }
     }));
 
-    let _ = window.request_animation_frame(
-        g.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
-    );
+    let _ = window.request_animation_frame(g.borrow().as_ref().unwrap().as_ref().unchecked_ref());
 }
 
 // OPFS progress persistence: origin-private read at startup, fire-and-forget
@@ -412,7 +411,9 @@ fn spawn_progress_save(bytes: Vec<u8>) {
                 return;
             }
         };
-        let write_opts = CreateWritableOptions { keep_existing_data: false };
+        let write_opts = CreateWritableOptions {
+            keep_existing_data: false,
+        };
         let mut writer = match file.create_writable_with_options(&write_opts).await {
             Ok(w) => w,
             Err(e) => {

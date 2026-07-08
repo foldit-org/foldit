@@ -2,6 +2,8 @@ use molex::entity::molecule::id::EntityId;
 
 use crate::app::App;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::app::refine::RefineEvent;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome};
@@ -9,6 +11,10 @@ use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, Op
 use viso::Focus;
 
 impl App {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "flat dispatch over the OpEvent enum; splitting the arms would scatter the stream-event handling that reads best in one place"
+    )]
     pub fn apply_backend_updates(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -181,6 +187,12 @@ impl App {
         // the `plugin_id` param the action rides in on.
         if op.op_id == "download_weights" {
             return self.dispatch_native_download(&op, focused_entity_id);
+        }
+        // Off-thread crystallographic B-factor refine: molex runs on a
+        // background thread and the result applies on completion in `tick`, so
+        // this intercept only kicks the thread and returns.
+        if op.op_id == "refine_b" {
+            return self.dispatch_native_refine();
         }
 
         let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
@@ -378,6 +390,7 @@ impl App {
             Ok(ckpt) => {
                 self.scores
                     .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
+                self.spawn_rfree_compute(ckpt);
                 Some(rid)
             }
             Err(e) => {
@@ -385,6 +398,104 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Kick a crystallographic B-factor refine on a background thread. Every
+    /// unmet precondition is a refused no-op with a user-facing error toast: a
+    /// held plugin lock, a refine already running, no shared GPU device, no
+    /// loaded density, or an empty committed head. Snapshots the committed head
+    /// (the refine input and the apply-time race fingerprint), then spawns a
+    /// thread that runs molex only and streams progress / completion back over
+    /// the channel; `tick`'s drain applies the result on the main thread.
+    ///
+    /// Opens no history edit here and no stream, so returns `None` always.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_native_refine(&mut self) -> Option<u64> {
+        const N_MACRO_CYCLES: usize = 5;
+
+        // Refuse while a plugin operation holds a lock: applying the refined B
+        // on completion would race the in-flight edit.
+        if self.runner_client.any_lock_held() {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "Cannot refine while another operation is running".to_owned(),
+            );
+            return None;
+        }
+        if self.refine_in_flight {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "A B-factor refine is already running".to_owned(),
+            );
+            return None;
+        }
+        if self.experimental_data.is_none() {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "B-factor refine needs a loaded density".to_owned(),
+            );
+            return None;
+        }
+        if self.shared_device.is_none() {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "B-factor refine needs a GPU device".to_owned(),
+            );
+            return None;
+        }
+
+        // The density and device were just confirmed present, so an empty
+        // committed head is the only `None` left here. The snapshot is the
+        // refine input and the source of the `(entity, atom count)` fingerprint
+        // the apply step re-checks, so a mid-refine edit discards the result
+        // rather than scattering stale B onto changed geometry.
+        let Some((data, dev, snapshot, table)) = self.xtal_job_inputs() else {
+            self.gui.push_notification(
+                foldit_gui::NotificationLevel::Error,
+                "No structure to refine".to_owned(),
+            );
+            return None;
+        };
+        self.refine_fingerprint = snapshot
+            .iter()
+            .map(|e| (e.id().raw(), e.atom_count()))
+            .collect();
+
+        self.refine_in_flight = true;
+        self.gui.actions.refine_progress = Some(foldit_gui::state::RefineProgress {
+            fraction: 0.0,
+            label: "Refining B-factors...".to_owned(),
+        });
+        self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
+
+        let tx = self.refine_tx.clone();
+        std::thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let result = molex::xtal::refine_b_from_atom_table_gpu(
+                &data,
+                &table,
+                N_MACRO_CYCLES,
+                &dev,
+                move |macro_cycle, inner_iter, inner_total| {
+                    let _ = progress_tx.send(RefineEvent::Progress {
+                        macro_cycle,
+                        inner_iter,
+                        inner_total,
+                    });
+                },
+            );
+            let event = match result {
+                Some((full_b, r_work, r_free)) => RefineEvent::Done {
+                    full_b,
+                    r_work,
+                    r_free,
+                },
+                None => RefineEvent::Failed("B-factor refinement failed".to_owned()),
+            };
+            let _ = tx.send(event);
+        });
+
+        None
     }
 
     /// Route a weight download to the specific plugin named in the op's
@@ -469,6 +580,7 @@ impl App {
                         &self.store,
                         ckpt,
                     );
+                    self.spawn_rfree_compute(ckpt);
                 }
                 Err(e) => log::warn!("dispatch_invoke: commit_action failed: {e}"),
             }

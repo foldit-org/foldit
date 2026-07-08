@@ -8,6 +8,8 @@ impl App {
     /// metadata, then hand to bring-up.
     pub(in crate::app) fn handle_load_structure(&mut self, path: &str) {
         self.set_app_phase(AppPhase::LoadingSession);
+        self.gui.score.r_free = None;
+        self.gui.mark_dirty(foldit_gui::DirtyFlags::SCORE);
         // Drop any prior plugin sessions so the armed bring-up re-`Init`s each plugin.
         self.runner_client.reset_for_new_structure();
         let loaded = match crate::structure_io::load_file_as_entities(path) {
@@ -60,6 +62,8 @@ impl App {
         self.viz.reset();
         self.projectors.render.reset_baselines();
         self.scores.clear_filter_bonus();
+        self.gui.score.r_free = None;
+        self.gui.mark_dirty(foldit_gui::DirtyFlags::SCORE);
         self.pending_dispatches.clear();
         self.runner_client.reset_for_new_structure();
 
@@ -70,6 +74,11 @@ impl App {
 
         let loaded = match data {
             Ok(puzzle_data) => {
+                // Cloned out before `puzzle_data` is moved into the store, since
+                // `load_puzzle` takes the whole `PuzzleData` by value and does
+                // not carry reflns onto the session `Puzzle`.
+                #[cfg(not(target_arch = "wasm32"))]
+                let reflns = puzzle_data.reflns.clone();
                 let render = self.store.load_puzzle(puzzle_id, puzzle_data);
 
                 // Overlay the puzzle's weight patch onto the base map.
@@ -109,6 +118,15 @@ impl App {
                     up: render.cam_up,
                 };
                 self.bringup.ss_override = render.ss_override;
+
+                // Build experimental data + map from the puzzle's own structure
+                // factors, after the store's history is seeded and before plugin
+                // bring-up ships the session density to the worker.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(reflns) = reflns {
+                    let name = self.store.title().to_owned();
+                    self.apply_puzzle_reflns(&reflns, &name);
+                }
 
                 true
             }

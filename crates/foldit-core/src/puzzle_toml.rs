@@ -51,6 +51,14 @@ pub struct PuzzleMeta {
     /// file in the puzzle dir. `None` for puzzles with no density fit target.
     #[serde(default)]
     pub density: Option<DensityRef>,
+    /// Optional structure factors (`[puzzle.reflns]`), referencing an sf.cif
+    /// in the puzzle dir. Reading it builds the experimental data the R-free
+    /// objective needs and computes the `elec_dens` map in-process, so a
+    /// crystallographic puzzle is self-contained (no `--with-density` flag).
+    /// Takes precedence over a static `[puzzle.density]` map. `None` for
+    /// non-crystallographic puzzles.
+    #[serde(default)]
+    pub reflns: Option<ReflnsRef>,
     /// Per-chain design masks (`[[puzzle.design_mask]]`) declaring which
     /// residues a designer may mutate
     #[serde(default)]
@@ -130,6 +138,20 @@ pub struct DensityRef {
     /// Grid spacing in Angstroms (feeds rosetta `edensity::grid_spacing`).
     /// `None` lets rosetta derive it from the map header.
     pub grid_spacing: Option<f32>,
+}
+
+/// The `[puzzle.reflns]` table: structure factors to build experimental data
+/// from. Unlike `[puzzle.density]` (a static precomputed map), this reads the
+/// puzzle's own sf.cif and computes the map, so the same reflections drive
+/// both the R-free objective and the `elec_dens` fit.
+#[derive(Debug, Deserialize)]
+pub struct ReflnsRef {
+    /// Path (relative to the puzzle dir) to the structure-factor cif.
+    pub path: String,
+    /// Explicit space-group number override. `None` reads the group from the
+    /// coordinate cif's Hermann-Mauguin name (the sf.cif commonly omits it).
+    #[serde(default)]
+    pub space_group: Option<u16>,
 }
 
 /// One `[[puzzle.design_mask]]` entry: the designable-residue specification

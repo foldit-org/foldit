@@ -6,8 +6,8 @@
 use foldit_core::{App, HostEffects};
 use foldit_gui::IpcMessage;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -160,7 +160,11 @@ impl AppRunner {
                     self.app.on_update_stream(request_id, params);
                 }
                 IpcMessage::OpenSessionDialog => self.open_session_dialog(),
-                IpcMessage::Request { wish_id, kind, payload } => {
+                IpcMessage::Request {
+                    wish_id,
+                    kind,
+                    payload,
+                } => {
                     let result = self.app.handle_request(kind, payload);
                     self.send_response_to_webview(&wish_id, &result);
                 }
@@ -196,20 +200,13 @@ impl AppRunner {
                 });
             }
             SessionLoadKind::Unsupported => {
-                log::warn!(
-                    "Load Session: unsupported selection {}",
-                    path.display()
-                );
+                log::warn!("Load Session: unsupported selection {}", path.display());
             }
         }
     }
 
     /// Resolve or reject a JS-side pending request via window.__onResponse.
-    fn send_response_to_webview(
-        &self,
-        wish_id: &str,
-        result: &foldit_gui::RequestResult,
-    ) {
+    fn send_response_to_webview(&self, wish_id: &str, result: &foldit_gui::RequestResult) {
         let Some(ref webview) = self.webview else {
             return;
         };
@@ -344,8 +341,13 @@ impl AppRunner {
             let ws = window.inner_size();
             let size = (ws.width, ws.height);
             if size != self.last_render_size && size.0 > 0 && size.1 > 0 {
-                log::info!("tick_frame resize: {}x{} (was {}x{})",
-                    size.0, size.1, self.last_render_size.0, self.last_render_size.1);
+                log::info!(
+                    "tick_frame resize: {}x{} (was {}x{})",
+                    size.0,
+                    size.1,
+                    self.last_render_size.0,
+                    self.last_render_size.1
+                );
                 self.app.resize(size.0, size.1);
                 self.resize_webview(ws);
                 self.last_render_size = size;
@@ -455,7 +457,9 @@ impl HostEffects for DesktopEffects<'_> {
                     return;
                 }
             };
-            let write_opts = CreateWritableOptions { keep_existing_data: false };
+            let write_opts = CreateWritableOptions {
+                keep_existing_data: false,
+            };
             let mut writer = match file.create_writable_with_options(&write_opts).await {
                 Ok(w) => w,
                 Err(e) => {
@@ -566,8 +570,10 @@ impl ApplicationHandler for AppRunner {
             WindowEvent::Resized(newsize) => {
                 log::info!(
                     "Resized event: {}x{} (last_render_size: {}x{})",
-                    newsize.width, newsize.height,
-                    self.last_render_size.0, self.last_render_size.1,
+                    newsize.width,
+                    newsize.height,
+                    self.last_render_size.0,
+                    self.last_render_size.1,
                 );
                 let size = (newsize.width, newsize.height);
                 if size.0 > 0 && size.1 > 0 {
@@ -633,7 +639,8 @@ impl ApplicationHandler for AppRunner {
             }
 
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.app.handle_native_modifiers(modifiers.state().shift_key());
+                self.app
+                    .handle_native_modifiers(modifiers.state().shift_key());
             }
 
             _ => (),
@@ -667,10 +674,7 @@ impl Drop for AppRunner {
     clippy::expect_used,
     reason = "event-loop setup is binary startup; failure is unrecoverable and should abort loudly"
 )]
-pub fn run(
-    app: App,
-    log_buffer: crate::tee_logger::LogBuffer,
-) -> ! {
+pub fn run(app: App, log_buffer: crate::tee_logger::LogBuffer) -> ! {
     let mut runner = AppRunner::new(app, log_buffer);
 
     // In debug, spawn dev server and wait for it before opening the window.

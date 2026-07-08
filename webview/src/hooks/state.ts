@@ -141,7 +141,7 @@ export function useFrontendState(selector?: (s: any) => any) {
 function _buildBackendData() {
 	return {
 		// Score
-		currentScore: () => state.score.value,
+		currentScore: () => state.score.value ?? 0,
 		invalidScore: () => state.score.invalid,
 		// Selection — list of per-entity residue selections; entities with
 		// no selected residues are absent from `entries`.
@@ -302,7 +302,7 @@ export const getUIState = () => ({
 });
 
 export const getBackendData = () => ({
-	currentScore: state.score.value,
+	currentScore: state.score.value ?? 0,
 	invalidScore: state.score.invalid,
 	selection: state.selection.entries,
 	actions: state.actions.available,

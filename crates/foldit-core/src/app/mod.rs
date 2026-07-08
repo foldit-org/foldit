@@ -19,15 +19,23 @@ use crate::session::{Session, SessionUpdate, SessionUpdateConsumer};
 use crate::viz::Viz;
 
 mod command;
+#[cfg(not(target_arch = "wasm32"))]
+mod density;
 mod dispatch;
 #[cfg(not(target_arch = "wasm32"))]
 mod gesture;
 mod harness;
+#[cfg(not(target_arch = "wasm32"))]
+mod init_config;
 pub mod input;
 mod load;
 mod plugins;
 mod preview;
 mod projectors;
+#[cfg(not(target_arch = "wasm32"))]
+mod refine;
+#[cfg(not(target_arch = "wasm32"))]
+mod rfree;
 pub mod score_coordinator;
 mod startup;
 #[cfg(test)]
@@ -37,6 +45,10 @@ mod view_options;
 use self::harness::EngineHarness;
 pub use self::plugins::{locate_plugin_ui_entrypoints, locate_plugins_root};
 use self::projectors::Projectors;
+#[cfg(not(target_arch = "wasm32"))]
+use self::refine::RefineEvent;
+#[cfg(not(target_arch = "wasm32"))]
+use self::rfree::RFreeEvent;
 use self::score_coordinator::ScoreCoordinator;
 pub use foldit_gui::TailUpdate;
 
@@ -80,6 +92,47 @@ pub struct App {
     /// fell back to self-creating its own; density then computes on the CPU.
     #[cfg(not(target_arch = "wasm32"))]
     shared_device: Option<molex::xtal::WgpuDevice>,
+
+    /// Experimental structure factors retained from a `--with-density` load.
+    /// The b-factor refine reads them, and `refresh_density` recomputes the
+    /// map from them after the refine writes new B values. `Arc` so the refine
+    /// thread borrows the same data the App keeps. `None` until a density load
+    /// succeeds.
+    #[cfg(not(target_arch = "wasm32"))]
+    experimental_data: Option<std::sync::Arc<molex::xtal::ExperimentalData>>,
+
+    /// viso map id of the currently-loaded density, so a refresh drops the
+    /// stale map before uploading the recomputed one.
+    #[cfg(not(target_arch = "wasm32"))]
+    density_map_id: Option<u32>,
+
+    /// True while a b-factor refine runs on the background thread. Gates a
+    /// second dispatch and disables the action button.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_in_flight: bool,
+
+    /// The dispatched refine's structural fingerprint (`(entity raw id, atom
+    /// count)` per committed head entity, in flat order): the apply step
+    /// discards the result if the committed model changed under it.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_fingerprint: Vec<(u32, usize)>,
+
+    /// Progress / completion events from the background refine thread, drained
+    /// on the main thread each tick. The thread runs molex only and never
+    /// touches session / engine / gui state.
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_rx: std::sync::mpsc::Receiver<RefineEvent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    refine_tx: std::sync::mpsc::Sender<RefineEvent>,
+
+    /// R-free results from the background compute thread, drained on the main
+    /// thread each tick. The thread runs molex only and never touches session /
+    /// engine / gui state; the drain folds the reward into the game score and
+    /// publishes the live readout.
+    #[cfg(not(target_arch = "wasm32"))]
+    rfree_rx: std::sync::mpsc::Receiver<RFreeEvent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    rfree_tx: std::sync::mpsc::Sender<RFreeEvent>,
 }
 
 /// Wrap raw bytes as the `{ "encoding": "base64", "content": ... }` envelope
@@ -93,6 +146,10 @@ fn base64_result(bytes: &[u8]) -> serde_json::Value {
 impl App {
     #[must_use]
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let (refine_tx, refine_rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (rfree_tx, rfree_rx) = std::sync::mpsc::channel();
         Self {
             harness: EngineHarness::new(),
             store: Session::new(),
@@ -110,6 +167,22 @@ impl App {
             pending_dispatches: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             shared_device: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            experimental_data: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            density_map_id: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_in_flight: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_fingerprint: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            refine_rx,
+            #[cfg(not(target_arch = "wasm32"))]
+            rfree_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            rfree_rx,
         }
     }
 
@@ -163,13 +236,11 @@ impl App {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let params: std::collections::HashMap<
-                String,
-                foldit_runner::orchestrator::ParamValue,
-            > = params
-                .into_iter()
-                .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
-                .collect();
+            let params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> =
+                params
+                    .into_iter()
+                    .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+                    .collect();
             self.runner_client.update_stream_by_rid(request_id, params);
         }
         #[cfg(target_arch = "wasm32")]
@@ -250,7 +321,9 @@ impl App {
                 #[cfg(target_arch = "wasm32")]
                 {
                     let _ = (query_id, params);
-                    Err(String::from("plugin queries are unavailable on this platform"))
+                    Err(String::from(
+                        "plugin queries are unavailable on this platform",
+                    ))
                 }
             }
             RequestKind::StartStream => {
@@ -262,10 +335,10 @@ impl App {
                     })?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    match self.dispatch_op_inner(op) {
-                        Some(request_id) => Ok(serde_json::json!({ "request_id": request_id })),
-                        None => Err(String::from("op did not start a stream")),
-                    }
+                    self.dispatch_op_inner(op).map_or_else(
+                        || Err(String::from("op did not start a stream")),
+                        |request_id| Ok(serde_json::json!({ "request_id": request_id })),
+                    )
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -359,6 +432,18 @@ impl App {
         // Plugin updates.
         self.apply_backend_updates();
 
+        // Completion / progress of the off-thread b-factor refine. Applying the
+        // refined B (and any toast) happens here on the main thread; the thread
+        // only ran molex.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drain_refine_events();
+
+        // Async R-free results land here on the main thread: fold the reward
+        // into the game score and publish the subheader readout. The compute
+        // thread ran molex only.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drain_rfree_events();
+
         for op in std::mem::take(&mut self.pending_dispatches) {
             self.handle_dispatch_op(op);
         }
@@ -382,6 +467,20 @@ impl App {
             self.mark_dirty(DirtyFlags::ACTIONS);
         }
 
+        // The native b-factor-refine action is available only with a density
+        // load, a shared GPU device, and no refine already running. Kept live
+        // on the driver so the catalog's `enabled` reads the same state a
+        // dispatch would; a change re-projects the actions section.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let available = self.experimental_data.is_some()
+                && self.shared_device.is_some()
+                && !self.refine_in_flight;
+            if self.runner_client.set_refine_available(available) {
+                self.mark_dirty(DirtyFlags::ACTIONS);
+            }
+        }
+
         // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();
 
@@ -394,7 +493,8 @@ impl App {
             && has_geometry
             && !self.store.has_pending()
         {
-            self.viz.refresh_connections(&mut self.runner_client, &self.store);
+            self.viz
+                .refresh_connections(&mut self.runner_client, &self.store);
         }
 
         let view_toggled = changes
@@ -411,8 +511,12 @@ impl App {
                 || view_toggled)
         {
             let opts = self.view_options();
-            self.viz
-                .step(&mut self.runner_client, &self.store, &mut self.scores, &opts);
+            self.viz.step(
+                &mut self.runner_client,
+                &self.store,
+                &mut self.scores,
+                &opts,
+            );
         }
 
         if !changes.is_empty() {
@@ -478,8 +582,8 @@ impl App {
             }
         }
 
-        if let Some(json) =
-            foldit_gui::bridge::push::serialize_dirty(&mut self.gui).map(|v| v.to_string().into_bytes())
+        if let Some(json) = foldit_gui::bridge::push::serialize_dirty(&mut self.gui)
+            .map(|v| v.to_string().into_bytes())
         {
             fx.push_state(&json);
         }

@@ -119,6 +119,12 @@ export type ActionsSection = {
 	 *  its entry to render a progress fill.
 	 */
 	download_progress: { [key in string]: DownloadProgress },
+	/**
+	 *  Live progress for the single in-flight b-factor refine, or `None` when
+	 *  nothing is refining. Rides the same `"actions"` wire push as its
+	 *  siblings; the frontend renders one determinate progress bar from it.
+	 */
+	refine_progress: RefineProgress | null,
 };
 
 /**
@@ -661,6 +667,30 @@ export type ProgressSection = {
 	entries: ProgressEntry[],
 };
 
+/**
+ *  Live R-free readout shown under the score bar.
+ * 
+ *  `value` is the current R-free (e.g. 0.28); `bonus` is the game-score
+ *  points its objective is currently contributing (e.g. 140). Rust computes
+ *  both; the frontend only renders.
+ */
+export type RFreeStatus = {
+	value: number | null,
+	bonus: number | null,
+};
+
+/**
+ *  Live progress for an in-flight b-factor refine.
+ * 
+ *  Determinate: `fraction` is 0..1 (0 at kick, 1 at completion) and `label`
+ *  is a ready-to-render phrase (e.g. "Refining B-factors (cycle 2/5)"). Rust
+ *  computes both; the frontend only renders.
+ */
+export type RefineProgress = {
+	fraction: number | null,
+	label: string,
+};
+
 /**  Information about a single entity in the scene */
 export type SceneEntityInfo = {
 	entity_id: number,
@@ -679,6 +709,19 @@ export type SceneEntityInfo = {
 	 *  values-bound appearance panel can read each control's current setting.
 	 */
 	appearance_values: unknown,
+};
+
+/**  Current score and validity state */
+export type ScoreSection = {
+	value: number | null,
+	invalid: boolean,
+	title: string,
+	/**
+	 *  Live R-free readout for the subheader under the score bar, or `None`
+	 *  when unavailable. Filled by the host projector; the frontend renders
+	 *  it from the same section the score value rides.
+	 */
+	r_free: RFreeStatus | null,
 };
 
 /**
