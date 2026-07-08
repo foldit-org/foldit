@@ -13,3 +13,9 @@
 [submodule "plugins/foundry"]
     path = plugins/foundry
     url = https://github.com/foldit-org/foldit-foundry-plugin
+[submodule "plugins/rosetta"]
+    path = plugins/rosetta
+    url = https://github.com/foldit-org/foldit-rosetta-plugin
+[submodule "plugins/foundry"]
+    path = plugins/simplefold
+    url = https://github.com/foldit-org/foldit-simplefold-plugin
