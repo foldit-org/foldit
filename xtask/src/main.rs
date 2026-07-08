@@ -14,7 +14,7 @@ mod filters_transcribe;
 use filters_transcribe::transcribe_filters;
 
 fn rosetta_interactive_path() -> String {
-    "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive".to_owned()
+    "plugins/rosetta/deps/rosetta-interactive".to_owned()
 }
 
 /// Canonicalize to an absolute path, stripping Windows' `\\?\`
@@ -264,17 +264,26 @@ fn package_web() -> Result<()> {
 }
 
 fn setup_envs() -> Result<()> {
-    println!("Installing plugin Python environments (pixi install --all)...");
-    let status = Command::new("pixi")
-        .args(["install", "--all"])
-        .current_dir("crates/foldit-runner")
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Failed to install plugin environments");
+    println!("Installing plugin Python environments (pixi install --all per plugin)...");
+    for dir in plugin_env_dirs()? {
+        // `--all` (not bare `pixi install`, which only installs the `default`
+        // env): each plugin's real env is NAMED after its id, so bare install
+        // would materialize only the empty default and leave the named env
+        // solved-but-unmaterialized.
+        println!("  pixi install --all in {}", dir.display());
+        let status = Command::new("pixi")
+            .args(["install", "--all"])
+            .current_dir(&dir)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!(
+                "Failed to install the plugin environments in {}",
+                dir.display()
+            );
+        }
     }
-    // molex is installed editable into every plugin env via pixi (the
-    // `molex-local` feature in pixi.toml). To recompile the molex
-    // extension after editing its Rust source, run
+    // molex composes into each plugin env via that plugin's own pixi.toml. To
+    // recompile the molex extension after editing its Rust source, run
     // `cargo xtask build-molex` separately.
 
     // libpython is brought into the process via foldit-python-host's
@@ -306,19 +315,46 @@ fn setup_envs() -> Result<()> {
     Ok(())
 }
 
+/// Directories that own a pixi environment to provision: each plugin under the
+/// top-level `plugins/` tree that carries a `pixi.toml` (native plugins like
+/// rosetta have none and are skipped), plus the dummy round-trip test fixture.
+/// Each env is named after its directory (= the plugin id).
+fn plugin_env_dirs() -> Result<Vec<std::path::PathBuf>> {
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("plugins") {
+        for entry in entries {
+            let path = entry?.path();
+            if path.join("pixi.toml").is_file() {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs.sort();
+    let dummy =
+        std::path::PathBuf::from("crates/foldit-runner/tests/fixtures/dummy");
+    if dummy.join("pixi.toml").is_file() {
+        dirs.push(dummy);
+    }
+    Ok(dirs)
+}
+
 fn build_molex() -> Result<()> {
     println!("Rebuilding the molex extension from local source...");
-    // molex is an editable maturin path dep composed into every plugin
-    // env (pixi.toml's `molex-local` feature). `pixi reinstall <pkg>`
-    // re-runs maturin to recompile the extension from the local crate.
-    for env in ["dummy", "foundry", "simplefold"] {
-        println!("  Reinstalling molex into the {env} environment...");
+    // molex composes into each plugin env via that plugin's own pixi.toml.
+    // `pixi reinstall molex` refreshes it from the resolved source. Each
+    // plugin's env is named after its id (= the directory name).
+    for dir in plugin_env_dirs()? {
+        let env = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("plugin env dir has a UTF-8 name");
+        println!("  Reinstalling molex in {}", dir.display());
         let status = Command::new("pixi")
             .args(["reinstall", "-e", env, "molex"])
-            .current_dir("crates/foldit-runner")
+            .current_dir(&dir)
             .status()?;
         if !status.success() {
-            anyhow::bail!("Failed to reinstall molex in the {env} environment");
+            anyhow::bail!("Failed to reinstall molex in {}", dir.display());
         }
     }
     println!("molex rebuilt and reinstalled in all plugin environments.");
@@ -429,7 +465,7 @@ fn install_rosetta_plugin_artifacts(cmake_dir: &str) -> Result<()> {
         anyhow::bail!("Built library not found at {lib_src}");
     }
 
-    let plugin_dir = "crates/foldit-runner/plugins/rosetta";
+    let plugin_dir = "plugins/rosetta";
     let lib_dst_plugin = format!("{}/{}", plugin_dir, rosetta_lib_name());
     std::fs::create_dir_all(plugin_dir)?;
     std::fs::copy(&lib_src, &lib_dst_plugin)?;
@@ -521,9 +557,10 @@ fn assemble() -> Result<()> {
     copy_rosetta_plugin()?;
 
     // 4. Python plugins: TEMPORARILY DISABLED for a Rosetta-only demo build.
-    //    To restore foundry/simplefold, re-add the pixi bundler step in
-    //    place of this skip: `pixi run bundle --output <abs STAGING>` run in
-    //    crates/foldit-runner (canonicalize STAGING first; bail on non-zero exit).
+    //    To restore foundry/simplefold, re-add the bundler step in place of
+    //    this skip: `python crates/foldit-runner/pixi_scripts/bundle_runtime.py
+    //    --output <abs STAGING>` (canonicalize STAGING first; bail on non-zero
+    //    exit). It discovers each plugin's env under `plugins/<id>/.pixi/envs`.
     println!("Skipping Python plugins (Rosetta-only demo build).");
 
     // 5. Read-only data assets, mirrored under <staging>/assets/ so the runtime
@@ -655,7 +692,7 @@ fn adhoc_seal_apps(out_dir: &str) -> Result<()> {
 /// Copy the Rosetta native plugin into `<staging>/plugins/rosetta`, mirroring
 /// the dev-tree layout the orchestrator's `discover_plugins` scans
 fn copy_rosetta_plugin() -> Result<()> {
-    let rosetta_plugin_src = "crates/foldit-runner/plugins/rosetta";
+    let rosetta_plugin_src = "plugins/rosetta";
     let rosetta_lib = rosetta_lib_name();
     let lib_src = format!("{rosetta_plugin_src}/{rosetta_lib}");
 
@@ -770,7 +807,7 @@ fn build_gui() -> Result<()> {
 }
 
 fn build_rosetta_ui() -> Result<()> {
-    let ui_src_dir = "crates/foldit-runner/plugins/rosetta/ui";
+    let ui_src_dir = "plugins/rosetta/ui";
 
     println!("Installing Rosetta UI dependencies...");
     let install_status = Command::new("bun")

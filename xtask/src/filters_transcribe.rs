@@ -40,7 +40,7 @@ use std::path::Path;
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
 const FILTERS_DIR: &str =
-    "crates/foldit-runner/plugins/rosetta/deps/rosetta-interactive/resources/levels";
+    "plugins/rosetta/deps/rosetta-interactive/resources/levels";
 
 /// Directory holding the legacy `<id>.ir_puzzle.puzzle_setup` source files,
 /// which carry the pose-numbered `"can_design"` design masks. Same tree as the

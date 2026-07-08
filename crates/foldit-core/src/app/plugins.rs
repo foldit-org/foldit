@@ -17,7 +17,7 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
     }
     let mut cursor = exe.parent()?.to_path_buf();
     loop {
-        let candidate = cursor.join("crates/foldit-runner/plugins");
+        let candidate = cursor.join("plugins");
         if candidate.is_dir() {
             return Some(candidate);
         }
