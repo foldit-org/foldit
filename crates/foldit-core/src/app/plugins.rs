@@ -1,3 +1,26 @@
+/// Strip the `\\?\` extended-length prefix that Windows APIs like
+/// `GetFinalPathNameByHandleW` (used by `fs::canonicalize`) add. The
+/// prefix disables path normalization, which breaks any downstream code
+/// that joins with forward-slash relative paths (e.g. Rosetta's C++
+/// database lookup). No-op on non-Windows.
+pub fn strip_win32_extended_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    p
+}
+
+fn strip_extended_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
+    strip_win32_extended_prefix(p)
+}
+
 /// Locate the runtime plugins directory.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
@@ -8,7 +31,7 @@ pub fn locate_plugins_root() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = strip_extended_prefix(std::env::current_exe().ok()?);
     if let Some(dir) = exe.parent() {
         let bundle = dir.join("plugins");
         if bundle.is_dir() {

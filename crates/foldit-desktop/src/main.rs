@@ -67,7 +67,12 @@ fn init_bundle_resource_paths() {
         return; // not a recognized bundle layout; keep default resolution
     };
     // Normalize away the `..` so logged/resolved paths are clean.
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    // On Windows, canonicalize adds a `\\?\` extended-length prefix which
+    // disables path normalization — any downstream code (e.g. Rosetta C++)
+    // that joins with forward-slash relative paths will break. Strip it.
+    let root = foldit_core::strip_win32_extended_prefix(
+        std::fs::canonicalize(&root).unwrap_or(root),
+    );
 
     let set_if_unset = |key: &str, path: std::path::PathBuf| {
         if std::env::var_os(key).is_none() {

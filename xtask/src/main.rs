@@ -467,7 +467,22 @@ fn ui_panel_built(plugin_dir: &Path, ui_dir: &str) -> bool {
 fn run_native_recipe(plan: &PluginBuildPlan, recipe: &str, clean: bool) -> Result<()> {
     let root = canonical_clean(".")?;
     let plugin_dir = canonical_clean(&plan.dir)?;
-    let recipe_path = plugin_dir.join(recipe);
+
+    // On Windows, prefer a `.ps1` sibling of the declared `.sh` recipe so
+    // native tooling (PowerShell + MSVC/Zig) is used instead of requiring
+    // Git Bash. Falls back to the declared recipe if no `.ps1` exists.
+    let recipe_path = if cfg!(target_os = "windows") && recipe.ends_with(".sh") {
+        let ps1 = recipe.replace(".sh", ".ps1");
+        let ps1_path = plugin_dir.join(&ps1);
+        if ps1_path.is_file() {
+            ps1_path
+        } else {
+            plugin_dir.join(recipe)
+        }
+    } else {
+        plugin_dir.join(recipe)
+    };
+
     if !recipe_path.is_file() {
         anyhow::bail!(
             "native recipe not found for `{}`: {}",
@@ -485,7 +500,16 @@ fn run_native_recipe(plan: &PluginBuildPlan, recipe: &str, clean: bool) -> Resul
     let binary_name = manifest.native_binary_name();
 
     println!("  Running native recipe {} ...", recipe_path.display());
-    let mut cmd = Command::new(&recipe_path);
+
+    // `.ps1` scripts need an explicit PowerShell interpreter.
+    let mut cmd = if recipe_path.extension().and_then(|e| e.to_str()) == Some("ps1") {
+        let mut c = Command::new("powershell");
+        c.args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-File"]);
+        c.arg(&recipe_path);
+        c
+    } else {
+        Command::new(&recipe_path)
+    };
     cmd.current_dir(&plugin_dir)
         .env("FOLDIT_WORKSPACE_ROOT", &root)
         .env("FOLDIT_MOLEX_DIR", root.join("crates/molex"))
