@@ -4,12 +4,7 @@ version = "0.1.0"
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64", "win-64"]
 
-# dummy is the runner's Python round-trip TEST FIXTURE (never shipped). Its dev
-# environment is named `dummy` (the plugin id) so the orchestrator's env
-# resolver finds it at `.pixi/envs/dummy` when the round-trip tests spawn a
-# worker for it (it walks up from this fixture dir to this pixi.toml). The SDK
-# is the in-tree editable checkout, not a published release, so the tests
-# exercise the current in-tree protocol.
+# dummy is the runner's Python round-trip test fixture
 [feature.dummy.dependencies]
 python = "3.12.*"
 
@@ -18,8 +13,8 @@ PYTHONUTF8 = "1"
 
 [feature.dummy.pypi-dependencies]
 dummy = { path = ".", editable = true }
-foldit-plugin-sdk = { path = "../../../../foldit-plugin-sdk", editable = true }
-molex = "==0.7.2"
+foldit-plugin-sdk = "==0.1.4"
+molex = "==0.7.4"
 
 [environments]
 dummy = { features = ["dummy"] }

@@ -16,4 +16,4 @@ xtask = "run --package xtask --"
 # — which exports its own CONDA_PREFIX — overrides this; the pin only
 # applies to bare `cargo` / `cargo xtask` builds.
 [env]
-CONDA_PREFIX = { value = "crates/foldit-runner/.pixi/envs/foundry", relative = true }
+CONDA_PREFIX = { value = "plugins/foundry/.pixi/envs/foundry", relative = true }

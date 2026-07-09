@@ -2,11 +2,11 @@
 name = "foldit-python-host"
 version = "0.1.0"
 edition = "2021"
-authors = ["Andreas Petrides"]
-license = "MIT"
-repository = "https://github.com/foldit-org/foldit-runner"
-keywords = ["protein", "folding", "molecular"]
-categories = ["science"]
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 readme = "../README.md"
 publish = false
 description = "Python plugin host for foldit-worker. Loaded as a dylib via libloading only when the worker hosts a Python plugin; links libpython so libpython only joins the process when this dylib is loaded."
