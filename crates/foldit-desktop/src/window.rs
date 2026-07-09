@@ -291,6 +291,14 @@ impl AppRunner {
         let dt = now.duration_since(self.last_frame);
         self.last_frame = now;
 
+        // On Linux the wry webview runs on the GTK main loop, which winit does
+        // not drive. Pump all pending GTK events each frame or the WebKitGTK
+        // webview never lays out, paints, or delivers its IPC messages.
+        #[cfg(target_os = "linux")]
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+
         // Process IPC messages (needed to detect webview_ready during init)
         self.process_ipc_messages();
 
@@ -681,6 +689,23 @@ pub fn run(app: App, log_buffer: crate::tee_logger::LogBuffer) -> ! {
     #[cfg(debug_assertions)]
     runner.ensure_dev_server();
 
+    // On Linux, wry's WebKitGTK backend (1) requires GTK to be initialized on
+    // the main thread before any webview is built, and (2) only accepts an
+    // X11 (`RawWindowHandle::Xlib`) parent for child webviews -- a Wayland
+    // handle is rejected with "the window handle kind is not supported". winit
+    // otherwise prefers Wayland whenever WAYLAND_DISPLAY is set, so pin it to
+    // X11 (via Xwayland) and bring GTK up here. `GDK_BACKEND=x11` (set in main)
+    // keeps GTK on the same X11 display so the Xlib parent handle is valid.
+    #[cfg(target_os = "linux")]
+    let event_loop = {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        gtk::init().expect("Failed to initialize GTK");
+        EventLoop::builder()
+            .with_x11()
+            .build()
+            .expect("Failed to create event loop")
+    };
+    #[cfg(not(target_os = "linux"))]
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut runner).expect("Event loop error");

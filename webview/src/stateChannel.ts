@@ -25,7 +25,7 @@ export const initialState: FrontendState = {
     active_preset: null,
   },
   ui: { text_bubble: null, fps: 0, log: '', selected_count: 0, hints_visible: true, fullscreen: false },
-  actions: { available: [] },
+  actions: { available: [], running: [] },
   loading: { progress: null, puzzle_loaded: false },
   scene: { entities: [], focused_entity: null },
   history: initialHistory,
