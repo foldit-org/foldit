@@ -43,7 +43,9 @@ mod tests;
 mod view_options;
 
 use self::harness::EngineHarness;
-pub use self::plugins::{locate_plugin_ui_entrypoints, locate_plugins_root};
+pub use self::plugins::{
+    locate_plugin_ui_entrypoints, locate_plugins_root, strip_win32_extended_prefix,
+};
 use self::projectors::Projectors;
 #[cfg(not(target_arch = "wasm32"))]
 use self::refine::RefineEvent;

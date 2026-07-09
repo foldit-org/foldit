@@ -43,6 +43,6 @@ pub(crate) mod wire_params;
 pub use app::App;
 pub use app::TailUpdate;
 #[cfg(not(target_arch = "wasm32"))]
-pub use app::{locate_plugin_ui_entrypoints, locate_plugins_root};
+pub use app::{locate_plugin_ui_entrypoints, locate_plugins_root, strip_win32_extended_prefix};
 pub use host_effects::HostEffects;
 pub use host_resources::HostResources;

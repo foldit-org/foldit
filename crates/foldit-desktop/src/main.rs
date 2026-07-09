@@ -67,7 +67,12 @@ fn init_bundle_resource_paths() {
         return; // not a recognized bundle layout; keep default resolution
     };
     // Normalize away the `..` so logged/resolved paths are clean.
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    // On Windows, canonicalize adds a `\\?\` extended-length prefix which
+    // disables path normalization — any downstream code (e.g. Rosetta C++)
+    // that joins with forward-slash relative paths will break. Strip it.
+    let root = foldit_core::strip_win32_extended_prefix(
+        std::fs::canonicalize(&root).unwrap_or(root),
+    );
 
     let set_if_unset = |key: &str, path: std::path::PathBuf| {
         if std::env::var_os(key).is_none() {
@@ -92,6 +97,17 @@ fn init_bundle_resource_paths() {
 }
 
 fn main() {
+    // Linux: wry's WebKitGTK backend can only host a child webview inside an
+    // X11 window. winit is pinned to X11 in `window::run`, so pin GTK to the
+    // same X11 display here -- otherwise GTK would connect to Wayland when
+    // WAYLAND_DISPLAY is set and reject the winit-provided Xlib parent handle.
+    // Must run before any thread spawns (set_var is not thread-safe) and before
+    // GTK is initialized. Respect an explicit override if the user set one.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+
     // When launched from a packaged bundle (macOS .app, Linux AppImage/deb,
     // Windows installer), the read-only assets and plugins live in a
     // platform-specific resource directory, not next to the executable. The

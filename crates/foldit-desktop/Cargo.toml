@@ -52,6 +52,13 @@ opfs = "0.2.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs"] }
 dirs = "5"
 
+# Linux: wry uses WebKitGTK, which requires GTK to be initialized on the main
+# thread and driven by the GTK main loop. winit does neither for us (tao would),
+# so we pull in the gtk bindings directly to `gtk::init()` and pump the loop.
+# Version pinned to match wry 0.50's gtk 0.18 so both share the same GTK state.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3.10"
