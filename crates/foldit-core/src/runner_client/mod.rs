@@ -95,7 +95,7 @@ impl RunnerClient {
     /// Sync the refine-running mirror (from `App::refine_in_flight`). Cheap,
     /// called each tick; see [`Self::refine_running`] field doc.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn set_refine_running(&mut self, running: bool) {
+    pub(crate) const fn set_refine_running(&mut self, running: bool) {
         self.refine_running = running;
     }
 

@@ -1,8 +1,14 @@
 /// Strip the `\\?\` extended-length prefix that Windows APIs like
-/// `GetFinalPathNameByHandleW` (used by `fs::canonicalize`) add. The
-/// prefix disables path normalization, which breaks any downstream code
+/// `GetFinalPathNameByHandleW` (used by `fs::canonicalize`) add.
+///
+/// The prefix disables path normalization, which breaks any downstream code
 /// that joins with forward-slash relative paths (e.g. Rosetta's C++
 /// database lookup). No-op on non-Windows.
+// Not const: off-Windows the body is a bare `p`, which is all clippy sees. The
+// `target_os = "windows"` arm calls `to_string_lossy`/`format!`, neither const,
+// so taking clippy's suggestion here would break the Windows build.
+#[allow(clippy::missing_const_for_fn)]
+#[must_use]
 pub fn strip_win32_extended_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
     {

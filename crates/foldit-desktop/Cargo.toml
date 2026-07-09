@@ -26,7 +26,7 @@ foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner" }
 
 # External deps
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.10", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.11", default-features = false }
 
 # Windowing / event loop
 winit = "0.30"

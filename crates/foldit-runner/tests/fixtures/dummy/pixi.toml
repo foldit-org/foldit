@@ -13,7 +13,7 @@ PYTHONUTF8 = "1"
 
 [feature.dummy.pypi-dependencies]
 dummy = { path = ".", editable = true }
-foldit-plugin-sdk = "==0.1.4"
+foldit-plugin-sdk = "==0.1.6"
 molex = "==0.7.4"
 
 [environments]

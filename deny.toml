@@ -71,6 +71,7 @@ skip = [
     # a major migration of a load-bearing dep, out of scope for dependency dedup.
     { crate = "heck@0.4.1", reason = "ouroboros_macro <- iceoryx2-cal 0.4 (0.4 vs 0.9 latest); needs a major iceoryx2 bump" },
     { crate = "rustix@0.38.44", reason = "which 4.4 <- bindgen 0.69 (iceoryx2 build-dep); tempfile uses rustix 1.x" },
+    { crate = "itertools@0.12.1", reason = "two anchors, both build-deps: bindgen 0.69 <- iceoryx2 0.4, and bindgen 0.71 <- tracel-tblgen-rs. Rest of the tree is on 0.14 via prost-build 0.13. Clearing this needs BOTH anchors moved, not just iceoryx2" },
     # toml 0.8 anchored by iceoryx2 0.4 + our crates; toml 0.9 comes from cbindgen
     # 0.29 (build-dep). Bumping our crates alone won't unify while iceoryx2 holds 0.8.
     { crate = "toml@0.8.23", reason = "iceoryx2 0.4 + our crates on 0.8; cbindgen 0.29 build-dep on 0.9. Bumping ours alone won't unify" },

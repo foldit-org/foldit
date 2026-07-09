@@ -17,10 +17,15 @@ workspace = true
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.10", default-features = false }
-molex = { version = "0.7.2", features = ["serde", "specta", "xtal", "gpu", "minimization"] }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.11", default-features = false }
+molex = { version = "0.7.4", features = [
+  "serde",
+  "specta",
+  "xtal",
+  "gpu",
+  "minimization",
+] }
 
-# Core
 glam = "0.30"
 indexmap = "2"
 slotmap = "1.0"
@@ -28,9 +33,6 @@ smallvec = "1"
 
 # Utilities
 log = "0.4"
-# Drop-in `std::time::{SystemTime, Instant}` replacement that works on
-# wasm32-unknown-unknown by routing to `performance.now()` / `Date.now()`.
-# Plain `std::time` panics on that target with "time not implemented".
 web-time = "1"
 
 # Serialization
@@ -42,14 +44,13 @@ base64 = "0.22"
 # Error handling
 thiserror = "2"
 
-# Native-only HTTP client for downloading from RCSB. On wasm the equivalent
-# fetch() bridge belongs in foldit-web (mirrors viso's split: web entry uses
-# `web_sys::window().fetch_with_str`, native uses a sync HTTP client).
+# Native-only HTTP client for downloading from RCSB.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
-# Decodes the opaque `voids` query payload (proto `VoidField`) at the
-# native runner-client boundary; the void detection + render path is
-# native-only, mirroring how the score path names the runner's proto types.
+reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
+  "native-tls",
+] }
+
 prost = "0.13"
 
 [dev-dependencies]

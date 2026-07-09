@@ -8,6 +8,7 @@ The root `Cargo.toml` defines the workspace. Its members are all root-owned:
 | `foldit-desktop` | `crates/foldit-desktop` | bin (`foldit`) | winit + wry + wgpu desktop shell |
 | `foldit-web` | `crates/foldit-web` | cdylib + rlib | wasm32 entry, canvas-mounted |
 | `foldit-gui` | `crates/foldit-gui` | lib | Wire and state types, JS-to-Rust bridge |
+| `foldit-runner` | `crates/foldit-runner` | rlib + bin (`foldit-worker`) | Plugin runner and worker binary |
 | `foldit-python-host` | `crates/foldit-runner/python-host` | cdylib | Python plugin host dylib |
 | `xtask` | `xtask` | bin | Build and packaging automation |
 
@@ -16,47 +17,52 @@ desktop binary.
 
 ## Two non-obvious members
 
-- **`foldit-gui` is in-tree, not a submodule.** It is absent from
-  `.gitmodules`, tracked directly in this repository, and its `repository`
-  field points at this repo. (A comment in the root `Cargo.toml` describes it
-  as submodule-resident; that comment is stale.)
-- **`foldit-python-host` lives inside the `foldit-runner` submodule** at
-  `crates/foldit-runner/python-host`, yet it is a root workspace member. It is
-  built from this workspace even though its source sits inside a submodule
-  checkout.
+- **`foldit-gui` is in-tree, not a submodule.** It is absent from `.gitmodules`,
+  tracked directly in this repository, and its `repository` field points at this
+  repo.
+- **`foldit-runner` is also in-tree**, likewise absent from `.gitmodules`. Both
+  it and the nested `foldit-python-host` at `crates/foldit-runner/python-host`
+  are root workspace members; `foldit-core` depends on the runner by path.
 
 ## Submodules
 
-`.gitmodules` declares four submodules, each in its own repository:
+`.gitmodules` declares six submodules, each in its own repository:
 
 | Submodule | Path |
 | --- | --- |
-| `foldit-runner` | `crates/foldit-runner` |
 | `molex` | `crates/molex` |
 | `viso` | `crates/viso` |
 | `foldit-plugin-sdk` | `crates/foldit-plugin-sdk` |
+| `foundry` | `plugins/foundry` |
+| `rosetta` | `plugins/rosetta` |
+| `simplefold` | `plugins/simplefold` |
 
-These are listed in the workspace `exclude` set. Without the exclude, cargo's
-workspace discovery walks into them from the outside (for example when maturin
-runs `cargo metadata` on `crates/molex/Cargo.toml`) and errors. They build under
-their own manifests, not as members here.
+The three under `crates/` are listed in the workspace `exclude` set. Without the
+exclude, cargo's workspace discovery walks into them from the outside (for
+example when maturin runs `cargo metadata` on `crates/molex/Cargo.toml`) and
+errors. They build under their own manifests, not as members here. The three
+under `plugins/` are Python projects with no Cargo manifest, so cargo never sees
+them.
 
 ## How the submodule crates are depended on
 
-The root crates depend on viso, molex, and the plugin SDK as published crates,
-and `[patch]` redirects two of them to local checkouts:
+The root crates depend on viso, molex, and the plugin SDK as published crates.
+The root `Cargo.toml` carries a `[patch]` entry for each, all commented out by
+default, so a default build resolves all three from their published sources and
+needs no submodule checkout:
 
-- **viso**: declared as a git dependency (`tag = "v0.3.6"`). A
-  `[patch."https://github.com/foldit-org/viso"]` block currently redirects it
-  to the local `crates/viso` checkout.
-- **foldit-plugin-sdk**: declared as crates.io `0.1`. A `[patch.crates-io]`
-  block currently redirects it to the local `crates/foldit-plugin-sdk` checkout.
-- **molex**: declared as crates.io `0.7.1` in every crate that uses it. There
-  is no molex `[patch]` block, so molex builds from the published crate even
-  when the `crates/molex` checkout is present.
+- **viso**: declared as a git dependency (`tag = "v0.3.11"`). A
+  `[patch."https://github.com/foldit-org/viso"]` block redirects it to the local
+  `crates/viso` checkout when uncommented.
+- **foldit-plugin-sdk**: declared as crates.io `0.1.6`. A `[patch.crates-io]`
+  entry redirects it to the local `crates/foldit-plugin-sdk` checkout when
+  uncommented.
+- **molex**: declared as crates.io `0.7.4` in every crate that uses it. A
+  `[patch.crates-io]` entry redirects it to the local `crates/molex` checkout
+  when uncommented.
 
-To build against the published viso or plugin SDK instead of the local checkout,
-comment out the matching `[patch]` block. See
+To build a dependency from a local checkout instead of its release, uncomment the
+matching `[patch]` entry. See
 [Local Development on Submodules](submodules.md).
 
 ## Workspace lints

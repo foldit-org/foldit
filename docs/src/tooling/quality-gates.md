@@ -18,9 +18,9 @@ check-all: clippy deny machete file-lengths
 Other recipes: `just check` (a plain `cargo check --workspace`, which stays green
 since warn-level lints do not break it), `just test`, `just doc`, `just warnings`
 (a clippy warning count), and `just lint` (per-rule, per-crate clippy
-breakdown). The `lint` recipe skips patched path deps (viso, molex): they are
-local sources dragged in by `[patch]`, are not lint-capped, and own their own
-gates in their own workspaces.
+breakdown). The `lint` recipe skips patched path deps (viso, molex): when a
+`[patch]` block is enabled they are local sources, are not lint-capped, and own
+their own gates in their own workspaces.
 
 ## File-length gate
 

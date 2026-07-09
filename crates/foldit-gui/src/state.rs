@@ -574,12 +574,13 @@ pub struct RefineProgress {
 }
 
 /// One currently-running action, projected from a held lock (a live
-/// orchestrator stream, or the native refine holding the global lock). The
-/// single source of truth for the running UI: the per-instance cancel toasts
-/// and each action button's cancel state both derive from this list, so a
-/// button is "running" exactly when an entry here is `global` or locks the
+/// orchestrator stream, or the native refine holding the global lock).
+///
+/// The single source of truth for the running UI: the per-instance cancel
+/// toasts and each action button's cancel state both derive from this list, so
+/// a button is "running" exactly when an entry here is `global` or locks the
 /// focused entity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct RunningAction {
     /// Dispatch request-id of the backing stream, used to cancel this one
     /// instance. `None` for the native refine, which is not a stream and is

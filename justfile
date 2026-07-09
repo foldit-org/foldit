@@ -1,14 +1,35 @@
 # Use PowerShell on Windows (bash resolves to WSL on some machines)
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
-# Surface the full technical-debt picture (does NOT gate the build).
-# Mirrors viso's `check-all` but every workspace lint is `warn`, so these
-# recipes report debt and run to completion; they don't fail the build.
+# Run all gates. Workspace lints are `warn`, but `clippy` passes `-D warnings`,
+# so this DOES fail on any lint. `fmt-check` is deliberately not a dependency:
+# the root tree has never been rustfmt'd (see the `fmt` recipe).
 check-all: clippy deny machete file-lengths
 
 # Clippy over every root-workspace member (gates: any warning is an error)
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Format check (nightly). The root has no rustfmt.toml and has never been
+# formatted, so this reports a large diff. That is why `check-all` does not
+# depend on it.
+#
+# Adopting viso/molex's rustfmt.toml verbatim was tried and reverted. If you
+# attempt it again, know what it costs:
+#   - `max_width = 80` rewraps one-line match arms into blocks, which trips
+#     `clippy::semicolon_if_nothing_returned`, and inflates 7 functions past
+#     the 100-line `clippy::too_many_lines` cap. viso survives 80 columns only
+#     because viso's code was written at 80.
+#   - `wrap_comments = true` reflows ~152 hand-aligned comment lines (ASCII
+#     tables, aligned `->` maps) into prose. Set it to false.
+#   - `error_on_line_overflow = true` can never pass: ~20 long lines live in
+#     `macro_rules!` bodies, which rustfmt does not format.
+fmt-check:
+    cargo +nightly fmt --all --check
+
+# Format (nightly). Reformats the whole workspace -- see `fmt-check` first.
+fmt:
+    cargo +nightly fmt --all
 
 # Type-check the workspace (must stay green; warn-level lints don't break it)
 check:

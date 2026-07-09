@@ -112,17 +112,14 @@ impl App {
     pub(in crate::app) fn cancel_action(&mut self, request_id: Option<u64>, refine: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            match request_id {
-                Some(rid) => self.runner_client.cancel_streams(Some(rid)),
-                None => {
-                    if refine {
-                        // Refine-only cancel: leave other streams running.
-                        self.request_refine_cancel();
-                    } else {
-                        // ESC / cancel-all: refine plus every non-download stream.
-                        self.request_refine_cancel();
-                        self.runner_client.cancel_streams(None);
-                    }
+            if let Some(rid) = request_id {
+                self.runner_client.cancel_streams(Some(rid));
+            } else {
+                // Refine-only cancel leaves other streams running; ESC /
+                // cancel-all also drops every non-download stream.
+                self.request_refine_cancel();
+                if !refine {
+                    self.runner_client.cancel_streams(None);
                 }
             }
         }

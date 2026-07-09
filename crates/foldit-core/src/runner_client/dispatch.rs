@@ -187,10 +187,8 @@ impl RunnerClient {
             return;
         };
         for (rid, entry) in &self.stream_host.active_streams {
-            let skip = match only_rid {
-                Some(target) => *rid != target,
-                None => entry.op_id == "download_weights",
-            };
+            let skip = only_rid
+                .map_or_else(|| entry.op_id == "download_weights", |target| *rid != target);
             if skip {
                 continue;
             }

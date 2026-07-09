@@ -1698,7 +1698,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2172,7 +2172,9 @@ dependencies = [
 
 [[package]]
 name = "foldit-plugin-sdk"
-version = "0.1.4"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18c6e333076b750825284c64e3bc10c8af469c1bd75e7dee3015f54d83d0068b"
 dependencies = [
  "cbindgen",
  "molex",
@@ -3894,7 +3896,9 @@ dependencies = [
 
 [[package]]
 name = "molex"
-version = "0.7.2"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d098a222092de5d3d6cdceee0dc9f9a9fa99481e4cda9b2baef24547c90d7be2"
 dependencies = [
  "argmin",
  "argmin-math",
@@ -5134,7 +5138,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -5154,7 +5158,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5334,7 +5338,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6599,7 +6603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -7336,7 +7340,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viso"
-version = "0.3.10"
+version = "0.3.11"
+source = "git+https://github.com/foldit-org/viso?tag=v0.3.11#3bf36f088b34a943376df33f7da1baf9c7ef7e84"
 dependencies = [
  "bytemuck",
  "encase",

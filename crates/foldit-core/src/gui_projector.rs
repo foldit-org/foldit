@@ -491,7 +491,7 @@ fn project_actions(session: &Session, driver: &RunnerClient, frontend: &mut GuiS
     });
     let groups = driver.plugin_groups();
     let running = driver.running_actions();
-    frontend.set_actions(actions, groups, running, focus.map(|e| e.raw()));
+    frontend.set_actions(actions, groups, running, focus.map(molex::EntityId::raw));
     frontend.set_download_progress(driver.weights_download_progress());
 }
 
