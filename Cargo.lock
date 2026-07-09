@@ -2141,6 +2141,7 @@ dependencies = [
  "foldit-core",
  "foldit-gui",
  "foldit-runner",
+ "gtk",
  "log",
  "opfs",
  "pollster",
