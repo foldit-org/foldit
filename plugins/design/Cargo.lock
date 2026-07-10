@@ -242,15 +242,15 @@ name = "foldit-design-plugin"
 version = "0.1.0"
 dependencies = [
  "foldit-plugin-sdk",
- "molex 0.8.0",
+ "molex",
 ]
 
 [[package]]
 name = "foldit-plugin-sdk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cbindgen",
- "molex 0.7.4",
+ "molex",
  "prost",
  "prost-build",
  "protox",
@@ -420,22 +420,6 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "molex"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d098a222092de5d3d6cdceee0dc9f9a9fa99481e4cda9b2baef24547c90d7be2"
-dependencies = [
- "compact_str",
- "flate2",
- "glam",
- "log",
- "ndarray",
- "rmp",
- "rustc-hash",
- "thiserror 2.0.18",
 ]
 
 [[package]]
