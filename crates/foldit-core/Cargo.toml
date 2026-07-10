@@ -17,7 +17,7 @@ workspace = true
 [dependencies]
 foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner", default-features = false }
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.12", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.13", default-features = false }
 # Core no longer needs the xtal/gpu/minimization surface — those moved to the
 # standalone xtal plugin, which imports molex with those features itself.
 molex = { version = "0.8.0", features = ["serde", "specta"] }
