@@ -583,7 +583,7 @@ fn run_ui_build(plugin_dir: &Path, ui_dir: &str) -> Result<()> {
 
     println!("  Building UI in {}...", dir.display());
     let status = Command::new("bun")
-        .args(["run", "build"])
+        .args(["run", "--bun", "build"])
         .current_dir(&dir)
         .status()?;
     if !status.success() {

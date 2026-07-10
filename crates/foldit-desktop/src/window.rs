@@ -44,7 +44,7 @@ const FRONTEND_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// Shared by the immediate reply path and the deferred one, which answers
 /// from `DesktopEffects` a tick or more after the request arrived.
 fn respond_to_webview(
-    webview: Option<&wry::WebView>,
+    webview: Option<&Webview>,
     wish_id: &str,
     result: &foldit_gui::RequestResult,
 ) {
