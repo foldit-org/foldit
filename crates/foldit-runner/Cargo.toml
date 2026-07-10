@@ -2,39 +2,31 @@
 name = "foldit-runner"
 version = "0.1.0"
 edition = "2021"
-authors = ["Andreas Petrides"]
-license = "MIT"
-description = "Plugin runner for Foldit — hosts language-agnostic plugins (Python, native) over a unified proto::plugin protocol"
-repository = "https://github.com/foldit-org/foldit-runner"
-keywords = ["plugin", "ipc", "protein", "rosetta", "bioinformatics"]
-categories = ["science", "development-tools::ffi"]
+description = "Plugin runner for Foldit: hosts language-agnostic plugins (Python, native) over a unified proto::plugin protocol"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [lib]
 name = "foldit_runner"
 crate-type = ["rlib"]
 
 # Worker binary. Hosts plugins via the unified protocol over IPC.
-# No pyo3 / libpython in its link graph — Python plugins are dispatched
-# via the `foldit-python-host` cdylib (dlopened at runtime when the
-# spawned plugin's manifest declares kind = "python"). Native plugins
-# (rosetta, etc.) are dlopened directly. Skipped on wasm builds.
 [[bin]]
 name = "foldit-worker"
 path = "src/bin/worker.rs"
 
-# ── Universal deps (compile on every target) ─────────────────────────────────
 [dependencies]
 thiserror = "2"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 
-# Owns plugin.proto, the protocol types (DispatchContext / ParamValue /
-# PollOutcome / ResidueRef), the Plugin trait + AssemblyPayload, the C-ABI,
-# the proto<->native decode, and PluginError. The runner re-exports its
-# surface so internal `crate::proto::plugin::*` / `crate::orchestrator::*`
-# / `crate::plugin::abi::*` paths keep resolving.
-foldit-plugin-sdk = "0.1.4"
+molex = "0.8.0"
+foldit-plugin-sdk = "0.1.6"
 
 # Still encodes/decodes the SDK's proto types on the IPC + vtable boundaries.
 prost = "0.13"
@@ -42,10 +34,6 @@ anyhow = "1.0.100"
 
 chrono = "0.4.42"
 
-# Molecular structure conversion library (COORDS format)
-molex = "0.7.2"
-
-# ── Native-only deps (IPC + process/env management) ──────────────────────────
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Logging (env_logger pulls regex; not needed on wasm)
 env_logger = "0.11"
@@ -61,7 +49,6 @@ interprocess = "2.1.0"
 # to dlopen plugin dylibs and dispatch through the C ABI vtable.
 libloading = "0.8"
 
-# ── Wasm-only deps ───────────────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Reserved for future wasm-bindgen scaffolding when phase 4 lands.
 
@@ -78,36 +65,11 @@ serial_test = "3.0"
 [features]
 default = []
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = true
-
-[profile.dev]
-opt-level = 0
-debug = true
-
-# ── Lint policy ──────────────────────────────────────────────────────────────
-# Mirrors the molex / viso `just check-all` guardrail set. Strict on
-# pedantic + nursery + cargo lint groups, with targeted restriction lints
-# (no unwrap / expect / panic / print* / dbg in library code).
-#
-# This is an inline definition (not `[lints] workspace = true`) because
-# foldit-runner is a workspace MEMBER and the monorepo root Cargo.toml
-# does not declare a `[workspace.lints.*]` block. Sibling crates inherit
-# nothing from here.
-#
-# The sub-workspace-member `crates/foldit-runner/python-host/` is a
-# separate package and does NOT inherit these lints; replicate the block
-# in its own Cargo.toml if/when you want the same guardrails there.
 [lints.clippy]
-# Broad lint groups (lower priority so individual lints can override)
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
-# Restriction lints (opt-in, not covered by the groups above)
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -118,10 +80,7 @@ print_stdout = "deny"
 print_stderr = "deny"
 str_to_string = "deny"
 
-# Multiple crate versions: transitive deps — not actionable
 multiple_crate_versions = "allow"
-
-# Pedantic allowances
 missing_const_for_fn = "allow"
 default_trait_access = "allow"
 doc_markdown = "allow"

@@ -345,7 +345,7 @@ fn rosetta_dylib_present(plugins_root: &std::path::Path) -> bool {
         "rosetta",
         rosetta_dylib_filename(),
         foldit_runner::plugin::host_target_triple(),
-        |p| p.exists(),
+        std::path::Path::exists,
     )
     .is_ok()
 }

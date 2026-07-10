@@ -134,7 +134,7 @@ fn resolve_native_binary(
         &manifest.id,
         &name,
         host_target_triple(),
-        |p| p.exists(),
+        Path::exists,
     )
 }
 
@@ -144,6 +144,7 @@ fn resolve_native_binary(
 /// `unknown` on an unsupported platform: the resolver then reports no
 /// `prebuilt/unknown/` directory, which is the correct clear failure.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub fn host_target_triple() -> &'static str {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "aarch64-apple-darwin"
@@ -165,6 +166,7 @@ pub fn host_target_triple() -> &'static str {
 /// Path of a native plugin's opt-in local build output under the
 /// `<plugin_dir>/local/<name>` convention (shadows the vendored binary).
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub fn local_binary_path(plugin_dir: &Path, name: &str) -> std::path::PathBuf {
     plugin_dir.join("local").join(name)
 }
@@ -172,6 +174,7 @@ pub fn local_binary_path(plugin_dir: &Path, name: &str) -> std::path::PathBuf {
 /// Path of a native plugin's committed per-platform binary under the
 /// `<plugin_dir>/prebuilt/<triple>/<name>` convention.
 #[cfg(not(target_arch = "wasm32"))]
+#[must_use]
 pub fn prebuilt_binary_path(
     plugin_dir: &Path,
     triple: &str,
@@ -182,6 +185,11 @@ pub fn prebuilt_binary_path(
 
 /// Existence-check-injected core of [`resolve_native_binary`], kept pure so
 /// the precedence logic is testable without touching the filesystem.
+///
+/// # Errors
+///
+/// Returns an error naming both candidate paths and the host triple when
+/// neither exists.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_native_binary_inner(
     plugin_dir: &Path,

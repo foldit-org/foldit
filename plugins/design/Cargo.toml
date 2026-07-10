@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 foldit-plugin-sdk = { path = "../../crates/foldit-plugin-sdk" }
 # Base molex: `mutate_residue`, `AminoAcid` and the assembly wire format are
 # all ungated.
-molex = "0.7.2"
+molex = "0.8.0"
 
 # foldit-plugin-sdk depends on `molex` from crates.io. Without this patch the
 # plugin's molex and the SDK's would be distinct crates and `Assembly` would

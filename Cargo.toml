@@ -4,16 +4,13 @@ members = [
   "crates/foldit-core",
   "crates/foldit-desktop",
   "crates/foldit-gui",
+  "crates/foldit-runner",
   "crates/foldit-runner/python-host",
   "crates/foldit-web",
   "xtask",
 ]
 default-members = ["crates/foldit-desktop"]
 
-# Shared package metadata for the root-owned members. Submodule-resident
-# members (foldit-gui, foldit-runner/python-host) set these inline instead,
-# since they live in their own repos and inheriting here would couple them
-# to this workspace.
 [workspace.package]
 authors = ["Andreas Petrides <apetrides32@gmail.com>"]
 license = "MIT"
@@ -21,26 +18,28 @@ repository = "https://github.com/foldit-org/foldit"
 keywords = ["protein", "folding", "molecular"]
 categories = ["science"]
 
-# Submodule directories that exist in-tree but are NOT workspace members.
-# Without this, cargo's workspace discovery walks into these from outside
-# (e.g., maturin running `cargo metadata` on crates/molex/Cargo.toml) and
-# errors with "current package believes it's in a workspace when it's not".
-exclude = ["crates/viso", "crates/molex", "crates/foldit-runner", "crates/foldit-plugin-sdk"]
+# Submodule directories that exist in-tree but aren't workspace members.
+# (They function as standalone dependencies, opt-in for local dev)
+exclude = ["crates/viso", "crates/molex", "crates/foldit-plugin-sdk"]
 
-# Workspace lints. Mirrors viso's clippy set but every level is `warn`
-# (not `deny`): these checks surface the technical-debt picture across
-# the root members, they do not gate the build. Members opt in with
-# `[lints]\nworkspace = true`.
+# Optimized release profile (hoisted from foldit-runner when it moved in-tree;
+# a member's own [profile] is ignored). Applies to the whole workspace release
+# build, so packaged binaries are LTO'd and stripped.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Workspace lints: these checks surface the technical-debt picture across
+# the root members, they do not gate the build. 
+# Members can be opted in with `[lints] workspace = true`.
 [workspace.lints.clippy]
-# Broad lint groups (lower priority so individual lints can override)
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
-# multiple_crate_versions is owned by cargo-deny (deny.toml [bans].skip), which
-# supports per-crate exceptions with reasons; clippy's version is all-or-nothing.
 multiple_crate_versions = "allow"
-# Restriction lints (opt-in, not covered by the groups above)
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
@@ -51,7 +50,7 @@ print_stdout = "warn"
 print_stderr = "warn"
 str_to_string = "warn"
 
-# ── Local development overrides ───────────────────────────────────────
+# Local development overrides
 # Each block below redirects a published dep to its local submodule
 # checkout. Toggle them per-dep, independently:
 #
@@ -61,21 +60,12 @@ str_to_string = "warn"
 #
 # Leave commented for the default "use published version" workflow.
 
-# NOTE: local-path patches for dev only. NEVER commit with these uncommented.
-# Uncomment to build against local submodule checkouts; re-comment before commit.
-# Dev-cycle local override: foldit tracks the local wgpu-29 viso working tree
-# directly (instead of the v0.3.10 git tag) while molex/viso/sdk are all in flux.
-# Re-comment (and re-tag viso) at end-of-dev. Do NOT commit uncommented.
-[patch."https://github.com/foldit-org/viso"]
-viso = { path = "crates/viso" }
+# WARNING: local-path patches for dev use only.
+# Do not commit to dev/main branches with these uncommented.
 
-# Dev-cycle local override: the density feature adds an arg to the plugin-sdk
-# `Plugin::init` trait; consumers must see the local SDK, not registry 0.1.4.
-# Re-comment (and bump/publish foldit-plugin-sdk) at end-of-dev. Do NOT commit
-# uncommented.
-[patch.crates-io]
-foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
-# Dev-cycle local override: the xtal density feature consumes molex's unpublished
-# ExperimentalData / refine-density API (branch `xtal`). Re-comment (and publish
-# molex 0.8 with xtal) at end-of-dev. Do NOT commit uncommented.
-molex = { path = "crates/molex" }
+# [patch."https://github.com/foldit-org/viso"]
+# viso = { path = "crates/viso" }
+
+# [patch.crates-io]
+# foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+# molex = { path = "crates/molex" }

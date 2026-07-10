@@ -19,7 +19,7 @@ crate-type = ["cdylib"]
 foldit-plugin-sdk = { path = "../../crates/foldit-plugin-sdk" }
 # The heavy feature set the host no longer carries: `xtal` (rustfft),
 # `gpu` (cubecl/wgpu), `minimization` (argmin).
-molex = { version = "0.7.2", features = ["xtal", "gpu", "minimization"] }
+molex = { version = "0.8.0", features = ["xtal", "gpu", "minimization"] }
 prost = "0.13"
 log = "0.4"
 

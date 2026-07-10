@@ -6,8 +6,9 @@ with it (a winit window on desktop, an HTML canvas on web). Foldit constructs a
 `VisoEngine`, hands it to the `App` through the engine harness, and the render
 projector republishes geometry to it whenever the scene changes.
 
-Foldit depends on viso by git tag (`v0.3.6`), with a `[patch]` that currently
-redirects it to the local submodule checkout. See
+Foldit depends on viso by git tag (`v0.3.11`). The root `Cargo.toml` carries a
+commented-out `[patch]` block that redirects it to the local submodule checkout
+when uncommented. See
 [Workspace Layout](../getting-started/workspace-layout.md).
 
 This book does not re-derive viso's internals (impostor rendering, the

@@ -1,20 +1,19 @@
 [alias]
 xtask = "run --package xtask --"
 
-# Pin Python to the python-host build env so bare cargo builds don't
-# auto-discover a system Python with a different ABI (e.g. system 3.13 vs the
-# pinned 3.12). Mismatch surfaces as undefined Python symbols at link time.
+# Pin Python to the pixi env so cargo builds don't auto-discover a
+# system Python with a different ABI (e.g. system 3.13 vs pixi 3.12).
+# Mismatch surfaces as undefined Python symbols at link time.
 #
-# We pin CONDA_PREFIX (the env *root*), not PYO3_PYTHON (a full interpreter
-# path), so this stays correct on every OS: pyo3-build-config derives the
-# interpreter from CONDA_PREFIX in an OS-aware way (<prefix>/python.exe on
-# Windows, <prefix>/bin/python on Unix). A hardcoded PYO3_PYTHON would bake in
-# one OS's layout.
+# We pin CONDA_PREFIX (the env *root*), not PYO3_PYTHON (a full
+# interpreter path), so this stays correct on every OS: pyo3-build-config
+# derives the interpreter from CONDA_PREFIX in an OS-aware way
+# (<prefix>/python.exe on Windows, <prefix>/bin/python on Unix), and
+# foldit-python-host's build.rs already resolves libpython from
+# CONDA_PREFIX too. A hardcoded PYO3_PYTHON would bake in one OS's layout.
 #
-# This is the runner's build-only interpreter env (foldit-python-host embeds
-# CPython); `cargo xtask` sets PYO3_PYTHON at the same env explicitly, so the
-# two agree. force is left at its default (false), so `pixi run -e <env> cargo`
-# — which exports its own CONDA_PREFIX — overrides this; the pin only applies
-# to bare `cargo` / `cargo xtask` builds.
+# force is left at its default (false), so `pixi run -e <env> cargo ...`
+# — which exports its own CONDA_PREFIX — overrides this; the pin only
+# applies to bare `cargo` / `cargo xtask` builds.
 [env]
-CONDA_PREFIX = { value = "crates/foldit-runner/python-host/.pixi/envs/default", relative = true }
+CONDA_PREFIX = { value = "plugins/foundry/.pixi/envs/foundry", relative = true }

@@ -5,7 +5,7 @@
     reason = "xtask is a CLI build tool; console output is its intended interface"
 )]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -315,9 +315,9 @@ struct UiBuildSection {
 /// (which reads each dir's `plugin.toml`) iterate the same directory set and
 /// differ only in the per-dir file they consult, so the walk lives here once.
 /// A missing root yields an empty list rather than an error.
-fn plugin_dirs(plugins_root: &Path) -> Result<Vec<PathBuf>> {
+fn plugin_dirs(plugins_root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(plugins_root) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(std::result::Result::ok)
@@ -325,7 +325,7 @@ fn plugin_dirs(plugins_root: &Path) -> Result<Vec<PathBuf>> {
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    Ok(dirs)
+    dirs
 }
 
 /// Walk `plugins_root`, read each plugin's `plugin.build.toml`, and classify
@@ -339,7 +339,7 @@ fn plan_setup_plugins(
     filter_id: Option<&str>,
 ) -> Result<Vec<PluginBuildPlan>> {
     let mut plans = Vec::new();
-    for dir in plugin_dirs(plugins_root)? {
+    for dir in plugin_dirs(plugins_root) {
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -425,7 +425,7 @@ fn setup_plugins(id: Option<&str>, clean: bool, from_source: bool) -> Result<()>
 /// it is already `present` and the user has not forced a rebuild (`--from-source`,
 /// or `--clean` which implies it). A missing artifact is always built, even
 /// unforced (e.g. a platform with no committed prebuilt yet).
-fn skip_vendored(present: bool, from_source: bool, clean: bool) -> bool {
+const fn skip_vendored(present: bool, from_source: bool, clean: bool) -> bool {
     present && !(from_source || clean)
 }
 
@@ -444,7 +444,7 @@ fn resolve_native_binary(plan: &PluginBuildPlan) -> Result<Option<PathBuf>> {
         &plan.id,
         &name,
         foldit_runner::plugin::host_target_triple(),
-        |p| p.exists(),
+        Path::exists,
     )
     .ok())
 }
@@ -471,9 +471,11 @@ fn run_native_recipe(plan: &PluginBuildPlan, recipe: &str, clean: bool) -> Resul
     // On Windows, prefer a `.ps1` sibling of the declared `.sh` recipe so
     // native tooling (PowerShell + MSVC/Zig) is used instead of requiring
     // Git Bash. Falls back to the declared recipe if no `.ps1` exists.
-    let recipe_path = if cfg!(target_os = "windows") && recipe.ends_with(".sh") {
-        let ps1 = recipe.replace(".sh", ".ps1");
-        let ps1_path = plugin_dir.join(&ps1);
+    let recipe_is_sh = Path::new(recipe)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("sh"));
+    let recipe_path = if cfg!(target_os = "windows") && recipe_is_sh {
+        let ps1_path = plugin_dir.join(Path::new(recipe).with_extension("ps1"));
         if ps1_path.is_file() {
             ps1_path
         } else {
@@ -536,7 +538,7 @@ fn run_native_recipe(plan: &PluginBuildPlan, recipe: &str, clean: bool) -> Resul
         &plan.id,
         &binary_name,
         foldit_runner::plugin::host_target_triple(),
-        |p| p.exists(),
+        Path::exists,
     )
     .is_err()
     {
@@ -613,7 +615,7 @@ fn plugin_env_dirs() -> Result<Vec<std::path::PathBuf>> {
     Ok(dirs)
 }
 
-/// Path to the conda-forge CPython 3.12 that foldit-python-host links libpython
+/// Path to the conda-forge `CPython` 3.12 that foldit-python-host links libpython
 /// against, provisioned by the build-only pixi env at `python-host/`. Installs
 /// that env on first use, so building the host never depends on a system
 /// python being present. Set as `PYO3_PYTHON` on the python-host cargo build.
@@ -646,7 +648,9 @@ fn build_molex() -> Result<()> {
         let env = dir
             .file_name()
             .and_then(|n| n.to_str())
-            .expect("plugin env dir has a UTF-8 name");
+            .with_context(|| {
+                format!("plugin env dir has a non-UTF-8 name: {}", dir.display())
+            })?;
         println!("  Reinstalling molex in {}", dir.display());
         let status = Command::new("pixi")
             .args(["reinstall", "-e", env, "molex"])
@@ -883,7 +887,7 @@ fn staged_native_binary_dest(staging: &str, id: &str, triple: &str, name: &str) 
 fn stage_native_plugins() -> Result<()> {
     let triple = foldit_runner::plugin::host_target_triple();
 
-    for dir in plugin_dirs(Path::new("plugins"))? {
+    for dir in plugin_dirs(Path::new("plugins")) {
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -900,23 +904,20 @@ fn stage_native_plugins() -> Result<()> {
         }
 
         let name = manifest.native_binary_name();
-        let binary_src = match foldit_runner::plugin::resolve_native_binary_inner(
+        let Ok(binary_src) = foldit_runner::plugin::resolve_native_binary_inner(
             &dir,
             id,
             &name,
             triple,
-            |p| p.exists(),
-        ) {
-            Ok(path) => path,
-            Err(_) => {
-                println!(
-                    "Warning: no native binary for plugin `{id}` (host triple \
-                     {triple}); skipping. Build it from source with \
-                     `cargo xtask setup-plugins {id}`, or add a prebuilt binary \
-                     for this platform."
-                );
-                continue;
-            }
+            Path::exists,
+        ) else {
+            println!(
+                "Warning: no native binary for plugin `{id}` (host triple \
+                 {triple}); skipping. Build it from source with \
+                 `cargo xtask setup-plugins {id}`, or add a prebuilt binary \
+                 for this platform."
+            );
+            continue;
         };
 
         let plugin_dst = format!("{STAGING}/plugins/{id}");
@@ -1068,6 +1069,12 @@ fn copy_dir(src: &str, dst: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test fixture that cannot build its temp tree should panic; \
+              that panic IS the failing test"
+)]
 mod setup_plugins_tests {
     use super::*;
 

@@ -12,6 +12,6 @@ fn main() -> Result<()> {
     let builder = std::thread::Builder::new()
         .name("worker-main".into())
         .stack_size(8 * 1024 * 1024);
-    let handle = builder.spawn(|| foldit_runner::worker::main())?;
+    let handle = builder.spawn(foldit_runner::worker::main)?;
     handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
 }

@@ -582,7 +582,7 @@ pub struct OpProgress {
 /// and each action button's cancel state both derive from this list, so a
 /// button is "running" exactly when an entry here is `global` or locks the
 /// focused entity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct RunningAction {
     /// Dispatch request-id of the backing stream, used to cancel this one
     /// instance. `u32` on the wire (specta forbids u64); request-ids are a
