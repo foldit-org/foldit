@@ -150,6 +150,9 @@ pub struct Session {
     /// `--with-density` pdbid load. The puzzle's own `density` takes
     /// precedence when a puzzle is installed.
     density: Option<crate::puzzle_load::DensityAsset>,
+    /// Structure factors for this session, from `[puzzle.reflns]` or a
+    /// `--with-density` load. Handed to the density-provider plugin at Init.
+    reflns: Option<crate::puzzle_load::ReflnsAsset>,
     /// Queue of [`SessionUpdate`]s emitted by this store's mutators
     pending_updates: Vec<SessionUpdate>,
     /// In-flight op-stream preview token maps.
@@ -179,6 +182,7 @@ impl Session {
             title: "Unknown".to_owned(),
             puzzle: None,
             density: None,
+            reflns: None,
             pending_updates: Vec::new(),
             previews: Previews::new(),
         }
@@ -411,6 +415,13 @@ impl Session {
     #[must_use]
     pub const fn session_density(&self) -> Option<&crate::puzzle_load::DensityAsset> {
         self.density.as_ref()
+    }
+
+    /// This session's structure factors, if any. The plugin bring-up hands
+    /// these to the `provides_density` plugin, which builds the map from them.
+    #[must_use]
+    pub const fn session_reflns(&self) -> Option<&crate::puzzle_load::ReflnsAsset> {
+        self.reflns.as_ref()
     }
 
     // Is Residue N of Entity X designable?

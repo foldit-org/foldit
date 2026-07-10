@@ -123,7 +123,7 @@ fn plugin_asset_mime(ext: &str) -> Option<&'static str> {
 /// discovery. Held in a `OnceLock` next to the webview so the closure
 /// captures a cheap clone.
 ///
-/// Its sole caller, `create_webview_release`, is `#[cfg(not(debug_assertions))]`,
+/// Its sole caller, the release `AssetResolver`, is `#[cfg(not(debug_assertions))]`,
 /// so under a `test` build (where this module still compiles) it has no
 /// caller and looks dead; the release build exercises it.
 #[cfg_attr(test, allow(dead_code))]

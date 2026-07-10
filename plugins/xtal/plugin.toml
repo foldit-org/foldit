@@ -1,0 +1,24 @@
+id = "xtal"
+kind = "native"
+name = "Crystallography"
+# Ahead of density consumers (rosetta): the host inits `provides_density`
+# plugins first, queries their density, then inits `uses_density` plugins with
+# the resulting map.
+order = 0
+provides_density = true
+
+[native]
+# Basename form: `PluginManifest::native_binary_name()` decorates this into
+# libxtal.so / libxtal.dylib / xtal.dll.
+binary = "xtal"
+
+# Click-to-fire streaming op: B-factor refinement against the experimental map.
+# The host deactivates this plugin outright on a structure with no reflections,
+# so the button only ever appears when there is a map to refine against.
+[[buttons]]
+op = "refine_b"
+display = "Refine B"
+icon = "builtin:cloud"
+tooltip = "Refine B-factors against the experimental electron density"
+# A fixed number of refinement cycles, so the reported fraction is meaningful.
+determinate_progress = true

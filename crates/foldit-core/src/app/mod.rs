@@ -34,9 +34,7 @@ mod plugins;
 mod preview;
 mod projectors;
 #[cfg(not(target_arch = "wasm32"))]
-mod refine;
 #[cfg(not(target_arch = "wasm32"))]
-mod rfree;
 pub mod score_coordinator;
 mod sphere_select;
 mod startup;
@@ -49,10 +47,6 @@ pub use self::plugins::{
     locate_plugin_ui_entrypoints, locate_plugins_root, strip_win32_extended_prefix,
 };
 use self::projectors::Projectors;
-#[cfg(not(target_arch = "wasm32"))]
-use self::refine::RefineEvent;
-#[cfg(not(target_arch = "wasm32"))]
-use self::rfree::RFreeEvent;
 use self::score_coordinator::ScoreCoordinator;
 pub use foldit_gui::TailUpdate;
 
@@ -93,60 +87,11 @@ pub struct App {
     /// Transient right-drag sphere-selection state; `Default` between drags.
     pub(in crate::app) sphere_select: self::sphere_select::SphereSelect,
 
-    /// Shared wgpu device (created from the adapter's full limits) handed to
-    /// cubecl so crystallographic GPU compute runs on the same device the
-    /// renderer uses. `None` when device creation failed and the renderer
-    /// fell back to self-creating its own; density then computes on the CPU.
-    #[cfg(not(target_arch = "wasm32"))]
-    shared_device: Option<molex::xtal::WgpuDevice>,
-
-    /// Experimental structure factors retained from a `--with-density` load.
-    /// The b-factor refine reads them, and `refresh_density` recomputes the
-    /// map from them after the refine writes new B values. `Arc` so the refine
-    /// thread borrows the same data the App keeps. `None` until a density load
-    /// succeeds.
-    #[cfg(not(target_arch = "wasm32"))]
-    experimental_data: Option<std::sync::Arc<molex::xtal::ExperimentalData>>,
-
     /// viso map id of the currently-loaded density, so a refresh drops the
     /// stale map before uploading the recomputed one.
     #[cfg(not(target_arch = "wasm32"))]
     density_map_id: Option<u32>,
 
-    /// True while a b-factor refine runs on the background thread. Gates a
-    /// second dispatch and disables the action button.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_in_flight: bool,
-
-    /// Cancel signal for the running refine. The background thread's progress
-    /// callback returns `!load()` (so molex aborts the solve), and the thread
-    /// reads it after molex returns to report `Cancelled` rather than
-    /// `Failed`. Reset to `false` at each dispatch.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-
-    /// The dispatched refine's structural fingerprint (`(entity raw id, atom
-    /// count)` per committed head entity, in flat order): the apply step
-    /// discards the result if the committed model changed under it.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_fingerprint: Vec<(u32, usize)>,
-
-    /// Progress / completion events from the background refine thread, drained
-    /// on the main thread each tick. The thread runs molex only and never
-    /// touches session / engine / gui state.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_rx: std::sync::mpsc::Receiver<RefineEvent>,
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_tx: std::sync::mpsc::Sender<RefineEvent>,
-
-    /// R-free results from the background compute thread, drained on the main
-    /// thread each tick. The thread runs molex only and never touches session /
-    /// engine / gui state; the drain folds the reward into the game score and
-    /// publishes the live readout.
-    #[cfg(not(target_arch = "wasm32"))]
-    rfree_rx: std::sync::mpsc::Receiver<RFreeEvent>,
-    #[cfg(not(target_arch = "wasm32"))]
-    rfree_tx: std::sync::mpsc::Sender<RFreeEvent>,
 }
 
 /// Wrap raw bytes as the `{ "encoding": "base64", "content": ... }` envelope
@@ -160,10 +105,6 @@ pub(in crate::app) fn base64_result(bytes: &[u8]) -> serde_json::Value {
 impl App {
     #[must_use]
     pub fn new(host: Box<dyn crate::HostResources>) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let (refine_tx, refine_rx) = std::sync::mpsc::channel();
-        #[cfg(not(target_arch = "wasm32"))]
-        let (rfree_tx, rfree_rx) = std::sync::mpsc::channel();
         Self {
             harness: EngineHarness::new(),
             store: Session::new(),
@@ -173,6 +114,7 @@ impl App {
             gui: GuiState::new(),
             bringup: self::startup::BringupState {
                 phase: self::startup::StartupPhase::Idle,
+                initial_assembly: Vec::new(),
                 camera: self::startup::StartupCamera::Fit,
                 ss_override: None,
             },
@@ -181,24 +123,7 @@ impl App {
             pending_dispatches: Vec::new(),
             sphere_select: self::sphere_select::SphereSelect::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            shared_device: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            experimental_data: None,
-            #[cfg(not(target_arch = "wasm32"))]
             density_map_id: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_in_flight: false,
-            refine_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_fingerprint: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_tx,
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_rx,
-            #[cfg(not(target_arch = "wasm32"))]
-            rfree_tx,
-            #[cfg(not(target_arch = "wasm32"))]
-            rfree_rx,
         }
     }
 
@@ -424,6 +349,29 @@ impl App {
         self.harness.render();
     }
 
+    /// The wgpu device the renderer was built on. A host compositing a texture
+    /// through [`Self::set_overlay_texture`] must allocate it here so both
+    /// share one device. `None` before the engine is attached.
+    #[must_use]
+    pub fn wgpu_device(&self) -> Option<&viso::wgpu::Device> {
+        self.harness.engine.as_ref().map(viso::VisoEngine::device)
+    }
+
+    /// The queue paired with [`Self::wgpu_device`].
+    #[must_use]
+    pub fn wgpu_queue(&self) -> Option<&viso::wgpu::Queue> {
+        self.harness.engine.as_ref().map(viso::VisoEngine::queue)
+    }
+
+    /// Install a premultiplied-alpha texture to composite over the 3D scene
+    /// each frame, or `None` to stop. Sized in the window's physical pixels.
+    /// No-op before the engine is attached.
+    pub fn set_overlay_texture(&mut self, view: Option<&viso::wgpu::TextureView>) {
+        if let Some(engine) = self.harness.engine.as_mut() {
+            engine.set_overlay_texture(view);
+        }
+    }
+
     /// Set the host log mirror on the owned frontend.
     pub fn set_frontend_log(&mut self, log: String) {
         self.gui.set_log(log);
@@ -442,18 +390,6 @@ impl App {
 
         // Plugin updates.
         self.apply_backend_updates();
-
-        // Completion / progress of the off-thread b-factor refine. Applying the
-        // refined B (and any toast) happens here on the main thread; the thread
-        // only ran molex.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.drain_refine_events();
-
-        // Async R-free results land here on the main thread: fold the reward
-        // into the game score and publish the subheader readout. The compute
-        // thread ran molex only.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.drain_rfree_events();
 
         for op in std::mem::take(&mut self.pending_dispatches) {
             self.handle_dispatch_op(op);
@@ -481,28 +417,6 @@ impl App {
             self.mark_dirty(DirtyFlags::ACTIONS);
         }
 
-        // The native b-factor-refine action is available only with a density
-        // load, a shared GPU device, no refine already running, and NOTHING
-        // else locked - refine takes the global lock, so it needs every entity
-        // and the global lock free (symmetric to how a held global lock
-        // disables every other button). Kept live on the driver so the
-        // catalog's `enabled` reads the same state a dispatch would; a change
-        // re-projects the actions section.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let available = self.experimental_data.is_some()
-                && self.shared_device.is_some()
-                && !self.refine_in_flight
-                && !self.runner_client.any_lock_or_global_held();
-            if self.runner_client.set_refine_available(available) {
-                self.mark_dirty(DirtyFlags::ACTIONS);
-            }
-            // Mirror refine-running so `running_actions` can surface refine as
-            // a synthetic running action. `refine_in_flight` transitions
-            // already dirty ACTIONS (dispatch start and every terminal), so no
-            // extra mark is needed here.
-            self.runner_client.set_refine_running(self.refine_in_flight);
-        }
 
         // Drain the SessionUpdate stream once and route to projectors.
         let changes = self.store.take_updates();

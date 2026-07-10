@@ -44,16 +44,18 @@ impl RunnerClient {
                     stage,
                     score,
                 } => {
-                    let Some(assembly) = latest_assembly else {
-                        // A Pending with no pose is a non-geometry stream (a
-                        // weight download) reporting advancement. Surface it as
-                        // Progress so the host download state machine can
-                        // advance, rather than dropping the frame.
+                    // Advancement is surfaced for every stream, whether or not
+                    // it carries a pose: a poseless Pending is a non-geometry
+                    // stream (a weight download), and a posed one still reports
+                    // how far along it is.
+                    if progress.is_some() || stage.is_some() {
                         events.push(OpEvent::Progress {
                             token: request_id,
                             progress,
-                            stage,
+                            stage: stage.clone(),
                         });
+                    }
+                    let Some(assembly) = latest_assembly else {
                         continue;
                     };
                     // The dispatch id is the edit token.
@@ -73,10 +75,17 @@ impl RunnerClient {
                     stage,
                     score,
                 } => {
+                    // A checkpoint advances the stream like a Pending does.
+                    if progress.is_some() || stage.is_some() {
+                        events.push(OpEvent::Progress {
+                            token: request_id,
+                            progress,
+                            stage: stage.clone(),
+                        });
+                    }
                     let Some(assembly) = latest_assembly else {
                         log::trace!(
                             "plugin update Checkpoint rid={request_id} \
-                             progress={progress:?} stage={stage:?} \
                              (skipped: no assembly)"
                         );
                         continue;
@@ -258,6 +267,8 @@ impl RunnerClient {
                 let (rid, handle) = orch
                     .dispatch_start_stream(&intent.op_id, ctx, params, entity_type_of)
                     .map_err(map_dispatch_error)?;
+                let determinate_progress =
+                    self.op_determinate_progress(&plugin_id, &intent.op_id);
                 let scope = self.register_stream(
                     rid,
                     handle,
@@ -265,6 +276,7 @@ impl RunnerClient {
                     intent.op_id.clone(),
                     cached.lock_meta.creates_entities,
                     preview,
+                    determinate_progress,
                 );
                 Ok(OpOutcome::Stream {
                     request_id: rid,
@@ -337,6 +349,9 @@ impl RunnerClient {
             intent.op_id.clone(),
             cached.lock_meta.creates_entities,
             preview,
+            // This path serves weight downloads, whose reported fraction is a
+            // true byte count.
+            true,
         );
         Some(rid)
     }
@@ -346,6 +361,10 @@ impl RunnerClient {
     /// is consumed into the table). Shared by [`Self::dispatch_op`]'s
     /// Stream branch and [`Self::dispatch_stream_on_plugin_lockless`] so the
     /// two dispatch paths cannot drift in what they stamp per stream.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every field is a distinct per-stream fact stamped once at dispatch; bundling them into a struct would only move the argument list"
+    )]
     fn register_stream(
         &mut self,
         rid: u64,
@@ -354,6 +373,7 @@ impl RunnerClient {
         op_id: String,
         creates_entities: bool,
         preview: bool,
+        determinate_progress: bool,
     ) -> super::types::EditScope {
         let scope = edit_scope_from_handle(&handle);
         let _ = self.stream_host.active_streams.insert(
@@ -364,6 +384,9 @@ impl RunnerClient {
                 op_id,
                 creates_entities,
                 preview,
+                determinate_progress,
+                progress: None,
+                stage: None,
             },
         );
         scope
@@ -422,9 +445,13 @@ impl RunnerClient {
                 plugin_id: plugin_id.clone(),
                 op_id: intent.op_id.to_owned(),
                 // Pull-drag is an edit on an existing entity, never a
-                // create and never a preview.
+                // create and never a preview, and it runs until the pointer
+                // comes up rather than through a known number of steps.
                 creates_entities: false,
                 preview: false,
+                determinate_progress: false,
+                progress: None,
+                stage: None,
             },
         );
         Ok((rid, plugin_id))

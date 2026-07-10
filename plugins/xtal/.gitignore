@@ -1,0 +1,10 @@
+# Local build output shadows prebuilt/ at runtime; never committed.
+/local/
+/target/
+
+# Shared libraries are build artifacts everywhere except the committed
+# per-platform fallbacks under prebuilt/.
+*.so
+*.dylib
+*.dll
+!prebuilt/**

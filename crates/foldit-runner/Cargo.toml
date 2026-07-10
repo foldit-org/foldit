@@ -25,8 +25,8 @@ log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 
-molex = "0.7.4"
-foldit-plugin-sdk = "0.1.6"
+molex = "0.8.0"
+foldit-plugin-sdk = "0.2.1"
 
 # Still encodes/decodes the SDK's proto types on the IPC + vtable boundaries.
 prost = "0.13"

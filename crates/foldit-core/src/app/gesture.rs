@@ -290,7 +290,7 @@ impl App {
             // ESC cancels everything cancellable (weight downloads excepted;
             // see `cancel_streams`). Routes through the one cancel owner so it
             // matches a toast's X button.
-            self.cancel_action(None, false);
+            self.cancel_action(None);
         }
 
         // A hotkey resolved in the `Key` arm dispatches through the same

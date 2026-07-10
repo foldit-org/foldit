@@ -63,6 +63,12 @@ pub struct PluginManifest {
     /// `false`.
     #[serde(default)]
     pub uses_density: bool,
+    /// Whether this plugin produces the electron-density map. The host inits
+    /// `provides_density` plugins first, reads their map through the
+    /// well-known `density` query, then inits `uses_density` plugins with it.
+    /// Defaults `false`.
+    #[serde(default)]
+    pub provides_density: bool,
 
     /// Python-specific overrides. Read only when `kind == Python`.
     pub python: Option<PythonSection>,
@@ -167,6 +173,48 @@ pub struct PanelEntry {
     pub position_y: f32,
 }
 
+/// A parameter value a manifest can declare inline for a button option.
+///
+/// Untagged so TOML scalars map straight onto a variant: `aa = "ALA"` is a
+/// `String`, `count = 3` an `Int`, `scale = 0.5` a `Float`. Variant order
+/// matters — bool and int must precede float so `3` never lands as `3.0`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ManifestParamValue {
+    /// TOML boolean.
+    Bool(bool),
+    /// TOML integer.
+    Int(i64),
+    /// TOML float.
+    Float(f64),
+    /// TOML string (also carries ENUM-typed params).
+    String(String),
+}
+
+/// One entry of a button's option picker.
+///
+/// Lives in `plugin.toml` under `[[buttons.options]]`. An option is a full
+/// dispatch of its parent button's op with `params` bound.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ButtonOption {
+    /// Display label rendered on the option.
+    pub label: String,
+    /// Render color token. Options sharing a color group into one picker
+    /// row, in the order colors first appear.
+    pub color: String,
+    /// Optional icon token: `builtin:<name>` glyph, `game:<path>` for a
+    /// foldit-owned asset, or a plugin-relative path. `None` = no icon.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Optional hotkey corner badge (winit `KeyCode` debug spelling).
+    #[serde(default)]
+    pub hotkey: Option<String>,
+    /// Parameter values bound into this option's dispatch, keyed by
+    /// `ParamSpec.name`.
+    #[serde(default)]
+    pub params: HashMap<String, ManifestParamValue>,
+}
+
 /// A single plugin-contributed user-facing button declaration.
 ///
 /// Lives in `plugin.toml` under `[[buttons]]`; the orchestrator joins
@@ -225,6 +273,20 @@ pub struct ButtonEntry {
     /// [`CatalogEntry`]: crate::orchestrator::types::CatalogEntry
     #[serde(default)]
     pub preview: bool,
+    /// Whether this op's stream reports how far through the user's request it
+    /// is. Defaults `false`, which renders an indeterminate bar. Open-ended
+    /// streams (wiggle, shake) run until cancelled, so any fraction they emit
+    /// measures an internal cycle budget rather than the work the user asked
+    /// for; the host discards it rather than draw a bar that fills and sits at
+    /// 100% while the op keeps running. Ops with a fixed step count (B-factor
+    /// refinement, diffusion) opt in.
+    #[serde(default)]
+    pub determinate_progress: bool,
+    /// Option picker for this button. Non-empty turns the button into a
+    /// toggle that opens a picker instead of a click-to-fire dispatch; each
+    /// option fires the same op with its own `params`. Empty = click-to-fire.
+    #[serde(default)]
+    pub options: Vec<ButtonOption>,
 }
 
 /// Plugin runtime kind. Drives spawn-primitive selection.
@@ -436,6 +498,74 @@ mod tests {
         assert_eq!(m.buttons[0].display, "Wiggle");
         assert_eq!(m.buttons[0].icon, PathBuf::from("icons/wiggle.svg"));
         assert_eq!(m.buttons[1].op, "ActionShakeMutate");
+    }
+
+    #[test]
+    fn parses_button_options_picker() {
+        let toml = r#"
+            id = "design"
+            kind = "native"
+
+            [[buttons]]
+            op = "mutate_residue"
+            display = "Mutate"
+            icon = "builtin:replace"
+
+            [[buttons.options]]
+            label = "A"
+            color = "orange"
+            icon = "game:residue_icons/ALA.png"
+            params = { aa = "ALA" }
+
+            [[buttons.options]]
+            label = "R"
+            color = "blue"
+            params = { aa = "ARG" }
+        "#;
+        let m = PluginManifest::parse(toml).unwrap();
+        let options = &m.buttons[0].options;
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, "A");
+        assert_eq!(options[0].color, "orange");
+        assert_eq!(
+            options[0].icon.as_deref(),
+            Some("game:residue_icons/ALA.png")
+        );
+        assert_eq!(
+            options[0].params.get("aa"),
+            Some(&ManifestParamValue::String("ALA".to_owned()))
+        );
+        // An option may omit its icon entirely.
+        assert!(options[1].icon.is_none());
+    }
+
+    #[test]
+    fn button_options_default_to_empty_and_scalars_keep_their_type() {
+        // A click-to-fire button declares no options.
+        let toml = r#"
+            id = "p"
+            kind = "native"
+
+            [[buttons]]
+            op = "go"
+            display = "Go"
+            icon = "builtin:replace"
+
+            [[buttons.options]]
+            label = "x"
+            color = "blue"
+            params = { count = 3, scale = 0.5, on = true, name = "n" }
+        "#;
+        let m = PluginManifest::parse(toml).unwrap();
+        let p = &m.buttons[0].options[0].params;
+        // Untagged variant order must keep an integer from landing as a float.
+        assert_eq!(p.get("count"), Some(&ManifestParamValue::Int(3)));
+        assert_eq!(p.get("scale"), Some(&ManifestParamValue::Float(0.5)));
+        assert_eq!(p.get("on"), Some(&ManifestParamValue::Bool(true)));
+        assert_eq!(
+            p.get("name"),
+            Some(&ManifestParamValue::String("n".to_owned()))
+        );
     }
 
     #[test]
@@ -777,5 +907,133 @@ mod tests {
         assert_eq!(name, "librosetta_interactive.so");
         #[cfg(target_os = "windows")]
         assert_eq!(name, "rosetta_interactive.dll");
+    }
+
+    #[test]
+    fn parses_on_disk_foundry() {
+        let toml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../plugins")
+                .join("foundry")
+                .join("plugin.toml"),
+        )
+        .expect("plugins/foundry/plugin.toml must exist");
+        let m = PluginManifest::parse(&toml).expect("foundry manifest must parse");
+        assert_eq!(m.id, "foundry");
+        assert_eq!(m.kind, PluginKind::Python);
+
+        let ops: Vec<&str> = m.buttons.iter().map(|b| b.op.as_str()).collect();
+        assert_eq!(ops, ["rfd3_design", "rf3_predict", "mpnn_design"]);
+
+        // RF3's diffusion intermediates are backbone-only, so they must ride a
+        // discardable ghost rather than the real lane.
+        let rf3 = m.buttons.iter().find(|b| b.op == "rf3_predict").unwrap();
+        assert!(rf3.preview, "rf3_predict must be a preview stream");
+        assert_eq!(rf3.icon, PathBuf::from("builtin:atom"));
+
+        let mpnn = m.buttons.iter().find(|b| b.op == "mpnn_design").unwrap();
+        assert_eq!(mpnn.icon, PathBuf::from("assets/icons/protein_mpnn.png"));
+    }
+
+    #[test]
+    fn parses_on_disk_design() {
+        let toml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../plugins")
+                .join("design")
+                .join("plugin.toml"),
+        )
+        .expect("plugins/design/plugin.toml must exist");
+        let m = PluginManifest::parse(&toml).expect("design manifest must parse");
+        assert_eq!(m.id, "design");
+        assert_eq!(m.kind, PluginKind::Native);
+
+        let button = &m.buttons[0];
+        assert_eq!(button.op, "mutate_residue");
+        assert!(button.requires_designable);
+        // Mutate rewrites exactly one residue's identity.
+        let spec = button.selection_spec.expect("mutate declares a selection spec");
+        assert_eq!((spec.min_residues, spec.max_residues), (1, 1));
+
+        // One option per proteinogenic amino acid, each binding its own code.
+        assert_eq!(button.options.len(), 20);
+        let codes: std::collections::HashSet<_> = button
+            .options
+            .iter()
+            .map(|o| match o.params.get("aa") {
+                Some(ManifestParamValue::String(s)) => s.clone(),
+                other => panic!("option {:?} has a non-string `aa`: {other:?}", o.label),
+            })
+            .collect();
+        assert_eq!(codes.len(), 20, "amino-acid codes must be unique");
+
+        // The frontend rows options by first-seen color, so a hydrophobic
+        // option must come first to keep the hydrophobic row on top.
+        assert_eq!(button.options[0].color, "orange");
+        let orange = button.options.iter().filter(|o| o.color == "orange").count();
+        assert_eq!(orange, 11, "molex's hydrophobic set has 11 members");
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(m.native_binary_name(), "libdesign.so");
+        #[cfg(target_os = "macos")]
+        assert_eq!(m.native_binary_name(), "libdesign.dylib");
+        #[cfg(target_os = "windows")]
+        assert_eq!(m.native_binary_name(), "design.dll");
+    }
+
+    /// Determinate progress is opt-in. An open-ended stream that happens to
+    /// report a fraction (rosetta's shake counts its own repack cycles) must
+    /// not be able to turn that into a filling progress bar just by emitting
+    /// it, so a button that says nothing gets an indeterminate bar.
+    #[test]
+    fn determinate_progress_defaults_off_and_is_opt_in() {
+        let toml = r#"
+            id = "p"
+            kind = "native"
+
+            [[buttons]]
+            op = "shake"
+            display = "Shake"
+            icon = "builtin:replace"
+
+            [[buttons]]
+            op = "refine_b"
+            display = "Refine B"
+            icon = "builtin:cloud"
+            determinate_progress = true
+        "#;
+        let m = PluginManifest::parse(toml).expect("manifest must parse");
+        assert!(!m.buttons[0].determinate_progress, "open-ended ops default off");
+        assert!(m.buttons[1].determinate_progress, "fixed-step ops opt in");
+    }
+
+    /// The on-disk manifests must agree with the rule above: rosetta's
+    /// open-ended sampling ops stay indeterminate, and the fixed-step ops
+    /// declare themselves.
+    #[test]
+    fn on_disk_manifests_only_opt_fixed_step_ops_into_determinate_progress() {
+        let plugins = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+        let determinate = |plugin: &str| -> std::collections::HashSet<String> {
+            let path = plugins.join(plugin).join("plugin.toml");
+            let toml = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+            PluginManifest::parse(&toml)
+                .unwrap_or_else(|e| panic!("{plugin} manifest must parse: {e}"))
+                .buttons
+                .into_iter()
+                .filter(|b| b.determinate_progress)
+                .map(|b| b.op)
+                .collect()
+        };
+
+        assert!(
+            determinate("rosetta").is_empty(),
+            "wiggle/shake/rebuild run until cancelled; none may claim a fraction"
+        );
+        assert_eq!(determinate("xtal"), ["refine_b".to_owned()].into());
+        assert_eq!(
+            determinate("foundry"),
+            ["rfd3_design".to_owned(), "rf3_predict".to_owned()].into(),
+        );
     }
 }

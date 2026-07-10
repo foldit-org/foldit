@@ -33,6 +33,9 @@ impl Session {
             Some(data.bubbles)
         };
         let current_bubble = bubbles.as_ref().map(|_| 0);
+        // Structure factors are session state, not puzzle state: a free-form
+        // `--with-density` load has no puzzle but still supplies them.
+        let reflns = data.reflns;
 
         self.start(
             data.name,
@@ -50,6 +53,7 @@ impl Session {
                 design_gating: None,
             }),
         );
+        self.set_session_reflns(reflns);
 
         let chain_keys: Vec<Option<String>> = data
             .entities

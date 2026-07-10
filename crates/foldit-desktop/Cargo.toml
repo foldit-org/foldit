@@ -26,7 +26,7 @@ foldit-gui = { path = "../foldit-gui" }
 foldit-runner = { path = "../foldit-runner" }
 
 # External deps
-viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.11", default-features = false }
+viso = { git = "https://github.com/foldit-org/viso", tag = "v0.3.13", default-features = false }
 
 # Windowing / event loop
 winit = "0.30"
@@ -35,9 +35,6 @@ pollster = "0.4"
 # Utilities
 log = "0.4"
 env_filter = "1.0"
-
-# Embedded webview
-wry = { version = "0.50", features = ["transparent"] }
 
 # Native cross-platform file dialog (macOS/Windows/Linux backends)
 rfd = "0.15"
@@ -52,12 +49,15 @@ opfs = "0.2.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs"] }
 dirs = "5"
 
-# Linux: wry uses WebKitGTK, which requires GTK to be initialized on the main
-# thread and driven by the GTK main loop. winit does neither for us (tao would),
-# so we pull in the gtk bindings directly to `gtk::init()` and pump the loop.
-# Version pinned to match wry 0.50's gtk 0.18 so both share the same GTK state.
+# WebKitGTK cannot paint transparent pixels into an on-screen X window, so the
+# webview is hosted off-screen and composited as a texture (`offscreen_webview`)
+# instead of being parented to the winit window by wry.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+wry = { version = "0.50", features = ["transparent"] }
 
 [dev-dependencies]
 proptest = "1"

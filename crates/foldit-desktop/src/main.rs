@@ -21,6 +21,8 @@
 //!   Mouse - Rotate/zoom camera
 
 mod host;
+#[cfg(target_os = "linux")]
+mod offscreen_webview;
 #[cfg(any(not(debug_assertions), test))]
 mod plugin_assets;
 mod tee_logger;
@@ -97,12 +99,11 @@ fn init_bundle_resource_paths() {
 }
 
 fn main() {
-    // Linux: wry's WebKitGTK backend can only host a child webview inside an
-    // X11 window. winit is pinned to X11 in `window::run`, so pin GTK to the
-    // same X11 display here -- otherwise GTK would connect to Wayland when
-    // WAYLAND_DISPLAY is set and reject the winit-provided Xlib parent handle.
-    // Must run before any thread spawns (set_var is not thread-safe) and before
-    // GTK is initialized. Respect an explicit override if the user set one.
+    // Linux: `offscreen_webview` hosts WebKitGTK in a GtkOffscreenWindow whose
+    // RGBA visual and Xlib backing surface are what give the UI per-pixel alpha.
+    // Pin GTK to X11 so that path is the one taken even when WAYLAND_DISPLAY is
+    // set. Must run before any thread spawns (set_var is not thread-safe) and
+    // before GTK is initialized. Respect an explicit override if the user set one.
     #[cfg(target_os = "linux")]
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11");

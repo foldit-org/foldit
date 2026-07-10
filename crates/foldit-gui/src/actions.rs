@@ -188,15 +188,13 @@ pub enum AppCommand {
     ClearProgress,
     /// Cancel a running action from the GUI (a per-action toast X or a running
     /// button's X). `request_id = Some(rid)` cancels exactly that one stream;
-    /// `refine = true` cancels the native B-factor refine (which is not a
-    /// stream and has no request-id); both unset cancels everything cancellable
-    /// (the ESC path). Drops any in-progress preview geometry either way.
+    /// `None` cancels everything cancellable (the ESC path). Drops any
+    /// in-progress preview geometry either way.
     CancelAction {
         /// `u32` on the wire (specta forbids u64); matches
         /// [`crate::state::RunningAction::request_id`].
         #[specta(type = Option<u32>)]
         request_id: Option<u64>,
-        refine: bool,
     },
 }
 

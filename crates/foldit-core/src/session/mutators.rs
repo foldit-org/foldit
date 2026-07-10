@@ -717,6 +717,12 @@ impl Session {
         self.density = d;
     }
 
+    /// Install this session's structure factors. Load-time state consumed by
+    /// the plugin-bringup path; no projector listens on it.
+    pub fn set_session_reflns(&mut self, r: Option<crate::puzzle_load::ReflnsAsset>) {
+        self.reflns = r;
+    }
+
     /// Drop the puzzle add-on and revert to the free-form session (a
     /// free-form structure load). Emits [`SessionUpdate::PuzzleChanged`]
     /// only when there was a puzzle to clear.

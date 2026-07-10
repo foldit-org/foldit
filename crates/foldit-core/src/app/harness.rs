@@ -246,13 +246,13 @@ impl EngineHarness {
                     // plugin hotkey catalog.
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        // Native picker-toggle flips a host-owned picker
-                        // open/closed rather than dispatching an op.
+                        // A key on an options-carrying button flips that
+                        // button's picker open/closed rather than dispatching.
                         match runner_client.resolve_hotkey(other) {
-                            HotkeyOwner::Plugin { op_id, .. } => {
+                            HotkeyOwner::Dispatch { op_id, .. } => {
                                 outcome.hotkey_op = Some(op_id);
                             }
-                            HotkeyOwner::Native { op_id } => {
+                            HotkeyOwner::TogglePicker { op_id, .. } => {
                                 outcome.toggle_picker = Some(op_id);
                             }
                             HotkeyOwner::None => {

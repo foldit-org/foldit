@@ -1,0 +1,7 @@
+# Build descriptor for `cargo xtask setup-plugins`. Read only by xtask; the
+# runtime never parses this file (runtime config lives in plugin.toml).
+
+[native]
+# Plugin-owned build recipe, run with cwd = this plugin dir and the FOLDIT_*
+# env contract xtask exports. It installs the built cdylib into local/.
+recipe = "scripts/build.sh"

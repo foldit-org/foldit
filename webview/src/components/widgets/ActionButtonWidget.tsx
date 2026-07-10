@@ -21,10 +21,9 @@ import { pluginPanels } from '../../pluginPanelLoader';
 import { pluginSettings } from '../../pluginSettingsLoader';
 import { settingsPanelId } from '../viewport/panelRegistry';
 import { panelVisibilityKey } from '../../hooks/state';
-import { Icons, builtinActionIcon } from '../../utils/iconMapping';
+import { Icons, resolveIcon } from '../../utils/iconMapping';
 import type { ActionInfo, PanelInfo, PluginGroupInfo, SettingsTabInfo } from '../../types';
 import ButtonListWidget, { type ButtonListItem } from "../util/ButtonListWidget";
-import { pluginAssetUrl, gameAssetUrl } from '../../pluginAssets';
 
 /**
  * Prettify a winit `KeyCode` debug string for the corner badge. The
@@ -59,26 +58,22 @@ function prettifyPluginId(id: string): string {
 }
 
 /**
- * Resolve a button's visual content from its `icon_path`. A path beginning
- * with `builtin:` names a GUI icon rendered inline; any other non-empty path
- * is a plugin-relative asset fetched from `/plugins/<pluginId>/<icon_path>`;
- * empty falls back to the label text. The `builtin:` branch runs first so a
- * built-in never resolves to a plugin asset URL.
+ * Resolve a button's visual content from its `icon_path`. `builtin:` glyphs
+ * render inline, `game:` and plugin-relative paths fetch an image, and an
+ * empty (or unknown-builtin) token falls back to the label text.
  */
 function iconContent(iconPath: string, pluginId: string, fallback: string) {
-  if (iconPath.startsWith('builtin:')) {
-    const Icon = builtinActionIcon(iconPath.slice('builtin:'.length));
-    return Icon ? <Icon /> : fallback;
-  }
-  return iconPath
-    ? <img src={pluginAssetUrl(pluginId, iconPath)} alt={fallback} />
-    : fallback;
+  const icon = resolveIcon(iconPath, pluginId);
+  if (icon.kind === 'component') return <icon.Icon />;
+  if (icon.kind === 'url') return <img src={icon.url} alt={fallback} />;
+  return fallback;
 }
 
 interface ActionPicker {
   opId: string;
-  // One ButtonListItem array per picker row. The mutate picker splits its
-  // options into two rows by hydrophobicity (hydrophobic first).
+  // One ButtonListItem array per picker row, one row per distinct option
+  // `color` in first-appearance order. The mutate picker yields two rows,
+  // hydrophobic (orange) then polar (blue).
   rows: ButtonListItem[][];
 }
 
@@ -97,9 +92,9 @@ const ActionButtonWidget: Component = () => {
 
   // Which options-carrying action has its picker open is backend-owned
   // (`actions.open_picker`, one op_id or null): the toggle button and the
-  // native "M" hotkey both flip it through `SetActionPickerOpen`, so a click
-  // and a keypress share one source of truth. The `groups` memo does not read
-  // it, so toggling never rebuilds the button items.
+  // button's hotkey both flip it through `SetActionPickerOpen`, so a click and
+  // a keypress share one source of truth. The `groups` memo does not read it,
+  // so toggling never rebuilds the button items.
   const openPicker = () => backendState.actions.open_picker;
 
   // Bucket each plugin's buttons -- action buttons then panel launchers --
@@ -123,15 +118,16 @@ const ActionButtonWidget: Component = () => {
       // slot. Sized to sit at the same visual weight as the plugin-asset PNGs
       // (which get a 5px inset); `.button-list-item svg` adds a matching inset.
       // Plugin-asset and text buttons keep using `content`.
-      const BuiltinIcon = action.icon_path.startsWith('builtin:')
-        ? builtinActionIcon(action.icon_path.slice('builtin:'.length))
-        : undefined;
+      const resolvedIcon = resolveIcon(action.icon_path, action.plugin_id);
+      const BuiltinIcon = resolvedIcon.kind === 'component' ? resolvedIcon.Icon : undefined;
       // Live weights download surfaces on the host-injected download button
       // (icon-only); its plugin's fraction drives a fill bar and the stage
-      // label rides the tooltip. Other ops carry no progress.
+      // label rides the tooltip. Other ops render their progress as a toast.
       const download =
         action.op_id === 'download_weights'
-          ? backendState.actions.download_progress[action.plugin_id]
+          ? backendState.actions.op_progress?.find(
+              (e) => e.op_id === 'download_weights' && e.plugin_id === action.plugin_id,
+            )
           : undefined;
       const item: ButtonListItem = {
         id: `action-${action.op_id}`,
@@ -145,7 +141,7 @@ const ActionButtonWidget: Component = () => {
         // catalog for the core-side resolver. Tooltip falls back to display.
         hotkey: action.hotkey ? formatHotkey(action.hotkey) : undefined,
         disabled: !action.enabled,
-        tooltip: (download?.stage || action.tooltip) ?? action.display,
+        tooltip: (download?.label || action.tooltip) ?? action.display,
         progress: download?.fraction ?? undefined,
         onClick: hasOptions
           ? () =>
@@ -189,11 +185,7 @@ const ActionButtonWidget: Component = () => {
         item.color = 'cancel';
         item.tooltip = 'Cancel';
         item.onClick = () =>
-          appCommand(
-            runningMatch.request_id != null
-              ? { type: 'CancelAction', request_id: runningMatch.request_id, refine: false }
-              : { type: 'CancelAction', request_id: null, refine: true },
-          );
+          appCommand({ type: 'CancelAction', request_id: runningMatch.request_id });
       }
 
       let bucket = byPluginActions.get(action.plugin_id);
@@ -205,31 +197,45 @@ const ActionButtonWidget: Component = () => {
 
       if (hasOptions) {
         // Each option is a self-contained dispatch (op_id + params). Picking
-        // one fires it and closes the picker. The icon token the host emits is
-        // relative to the foldit assets root, resolved via `gameAssetUrl`.
-        const toItem = (option: (typeof action.options)[number]): ButtonListItem => ({
-          id: `${option.op_id}:${option.label}`,
-          content: option.label,
-          color: option.color,
-          icon: option.icon ? gameAssetUrl(option.icon) : undefined,
-          hotkey: option.hotkey ? formatHotkey(option.hotkey) : undefined,
-          onClick: () => {
-            dispatchOp({ op_id: option.op_id, params: option.params });
-            appCommand({ type: 'SetActionPickerOpen', op_id: null });
-          },
-        });
+        // one fires it and closes the picker. Option icons take the same
+        // `builtin:` / `game:` / plugin-relative tokens as button icons.
+        const toItem = (option: (typeof action.options)[number]): ButtonListItem => {
+          const optionIcon = resolveIcon(option.icon, action.plugin_id);
+          return {
+            id: `${option.op_id}:${option.label}`,
+            content: option.label,
+            color: option.color,
+            icon: optionIcon.kind === 'url' ? optionIcon.url : undefined,
+            iconNode:
+              optionIcon.kind === 'component'
+                ? <optionIcon.Icon size={24} color="white" />
+                : undefined,
+            hotkey: option.hotkey ? formatHotkey(option.hotkey) : undefined,
+            onClick: () => {
+              dispatchOp({ op_id: option.op_id, params: option.params });
+              appCommand({ type: 'SetActionPickerOpen', op_id: null });
+            },
+          };
+        };
 
-        // Two rows split by hydrophobicity: hydrophobic (`orange`) on top,
-        // polar (`blue`) below. The `color` token also styles each button.
-        const hydrophobic = action.options.filter((o) => o.color === 'orange').map(toItem);
-        const polar = action.options.filter((o) => o.color === 'blue').map(toItem);
+        // One picker row per distinct `color` token, in the order colors first
+        // appear. Mutate yields hydrophobic (`orange`) then polar (`blue`).
+        const rowsByColor = new Map<string, ButtonListItem[]>();
+        for (const option of action.options) {
+          let row = rowsByColor.get(option.color);
+          if (!row) {
+            row = [];
+            rowsByColor.set(option.color, row);
+          }
+          row.push(toItem(option));
+        }
 
         let pickers = byPluginPickers.get(action.plugin_id);
         if (!pickers) {
           pickers = [];
           byPluginPickers.set(action.plugin_id, pickers);
         }
-        pickers.push({ opId: action.op_id, rows: [hydrophobic, polar] });
+        pickers.push({ opId: action.op_id, rows: [...rowsByColor.values()] });
       }
     }
 

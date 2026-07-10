@@ -26,7 +26,7 @@ foldit-runner = { path = ".." }
 # The Plugin trait returns `foldit_plugin_sdk::Result<_, PluginError>`, and
 # this crate's `impl Plugin for PyPlugin` builds those error values directly
 # (foldit-runner does not re-export PluginError / the SDK Result alias).
-foldit-plugin-sdk = "0.1.6"
+foldit-plugin-sdk = "0.2.1"
 
 # Pyo3 lives here, NOT in foldit-runner. This crate EMBEDS the interpreter
 # (`Python::initialize`), so it must link libpython — hence NO

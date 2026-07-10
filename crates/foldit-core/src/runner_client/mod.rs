@@ -59,18 +59,6 @@ pub struct RunnerClient {
     /// left untouched until a `Missing` reply swaps them.
     #[cfg(not(target_arch = "wasm32"))]
     weights: std::collections::HashMap<String, WeightsState>,
-    /// Whether the native B-factor-refine action is currently available (a
-    /// density is loaded, a GPU device exists, and no refine is running). Kept
-    /// here, like `weights`, so the action catalog resolves its `enabled` off
-    /// driver state; `App` syncs it each tick.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_available: bool,
-    /// Whether a native B-factor refine is currently running. Mirrors
-    /// `App::refine_in_flight` so `running_actions` can surface refine (which
-    /// is not an orchestrator stream) as a synthetic running action for the
-    /// button's cancel state. `App` syncs it each tick.
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_running: bool,
 }
 
 impl RunnerClient {
@@ -85,18 +73,7 @@ impl RunnerClient {
             },
             #[cfg(not(target_arch = "wasm32"))]
             weights: std::collections::HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_available: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            refine_running: false,
         }
-    }
-
-    /// Sync the refine-running mirror (from `App::refine_in_flight`). Cheap,
-    /// called each tick; see [`Self::refine_running`] field doc.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const fn set_refine_running(&mut self, running: bool) {
-        self.refine_running = running;
     }
 
     /// Construct and install a fresh orchestrator handle. Called on
@@ -121,50 +98,6 @@ impl RunnerClient {
             .plugin_registry()
             .get_op(op_id)
             .map(|op| op.plugin_id.clone())
-    }
-
-    /// Whether the orchestrator currently holds any entity lock. Read
-    /// immutably so a host-native edit can refuse while a plugin operation
-    /// is mid-flight (a concurrent native mutation would race it). `false`
-    /// when no orchestrator is wired up.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn any_lock_held(&self) -> bool {
-        self.orchestrator
-            .as_ref()
-            .is_some_and(|orch| !orch.locked_entities().is_empty())
-    }
-
-    /// Whether ANY lock is held - an entity lock OR the global lock.
-    /// [`Self::any_lock_held`] deliberately checks only entity locks (its
-    /// callers race per-entity native edits); the refine gate needs the
-    /// global lock counted too, since a refine (or another global op) must
-    /// block a fresh refine. `false` when no orchestrator is wired up.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn any_lock_or_global_held(&self) -> bool {
-        self.orchestrator.as_ref().is_some_and(|orch| {
-            !orch.locked_entities().is_empty() || orch.is_global_locked()
-        })
-    }
-
-    /// Acquire the orchestrator global lock for the native B-factor refine,
-    /// returning `true` on success (everything was free). Refine is not a
-    /// plugin stream, so it holds no `DispatchHandle`; release is the bare
-    /// [`Self::unlock_global_native`]. `false` (not acquired) when no
-    /// orchestrator is wired up or a lock is already held.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn lock_global_native(&mut self, label: &str) -> bool {
-        self.orchestrator
-            .as_mut()
-            .is_some_and(|orch| orch.try_lock_global(label))
-    }
-
-    /// Release the global lock taken by [`Self::lock_global_native`].
-    /// Idempotent; safe to call on every refine terminal.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn unlock_global_native(&mut self) {
-        if let Some(orch) = self.orchestrator.as_mut() {
-            orch.unlock_global();
-        }
     }
 
     /// Whether `op_id` declares `creates_entities` (its output is a NEW
@@ -409,27 +342,58 @@ impl RunnerClient {
         false
     }
 
-    /// Per-plugin live download progress for the GUI, one entry per plugin
-    /// whose weights are currently `Downloading`. Non-`Downloading` states
-    /// contribute nothing, so the map is empty when no download is in flight.
-    pub(crate) fn weights_download_progress(
-        &self,
-    ) -> std::collections::HashMap<String, foldit_gui::state::DownloadProgress> {
-        self.weights
+    /// Fold a stream's reported advancement onto its live entry. Returns
+    /// `true` when anything changed, so the caller re-projects only on a real
+    /// transition. Unknown request ids are dropped (a terminal already cleared
+    /// the entry).
+    ///
+    /// A stream that did not declare `determinate_progress` keeps its stage
+    /// label but drops its fraction: an open-ended op (wiggle, shake) reports
+    /// progress through an internal cycle budget, which says nothing about the
+    /// work the user asked for and would otherwise park a full bar at 100%
+    /// while the op keeps running.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn record_stream_progress(
+        &mut self,
+        rid: u64,
+        progress: Option<f32>,
+        stage: Option<String>,
+    ) -> bool {
+        let Some(entry) = self.stream_host.active_streams.get_mut(&rid) else {
+            return false;
+        };
+        let mut changed = false;
+        if entry.determinate_progress && progress.is_some() && entry.progress != progress {
+            entry.progress = progress;
+            changed = true;
+        }
+        if stage.is_some() && entry.stage != stage {
+            entry.stage = stage;
+            changed = true;
+        }
+        changed
+    }
+
+    /// One entry per in-flight stream, weight downloads included. A stream that
+    /// has reported nothing yet still appears, with a `None` fraction, so the
+    /// frontend can render an indeterminate bar the moment it starts.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn op_progress(&self) -> Vec<foldit_gui::state::OpProgress> {
+        let mut entries: Vec<_> = self
+            .stream_host
+            .active_streams
             .iter()
-            .filter_map(|(plugin_id, state)| match state {
-                WeightsState::Downloading {
-                    progress, stage, ..
-                } => Some((
-                    plugin_id.clone(),
-                    foldit_gui::state::DownloadProgress {
-                        fraction: *progress,
-                        stage: stage.clone(),
-                    },
-                )),
-                _ => None,
+            .map(|(rid, e)| foldit_gui::state::OpProgress {
+                request_id: *rid,
+                op_id: e.op_id.clone(),
+                plugin_id: e.plugin_id.clone(),
+                fraction: e.progress,
+                label: e.stage.clone(),
             })
-            .collect()
+            .collect();
+        // Stable order so an unchanged set never re-renders as a reorder.
+        entries.sort_by_key(|e| e.request_id);
+        entries
     }
 
     /// The plugin whose download is in flight under stream `rid`, or `None`
@@ -557,33 +521,40 @@ impl RunnerClient {
     /// is wired up.
     pub(crate) fn kick_inits(
         &mut self,
+        ids: &[String],
         initial_assembly: &[u8],
-        ligands: &[crate::puzzle_load::LigandAsset],
-        constraints: &[crate::puzzle_setup::Constraint],
-        density: Option<&crate::puzzle_load::DensityAsset>,
-        config_params: &std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+        puzzle: &InitPuzzleInputs<'_>,
     ) -> Vec<String> {
         let Some(orch) = self.orchestrator.as_mut() else {
             return Vec::new();
         };
         // Convert the core-side puzzle payload into the orchestrator's native
         // mirror types once; the per-plugin loop clones the payload per kick.
-        // The density map is per-plugin (only `uses_density` plugins receive
-        // it), so it is appended inside the loop rather than baked into the
-        // shared base payload.
-        let payload = init_payload_from_puzzle(ligands, constraints, config_params);
-        let discovered = orch.discovered_plugin_ids();
-        let mut kicked = Vec::with_capacity(discovered.len());
-        for plugin_id in &discovered {
-            // Copy the opt-in bool out of the immutable descriptor borrow
+        // The reflections and the density map are per-plugin, so they are
+        // appended inside the loop rather than baked into the shared payload.
+        let payload =
+            init_payload_from_puzzle(puzzle.ligands, puzzle.constraints, puzzle.config_params);
+        let mut kicked = Vec::with_capacity(ids.len());
+        for plugin_id in ids {
+            // Copy the opt-in bools out of the immutable descriptor borrow
             // before the `&mut` kick call below.
-            let wants_density = orch
-                .plugin_descriptor(plugin_id)
+            let descriptor = orch.plugin_descriptor(plugin_id);
+            let wants_density = descriptor
                 .is_some_and(foldit_runner::orchestrator::PluginSpawnDescriptor::uses_density);
-            let plugin_payload = match (wants_density, density) {
-                (true, Some(map)) => with_density(payload.clone(), map),
-                _ => payload.clone(),
-            };
+            let makes_density = descriptor
+                .is_some_and(foldit_runner::orchestrator::PluginSpawnDescriptor::provides_density);
+
+            let mut plugin_payload = payload.clone();
+            if makes_density {
+                if let Some(reflns) = puzzle.reflns {
+                    plugin_payload = with_reflns(plugin_payload, reflns, puzzle.name);
+                }
+            } else if wants_density {
+                if let Some(map) = puzzle.density {
+                    plugin_payload = with_density(plugin_payload, map);
+                }
+            }
+
             match orch.kick_init_session(plugin_id, initial_assembly.to_owned(), plugin_payload) {
                 Ok(()) => kicked.push(plugin_id.clone()),
                 Err(e) => log::warn!(
@@ -593,6 +564,74 @@ impl RunnerClient {
             }
         }
         kicked
+    }
+
+    /// Deactivate `ids` for the loaded structure: drop the session each holds
+    /// and evict its ops and queries, so its buttons leave the action catalog.
+    /// The workers stay warm, so a later load that satisfies their
+    /// requirements re-`Init`s them without a respawn.
+    pub(crate) fn deactivate_plugins(&mut self, ids: &[String]) {
+        let Some(orch) = self.orchestrator.as_mut() else {
+            return;
+        };
+        for plugin_id in ids {
+            orch.deactivate_plugin(plugin_id);
+        }
+    }
+
+    /// Discovered plugins that declare `provides_density`. The caller inits
+    /// these before the rest, then reads their map with [`Self::fetch_density`].
+    pub(crate) fn density_provider_ids(&self) -> Vec<String> {
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return Vec::new();
+        };
+        orch.discovered_plugin_ids()
+            .into_iter()
+            .filter(|id| {
+                orch.plugin_descriptor(id).is_some_and(
+                    foldit_runner::orchestrator::PluginSpawnDescriptor::provides_density,
+                )
+            })
+            .collect()
+    }
+
+    /// Discovered plugins that do NOT provide density.
+    pub(crate) fn density_consumer_ids(&self) -> Vec<String> {
+        let Some(orch) = self.orchestrator.as_ref() else {
+            return Vec::new();
+        };
+        orch.discovered_plugin_ids()
+            .into_iter()
+            .filter(|id| {
+                !orch.plugin_descriptor(id).is_some_and(
+                    foldit_runner::orchestrator::PluginSpawnDescriptor::provides_density,
+                )
+            })
+            .collect()
+    }
+
+    /// Read the map from the plugin that provides it, through the well-known
+    /// `density` query. `None` when no plugin provides one, the provider's
+    /// session has no reflections, or the query fails.
+    pub(crate) fn fetch_density(&mut self) -> Option<crate::puzzle_load::DensityAsset> {
+        if !self.supports_query("density") {
+            return None;
+        }
+        let bytes = self.request_query_bytes("density");
+        if bytes.is_empty() {
+            return None;
+        }
+        let map =
+            <foldit_runner::proto::plugin::DensityMap as prost::Message>::decode(&bytes[..]).ok()?;
+        if map.data.is_empty() {
+            return None;
+        }
+        Some(crate::puzzle_load::DensityAsset {
+            name: map.name,
+            bytes: map.data,
+            resolution: map.resolution,
+            grid_spacing: map.grid_spacing,
+        })
     }
 
     /// Drain whatever `Init` replies have arrived since the last call.
@@ -668,6 +707,63 @@ fn init_payload_from_puzzle(
             })
             .collect(),
     }
+}
+
+/// The puzzle-derived inputs every plugin `Init` payload is built from.
+/// Bundled so the two-phase kick (density providers, then consumers) threads
+/// one borrow instead of six.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct InitPuzzleInputs<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) ligands: &'a [crate::puzzle_load::LigandAsset],
+    pub(crate) constraints: &'a [crate::puzzle_setup::Constraint],
+    /// Structure factors, delivered to `provides_density` plugins.
+    pub(crate) reflns: Option<&'a crate::puzzle_load::ReflnsAsset>,
+    /// The computed map, delivered to `uses_density` plugins.
+    pub(crate) density: Option<&'a crate::puzzle_load::DensityAsset>,
+    pub(crate) config_params:
+        &'a std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+}
+
+/// Append the puzzle's structure factors to `payload` for a `provides_density`
+/// plugin: the sf-cif text and (when the puzzle declares no explicit space
+/// group) the coordinate cif ride the `PuzzleAsset` lane; the space-group
+/// override and the puzzle name ride the generic `params` map.
+#[cfg(not(target_arch = "wasm32"))]
+fn with_reflns(
+    mut payload: foldit_runner::orchestrator::InitPayload,
+    reflns: &crate::puzzle_load::ReflnsAsset,
+    name: &str,
+) -> foldit_runner::orchestrator::InitPayload {
+    use foldit_runner::orchestrator::{ParamValue, PuzzleAsset};
+
+    payload.assets.push(PuzzleAsset {
+        name: format!("{name}.sf.cif"),
+        data: reflns.sf_text.as_bytes().to_vec(),
+    });
+    let _ = payload
+        .params
+        .insert(String::from("xtal.name"), ParamValue::String(name.to_owned()));
+
+    if let Some(sg) = reflns.space_group {
+        let _ = payload.params.insert(
+            String::from("xtal.space_group"),
+            ParamValue::Int(i32::from(sg)),
+        );
+    } else if let Some(path) = reflns.coord_path.as_ref() {
+        // No override: the plugin reads symmetry off the coordinate cif.
+        match std::fs::read(path) {
+            Ok(data) => payload.assets.push(PuzzleAsset {
+                name: format!("{name}.coord.cif"),
+                data,
+            }),
+            Err(e) => log::warn!(
+                "[RunnerClient] reflns: cannot read coordinate cif {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    payload
 }
 
 /// Append a puzzle's electron-density map to `payload`: the raw map bytes

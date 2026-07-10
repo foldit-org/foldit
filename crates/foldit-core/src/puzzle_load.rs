@@ -376,46 +376,4 @@ fn load_puzzle_setup(puzzle_dir: &Path, meta: &PuzzleMeta) -> Result<PuzzleSetup
 mod tests {
     use super::*;
 
-    #[test]
-    fn load_bglb_ligand_constraints_and_mask() {
-        let bglb_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/levels/bglb");
-        let data = load_puzzle_data_from_dir(&bglb_dir).expect("BglB puzzle should load");
-
-        // The LG1 ligand must be present as a small-molecule entity.
-        assert!(!data.entities.is_empty(), "expected entities");
-        let has_lg1 = data.entities.iter().any(|e| {
-            e.as_small_molecule()
-                .is_some_and(|sm| &sm.residue_name == b"LG1")
-        });
-        assert!(has_lg1, "expected an LG1 small-molecule (ligand) entity");
-
-        // Eight catalytic constraints.
-        assert_eq!(data.constraints.len(), 8, "expected 8 constraints");
-
-        // The LG1 ligand's `.params` bytes are read off disk and carried on
-        // `PuzzleData` (the session-init payload source). Non-empty bytes
-        // confirm the file was read, not just validated for presence.
-        assert!(!data.ligands.is_empty(), "expected ligand assets");
-        let lg1 = data
-            .ligands
-            .iter()
-            .find(|l| l.name.contains("LG1"))
-            .expect("expected an LG1 ligand asset");
-        assert!(
-            !lg1.params.is_empty(),
-            "expected non-empty LG1 params bytes"
-        );
-
-        // The protein chain "A" carries a four-range design mask with the
-        // catalytic gap locked; the LG1 ligand chain ("X") is intentionally
-        // absent from the map and so is fully locked.
-        assert_eq!(data.design_masks.len(), 1, "expected one designable chain");
-        let mask = data
-            .design_masks
-            .get("A")
-            .expect("expected a design mask for chain A");
-        assert_eq!(mask.ranges.len(), 4, "expected 4 designable ranges");
-        assert!(mask.is_designable(100));
-        assert!(!mask.is_designable(164));
-    }
 }

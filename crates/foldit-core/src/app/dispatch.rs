@@ -2,8 +2,6 @@ use molex::entity::molecule::id::EntityId;
 
 use crate::app::App;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::app::refine::RefineEvent;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::history::CheckpointKind;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, OpOutcome};
@@ -128,10 +126,16 @@ impl App {
                         progress,
                         stage,
                     } => {
-                        if self
-                            .runner_client
-                            .update_weights_progress(token, progress, stage)
-                        {
+                        // The download state machine and the generic progress
+                        // bar both read the same frame.
+                        let weights = self.runner_client.update_weights_progress(
+                            token,
+                            progress,
+                            stage.clone(),
+                        );
+                        let stream =
+                            self.runner_client.record_stream_progress(token, progress, stage);
+                        if weights || stream {
                             self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
                         }
                     }
@@ -234,9 +238,7 @@ impl App {
         // round-trip. They carry no plugin owner, so they must be intercepted
         // here: `resolve_op_plugin_id` below drops any op-id the plugin
         // registry doesn't know, which would silently discard a native op.
-        if op.op_id == "mutate_residue" {
-            return self.dispatch_native_mutate(&op);
-        }
+        //
         // Every ML plugin registers `download_weights` under the same op-id,
         // so `resolve_op_plugin_id` collapses them to one arbitrary
         // last-writer owner and the download would hit the wrong plugin.
@@ -245,13 +247,6 @@ impl App {
         if op.op_id == "download_weights" {
             return self.dispatch_native_download(&op, focused_entity_id);
         }
-        // Off-thread crystallographic B-factor refine: molex runs on a
-        // background thread and the result applies on completion in `tick`, so
-        // this intercept only kicks the thread and returns.
-        if op.op_id == "refine_b" {
-            return self.dispatch_native_refine();
-        }
-
         let Some(plugin_id) = self.runner_client.resolve_op_plugin_id(&op.op_id) else {
             log::warn!(
                 "dispatch_op_inner({:?}): op not resolvable (no orchestrator or op-id not in registry)",
@@ -377,228 +372,6 @@ impl App {
         }
     }
 
-    /// Mutate the single selected residue entirely in the host: swap its
-    /// amino acid via molex, apply the rebuilt protein into the session,
-    /// commit, and fire a rosetta rescore on the committed checkpoint. No
-    /// plugin is involved in the edit; rosetta runs only for the score.
-    ///
-    /// Every unmet precondition is a refused no-op (`None`): a held plugin
-    /// lock, a selection that isn't exactly one designable residue, a
-    /// missing / unparseable amino-acid param, a non-protein target, or a
-    /// molex placement failure. None of these panic or leave a dangling
-    /// tentative. Returns the edit's `request_id` on success.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn dispatch_native_mutate(&mut self, op: &foldit_gui::OpDispatch) -> Option<u64> {
-        // Refuse while a plugin operation holds a lock: a concurrent native
-        // mutation would race the in-flight edit. Read the lock state
-        // immutably, never taking the orchestrator's mutable handle.
-        if self.runner_client.any_lock_held() {
-            return None;
-        }
-
-        // Exactly one entity, exactly one selected residue, and that
-        // selection must be designable (the gate the action button shows).
-        if !self.store.selection_is_designable() {
-            return None;
-        }
-        let (eid, res_idx) = {
-            let selection = self.store.selection();
-            if selection.len() != 1 {
-                return None;
-            }
-            let (eid, residues) = selection.iter().next()?;
-            if residues.len() != 1 {
-                return None;
-            }
-            (*eid, *residues.iter().next()?)
-        };
-
-        // The 3-letter amino-acid code rides on the "aa" param; there is no
-        // 1-letter residue constructor.
-        let Some(foldit_gui::state::ParamValue::String(code)) = op.params.get("aa") else {
-            return None;
-        };
-        let code_bytes: [u8; 3] = code.as_bytes().try_into().ok()?;
-        let aa = molex::chemistry::AminoAcid::from_code(code_bytes)?;
-
-        // The selected residue's u32 is the same 0-based positional index
-        // molex `mutate_residue` takes. `mutate_residue` preserves the entity
-        // id, so the rebuilt protein re-applies onto the same lane.
-        let new_protein = self
-            .store
-            .entity(eid)?
-            .as_protein()?
-            .mutate_residue(res_idx as usize, aa)
-            .ok()?;
-        let assembly = molex::Assembly::new(vec![molex::MoleculeEntity::Protein(new_protein)]);
-
-        // Host-internal action: no dispatch happened, so the edit's
-        // request_id is drawn straight from the orchestrator (the single id
-        // authority), then applied through the same begin/apply/commit
-        // sequence a plugin invoke uses.
-        let rid = self.runner_client.alloc_request_id()?;
-        let display = String::from("Mutate");
-        let kind = CheckpointKind::NativeEdit {
-            op_id: op.op_id.clone(),
-            display: display.clone(),
-        };
-        if let Err(e) = self
-            .store
-            .begin_action([eid], kind, display, rid, std::collections::BTreeMap::new())
-        {
-            log::trace!("dispatch_native_mutate: begin_action skipped: {e}");
-            return None;
-        }
-        let applied = self.store.apply_streaming_assembly(&assembly, None, rid);
-        if !applied {
-            // The incoming assembly did not match the open lane, so no edit
-            // landed. Discard the tentative rather than committing it: a missed
-            // apply must be a true no-op, not a phantom checkpoint that moves
-            // the session head.
-            let _ = self.store.abort_action(rid);
-            return None;
-        }
-        match self.store.commit_action(rid) {
-            Ok(ckpt) => {
-                self.scores
-                    .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
-                self.spawn_rfree_compute(ckpt);
-                Some(rid)
-            }
-            Err(e) => {
-                log::warn!("dispatch_native_mutate: commit_action failed: {e}");
-                None
-            }
-        }
-    }
-
-    /// Kick a crystallographic B-factor refine on a background thread. Every
-    /// unmet precondition is a refused no-op with a user-facing error toast: a
-    /// held plugin lock, a refine already running, no shared GPU device, no
-    /// loaded density, or an empty committed head. Snapshots the committed head
-    /// (the refine input and the apply-time race fingerprint), then spawns a
-    /// thread that runs molex only and streams progress / completion back over
-    /// the channel; `tick`'s drain applies the result on the main thread.
-    ///
-    /// Opens no history edit here and no stream, so returns `None` always.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn dispatch_native_refine(&mut self) -> Option<u64> {
-        const N_MACRO_CYCLES: usize = 5;
-
-        // Refuse while any operation holds a lock (entity or global): refine
-        // locks everything, so it needs a clean slate, and applying the
-        // refined B on completion would race any in-flight edit.
-        if self.runner_client.any_lock_or_global_held() {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "Cannot refine while another operation is running".to_owned(),
-            );
-            return None;
-        }
-        if self.refine_in_flight {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "A B-factor refine is already running".to_owned(),
-            );
-            return None;
-        }
-        if self.experimental_data.is_none() {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "B-factor refine needs a loaded density".to_owned(),
-            );
-            return None;
-        }
-        if self.shared_device.is_none() {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "B-factor refine needs a GPU device".to_owned(),
-            );
-            return None;
-        }
-
-        // The density and device were just confirmed present, so an empty
-        // committed head is the only `None` left here. The snapshot is the
-        // refine input and the source of the `(entity, atom count)` fingerprint
-        // the apply step re-checks, so a mid-refine edit discards the result
-        // rather than scattering stale B onto changed geometry.
-        let Some((data, dev, snapshot, table)) = self.xtal_job_inputs() else {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "No structure to refine".to_owned(),
-            );
-            return None;
-        };
-        self.refine_fingerprint = snapshot
-            .iter()
-            .map(|e| (e.id().raw(), e.atom_count()))
-            .collect();
-
-        // Take the global lock for the whole refine: it disables every entity
-        // and global action button (the catalog `enabled` rule keys off
-        // `is_global_locked`), and no action can start until refine releases
-        // it on its terminal. Placed after every precondition bail so no early
-        // return needs to unlock; `try_lock_global` is the authority (it also
-        // catches a global op that raced in past the guard above).
-        if !self.runner_client.lock_global_native("B-factor Refine") {
-            self.gui.push_notification(
-                foldit_gui::NotificationLevel::Error,
-                "Cannot refine while another operation is running".to_owned(),
-            );
-            return None;
-        }
-
-        self.refine_in_flight = true;
-        // Arm a fresh cancel signal for this run.
-        self.refine_cancel
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.gui.actions.refine_progress = Some(foldit_gui::state::RefineProgress {
-            fraction: 0.0,
-            label: "Refining B-factors...".to_owned(),
-        });
-        self.mark_dirty(foldit_gui::DirtyFlags::ACTIONS);
-
-        let tx = self.refine_tx.clone();
-        let cancel = std::sync::Arc::clone(&self.refine_cancel);
-        std::thread::spawn(move || {
-            use std::sync::atomic::Ordering;
-            let progress_tx = tx.clone();
-            let progress_cancel = std::sync::Arc::clone(&cancel);
-            let result = molex::xtal::refine_b_from_atom_table_gpu(
-                &data,
-                &table,
-                N_MACRO_CYCLES,
-                &dev,
-                move |macro_cycle, inner_iter, inner_total| {
-                    let _ = progress_tx.send(RefineEvent::Progress {
-                        macro_cycle,
-                        inner_iter,
-                        inner_total,
-                    });
-                    // Returning `false` aborts the molex solve.
-                    !progress_cancel.load(Ordering::Relaxed)
-                },
-            );
-            // A cancelled run comes back as `None` (the aborted solve); the
-            // flag tells it apart from a genuine failure.
-            let event = if cancel.load(Ordering::Relaxed) {
-                RefineEvent::Cancelled
-            } else {
-                match result {
-                    Some((full_b, r_work, r_free)) => RefineEvent::Done {
-                        full_b,
-                        r_work,
-                        r_free,
-                    },
-                    None => RefineEvent::Failed("B-factor refinement failed".to_owned()),
-                }
-            };
-            let _ = tx.send(event);
-        });
-
-        None
-    }
-
     /// Route a weight download to the specific plugin named in the op's
     /// `plugin_id` param, bypassing the flat op-registry resolution. The
     /// download stream is registered like any other stream (so its
@@ -681,7 +454,6 @@ impl App {
                         &self.store,
                         ckpt,
                     );
-                    self.spawn_rfree_compute(ckpt);
                 }
                 Err(e) => log::warn!("dispatch_invoke: commit_action failed: {e}"),
             }

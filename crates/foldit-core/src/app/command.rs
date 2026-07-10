@@ -89,8 +89,8 @@ impl App {
             return;
         }
 
-        if let AppCommand::CancelAction { request_id, refine } = command {
-            self.cancel_action(request_id, refine);
+        if let AppCommand::CancelAction { request_id } = command {
+            self.cancel_action(request_id);
             return;
         }
 
@@ -101,27 +101,15 @@ impl App {
         self.handle_engine_command(command);
     }
 
-    /// Cancel a running action. The three cases map to the three UI triggers:
-    /// `request_id = Some(rid)` cancels exactly that stream (a per-action toast
-    /// X / a running button's X); `refine = true` cancels the native B-factor
-    /// refine (its own toast/button X); both unset is the ESC path, cancelling
-    /// every cancellable action - the refine plus every stream except weight
-    /// downloads. Any in-progress preview geometry is dropped either way. The
-    /// one owner of the cancel teardown, so ESC and the toast/button X cannot
-    /// drift.
-    pub(in crate::app) fn cancel_action(&mut self, request_id: Option<u64>, refine: bool) {
+    /// Cancel a running action. `request_id = Some(rid)` cancels exactly that
+    /// stream (a per-action toast X / a running button's X); `None` is the ESC
+    /// path, cancelling every cancellable stream except weight downloads. Any
+    /// in-progress preview geometry is dropped either way. The one owner of the
+    /// cancel teardown, so ESC and the toast/button X cannot drift.
+    pub(in crate::app) fn cancel_action(&mut self, request_id: Option<u64>) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(rid) = request_id {
-                self.runner_client.cancel_streams(Some(rid));
-            } else {
-                // Refine-only cancel leaves other streams running; ESC /
-                // cancel-all also drops every non-download stream.
-                self.request_refine_cancel();
-                if !refine {
-                    self.runner_client.cancel_streams(None);
-                }
-            }
+            self.runner_client.cancel_streams(request_id);
         }
         #[cfg(target_arch = "wasm32")]
         {
