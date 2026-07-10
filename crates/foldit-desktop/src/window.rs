@@ -8,7 +8,7 @@ use foldit_gui::IpcMessage;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -19,6 +19,44 @@ use winit::window::{Window, WindowId};
 /// `App` owns the [`foldit_gui::GuiState`] mirror and the
 /// Loading → `InPuzzle` state-machine; the runner is purely the
 /// wry/winit + dev-server shell.
+/// Minimum spacing between frontend pushes. The event loop runs uncapped
+/// (`ControlFlow::Poll` plus a self-sustaining `request_redraw`), so without
+/// this it issues `evaluate_script` tens of thousands of times per second —
+/// far past what the WebContent process can drain, which exhausts memory in
+/// a process the host never sees.
+const FRONTEND_PUSH_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Resolve or reject a JS-side pending request via `window.__onResponse`.
+/// Shared by the immediate reply path and the deferred one, which answers
+/// from `DesktopEffects` a tick or more after the request arrived.
+fn respond_to_webview(
+    webview: Option<&wry::WebView>,
+    wish_id: &str,
+    result: &foldit_gui::RequestResult,
+) {
+    let Some(webview) = webview else {
+        return;
+    };
+    let (ok, payload) = match result {
+        Ok(v) => (true, v.clone()),
+        Err(msg) => (false, serde_json::Value::String(msg.clone())),
+    };
+    // Serializing a `&str` to a JSON string is infallible, so the unwrap
+    // cannot fire (the only error sources in `to_string` are custom
+    // Serialize impls and non-string map keys).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "serde_json::to_string over a &str is infallible"
+    )]
+    let script = format!(
+        "if(window.__onResponse)window.__onResponse({},{},{})",
+        serde_json::to_string(wish_id).unwrap(),
+        ok,
+        payload,
+    );
+    let _ = webview.evaluate_script(&script);
+}
+
 pub struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
@@ -26,6 +64,11 @@ pub struct AppRunner {
     ipc_rx: Option<std::sync::mpsc::Receiver<IpcMessage>>,
     webview_ready: bool,
     last_frame: Instant,
+    /// When the frontend last accepted a push. `evaluate_script` enqueues an
+    /// async IPC message to the WebContent process; the event loop can issue
+    /// them far faster than WebKit drains them, so pushes are rate-limited to
+    /// `FRONTEND_PUSH_INTERVAL`. `None` until the first push.
+    last_frontend_push: Option<Instant>,
     /// Last applied render size, to avoid redundant resizes
     last_render_size: (u32, u32),
     /// Structure load is deferred until the webview loading screen is visible
@@ -73,6 +116,7 @@ impl AppRunner {
             ipc_rx: None,
             webview_ready: false,
             last_frame: Instant::now(),
+            last_frontend_push: None,
             last_render_size: (0, 0),
             init_pending: false,
             init_deadline: None,
@@ -160,6 +204,19 @@ impl AppRunner {
                     self.app.on_update_stream(request_id, params);
                 }
                 IpcMessage::OpenSessionDialog => self.open_session_dialog(),
+                // A plugin query round-trips to a worker that is serialising
+                // tasks behind whatever step it is running, so it is fired
+                // async and answered from `App::tick` when the reply lands.
+                // Every other request kind is local and answers here.
+                IpcMessage::Request {
+                    wish_id,
+                    kind: foldit_gui::RequestKind::PluginQuery,
+                    payload,
+                } => {
+                    if let Err(e) = self.app.begin_plugin_query(&wish_id, &payload) {
+                        self.send_response_to_webview(&wish_id, &Err(e));
+                    }
+                }
                 IpcMessage::Request {
                     wish_id,
                     kind,
@@ -207,27 +264,7 @@ impl AppRunner {
 
     /// Resolve or reject a JS-side pending request via window.__onResponse.
     fn send_response_to_webview(&self, wish_id: &str, result: &foldit_gui::RequestResult) {
-        let Some(ref webview) = self.webview else {
-            return;
-        };
-        let (ok, payload) = match result {
-            Ok(v) => (true, v.clone()),
-            Err(msg) => (false, serde_json::Value::String(msg.clone())),
-        };
-        // Serializing a `&str` to a JSON string is infallible, so the
-        // unwrap cannot fire (the only error sources in `to_string` are
-        // custom Serialize impls and non-string map keys).
-        #[allow(
-            clippy::unwrap_used,
-            reason = "serde_json::to_string over a &str is infallible"
-        )]
-        let script = format!(
-            "if(window.__onResponse)window.__onResponse({},{},{})",
-            serde_json::to_string(wish_id).unwrap(),
-            ok,
-            payload,
-        );
-        let _ = webview.evaluate_script(&script);
+        respond_to_webview(self.webview.as_ref(), wish_id, result);
     }
 
     /// Resize the webview to match a new window size (physical pixels).
@@ -379,6 +416,7 @@ impl AppRunner {
             webview_ready: self.webview_ready,
             window: self.window.as_ref(),
             runtime: &self.progress_runtime,
+            last_frontend_push: &mut self.last_frontend_push,
         };
         self.app.tick(dt.as_secs_f32(), &mut fx);
 
@@ -402,9 +440,33 @@ struct DesktopEffects<'a> {
     webview_ready: bool,
     window: Option<&'a Arc<Window>>,
     runtime: &'a tokio::runtime::Runtime,
+    last_frontend_push: &'a mut Option<Instant>,
 }
 
 impl HostEffects for DesktopEffects<'_> {
+    fn may_push_frontend(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_frontend_push
+            .is_some_and(|prev| now.duration_since(prev) < FRONTEND_PUSH_INTERVAL)
+        {
+            return false;
+        }
+        *self.last_frontend_push = Some(now);
+        true
+    }
+
+    fn push_response(
+        &mut self,
+        wish_id: &str,
+        result: &foldit_gui::RequestResult,
+    ) {
+        if !self.webview_ready {
+            return;
+        }
+        respond_to_webview(self.webview, wish_id, result);
+    }
+
     fn push_state(&mut self, json: &[u8]) {
         if !self.webview_ready {
             return;

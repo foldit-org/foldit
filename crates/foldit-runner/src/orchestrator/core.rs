@@ -161,6 +161,12 @@ pub struct Orchestrator {
     /// for the same id is skipped (coalesced) while one is in flight.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) pending_queries: HashMap<String, ScoreReplyRx>,
+    /// In-flight async queries fired on behalf of a specific caller request
+    /// (a webview wish), keyed by that caller's correlation id rather than by
+    /// query id. Unlike `pending_queries` these are not coalesced: two wishes
+    /// for the same query id are two entries, because each owes its own reply.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) pending_keyed_queries: HashMap<String, ScoreReplyRx>,
     /// Plugins whose worker is being brought up (warmed) without blocking
     /// the caller. `kick_warm_plugin` binds the listener + spawns the
     /// child and stashes the un-accepted [`super::spawn::PendingWorker`]
@@ -252,6 +258,7 @@ impl Orchestrator {
             pending_composition_scores: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_queries: HashMap::new(),
+            pending_keyed_queries: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_warms: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]

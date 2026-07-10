@@ -63,8 +63,8 @@ str_to_string = "warn"
 # WARNING: local-path patches for dev use only.
 # Do not commit to dev/main branches with these uncommented.
 
-# [patch."https://github.com/foldit-org/viso"]
-# viso = { path = "crates/viso" }
+[patch."https://github.com/foldit-org/viso"]
+viso = { path = "crates/viso" }
 
 # [patch.crates-io]
 # foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }

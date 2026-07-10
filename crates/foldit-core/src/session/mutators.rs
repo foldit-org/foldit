@@ -6,7 +6,7 @@
 //! [`Session::apply`] funnel without any visibility widening.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +15,123 @@ use molex::MoleculeEntity;
 use viso::Focus;
 
 use crate::history::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatus, History};
+
+/// Whether `dst` and `src` describe the same atoms, so a stream frame can be
+/// applied by overwriting the value columns instead of cloning the entity.
+///
+/// This partitions `MoleculeEntity` into *identity* — everything checked
+/// here, plus the bonds and segment breaks derived from it — and *value* —
+/// the columns [`overwrite_value_columns`] copies. Only identity forces the
+/// clone path; a value change is applied in place.
+///
+/// Deliberately stricter than an atom-count compare. A same-size mutation
+/// (ASP -> ASN: eight atoms either way) leaves counts and residue ranges
+/// untouched while changing residue names, elements and bonds; such a frame
+/// must clone. Each check is an allocation-free scan, cheaper than the clone
+/// it guards.
+fn composition_matches(dst: &MoleculeEntity, src: &MoleculeEntity) -> bool {
+    let (cd, cs) = (dst.columns(), src.columns());
+    if dst.molecule_type() != src.molecule_type()
+        || dst.atom_count() != src.atom_count()
+        || cd.element != cs.element
+        || cd.name != cs.name
+        || cd.formal_charge != cs.formal_charge
+    {
+        return false;
+    }
+    match (dst.residues(), src.residues()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.name == y.name
+                        && x.atom_range == y.atom_range
+                        && x.variants == y.variants
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Copy the per-atom columns a plugin owns without changing identity:
+/// `position` and `observed`. Guarded by [`composition_matches`], so the
+/// column lengths and atom ordering already match.
+///
+/// `b_factor` and `occupancy` are deliberately retained, not copied: they are
+/// static crystallographic input metadata the plugin neither consumes nor
+/// produces, so `dst`'s parsed values must survive a value-only frame.
+/// [`composition_matches`] has asserted identical atom count and ordering, so
+/// the retained columns stay index-aligned with the incoming positions.
+fn overwrite_value_columns(dst: &mut MoleculeEntity, src: &MoleculeEntity) {
+    let src_cols = src.columns();
+    let dst_cols = dst.columns_mut();
+    dst_cols.position.copy_from_slice(&src_cols.position);
+    dst_cols.observed.copy_from_slice(&src_cols.observed);
+}
+
+/// Carry the crystallographic columns (`b_factor`, `occupancy`) from `old`
+/// onto `new`, matching atoms by `(residue index, atom name)`. Atom indices
+/// are not usable here: residue completion inserts hydrogens, so `old` and
+/// `new` disagree on atom count and ordering. Atoms in `new` with no name
+/// match in the same residue (completion-added hydrogens) keep whatever they
+/// arrived with.
+///
+/// A no-op when either entity lacks residues, or the two residue counts
+/// differ: a residue-count change means the two are not the same molecule
+/// residue-for-residue, so a partial carry would misattribute B-factors.
+fn carry_crystallographic_columns(new: &mut MoleculeEntity, old: &MoleculeEntity) {
+    let (Some(old_res), Some(new_res)) = (old.residues(), new.residues()) else {
+        log::debug!("carry_crystallographic_columns: non-polymer entity, skipping");
+        return;
+    };
+    if old_res.len() != new_res.len() {
+        log::debug!(
+            "carry_crystallographic_columns: residue count {} -> {}, skipping",
+            old_res.len(),
+            new_res.len()
+        );
+        return;
+    }
+
+    let old_cols = old.columns();
+    let mut by_key: HashMap<(usize, &[u8]), (f32, f32)> = HashMap::new();
+    for (res_idx, res) in old_res.iter().enumerate() {
+        for atom_idx in res.atom_range.clone() {
+            let _ = by_key.insert(
+                (
+                    res_idx,
+                    crate::atom_name::trimmed_atom_name(&old_cols.name[atom_idx]),
+                ),
+                (old_cols.b_factor[atom_idx], old_cols.occupancy[atom_idx]),
+            );
+        }
+    }
+
+    // Resolve the write plan while `new`'s residues/columns are borrowed
+    // immutably, then apply it under the mutable borrow.
+    let writes: Vec<(usize, f32, f32)> = {
+        let new_cols = new.columns();
+        let mut w = Vec::new();
+        for (res_idx, res) in new_res.iter().enumerate() {
+            for atom_idx in res.atom_range.clone() {
+                let key = (
+                    res_idx,
+                    crate::atom_name::trimmed_atom_name(&new_cols.name[atom_idx]),
+                );
+                if let Some(&(b, occ)) = by_key.get(&key) {
+                    w.push((atom_idx, b, occ));
+                }
+            }
+        }
+        w
+    };
+
+    let new_cols = new.columns_mut();
+    for (atom_idx, b, occ) in writes {
+        new_cols.b_factor[atom_idx] = b;
+        new_cols.occupancy[atom_idx] = occ;
+    }
+}
 
 use super::change::HeadMoveCause;
 use super::{Puzzle, Session, SessionError, SessionUpdate};
@@ -439,7 +556,21 @@ impl Session {
         let mut applied = false;
         let res = self.action_update(request_id, raw_score, raw_score, None, |entity_mut| {
             if let Some(src) = incoming.entity(entity_mut.id()) {
-                *entity_mut = src.clone();
+                if composition_matches(entity_mut, src) {
+                    // Value-only stream frame (wiggle/shake/pull): overwrite
+                    // the per-atom columns in place. The `clone()` below
+                    // reallocates the bond list and residue table too, per
+                    // frame, for identity the plugin did not touch.
+                    overwrite_value_columns(entity_mut, src);
+                } else {
+                    // Identity changed (post-Init adoption adds completion
+                    // hydrogens): adopt the incoming entity wholesale, then
+                    // carry the parsed crystallographic columns across by
+                    // (residue, atom name) - the plugin does not own them and
+                    // atom indices no longer line up.
+                    let old = std::mem::replace(entity_mut, src.clone());
+                    carry_crystallographic_columns(entity_mut, &old);
+                }
                 applied = true;
             }
         });
@@ -691,5 +822,260 @@ impl Session {
         self.apply(SessionUpdate::HeadMoved {
             cause: HeadMoveCause::Navigate,
         });
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+mod tests {
+    use super::*;
+    use molex::entity::molecule::atom::Atom;
+    use molex::entity::molecule::polymer::Residue;
+    use molex::entity::molecule::protein::ProteinEntity;
+    use molex::Element;
+
+    fn pad4(name: &str) -> [u8; 4] {
+        let mut n = [b' '; 4];
+        for (i, b) in name.bytes().take(4).enumerate() {
+            n[i] = b;
+        }
+        n
+    }
+
+    /// Build a single continuous protein chain from per-residue atom specs
+    /// `(name, element, b_factor)`. Positions increase monotonically so a
+    /// stray position-carry would be visible; occupancy defaults to 1.0.
+    /// Atoms are given in canonical order (`N, CA, C, O, ..., H`) so the
+    /// constructor's canonicalize leaves storage order as written.
+    fn protein_from(residue_specs: &[Vec<(&str, Element, f32)>]) -> MoleculeEntity {
+        let mut atoms = Vec::new();
+        let mut residues = Vec::new();
+        let mut coord = 0.0_f32;
+        for (r, spec) in residue_specs.iter().enumerate() {
+            let start = atoms.len();
+            for &(name, element, b) in spec {
+                coord += 1.0;
+                atoms.push(Atom {
+                    position: glam::Vec3::splat(coord),
+                    occupancy: 1.0,
+                    b_factor: b,
+                    element,
+                    name: pad4(name),
+                    formal_charge: 0,
+                    observed: true,
+                });
+            }
+            let end = atoms.len();
+            residues.push(Residue {
+                name: *b"ALA",
+                label_seq_id: r as i32 + 1,
+                auth_seq_id: None,
+                auth_comp_id: None,
+                ins_code: None,
+                atom_range: start..end,
+                variants: Vec::new(),
+            });
+        }
+        let id = EntityIdAllocator::new().allocate();
+        MoleculeEntity::Protein(ProteinEntity::new_continuous(
+            id,
+            atoms,
+            residues,
+            "A".to_owned(),
+        ))
+    }
+
+    #[test]
+    fn fast_path_retains_crystallographic_columns_and_takes_positions() {
+        let mut dst = protein_from(&[vec![
+            ("N", Element::N, 30.0),
+            ("CA", Element::C, 31.0),
+            ("C", Element::C, 32.0),
+            ("O", Element::O, 33.0),
+        ]]);
+        for o in &mut dst.columns_mut().occupancy {
+            *o = 0.5;
+        }
+
+        // Same composition, but the plugin frame zeroes b/occupancy and moves
+        // the coordinates.
+        let mut src = protein_from(&[vec![
+            ("N", Element::N, 0.0),
+            ("CA", Element::C, 0.0),
+            ("C", Element::C, 0.0),
+            ("O", Element::O, 0.0),
+        ]]);
+        for p in &mut src.columns_mut().position {
+            *p += glam::Vec3::splat(100.0);
+        }
+
+        assert!(composition_matches(&dst, &src));
+        let src_positions = src.columns().position.clone();
+
+        overwrite_value_columns(&mut dst, &src);
+
+        let cols = dst.columns();
+        assert_eq!(cols.b_factor, vec![30.0, 31.0, 32.0, 33.0]);
+        assert!(cols.occupancy.iter().all(|&o| o == 0.5));
+        assert_eq!(cols.position, src_positions);
+    }
+
+    #[test]
+    fn slow_path_carries_b_across_added_hydrogens() {
+        let old = protein_from(&[
+            vec![
+                ("N", Element::N, 11.0),
+                ("CA", Element::C, 12.0),
+                ("C", Element::C, 13.0),
+                ("O", Element::O, 14.0),
+            ],
+            vec![
+                ("N", Element::N, 21.0),
+                ("CA", Element::C, 22.0),
+                ("C", Element::C, 23.0),
+                ("O", Element::O, 24.0),
+            ],
+        ]);
+        // Same residues, each grown by a hydrogen; all B zeroed. Atom indices
+        // now disagree with `old` from residue 1 onward.
+        let mut new = protein_from(&[
+            vec![
+                ("N", Element::N, 0.0),
+                ("CA", Element::C, 0.0),
+                ("C", Element::C, 0.0),
+                ("O", Element::O, 0.0),
+                ("H", Element::H, 0.0),
+            ],
+            vec![
+                ("N", Element::N, 0.0),
+                ("CA", Element::C, 0.0),
+                ("C", Element::C, 0.0),
+                ("O", Element::O, 0.0),
+                ("H", Element::H, 0.0),
+            ],
+        ]);
+
+        carry_crystallographic_columns(&mut new, &old);
+
+        let b = &new.columns().b_factor;
+        // Residue 0 (indices 0..5): heavy matched, H untouched.
+        assert_eq!(b[0], 11.0);
+        assert_eq!(b[1], 12.0);
+        assert_eq!(b[2], 13.0);
+        assert_eq!(b[3], 14.0);
+        assert_eq!(b[4], 0.0);
+        // Residue 1 (indices 5..10): matched by name despite the index shift.
+        assert_eq!(b[5], 21.0);
+        assert_eq!(b[6], 22.0);
+        assert_eq!(b[7], 23.0);
+        assert_eq!(b[8], 24.0);
+        assert_eq!(b[9], 0.0);
+    }
+
+    #[test]
+    fn slow_path_residue_count_mismatch_is_noop() {
+        let old = protein_from(&[
+            vec![
+                ("N", Element::N, 5.0),
+                ("CA", Element::C, 5.0),
+                ("C", Element::C, 5.0),
+                ("O", Element::O, 5.0),
+            ],
+            vec![
+                ("N", Element::N, 6.0),
+                ("CA", Element::C, 6.0),
+                ("C", Element::C, 6.0),
+                ("O", Element::O, 6.0),
+            ],
+        ]);
+        let mut new = protein_from(&[
+            vec![
+                ("N", Element::N, 7.0),
+                ("CA", Element::C, 7.0),
+                ("C", Element::C, 7.0),
+                ("O", Element::O, 7.0),
+            ],
+            vec![
+                ("N", Element::N, 7.0),
+                ("CA", Element::C, 7.0),
+                ("C", Element::C, 7.0),
+                ("O", Element::O, 7.0),
+            ],
+            vec![
+                ("N", Element::N, 7.0),
+                ("CA", Element::C, 7.0),
+                ("C", Element::C, 7.0),
+                ("O", Element::O, 7.0),
+            ],
+        ]);
+        let before = new.columns().b_factor.clone();
+
+        carry_crystallographic_columns(&mut new, &old);
+
+        assert_eq!(new.columns().b_factor, before);
+    }
+
+    #[test]
+    fn slow_path_matches_across_null_and_space_padding() {
+        // Same residue, same logical atom (CA), but `old` stores the name
+        // null-padded and `new` stores it space-padded (the two paddings
+        // coexist across molex producers). Keying on the raw 4-byte buffer
+        // would never match these two, silently dropping the carry; trimming
+        // the padding first makes them match.
+        let mut old = protein_from(&[vec![
+            ("N", Element::N, 11.0),
+            ("CA", Element::C, 42.0),
+            ("C", Element::C, 13.0),
+            ("O", Element::O, 14.0),
+        ]]);
+        old.columns_mut().name[1] = [b'C', b'A', 0, 0];
+        let mut new = protein_from(&[vec![
+            ("N", Element::N, 0.0),
+            ("CA", Element::C, 0.0),
+            ("C", Element::C, 0.0),
+            ("O", Element::O, 0.0),
+        ]]);
+        new.columns_mut().name[1] = [b'C', b'A', b' ', b' '];
+
+        carry_crystallographic_columns(&mut new, &old);
+
+        // The CA B-factor crosses the padding boundary.
+        assert_eq!(new.columns().b_factor[1], 42.0);
+    }
+
+    #[test]
+    fn slow_path_keys_by_name_not_index() {
+        let old = protein_from(&[vec![
+            ("N", Element::N, 10.0),
+            ("CA", Element::C, 20.0),
+            ("C", Element::C, 30.0),
+            ("O", Element::O, 40.0),
+        ]]);
+        let mut new = protein_from(&[vec![
+            ("N", Element::N, 0.0),
+            ("CA", Element::C, 0.0),
+            ("C", Element::C, 0.0),
+            ("O", Element::O, 0.0),
+        ]]);
+        // Force storage order and name to disagree: swap the N and O cells so
+        // index 0 holds "O" and index 3 holds "N". Constructing with scrambled
+        // input would just re-canonicalize, so permute in place after build.
+        new.columns_mut().name.swap(0, 3);
+
+        carry_crystallographic_columns(&mut new, &old);
+
+        let cols = new.columns();
+        // B follows the NAME. Index-keying would have written old[0]=10.0 at
+        // index 0 (which now holds "O").
+        assert_eq!(cols.name[0], pad4("O"));
+        assert_eq!(cols.b_factor[0], 40.0);
+        assert_eq!(cols.name[3], pad4("N"));
+        assert_eq!(cols.b_factor[3], 10.0);
+        assert_eq!(cols.b_factor[1], 20.0);
+        assert_eq!(cols.b_factor[2], 30.0);
     }
 }

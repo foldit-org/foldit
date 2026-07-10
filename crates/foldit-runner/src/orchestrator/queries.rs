@@ -68,6 +68,71 @@ impl Orchestrator {
         self.pending_queries.contains_key(id)
     }
 
+    /// Fire query `id` non-blocking on behalf of caller request `key`, with
+    /// `ctx` and `params`. The reply is drained by
+    /// [`Self::poll_keyed_query_results`] and returned under `key`, so a
+    /// caller that owes a reply to someone else (a webview wish) can route it.
+    ///
+    /// This is the async counterpart of [`Self::dispatch_query`], which blocks
+    /// the calling thread on the worker round-trip and must not be used from
+    /// an event loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`OpDispatchError`] when `id` is unregistered, its plugin
+    /// has no session, or its worker is gone -- all conditions the caller can
+    /// answer immediately rather than wait on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_keyed_query(
+        &mut self,
+        key: &str,
+        id: &str,
+        ctx: &DispatchContext,
+        params: HashMap<String, super::types::ParamValue>,
+    ) -> Result<(), super::ops::OpDispatchError> {
+        use super::ops::OpDispatchError;
+        let cached = self
+            .plugin_registry
+            .get_query(id)
+            .ok_or_else(|| OpDispatchError::UnknownQuery(String::from(id)))?
+            .clone();
+        let session = self
+            .plugin_sessions
+            .get(&cached.plugin_id)
+            .copied()
+            .ok_or_else(|| {
+                OpDispatchError::NoSession(cached.plugin_id.clone())
+            })?;
+        let handle =
+            self.plugin_workers.get(&cached.plugin_id).ok_or_else(|| {
+                OpDispatchError::WorkerGone(cached.plugin_id.clone())
+            })?;
+        let (reply_tx, reply_rx) = mpsc::channel();
+        handle
+            .submit(PluginTask::Query {
+                session,
+                query: String::from(id),
+                ctx: ctx.clone(),
+                params,
+                assembly: Vec::new(),
+                reply: reply_tx,
+            })
+            .map_err(|_| OpDispatchError::WorkerGone(cached.plugin_id))?;
+        let _ = self
+            .pending_keyed_queries
+            .insert(String::from(key), reply_rx);
+        Ok(())
+    }
+
+    /// Drain arrived keyed-query replies as `(key, bytes)`. Non-blocking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_keyed_query_results(&mut self) -> Vec<(String, Vec<u8>)> {
+        drain_opaque_replies(
+            &mut self.pending_keyed_queries,
+            "poll_keyed_query_results",
+        )
+    }
+
     /// Drain whatever async query replies have arrived since the last call.
     /// Non-blocking `try_recv`; a query whose reply is not yet ready stays
     /// pending. Returns one `(query_id, bytes)` pair per query that replied

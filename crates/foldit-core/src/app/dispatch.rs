@@ -11,6 +11,63 @@ use crate::runner_client::{DispatchError, DispatchIntent, EditScope, OpEvent, Op
 use viso::Focus;
 
 impl App {
+    /// Fire a `PluginQuery` for webview request `wish_id` without blocking.
+    ///
+    /// The plugin worker serialises tasks behind whatever step it is running,
+    /// so awaiting the reply here froze the event loop for that step's length.
+    /// [`Self::drain_deferred_queries`] answers the wish when the reply lands.
+    ///
+    /// # Errors
+    ///
+    /// Returns the conditions answerable without waiting: a malformed payload,
+    /// an unregistered query, no session, or a dead worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn begin_plugin_query(
+        &mut self,
+        wish_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let query_id = payload
+            .get("query_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'query_id'".to_owned())?;
+        let params: std::collections::HashMap<String, foldit_gui::state::ParamValue> =
+            match payload.get("params") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string())?,
+                None => std::collections::HashMap::new(),
+            };
+        let focus = match self.store.focus() {
+            Focus::Entity(eid) => Some(eid),
+            Focus::All => None,
+        };
+        let selection = self.store.selection().clone();
+        let designable = self.store.designable_residues();
+        self.runner_client.request_plugin_query_keyed(
+            wish_id,
+            query_id,
+            focus,
+            &selection,
+            &designable,
+            params,
+        )
+    }
+
+    /// Answer each deferred webview query whose reply has landed.
+    ///
+    /// A query that failed is dropped by the drain rather than surfaced, so
+    /// its wish never resolves and the JS side sees a request that never
+    /// returns. ⚠️ That is the pre-existing behaviour of the async query
+    /// drain, not something this path introduces, but it is worth fixing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn drain_deferred_queries(
+        &mut self,
+        fx: &mut dyn crate::HostEffects,
+    ) {
+        for (wish_id, bytes) in self.runner_client.poll_keyed_query_results() {
+            fx.push_response(&wish_id, &Ok(super::base64_result(&bytes)));
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "flat dispatch over the OpEvent enum; splitting the arms would scatter the stream-event handling that reads best in one place"

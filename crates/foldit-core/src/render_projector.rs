@@ -39,11 +39,21 @@ pub struct RenderProjector {
     /// structure forward without re-running DSSP. `None` until the first
     /// committed / load publish.
     last_ss: Option<molex::Assembly>,
+    /// The last geometrically-detected connection set, cached for the same
+    /// reason as `last_ss`: `detect_fallback_connections` runs the backbone
+    /// hbond kernel plus a disulfide scan over the whole assembly, and doing
+    /// that per streamed frame is a wiggle/shake stall. Carried forward on
+    /// tentative frames; the links are atom-index pairs, so viso re-resolves
+    /// their endpoints against the moving coords. `None` until the first
+    /// fallback detection, and dropped on a head topology change.
+    last_fallback_connections:
+        Option<HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
 }
 
 impl RenderProjector {
     pub const fn new() -> Self {
         Self {
+            last_fallback_connections: None,
             publish_seq: 0,
             last_published_ids: BTreeSet::new(),
             last_pushed_appearance: BTreeSet::new(),
@@ -131,11 +141,27 @@ impl RenderProjector {
     /// held set: when a plugin provides connections the atom-index map is
     /// stamped verbatim and molex's geometric fallback is NOT run; otherwise
     /// molex detects them geometrically per publish.
+    /// `redetect` forces the geometric fallback to re-run; a tentative
+    /// streaming frame passes `false` and reuses the cached set.
     fn populate_connections(
+        &mut self,
         held: Option<&HashMap<molex::ConnectionType, Vec<molex::AtomLink>>>,
         asm: &mut molex::Assembly,
+        redetect: bool,
     ) {
-        let connections = held.map_or_else(|| asm.detect_fallback_connections(), Clone::clone);
+        let connections = if let Some(provided) = held {
+            provided.clone()
+        } else if redetect || self.last_fallback_connections.is_none() {
+            let detected = asm.detect_fallback_connections();
+            self.last_fallback_connections = Some(detected.clone());
+            detected
+        } else {
+            // Cloned, not detected: an atom-link memcpy instead of the
+            // hbond kernel over every backbone residue.
+            self.last_fallback_connections
+                .clone()
+                .unwrap_or_default()
+        };
         asm.set_connections(connections);
     }
 }
@@ -246,7 +272,11 @@ impl SessionUpdateConsumer for RenderProjector {
                 head
             };
 
-            Self::populate_connections(held_connections, &mut asm);
+            self.populate_connections(
+                held_connections,
+                &mut asm,
+                committed_geometry || topology_changed,
+            );
             self.publish_seq = self.publish_seq.saturating_add(1);
             asm.set_generation(self.publish_seq);
             let asm = std::sync::Arc::new(asm);

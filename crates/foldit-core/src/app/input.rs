@@ -4,7 +4,8 @@ use viso::ClickEvent;
 use crate::app::harness::EngineHarness;
 use crate::app::App;
 
-pub(in crate::app) use super::gesture::{hovered_segment_target, next_focus};
+pub(in crate::app) use super::gesture::next_focus;
+pub(in crate::app) use super::pick::hovered_segment_target;
 
 impl App {
     /// Dispatch a keybinding by physical-key string ("`KeyR`", "`KeyT`",
@@ -65,6 +66,14 @@ impl App {
         // button still held, anchored to the down-target regardless of
         // where the cursor has since wandered. `mouse_pressed()` is viso's
         // own press bit, set by the preceding PointerDown.
+
+        // Right-button drag grows a world-space selection sphere. It is
+        // intercepted first (and on every target) so the right button never
+        // reaches viso, where it would otherwise be an inert press.
+        if self.try_sphere_select_interception(&input) {
+            return;
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         if self.try_pull_drag_interception(&input) {
             return;
@@ -96,22 +105,8 @@ impl App {
                     return;
                 };
                 self.harness.feed_pointer_down(viso_button, x, y, shift);
-                // Lock the pull intent at the down-target. The cursor was
-                // just fed to (x, y), so resolving the route here captures
-                // what is under the press; a later move can only supply the
-                // drag endpoint. Left button only - right/middle are camera.
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let origin = if button == 0 {
-                        self.harness
-                            .engine
-                            .as_ref()
-                            .and_then(|engine| Self::resolve_pull_route(engine, &self.store, x, y))
-                    } else {
-                        None
-                    };
-                    self.runner_client.set_pending_pull_origin(origin);
-                }
+                self.latch_pull_origin(x, y, button);
             }
             ViewportInput::PointerUp {
                 x,
@@ -177,6 +172,24 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             pending_toggle_picker,
         );
+    }
+
+    /// Lock the pull intent at the down-target. The cursor was just fed to
+    /// (x, y), so resolving the route here captures what is under the press; a
+    /// later move can only supply the drag endpoint. Only the left button
+    /// anchors a pull: the right button is claimed by sphere-select, and the
+    /// middle button is inert in viso.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn latch_pull_origin(&mut self, x: f32, y: f32, button: u8) {
+        let origin = if button == 0 {
+            self.harness
+                .engine
+                .as_ref()
+                .and_then(|engine| Self::resolve_pull_route(engine, &self.store, x, y))
+        } else {
+            None
+        };
+        self.runner_client.set_pending_pull_origin(origin);
     }
 
     pub fn handle_native_mouse_input(&mut self, button: viso::MouseButton, pressed: bool) {

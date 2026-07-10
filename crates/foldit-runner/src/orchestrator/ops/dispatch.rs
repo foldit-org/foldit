@@ -582,11 +582,15 @@ impl Orchestrator {
 
     /// Push new params to a running stream (e.g. pull-target updates).
     ///
+    /// Fire-and-forget: the ack is dropped rather than awaited. Callers reach
+    /// this from the event-loop thread (a pull drag, a slider), and the worker
+    /// serialises tasks behind whatever step it is running, so awaiting the
+    /// ack froze the UI for the length of that step. Worker-side errors still
+    /// surface on the stream itself as a `PluginUpdate` terminal.
+    ///
     /// # Errors
     ///
-    /// Returns an [`OpDispatchError`] if the plugin worker is gone, the
-    /// reply channel is dropped, or the plugin returns an
-    /// `UpdateStream` error.
+    /// Returns an [`OpDispatchError`] if the plugin worker is gone.
     pub fn dispatch_update_stream(
         &self,
         plugin_id: &str,
@@ -596,7 +600,9 @@ impl Orchestrator {
         let handle = self.plugin_workers.get(plugin_id).ok_or_else(|| {
             OpDispatchError::WorkerGone(String::from(plugin_id))
         })?;
-        let (reply_tx, reply_rx) = mpsc::channel();
+        // The worker sends through `let _ = reply.send(..)`, so a dropped
+        // receiver is a no-op for it.
+        let (reply_tx, _drop_ack) = mpsc::channel();
         handle
             .submit(PluginTask::UpdateStream {
                 request_id,
@@ -606,18 +612,14 @@ impl Orchestrator {
             .map_err(|_| {
                 OpDispatchError::WorkerGone(String::from(plugin_id))
             })?;
-        Ok(reply_rx.recv().map_err(|_| {
-            OpDispatchError::WorkerGone(String::from(plugin_id))
-        })??)
+        Ok(())
     }
 
     /// Cancel a running stream. Idempotent.
     ///
     /// # Errors
     ///
-    /// Returns an [`OpDispatchError`] if the plugin worker is gone, the
-    /// reply channel is dropped, or the plugin returns a
-    /// `CancelStream` error.
+    /// Returns an [`OpDispatchError`] if the plugin worker is gone.
     pub fn dispatch_cancel_stream(
         &self,
         plugin_id: &str,
@@ -626,7 +628,9 @@ impl Orchestrator {
         let handle = self.plugin_workers.get(plugin_id).ok_or_else(|| {
             OpDispatchError::WorkerGone(String::from(plugin_id))
         })?;
-        let (reply_tx, reply_rx) = mpsc::channel();
+        // Fire-and-forget for the same reason as `dispatch_update_stream`;
+        // the stream's `Cancelled` terminal arrives through the pump.
+        let (reply_tx, _drop_ack) = mpsc::channel();
         handle
             .submit(PluginTask::CancelStream {
                 request_id,
@@ -635,9 +639,7 @@ impl Orchestrator {
             .map_err(|_| {
                 OpDispatchError::WorkerGone(String::from(plugin_id))
             })?;
-        Ok(reply_rx.recv().map_err(|_| {
-            OpDispatchError::WorkerGone(String::from(plugin_id))
-        })??)
+        Ok(())
     }
 
     // Internals

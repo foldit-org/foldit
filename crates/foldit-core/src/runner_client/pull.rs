@@ -183,9 +183,5 @@ pub fn build_pull_info(route: &PullRoute, screen_target: (f32, f32)) -> PullInfo
 /// in molex carry the raw 4-byte buffer; the on-wire / classifier
 /// representation drops the padding.
 fn trim_atom_name(raw: [u8; 4]) -> String {
-    let end = raw
-        .iter()
-        .position(|b| *b == 0 || *b == b' ')
-        .unwrap_or(raw.len());
-    String::from_utf8_lossy(&raw[..end]).into_owned()
+    String::from_utf8_lossy(crate::atom_name::trimmed_atom_name(&raw)).into_owned()
 }

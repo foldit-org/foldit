@@ -7340,8 +7340,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viso"
-version = "0.3.11"
-source = "git+https://github.com/foldit-org/viso?tag=v0.3.11#3bf36f088b34a943376df33f7da1baf9c7ef7e84"
+version = "0.3.12"
 dependencies = [
  "bytemuck",
  "encase",

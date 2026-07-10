@@ -20,6 +20,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub(crate) mod app;
+pub(crate) mod atom_name;
 pub(crate) mod gui_projector;
 pub(crate) mod history;
 mod host_effects;

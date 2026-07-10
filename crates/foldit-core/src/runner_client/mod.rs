@@ -292,6 +292,51 @@ impl RunnerClient {
             .map_err(|e| format!("query '{id}' failed: {e}"))
     }
 
+    /// Fire query `id` non-blocking on behalf of caller request `key`. The
+    /// reply is drained by [`Self::poll_keyed_query_results`] under `key`.
+    ///
+    /// The async counterpart of [`Self::dispatch_plugin_query`], which blocks
+    /// the calling thread on the worker round-trip. Anything reached from the
+    /// event loop must use this: the worker serialises tasks behind whatever
+    /// step it is running, so the blocking form freezes the UI for its length.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn request_plugin_query_keyed(
+        &mut self,
+        key: &str,
+        id: &str,
+        focus: Option<molex::EntityId>,
+        selection: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
+        designable: &std::collections::BTreeMap<molex::EntityId, std::collections::BTreeSet<u32>>,
+        params: std::collections::HashMap<String, foldit_gui::state::ParamValue>,
+    ) -> Result<(), String> {
+        if !self.supports_query(id) {
+            return Err(format!("query '{id}' is not registered"));
+        }
+        let ctx = types::build_dispatch_context(focus, selection, designable);
+        let orch = self
+            .orchestrator
+            .as_mut()
+            .ok_or_else(|| String::from("orchestrator not initialized"))?;
+
+        let params: std::collections::HashMap<String, foldit_runner::orchestrator::ParamValue> =
+            params
+                .into_iter()
+                .map(|(k, v)| (k, crate::wire_params::param_value_from_wire(v)))
+                .collect();
+
+        orch.request_keyed_query(key, id, &ctx, params)
+            .map_err(|e| format!("query '{id}' failed: {e}"))
+    }
+
+    /// Drain arrived keyed-query replies as `(key, bytes)`. Non-blocking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn poll_keyed_query_results(&mut self) -> Vec<(String, Vec<u8>)> {
+        self.orchestrator
+            .as_mut()
+            .map(foldit_runner::Orchestrator::poll_keyed_query_results)
+            .unwrap_or_default()
+    }
+
     /// Fire the query `id` non-blocking against the live session pose. The
     /// reply lands on a stored receiver drained by
     /// [`Self::poll_query_results`]; the caller decodes and applies it then.

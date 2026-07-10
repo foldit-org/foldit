@@ -29,6 +29,7 @@ mod harness;
 mod init_config;
 pub mod input;
 mod load;
+mod pick;
 mod plugins;
 mod preview;
 mod projectors;
@@ -37,6 +38,7 @@ mod refine;
 #[cfg(not(target_arch = "wasm32"))]
 mod rfree;
 pub mod score_coordinator;
+mod sphere_select;
 mod startup;
 #[cfg(test)]
 mod tests;
@@ -87,6 +89,9 @@ pub struct App {
 
     /// Dispatches queued this tick, drained on the next `tick`.
     pub(in crate::app) pending_dispatches: Vec<foldit_gui::OpDispatch>,
+
+    /// Transient right-drag sphere-selection state; `Default` between drags.
+    pub(in crate::app) sphere_select: self::sphere_select::SphereSelect,
 
     /// Shared wgpu device (created from the adapter's full limits) handed to
     /// cubecl so crystallographic GPU compute runs on the same device the
@@ -146,7 +151,7 @@ pub struct App {
 
 /// Wrap raw bytes as the `{ "encoding": "base64", "content": ... }` envelope
 /// the JS request path expects for a binary reply.
-fn base64_result(bytes: &[u8]) -> serde_json::Value {
+pub(in crate::app) fn base64_result(bytes: &[u8]) -> serde_json::Value {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     serde_json::json!({ "encoding": "base64", "content": b64 })
@@ -174,6 +179,7 @@ impl App {
             scores: ScoreCoordinator::new(),
             viz: Viz::new(),
             pending_dispatches: Vec::new(),
+            sphere_select: self::sphere_select::SphereSelect::default(),
             #[cfg(not(target_arch = "wasm32"))]
             shared_device: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -313,20 +319,15 @@ impl App {
                     };
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let focus = match self.store.focus() {
-                        viso::Focus::Entity(eid) => Some(eid),
-                        viso::Focus::All => None,
-                    };
-                    let selection = self.store.selection().clone();
-                    let designable = self.store.designable_residues();
-                    let bytes = self.runner_client.dispatch_plugin_query(
-                        query_id,
-                        focus,
-                        &selection,
-                        &designable,
-                        params,
-                    )?;
-                    Ok(base64_result(&bytes))
+                    // Native hosts must go through `begin_plugin_query`, which
+                    // fires the query async and answers the wish when the
+                    // reply lands. Dispatching here would block the event loop
+                    // behind whatever step the plugin worker is running.
+                    let _ = (query_id, params);
+                    Err(String::from(
+                        "plugin queries dispatch asynchronously; call \
+                         begin_plugin_query",
+                    ))
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -461,6 +462,9 @@ impl App {
         // Apply this tick's score replies before the drain so their
         // `ScoresChanged` lands in this tick's `changes` batch.
         self.scores.poll(&mut self.runner_client, &mut self.store);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drain_deferred_queries(fx);
 
         let viz_results = self.runner_client.poll_query_results();
         if !viz_results.is_empty() {
@@ -601,13 +605,15 @@ impl App {
             }
         }
 
-        if let Some(json) = foldit_gui::bridge::push::serialize_dirty(&mut self.gui)
-            .map(|v| v.to_string().into_bytes())
-        {
-            fx.push_state(&json);
-        }
-        if let Some(update) = self.gui.take_tail_update() {
-            fx.push_tail(update);
+        if fx.may_push_frontend() {
+            if let Some(json) = foldit_gui::bridge::push::serialize_dirty(&mut self.gui)
+                .map(|v| v.to_string().into_bytes())
+            {
+                fx.push_state(&json);
+            }
+            if let Some(update) = self.gui.take_tail_update() {
+                fx.push_tail(update);
+            }
         }
         if let Some(value) = self.gui.take_fullscreen_change() {
             fx.set_fullscreen(value);
@@ -615,5 +621,6 @@ impl App {
         if let Some(bytes) = self.gui.take_progress_to_persist() {
             fx.persist_progress(bytes);
         }
+
     }
 }
