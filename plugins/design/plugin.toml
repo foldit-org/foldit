@@ -1,0 +1,145 @@
+id = "design"
+kind = "native"
+name = "Design"
+order = 1
+
+[native]
+# Basename form: `PluginManifest::native_binary_name()` decorates this into
+# libdesign.so / libdesign.dylib / design.dll.
+binary = "design"
+
+# The mutate picker. Each `[[buttons.options]]` entry dispatches `mutate_residue`
+# with its own `aa` param. Options are in molex's `AminoAcid::ALL` order; the
+# frontend rows them by `color` in first-appearance order, putting hydrophobic
+# (orange) above polar (blue).
+#
+# Icon tokens: `builtin:` a GUI glyph, `game:` foldit-owned art under
+# `/game-assets/`, bare path a plugin-relative asset.
+[[buttons]]
+op = "mutate_residue"
+display = "Mutate"
+icon = "builtin:replace"
+hotkey = "KeyM"
+tooltip = "Mutate: change the selected residue's amino-acid identity"
+requires_designable = true
+selection_spec = { min_residues = 1, max_residues = 1 }
+
+[[buttons.options]]
+label = "A"
+color = "orange"
+icon = "game:residue_icons/ALA.png"
+params = { aa = "ALA" }
+
+[[buttons.options]]
+label = "R"
+color = "blue"
+icon = "game:residue_icons/ARG.png"
+params = { aa = "ARG" }
+
+[[buttons.options]]
+label = "N"
+color = "blue"
+icon = "game:residue_icons/ASN.png"
+params = { aa = "ASN" }
+
+[[buttons.options]]
+label = "D"
+color = "blue"
+icon = "game:residue_icons/ASP.png"
+params = { aa = "ASP" }
+
+[[buttons.options]]
+label = "C"
+color = "orange"
+icon = "game:residue_icons/CYS.png"
+params = { aa = "CYS" }
+
+[[buttons.options]]
+label = "Q"
+color = "blue"
+icon = "game:residue_icons/GLN.png"
+params = { aa = "GLN" }
+
+[[buttons.options]]
+label = "E"
+color = "blue"
+icon = "game:residue_icons/GLU.png"
+params = { aa = "GLU" }
+
+[[buttons.options]]
+label = "G"
+color = "orange"
+icon = "game:residue_icons/GLY.png"
+params = { aa = "GLY" }
+
+[[buttons.options]]
+label = "H"
+color = "blue"
+icon = "game:residue_icons/HIS.png"
+params = { aa = "HIS" }
+
+[[buttons.options]]
+label = "I"
+color = "orange"
+icon = "game:residue_icons/ILE.png"
+params = { aa = "ILE" }
+
+[[buttons.options]]
+label = "L"
+color = "orange"
+icon = "game:residue_icons/LEU.png"
+params = { aa = "LEU" }
+
+[[buttons.options]]
+label = "K"
+color = "blue"
+icon = "game:residue_icons/LYS.png"
+params = { aa = "LYS" }
+
+[[buttons.options]]
+label = "M"
+color = "orange"
+icon = "game:residue_icons/MET.png"
+params = { aa = "MET" }
+
+[[buttons.options]]
+label = "F"
+color = "orange"
+icon = "game:residue_icons/PHE.png"
+params = { aa = "PHE" }
+
+[[buttons.options]]
+label = "P"
+color = "orange"
+icon = "game:residue_icons/PRO.png"
+params = { aa = "PRO" }
+
+[[buttons.options]]
+label = "S"
+color = "blue"
+icon = "game:residue_icons/SER.png"
+params = { aa = "SER" }
+
+[[buttons.options]]
+label = "T"
+color = "blue"
+icon = "game:residue_icons/THR.png"
+params = { aa = "THR" }
+
+[[buttons.options]]
+label = "W"
+color = "orange"
+icon = "game:residue_icons/TRP.png"
+params = { aa = "TRP" }
+
+[[buttons.options]]
+label = "Y"
+color = "orange"
+icon = "game:residue_icons/TYR.png"
+params = { aa = "TYR" }
+
+[[buttons.options]]
+label = "V"
+color = "orange"
+icon = "game:residue_icons/VAL.png"
+params = { aa = "VAL" }
