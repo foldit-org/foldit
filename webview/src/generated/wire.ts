@@ -33,11 +33,11 @@ export type ActionInfo = {
 	/**  Display label. */
 	display: string,
 	/**
-	 *  Manifest-relative icon asset path (relative to the owning plugin
-	 *  directory). The GUI builds its fetch URL as
-	 *  `/plugins/<plugin_id>/<icon_path>`. A value beginning with `builtin:`
-	 *  instead names a built-in GUI icon resolved by the frontend's icon set,
-	 *  letting native actions ship a glyph with no plugin asset file.
+	 *  Icon token. Three schemes, resolved by the frontend in this order:
+	 *  `builtin:<name>` names a built-in GUI glyph (no asset file);
+	 *  `game:<path>` is a foldit-owned asset under `/game-assets/<path>`;
+	 *  any other value is manifest-relative and fetched from
+	 *  `/plugins/<plugin_id>/<icon_path>`. Empty falls back to the label.
 	 */
 	icon_path: string,
 	/**  True when the op can be dispatched in the current lock state. */
@@ -83,7 +83,11 @@ export type ActionOption = {
 	label: string,
 	/**  Render color (frontend-interpreted CSS color string). */
 	color: string,
-	/**  Optional icon asset path (manifest-relative). `None` = no icon. */
+	/**
+	 *  Optional icon token, same three schemes as [`ActionInfo::icon_path`]
+	 *  (`builtin:` glyph / `game:` foldit asset / plugin-relative path).
+	 *  `None` = no icon.
+	 */
 	icon: string | null,
 	/**
 	 *  Optional hotkey corner-badge string (winit `KeyCode` spelling).
@@ -124,17 +128,11 @@ export type ActionsSection = {
 	 */
 	open_picker: string | null,
 	/**
-	 *  Per-plugin live download progress, keyed by `plugin_id`. Empty when
-	 *  nothing is downloading; a plugin's host-injected download button reads
-	 *  its entry to render a progress fill.
+	 *  One entry per in-flight streaming op, weight downloads included. Empty
+	 *  when nothing is running. Rides the same `"actions"` wire push as its
+	 *  siblings.
 	 */
-	download_progress: { [key in string]: DownloadProgress },
-	/**
-	 *  Live progress for the single in-flight b-factor refine, or `None` when
-	 *  nothing is refining. Rides the same `"actions"` wire push as its
-	 *  siblings; the frontend renders one determinate progress bar from it.
-	 */
-	refine_progress: RefineProgress | null,
+	op_progress: OpProgress[],
 };
 
 /**
@@ -229,16 +227,15 @@ export type AppCommand = { type: "SetViewOptions"; options: unknown } | { type: 
 /**
  *  Cancel a running action from the GUI (a per-action toast X or a running
  *  button's X). `request_id = Some(rid)` cancels exactly that one stream;
- *  `refine = true` cancels the native B-factor refine (which is not a
- *  stream and has no request-id); both unset cancels everything cancellable
- *  (the ESC path). Drops any in-progress preview geometry either way.
+ *  `None` cancels everything cancellable (the ESC path). Drops any
+ *  in-progress preview geometry either way.
  */
 { type: "CancelAction"; 
 /**
  *  `u32` on the wire (specta forbids u64); matches
  *  [`crate::state::RunningAction::request_id`].
  */
-request_id: number | null; refine: boolean };
+request_id: number | null };
 
 /**
  *  Top-level GUI state machine: the App-lifetime lifecycle phase.
@@ -342,17 +339,6 @@ export type CheckpointKindTag =
  *  as a plugin op. Display label rides on `CheckpointInfo::label`.
  */
 "native_edit";
-
-/**
- *  Live download progress for a plugin whose weights are streaming in.
- * 
- *  `fraction` is 0..1 (0 at kick, 1 at completion); `stage` is a
- *  human-readable label for the current phase of the download.
- */
-export type DownloadProgress = {
-	fraction: number | null,
-	stage: string,
-};
 
 /**
  *  Opaque entity identifier.
@@ -540,6 +526,32 @@ export type OpDispatch = {
 };
 
 /**
+ *  Live progress for one in-flight streaming op, one entry per active stream
+ *  (weight downloads included).
+ * 
+ *  `fraction` is `None` for an indefinite op — wiggle, shake, and any stream
+ *  whose plugin reports no measurable advancement — and the frontend renders
+ *  an indeterminate "running" bar. A determinate op (B-factor refine,
+ *  RFdiffusion3) reports 0..1. `label` is a ready-to-render phrase supplied by
+ *  the plugin's stage string; `None` until it reports one.
+ */
+export type OpProgress = {
+	/**
+	 *  `u32` on the wire (specta forbids u64); matches
+	 *  [`RunningAction::request_id`].
+	 */
+	request_id: number,
+	op_id: string,
+	/**
+	 *  Owning plugin, so a plugin-scoped surface (the weights download button)
+	 *  can find its own entry without a second lookup.
+	 */
+	plugin_id: string,
+	fraction: number | null,
+	label: string | null,
+};
+
+/**
  *  One plugin-contributed custom panel, served on demand via the
  *  `PanelsCatalog` request.
  * 
@@ -703,20 +715,8 @@ export type RFreeStatus = {
 };
 
 /**
- *  Live progress for an in-flight b-factor refine.
- * 
- *  Determinate: `fraction` is 0..1 (0 at kick, 1 at completion) and `label`
- *  is a ready-to-render phrase (e.g. "Refining B-factors (cycle 2/5)"). Rust
- *  computes both; the frontend only renders.
- */
-export type RefineProgress = {
-	fraction: number | null,
-	label: string,
-};
-
-/**
- *  One currently-running action, projected from a held lock (a live
- *  orchestrator stream, or the native refine holding the global lock). The
+ *  One currently-running action, projected from a held lock on a live
+ *  orchestrator stream. The
  *  single source of truth for the running UI: the per-instance cancel toasts
  *  and each action button's cancel state both derive from this list, so a
  *  button is "running" exactly when an entry here is `global` or locks the
@@ -725,10 +725,8 @@ export type RefineProgress = {
 export type RunningAction = {
 	/**
 	 *  Dispatch request-id of the backing stream, used to cancel this one
-	 *  instance. `None` for the native refine, which is not a stream and is
-	 *  cancelled through the `refine` flag on [`crate::AppCommand::CancelAction`].
-	 *  `u32` on the wire (specta forbids u64); request-ids are a monotonic
-	 *  counter that never approaches the u32 ceiling.
+	 *  instance. `u32` on the wire (specta forbids u64); request-ids are a
+	 *  monotonic counter that never approaches the u32 ceiling.
 	 */
 	request_id: number | null,
 	/**  Op-id of the running action (joins to [`ActionInfo::op_id`]). */

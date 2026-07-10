@@ -20,6 +20,9 @@ use crate::session::{HeadMoveCause, SessionUpdate, SessionUpdateConsumer};
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::app) struct BringupState {
     pub(in crate::app) phase: StartupPhase,
+    /// Serialized head assembly, stashed between the provider and consumer
+    /// Init phases so the second kick does not re-serialize it.
+    pub(in crate::app) initial_assembly: Vec<u8>,
     pub(in crate::app) camera: StartupCamera,
     pub(in crate::app) ss_override: Option<(u32, Vec<molex::SSType>)>,
 }
@@ -38,6 +41,12 @@ pub(in crate::app) enum StartupPhase {
         expected: std::collections::BTreeSet<String>,
         connected: std::collections::BTreeSet<String>,
         path: String,
+    },
+    /// Density-provider `Init` sessions in flight. Their map must land in the
+    /// session before `uses_density` plugins are initialized.
+    InitializingProviders {
+        expected: std::collections::BTreeSet<String>,
+        adopted: std::collections::BTreeSet<String>,
     },
     /// Plugin `Init` sessions in flight; accumulating adopted plugin ids.
     Initializing {
@@ -83,20 +92,16 @@ impl App {
         self.harness.attach(engine);
     }
 
-    /// Desktop GPU bring-up: create ONE wgpu device against `target`, build
-    /// and attach the renderer on it, and cache it for crystallographic GPU
-    /// compute so both consumers share a single device.
+    /// Desktop GPU bring-up: create ONE wgpu device against `target` and build
+    /// and attach the renderer on it.
     ///
     /// The device is created with `required_limits: adapter.limits()` (the
-    /// adapter maximum) rather than the wgpu defaults: cubecl reads the handed
-    /// device's limits back to size its storage-buffer bindings, and the
-    /// default limit (8 storage buffers) is too small for its compute kernels.
-    /// The adapter maximum is a guaranteed superset.
+    /// adapter maximum) rather than the wgpu defaults, so consumers that bind
+    /// more storage buffers than the conservative default allows still work.
     ///
     /// On device-creation failure this falls back to viso self-creating its
-    /// own device (renderer only) and leaves the shared device unset, so
-    /// density then computes on the CPU. Errors are logged here; the desktop
-    /// caller fires-and-forgets.
+    /// own device. Errors are logged here; the desktop caller
+    /// fires-and-forgets.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(
         clippy::future_not_send,
@@ -168,16 +173,8 @@ impl App {
             return;
         };
 
-        // Shared-device path: build the renderer on this device, then hand the
-        // same handles to cubecl. `device`/`queue` are ref-counted; cloning
-        // gives the renderer its own copy while `WgpuSetup` takes the originals.
         let ctx = match viso::RenderContext::new_with_device(
-            &instance,
-            &adapter,
-            device.clone(),
-            queue.clone(),
-            target,
-            size,
+            &instance, &adapter, device, queue, target, size,
         )
         .await
         {
@@ -196,17 +193,6 @@ impl App {
         };
         engine.set_render_scale(render_scale);
         self.attach_engine(engine);
-
-        let backend = adapter.get_info().backend;
-        let setup = molex::xtal::WgpuSetup {
-            instance,
-            adapter,
-            device,
-            queue,
-            backend,
-        };
-        self.shared_device = Some(molex::xtal::shared_gpu_device(setup));
-        log::info!("[App] shared wgpu device created; molex xtal compute will run on GPU");
     }
 
     /// Begin app bring-up: the one host trigger that arms the non-blocking
@@ -327,6 +313,23 @@ impl App {
                         connected,
                         path,
                     };
+                }
+            }
+            StartupPhase::InitializingProviders {
+                expected,
+                mut adopted,
+            } => {
+                for (plugin_id, init_bytes) in self.runner_client.poll_inits() {
+                    self.apply_post_init(&plugin_id, &init_bytes, "_init_normalize", "Init");
+                    adopted.insert(plugin_id);
+                }
+                if adopted.is_superset(&expected) {
+                    self.adopt_provider_density();
+                    let assembly = std::mem::take(&mut self.bringup.initial_assembly);
+                    self.bringup.phase = self.kick_consumer_inits(&assembly);
+                } else {
+                    self.bringup.phase =
+                        StartupPhase::InitializingProviders { expected, adopted };
                 }
             }
             StartupPhase::Initializing {
@@ -516,13 +519,6 @@ impl App {
     fn warms_done_load_and_kick_inits(&mut self, path: &str) -> StartupPhase {
         match crate::structure_io::load_file_as_entities(path) {
             Ok((entities, name)) => {
-                // `--with-density`: fetch structure factors and compute an
-                // experimental-weighted map before `entities` is moved into
-                // history; warn-and-continue on any failure so the load never
-                // hard-fails on a missing sf.cif or unsupported space group.
-                if self.host.with_density() {
-                    self.load_with_density(&entities, &name);
-                }
                 let _ = self.store.seed_history_with_entities(
                     entities,
                     std::path::PathBuf::new(),
@@ -533,6 +529,13 @@ impl App {
                 // scientist puzzle panel + title reach the GUI at the
                 // InSession gate's full populate.
                 self.store.start(name.clone(), None);
+                // `--with-density`: stage the structure factors on the session
+                // now that it exists, so the plugin bring-up below hands them
+                // to the density provider at Init. Warn-and-continue on any
+                // failure, so the load never hard-fails on a missing sf.cif.
+                if self.host.with_density() {
+                    self.load_with_density(&name);
+                }
                 // Seed the view options from the Default preset on a fresh app
                 // so the panel reflects the true coloring on first paint; once
                 // the player has touched any view setting, skip the seed and
@@ -604,41 +607,85 @@ impl App {
             }
         };
 
-        // Source the puzzle-specific session payload (ligand asset bytes +
-        // catalytic constraints + electron-density map) from the loaded
-        // puzzle. A free-form structure load has no puzzle, so these default
-        // empty / `None`. Cloned out of the puzzle to release the
-        // `self.store` borrow before the `&mut self.runner_client` kick below.
-        let (ligands, constraints, mut density) = self.store.puzzle().map_or_else(
-            || (Vec::new(), Vec::new(), None),
-            |p| (p.ligands.clone(), p.constraints.clone(), p.density.clone()),
-        );
-        // Fall back to the free-form session density (a `--with-density` load)
-        // when the puzzle path supplied none.
-        if density.is_none() {
-            density = self.store.session_density().cloned();
+        // Density providers init first: they compute the map that
+        // `uses_density` plugins ingest at their own Init.
+        //
+        // Without reflections there is no map to compute, and a provider's
+        // whole surface (its density query, its refinement ops) is meaningless.
+        // Deactivating it drops its buttons from the action catalog instead of
+        // offering ones that can only fail; its worker stays warm for a later
+        // load that does carry structure factors.
+        let providers = self.runner_client.density_provider_ids();
+        if self.store.session_reflns().is_none() {
+            if !providers.is_empty() {
+                log::info!(
+                    "[App] no structure factors; density providers inactive: {}",
+                    providers.join(", ")
+                );
+                self.runner_client.deactivate_plugins(&providers);
+            }
+            return self.kick_consumer_inits(&initial_assembly);
+        }
+        if providers.is_empty() {
+            return self.kick_consumer_inits(&initial_assembly);
         }
 
+        let expected: std::collections::BTreeSet<String> =
+            self.kick_for(&providers, &initial_assembly).into_iter().collect();
+        if expected.is_empty() {
+            // Every provider kick failed; carry on without a computed map.
+            return self.kick_consumer_inits(&initial_assembly);
+        }
+        self.bringup.initial_assembly = initial_assembly;
+        StartupPhase::InitializingProviders {
+            expected,
+            adopted: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Kick `Init` for `ids` with the puzzle-specific session payload (ligand
+    /// asset bytes, catalytic constraints, structure factors, the map). A
+    /// free-form structure load has no puzzle, so these default empty / `None`.
+    ///
+    /// The puzzle fields are cloned to release the `self.store` borrow before
+    /// the `&mut self.runner_client` kick.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kick_for(&mut self, ids: &[String], initial_assembly: &[u8]) -> Vec<String> {
+        let (ligands, constraints) = self.store.puzzle().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |p| (p.ligands.clone(), p.constraints.clone()),
+        );
+        // Reflections are session state: a `--with-density` load has no puzzle.
+        let reflns = self.store.session_reflns().cloned();
+        let density = self.store.session_density().cloned();
+        let name = self.store.title().to_owned();
+
         // Flatten the loaded puzzle's scorefunction weight patch and its
-        // rosetta-targeted objective filters into the generic config-param
-        // channel carried on the Init payload. The bridge stashes these on
-        // the session at Init and applies them at every scorefunction build,
-        // so weight-zero terms (e.g. `envsmooth`) ship and are optimized
-        // against, and each forwarded filter emits its per-filter bonus on
-        // the score report. Empty for a free-form load (no puzzle).
+        // objective filters into the generic config-param channel carried on
+        // the Init payload. The bridge stashes these on the session at Init and
+        // applies them at every scorefunction build, so weight-zero terms
+        // (e.g. `envsmooth`) ship and are optimized against, and each forwarded
+        // filter emits its per-filter bonus on the score report.
         let config_params = self.build_init_config_params();
 
-        let expected: std::collections::BTreeSet<String> = self
-            .runner_client
-            .kick_inits(
-                &initial_assembly,
-                &ligands,
-                &constraints,
-                density.as_ref(),
-                &config_params,
-            )
-            .into_iter()
-            .collect();
+        let inputs = crate::runner_client::InitPuzzleInputs {
+            name: &name,
+            ligands: &ligands,
+            constraints: &constraints,
+            reflns: reflns.as_ref(),
+            density: density.as_ref(),
+            config_params: &config_params,
+        };
+        self.runner_client.kick_inits(ids, initial_assembly, &inputs)
+    }
+
+    /// Read the provider's map into the session, then kick every remaining
+    /// plugin. Also the entry point when no plugin provides density.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kick_consumer_inits(&mut self, initial_assembly: &[u8]) -> StartupPhase {
+        let consumers = self.runner_client.density_consumer_ids();
+        let expected: std::collections::BTreeSet<String> =
+            self.kick_for(&consumers, initial_assembly).into_iter().collect();
         if expected.is_empty() {
             // No plugin sessions to bring up: go straight to the first score.
             return self.kick_first_score_then_phase();

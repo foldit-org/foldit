@@ -3,11 +3,13 @@
  */
 
 import type { JSX } from 'solid-js';
+import { pluginAssetUrl, gameAssetUrl } from '../pluginAssets';
 import {
   TbArrowLeft, TbArrowRight, TbRefresh, TbCheck, TbRefreshAlert,
   TbList, TbX, TbHelp, TbRotate, TbEye, TbSettings, TbInfoCircle,
   TbDeviceFloppy, TbLifebuoy, TbActivity, TbMinus, TbSquare, TbLogout,
-  TbChevronDown, TbStar, TbTrophy, TbTrash, TbReplace, TbDownload, TbCloud
+  TbChevronDown, TbStar, TbTrophy, TbTrash, TbReplace, TbDownload, TbCloud,
+  TbAtom2
 } from 'solid-icons/tb';
 
 // Icon size and styling props interface for consistency
@@ -51,6 +53,7 @@ export const Icons = {
   Replace: (props: IconProps = {}) => <TbReplace {...defaultIconProps} {...props} />,
   Download: (props: IconProps = {}) => <TbDownload {...defaultIconProps} {...props} />,
   Cloud: (props: IconProps = {}) => <TbCloud {...defaultIconProps} {...props} />,
+  Atom: (props: IconProps = {}) => <TbAtom2 {...defaultIconProps} {...props} />,
 };
 
 // Built-in GUI icons addressable by name from the backend. An ActionInfo /
@@ -61,10 +64,42 @@ const BUILTIN_ACTION_ICONS: Record<string, (p?: IconProps) => JSX.Element> = {
   replace: Icons.Replace,
   download: Icons.Download,
   cloud: Icons.Cloud,
+  atom: Icons.Atom,
 };
 
 export function builtinActionIcon(name: string): ((p?: IconProps) => JSX.Element) | undefined {
   return BUILTIN_ACTION_ICONS[name];
+}
+
+/** A resolved icon token: an inline component, a fetchable URL, or nothing. */
+export type ResolvedIcon =
+  | { kind: 'component'; Icon: (p?: IconProps) => JSX.Element }
+  | { kind: 'url'; url: string }
+  | { kind: 'none' };
+
+/**
+ * Resolve any backend icon token, for buttons and picker options alike.
+ *
+ *   builtin:<name>            -> inline GUI glyph, no asset fetch
+ *   game:<path>               -> foldit-owned asset under /game-assets/
+ *   <path>                    -> plugin-relative asset under /plugins/<id>/
+ *
+ * `builtin:` is checked first so a glyph never resolves to an asset URL. An
+ * unknown builtin name resolves to `none` rather than a broken image.
+ */
+export function resolveIcon(
+  token: string | null | undefined,
+  pluginId: string,
+): ResolvedIcon {
+  if (!token) return { kind: 'none' };
+  if (token.startsWith('builtin:')) {
+    const Icon = builtinActionIcon(token.slice('builtin:'.length));
+    return Icon ? { kind: 'component', Icon } : { kind: 'none' };
+  }
+  if (token.startsWith('game:')) {
+    return { kind: 'url', url: gameAssetUrl(token.slice('game:'.length)) };
+  }
+  return { kind: 'url', url: pluginAssetUrl(pluginId, token) };
 }
 
 // For backward compatibility, export individual icons

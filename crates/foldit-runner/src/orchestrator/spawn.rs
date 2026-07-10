@@ -62,6 +62,8 @@ pub enum PluginSpawnDescriptor {
         /// Whether this plugin fits against electron density; gates
         /// whether the host includes the density map in its init payload.
         uses_density: bool,
+        /// Whether this plugin produces the electron-density map.
+        provides_density: bool,
         /// Button declarations parsed from the manifest. Empty for
         /// plugins with no user-facing surface.
         buttons: Vec<ButtonEntry>,
@@ -90,6 +92,8 @@ pub enum PluginSpawnDescriptor {
         /// Whether this plugin fits against electron density; gates
         /// whether the host includes the density map in its init payload.
         uses_density: bool,
+        /// Whether this plugin produces the electron-density map.
+        provides_density: bool,
         /// Button declarations parsed from the manifest.
         buttons: Vec<ButtonEntry>,
         /// Custom-panel declarations parsed from the manifest.
@@ -113,6 +117,8 @@ pub enum PluginSpawnDescriptor {
         /// Whether this plugin fits against electron density; gates
         /// whether the host includes the density map in its init payload.
         uses_density: bool,
+        /// Whether this plugin produces the electron-density map.
+        provides_density: bool,
         /// Button declarations parsed from the manifest.
         buttons: Vec<ButtonEntry>,
         /// Custom-panel declarations parsed from the manifest.
@@ -212,6 +218,18 @@ impl PluginSpawnDescriptor {
         }
     }
 
+    /// Whether this plugin produces the electron-density map, regardless of
+    /// variant. The host inits these first and reads their map through the
+    /// well-known `density` query.
+    #[must_use]
+    pub const fn provides_density(&self) -> bool {
+        match self {
+            PluginSpawnDescriptor::Python { provides_density, .. }
+            | PluginSpawnDescriptor::Native { provides_density, .. }
+            | PluginSpawnDescriptor::Wasm { provides_density, .. } => *provides_density,
+        }
+    }
+
     /// Build a descriptor for `plugin_dir` against the parsed manifest.
     #[must_use]
     pub fn from_manifest(
@@ -224,6 +242,7 @@ impl PluginSpawnDescriptor {
         let name = manifest.name.clone();
         let order = manifest.order;
         let uses_density = manifest.uses_density;
+        let provides_density = manifest.provides_density;
         match manifest.kind {
             PluginKind::Python => PluginSpawnDescriptor::Python {
                 id: manifest.id.clone(),
@@ -232,6 +251,7 @@ impl PluginSpawnDescriptor {
                 name,
                 order,
                 uses_density,
+                provides_density,
                 buttons,
                 panels,
                 settings,
@@ -242,6 +262,7 @@ impl PluginSpawnDescriptor {
                 name,
                 order,
                 uses_density,
+                provides_density,
                 buttons,
                 panels,
                 settings,
@@ -252,6 +273,7 @@ impl PluginSpawnDescriptor {
                 name,
                 order,
                 uses_density,
+                provides_density,
                 buttons,
                 panels,
                 settings,

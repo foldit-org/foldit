@@ -70,7 +70,6 @@ impl App {
                                 ckpt,
                             ),
                         }
-                        self.spawn_rfree_compute(ckpt);
                     }
                     Err(e) => log::warn!("commit_action failed: {e}"),
                 }
@@ -125,7 +124,6 @@ impl App {
                         ckpt,
                     ),
                 }
-                self.spawn_rfree_compute(ckpt);
             }
             Err(e) => {
                 log::warn!("promote checkpoint rid={token}: commit_and_reopen failed: {e}");
@@ -189,7 +187,6 @@ impl App {
             Ok(ckpt) => {
                 self.scores
                     .score_committed_checkpoint(&mut self.runner_client, &self.store, ckpt);
-                self.spawn_rfree_compute(ckpt);
                 true
             }
             Err(e) => {

@@ -353,10 +353,12 @@ impl Orchestrator {
             for button in descriptor.buttons() {
                 let Some(cached_op) = self.plugin_registry.get_op(&button.op)
                 else {
-                    log::warn!(
+                    // Ops register at `Init`, so a plugin that has not been
+                    // initialized yet -- or that was deactivated for this
+                    // structure -- contributes no buttons.
+                    log::debug!(
                         "[Orchestrator] manifest button for op {:?} on plugin \
-                         {plugin_id} skipped: op-id not registered (bridge \
-                         missing or plugin not yet registered)",
+                         {plugin_id} skipped: op-id not registered",
                         button.op
                     );
                     continue;
@@ -378,9 +380,13 @@ impl Orchestrator {
                     // Design gate is manifest-authored; the host evaluates
                     // it (the orchestrator holds no design mask).
                     requires_designable: button.requires_designable,
+                    determinate_progress: button.determinate_progress,
                     // Preview flag is manifest-authored; the host reads it
                     // to treat the stream as a discardable preview.
                     preview: button.preview,
+                    // Option picker is manifest-authored; the host turns each
+                    // entry into a full dispatch of this op.
+                    options: button.options.clone(),
                 });
             }
         }
@@ -837,6 +843,7 @@ mod actions_catalog_focus_tests {
             params: vec![],
         });
         let button = ButtonEntry {
+            determinate_progress: false,
             op: String::from(OP),
             display: String::from("Test Op"),
             icon: PathBuf::new(),
@@ -845,6 +852,7 @@ mod actions_catalog_focus_tests {
             selection_spec: None,
             requires_designable: false,
             preview: false,
+            options: Vec::new(),
         };
         let _ = o.plugin_descriptors.insert(
             String::from(PLUGIN),
@@ -857,6 +865,7 @@ mod actions_catalog_focus_tests {
                 buttons: vec![button],
                 panels: vec![],
                 settings: vec![],
+                provides_density: false,
             },
         );
         o

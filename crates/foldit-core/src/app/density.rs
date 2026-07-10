@@ -1,24 +1,41 @@
-//! Experimental-density map bring-up for the `--with-density` load and the
-//! `[puzzle.reflns]` path: resolve structure factors + a space group, then
-//! feed the computed map to both the scoring lane (an mrc `DensityAsset`
-//! stashed on the session) and the render lane (the viso engine). The App-free
-//! compute lives in [`crate::xtal`]; these methods own the App/session/engine
-//! lane-feed around it.
+//! Session density: staging the structure factors a provider plugin folds into
+//! a map, and the render lane for the map it hands back.
+//!
+//! The map itself is produced by the plugin that declares `provides_density`
+//! and read into the session through the well-known `density` query. This
+//! module only stages that plugin's input and turns the mrc bytes it returns
+//! into the cropped map the viso engine renders.
+
+use molex::entity::molecule::id::EntityId;
+use molex::MoleculeEntity;
 
 use super::App;
 
 impl App {
-    /// Fetch structure factors for `name`, compute an experimental-weighted
-    /// density against the just-loaded `entities`, and feed it to both lanes:
-    /// the scoring lane (an mrc [`crate::puzzle_load::DensityAsset`] stashed on
-    /// the session for `kick_inits`) and the render lane (the viso engine).
-    /// Called before `entities` is moved into history so the atom table can be
-    /// built from them by reference.
+    /// Clone the committed head entities, excluding transient previews, so the
+    /// render lane never crops against a discardable ghost.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn committed_head_entities(&self) -> Vec<MoleculeEntity> {
+        let previews: std::collections::HashSet<EntityId> = self.store.preview_ids().collect();
+        self.store
+            .ids()
+            .filter(|id| !previews.contains(id))
+            .filter_map(|id| self.store.entity(id).cloned())
+            .collect()
+    }
+
+    /// Resolve the structure factors for `name` and stash them on the session,
+    /// so plugin bring-up hands them to the density provider.
     ///
-    /// Every failure branch warns and returns without touching either lane, so
-    /// a missing sf.cif, an unsupported space group, or an empty reflection set
-    /// degrades the load to viewer-only rather than aborting it.
-    pub(in crate::app) fn load_with_density(&mut self, entities: &[molex::MoleculeEntity], name: &str) {
+    /// The host does not resolve the space group. The sf-cif commonly omits
+    /// symmetry, and the Hermann-Mauguin lookup lives behind molex's `xtal`
+    /// feature, which the host no longer carries; the coordinate cif rides
+    /// along instead and the provider reads symmetry from it.
+    ///
+    /// Every failure branch warns and returns, so a missing sf.cif degrades the
+    /// load to viewer-only rather than aborting it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn load_with_density(&mut self, name: &str) {
         let sf_path = match crate::structure_io::resolve_sf_cif(name) {
             Ok(p) => p,
             Err(e) => {
@@ -33,110 +50,55 @@ impl App {
                 return;
             }
         };
-
-        // The sf.cif commonly omits symmetry, so resolve the space group from
-        // the coordinate cif's Hermann-Mauguin name.
         let coord_path = std::path::Path::new("assets/models").join(format!("{name}.cif"));
-        let Some(sg_number) = crate::xtal::read_space_group_number(&coord_path) else {
-            log::warn!(
-                "[App] --with-density: could not resolve a supported space group from {}; \
-                 skipping density",
-                coord_path.display()
-            );
-            return;
-        };
 
-        let Some(data) = crate::xtal::build_experimental_data(&sf_text, sg_number, name) else {
-            log::warn!(
-                "[App] --with-density: no usable reflections in {sf_path}; skipping density"
-            );
-            return;
-        };
-
-        // Retain the experimental data for later refine / map-refresh cycles,
-        // then compute + upload the map through the shared tail so the map id
-        // is tracked in one place.
-        self.experimental_data = Some(data);
-        self.refresh_density(entities, &format!("{name}-density.mrc"));
-        log::info!("[App] --with-density: loaded experimental map for '{name}'");
+        self.store
+            .set_session_reflns(Some(crate::puzzle_load::ReflnsAsset {
+                sf_text,
+                coord_path: Some(coord_path),
+                space_group: None,
+            }));
+        log::info!("[App] --with-density: structure factors staged for '{name}'");
     }
 
-    /// Build experimental data from a puzzle's own structure factors
-    /// (`[puzzle.reflns]`) and refresh the density, so a crystallographic
-    /// puzzle enables the R-free objective and ships an `elec_dens` map without
-    /// the `--with-density` flag. Resolves the space group from the TOML
-    /// override or, failing that, the coordinate cif's Hermann-Mauguin name.
-    ///
-    /// Runs after the store's history is seeded (so the committed head is the
-    /// map-computation input) and before plugin bring-up (so the map lands on
-    /// the session for `kick_inits`). Every failure branch warns and returns,
-    /// degrading the crystallography to viewer-only rather than aborting the
-    /// puzzle load. `name` labels the map asset and seeds the free-flag set.
-    pub(in crate::app) fn apply_puzzle_reflns(
-        &mut self,
-        reflns: &crate::puzzle_load::ReflnsAsset,
-        name: &str,
-    ) {
-        let sg_number = if let Some(sg) = reflns.space_group {
-            sg
-        } else if let Some(coord_path) = reflns.coord_path.as_ref() {
-            let Some(sg) = crate::xtal::read_space_group_number(coord_path) else {
-                log::warn!(
-                    "[App] puzzle reflns: could not resolve a supported space group \
-                     from {}; skipping density",
-                    coord_path.display()
-                );
-                return;
-            };
-            sg
-        } else {
-            log::warn!(
-                "[App] puzzle reflns: no space_group override and no coordinate cif to \
-                 read symmetry from; skipping density"
-            );
+    /// Read the density provider's map into the session and refresh the render
+    /// lane. No-op when no plugin provides one, or the puzzle has no
+    /// reflections.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn adopt_provider_density(&mut self) {
+        let Some(map) = self.runner_client.fetch_density() else {
             return;
         };
-
-        let Some(data) = crate::xtal::build_experimental_data(&reflns.sf_text, sg_number, name)
-        else {
-            log::warn!("[App] puzzle reflns: no usable reflections; skipping density");
-            return;
-        };
-        self.experimental_data = Some(data);
-        let entities = self.committed_head_entities();
-        self.refresh_density(&entities, &format!("{name}-density.mrc"));
-        log::info!("[App] puzzle reflns: loaded experimental map for '{name}'");
+        log::info!("[App] adopted density map '{}' from its provider", map.name);
+        self.store.set_session_density(Some(map));
+        self.refresh_density_render();
     }
 
-    /// Compute the experimental-weighted density from `entities` and feed both
-    /// lanes: the scoring lane (an mrc [`crate::puzzle_load::DensityAsset`]
-    /// stashed on the session) and the render lane (the viso engine). Reuses
-    /// the retained [`molex::xtal::ExperimentalData`], so it is a no-op when no
-    /// density has been loaded. `map_name` names the mrc asset.
+    /// Rebuild the render-lane map from the session's mrc bytes: decode the
+    /// full-cell map, then crop to a sub-block around the model so
+    /// symmetry-mate blobs drop out.
     ///
     /// The render map id is retained on `self.density_map_id`: a prior map is
-    /// removed from the engine before the recomputed one is uploaded, so a
-    /// refine's map refresh replaces rather than stacks.
-    pub(in crate::app) fn refresh_density(
-        &mut self,
-        entities: &[molex::MoleculeEntity],
-        map_name: &str,
-    ) {
-        let Some(data) = self.experimental_data.clone() else {
+    /// removed from the engine before the new one is uploaded, so a refresh
+    /// replaces rather than stacks.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn refresh_density_render(&mut self) {
+        let Some(asset) = self.store.session_density() else {
             return;
         };
-
-        let Some((asset, cropped)) =
-            crate::xtal::compute_density(entities, &data, self.shared_device.as_ref(), map_name)
-        else {
-            log::warn!("[App] density refresh: computation failed; keeping prior map");
-            return;
+        let density = match molex::adapters::mrc::mrc_to_density(&asset.bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("[App] density: cannot decode map bytes: {e}; keeping prior map");
+                return;
+            }
         };
-        self.store.set_session_density(Some(asset));
 
-        // Drop any prior map before uploading the recomputed one, so the id
-        // stays single. The engine is attached before startup advances to the
-        // load seam (`begin_startup` requires it), so the borrow is valid.
+        let entities = self.committed_head_entities();
+        let table = molex::adapters::table::AtomTable::from_entities(&entities);
+        let positions: Vec<[f32; 3]> = table.position.iter().map(glam::Vec3::to_array).collect();
+        let cropped = density.crop_to_points(&positions, 3);
+
         if let Some(old) = self.density_map_id.take() {
             if let Some(engine) = self.harness.engine.as_mut() {
                 engine.remove_density(old);

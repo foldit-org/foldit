@@ -74,12 +74,18 @@ impl App {
 
         let loaded = match data {
             Ok(puzzle_data) => {
-                // Cloned out before `puzzle_data` is moved into the store, since
-                // `load_puzzle` takes the whole `PuzzleData` by value and does
-                // not carry reflns onto the session `Puzzle`.
                 #[cfg(not(target_arch = "wasm32"))]
-                let reflns = puzzle_data.reflns.clone();
                 let render = self.store.load_puzzle(puzzle_id, puzzle_data);
+
+                // A puzzle may ship a prebaked map. Seed the session with it so
+                // `uses_density` plugins receive one even when the puzzle
+                // declares no reflections; a density provider overwrites it at
+                // bring-up (reflns supersede a prebaked map).
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(map) = self.store.puzzle().and_then(|p| p.density.clone()) {
+                    self.store.set_session_density(Some(map));
+                    self.refresh_density_render();
+                }
 
                 // Overlay the puzzle's weight patch onto the base map.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -118,15 +124,6 @@ impl App {
                     up: render.cam_up,
                 };
                 self.bringup.ss_override = render.ss_override;
-
-                // Build experimental data + map from the puzzle's own structure
-                // factors, after the store's history is seeded and before plugin
-                // bring-up ships the session density to the worker.
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(reflns) = reflns {
-                    let name = self.store.title().to_owned();
-                    self.apply_puzzle_reflns(&reflns, &name);
-                }
 
                 true
             }

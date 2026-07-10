@@ -1,7 +1,13 @@
-//! Window management module: winit event loop, wry webview, frame timing, IPC dispatch.
+//! Window management module: winit event loop, webview, frame timing, IPC dispatch.
 //!
 //! `AppRunner` owns the window-layer state and holds `App` by value.
 //! It implements `ApplicationHandler` and delegates domain logic to `App` via method calls.
+//!
+//! Two webview backends sit behind the [`Webview`] alias. macOS and Windows
+//! parent a `wry::WebView` to the winit window as a transparent child. Linux
+//! cannot: `WebKitGTK` paints an opaque backing into any on-screen X window and
+//! would hide the renderer, so [`crate::offscreen_webview`] runs it off-screen
+//! and viso composites the result as a texture.
 
 use foldit_core::{App, HostEffects};
 use foldit_gui::IpcMessage;
@@ -15,6 +21,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
+#[cfg(target_os = "linux")]
+use crate::offscreen_webview::OffscreenWebview;
+
+#[cfg(target_os = "linux")]
+type Webview = OffscreenWebview;
+#[cfg(not(target_os = "linux"))]
+type Webview = wry::WebView;
+
 /// Window-layer state that wraps `App` and implements `ApplicationHandler`.
 /// `App` owns the [`foldit_gui::GuiState`] mirror and the
 /// Loading → `InPuzzle` state-machine; the runner is purely the
@@ -22,7 +36,7 @@ use winit::window::{Window, WindowId};
 pub struct AppRunner {
     app: App,
     window: Option<Arc<Window>>,
-    webview: Option<wry::WebView>,
+    webview: Option<Webview>,
     ipc_rx: Option<std::sync::mpsc::Receiver<IpcMessage>>,
     webview_ready: bool,
     last_frame: Instant,
@@ -227,12 +241,18 @@ impl AppRunner {
             ok,
             payload,
         );
-        let _ = webview.evaluate_script(&script);
+        evaluate_script(webview, &script);
     }
 
     /// Resize the webview to match a new window size (physical pixels).
-    fn resize_webview(&self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if let Some(ref webview) = &self.webview {
+    fn resize_webview(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        let Some(webview) = self.webview.as_mut() else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        webview.resize(new_size);
+        #[cfg(not(target_os = "linux"))]
+        {
             use wry::dpi::{PhysicalPosition, PhysicalSize};
             let _ = webview.set_bounds(wry::Rect {
                 position: PhysicalPosition::new(0, 0).into(),
@@ -241,11 +261,79 @@ impl AppRunner {
         }
     }
 
+    /// Blit the webview's latest paint into viso's overlay texture, which the
+    /// next `App::render` composites over the 3D scene.
+    #[cfg(target_os = "linux")]
+    fn composite_webview(&mut self) {
+        // Cloning these `Arc` handles is what lets the overlay install below
+        // borrow `App` mutably while the webview still holds a texture view.
+        let (Some(device), Some(queue)) = (
+            self.app.wgpu_device().cloned(),
+            self.app.wgpu_queue().cloned(),
+        ) else {
+            return;
+        };
+        let Some(webview) = self.webview.as_mut() else {
+            return;
+        };
+        if let Some(view) = webview.ensure_texture(&device) {
+            self.app.set_overlay_texture(Some(view));
+        }
+        webview.upload(&queue);
+    }
+
+    /// Build the `WebKitGTK` view that renders off-screen into viso's overlay.
+    #[cfg(target_os = "linux")]
+    fn create_webview(window: &Arc<Window>) -> (Option<Webview>, Receiver<IpcMessage>) {
+        use crate::offscreen_webview::Content;
+        #[cfg(not(debug_assertions))]
+        use crate::offscreen_webview::Scheme;
+
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<IpcMessage>();
+
+        #[cfg(debug_assertions)]
+        let content = Content {
+            entry: "http://localhost:5173".to_owned(),
+            scheme: None,
+        };
+        #[cfg(not(debug_assertions))]
+        let content = {
+            let assets = crate::webview_assets::AssetResolver::new();
+            Content {
+                entry: Self::RELEASE_URL.to_owned(),
+                scheme: Some(Scheme {
+                    name: "foldit".to_owned(),
+                    resolve: Box::new(move |path| assets.resolve(path)),
+                }),
+            }
+        };
+
+        let webview = OffscreenWebview::new(
+            window.inner_size(),
+            content,
+            Self::INIT_SCRIPT,
+            ipc_tx,
+            Self::handle_ipc,
+        );
+        let webview = match webview {
+            Ok(webview) => {
+                log::info!("offscreen WebKitGTK webview created");
+                webview.set_scale_factor(window.scale_factor());
+                webview.focus();
+                Some(webview)
+            }
+            Err(e) => {
+                log::error!("Failed to create the offscreen webview: {e}");
+                None
+            }
+        };
+
+        (webview, ipc_rx)
+    }
+
     /// Create the wry webview as a child of the winit window (debug: connects to dev server).
-    #[cfg(debug_assertions)]
-    fn create_webview(
-        window: &Arc<Window>,
-    ) -> (Option<wry::WebView>, std::sync::mpsc::Receiver<IpcMessage>) {
+    #[cfg(all(debug_assertions, not(target_os = "linux")))]
+    fn create_webview(window: &Arc<Window>) -> (Option<Webview>, Receiver<IpcMessage>) {
         let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<IpcMessage>();
 
         let webview = {
@@ -259,7 +347,7 @@ impl AppRunner {
                 .with_url("http://localhost:5173")
                 .with_ipc_handler({
                     let ipc_tx = ipc_tx;
-                    move |req| Self::handle_ipc(&ipc_tx, &req)
+                    move |req| Self::handle_ipc(&ipc_tx, req.body())
                 })
                 .with_bounds(wry::Rect {
                     position: PhysicalPosition::new(0, 0).into(),
@@ -291,9 +379,9 @@ impl AppRunner {
         let dt = now.duration_since(self.last_frame);
         self.last_frame = now;
 
-        // On Linux the wry webview runs on the GTK main loop, which winit does
-        // not drive. Pump all pending GTK events each frame or the WebKitGTK
-        // webview never lays out, paints, or delivers its IPC messages.
+        // WebKitGTK runs on the GTK main loop, which winit does not drive. Pump
+        // all pending GTK events each frame or the webview never lays out,
+        // paints, or delivers its IPC messages.
         #[cfg(target_os = "linux")]
         while gtk::events_pending() {
             gtk::main_iteration_do(false);
@@ -345,8 +433,7 @@ impl AppRunner {
         // Ensure render surface always matches actual window size.
         // We do this every frame because Resized events can be unreliable
         // on Windows (stale WM_SIZE, timing issues with child windows).
-        if let Some(ref window) = self.window {
-            let ws = window.inner_size();
+        if let Some(ws) = self.window.as_ref().map(|window| window.inner_size()) {
             let size = (ws.width, ws.height);
             if size != self.last_render_size && size.0 > 0 && size.1 > 0 {
                 log::info!(
@@ -382,6 +469,8 @@ impl AppRunner {
         };
         self.app.tick(dt.as_secs_f32(), &mut fx);
 
+        #[cfg(target_os = "linux")]
+        self.composite_webview();
         self.app.render();
 
         // Merge any landed progress load (projects next frame).
@@ -395,10 +484,19 @@ impl AppRunner {
     }
 }
 
+/// Evaluate `script` in the page and discard the outcome. The two backends
+/// disagree on the return type; nothing here can act on either.
+fn evaluate_script(webview: &Webview, script: &str) {
+    #[cfg(target_os = "linux")]
+    webview.evaluate_script(script);
+    #[cfg(not(target_os = "linux"))]
+    let _ = webview.evaluate_script(script);
+}
+
 /// Transient per-frame effect sink built from `AppRunner`'s non-`App`
 /// fields and passed into `App::tick`.
 struct DesktopEffects<'a> {
-    webview: Option<&'a wry::WebView>,
+    webview: Option<&'a Webview>,
     webview_ready: bool,
     window: Option<&'a Arc<Window>>,
     runtime: &'a tokio::runtime::Runtime,
@@ -414,7 +512,7 @@ impl HostEffects for DesktopEffects<'_> {
         };
         if let Some(webview) = self.webview {
             let script = format!("if(window.__onStateUpdate)window.__onStateUpdate({payload})");
-            let _ = webview.evaluate_script(&script);
+            evaluate_script(webview, &script);
         }
     }
 
@@ -433,7 +531,7 @@ impl HostEffects for DesktopEffects<'_> {
                 "if(window.__onTailUpdate)window.__onTailUpdate(null)".to_owned()
             }
         };
-        let _ = webview.evaluate_script(&script);
+        evaluate_script(webview, &script);
     }
 
     fn set_fullscreen(&mut self, value: bool) {
@@ -494,16 +592,13 @@ impl ApplicationHandler for AppRunner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             // Create window. The window is shown immediately rather than created
-            // hidden and revealed on a first-paint signal: the three platform
-            // webview engines wry uses (WKWebView on macOS, WebView2 on Windows,
-            // WebKitGTK on Linux) all refuse to lay out and paint their content
-            // while the host window is hidden or off-screen (they gate rendering,
-            // and even JS execution, on the host being visible), so the
-            // Electron-style "create hidden, show on ready-to-show" pattern is
-            // not available on any of foldit's targets. The load gap before the
-            // webview's first paint is instead covered by presenting an opaque
-            // black frame (see the init_pending wait in `tick_frame`) that
-            // matches the loading-screen background.
+            // hidden and revealed on a first-paint signal: WKWebView and WebView2
+            // both refuse to lay out and paint their content -- and even to run JS
+            // -- while the host window is hidden, so the Electron-style "create
+            // hidden, show on ready-to-show" pattern is not available. The load
+            // gap before the webview's first paint is instead covered by
+            // presenting an opaque black frame (see the init_pending wait in
+            // `tick_frame`) that matches the loading-screen background.
             // On Windows, disable WS_CLIPCHILDREN so the wry child HWND
             // doesn't occlude the wgpu DirectComposition swap chain.
             #[allow(unused_mut)]
@@ -532,21 +627,16 @@ impl ApplicationHandler for AppRunner {
             create_render_context(&mut self.app, window.clone());
 
             #[cfg(debug_assertions)]
-            {
-                if self.dev_server_available {
-                    let (webview, ipc_rx) = Self::create_webview(&window);
-                    self.webview = webview;
-                    self.ipc_rx = Some(ipc_rx);
-                } else {
-                    log::info!("No dev server available, running without webview overlay");
-                }
-            }
-
+            let build_webview = self.dev_server_available;
             #[cfg(not(debug_assertions))]
-            {
-                let (webview, ipc_rx) = Self::create_webview_release(&window);
+            let build_webview = true;
+
+            if build_webview {
+                let (webview, ipc_rx) = Self::create_webview(&window);
                 self.webview = webview;
                 self.ipc_rx = Some(ipc_rx);
+            } else {
+                log::info!("No dev server available, running without webview overlay");
             }
 
             // Defer startup until the webview loading screen is visible.
@@ -567,6 +657,13 @@ impl ApplicationHandler for AppRunner {
         reason = "winit delivers cursor positions and scroll deltas as f64; the renderer consumes f32 screen coordinates, where this precision reduction is intended and harmless"
     )]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // The offscreen webview is unmapped, so X routes it nothing; every
+        // event it should see has to be synthesized from winit's.
+        #[cfg(target_os = "linux")]
+        if let Some(webview) = self.webview.as_mut() {
+            webview.on_window_event(&event);
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 #[cfg(debug_assertions)]
@@ -592,9 +689,16 @@ impl ApplicationHandler for AppRunner {
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(window) = &self.window {
-                    let actual = window.inner_size();
-                    self.app.set_surface_scale(window.scale_factor());
+                if let Some((actual, scale)) = self
+                    .window
+                    .as_ref()
+                    .map(|window| (window.inner_size(), window.scale_factor()))
+                {
+                    self.app.set_surface_scale(scale);
+                    #[cfg(target_os = "linux")]
+                    if let Some(webview) = &self.webview {
+                        webview.set_scale_factor(scale);
+                    }
                     let size = (actual.width, actual.height);
                     if size.0 > 0 && size.1 > 0 {
                         self.app.resize(size.0, size.1);
@@ -689,13 +793,10 @@ pub fn run(app: App, log_buffer: crate::tee_logger::LogBuffer) -> ! {
     #[cfg(debug_assertions)]
     runner.ensure_dev_server();
 
-    // On Linux, wry's WebKitGTK backend (1) requires GTK to be initialized on
-    // the main thread before any webview is built, and (2) only accepts an
-    // X11 (`RawWindowHandle::Xlib`) parent for child webviews -- a Wayland
-    // handle is rejected with "the window handle kind is not supported". winit
-    // otherwise prefers Wayland whenever WAYLAND_DISPLAY is set, so pin it to
-    // X11 (via Xwayland) and bring GTK up here. `GDK_BACKEND=x11` (set in main)
-    // keeps GTK on the same X11 display so the Xlib parent handle is valid.
+    // GTK must be initialized on the main thread before any WebKitGTK view is
+    // built. winit is pinned to X11 (via Xwayland when the session is Wayland)
+    // to match the `GDK_BACKEND=x11` pin in `main`, keeping both toolkits on one
+    // display connection.
     #[cfg(target_os = "linux")]
     let event_loop = {
         use winit::platform::x11::EventLoopBuilderExtX11;

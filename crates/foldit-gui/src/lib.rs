@@ -352,14 +352,10 @@ impl GuiState {
         self.actions.open_picker.as_deref()
     }
 
-    /// Replace the per-plugin download-progress map. Marks `ACTIONS` dirty
-    /// so the next push carries the change. Empty map clears all progress
-    /// fills.
-    pub fn set_download_progress(
-        &mut self,
-        map: std::collections::HashMap<String, DownloadProgress>,
-    ) {
-        self.actions.download_progress = map;
+    /// Replace the in-flight stream progress list. Marks `ACTIONS` dirty so
+    /// the next push carries the change. An empty list clears every bar.
+    pub fn set_op_progress(&mut self, entries: Vec<state::OpProgress>) {
+        self.actions.op_progress = entries;
         self.dirty |= DirtyFlags::ACTIONS;
     }
 

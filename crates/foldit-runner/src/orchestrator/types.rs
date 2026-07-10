@@ -719,6 +719,10 @@ impl PluginRegistry {
 /// `/plugins/<plugin_id>/<path>`.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent manifest-authored property of one button; there is no state machine to collapse them into"
+)]
 pub struct CatalogEntry {
     /// Owning plugin id (matches `PluginRegistration.id`).
     pub plugin_id: String,
@@ -763,4 +767,12 @@ pub struct CatalogEntry {
     /// it through but never acts on it; the host (foldit-core) reads it at
     /// dispatch to decide whether the stream is a throwaway preview.
     pub preview: bool,
+    /// Whether the op's stream reports how far through the user's request it
+    /// is. Manifest-authored. The orchestrator carries it through but never
+    /// acts on it; the host (foldit-core) reads it at dispatch to decide
+    /// whether to keep the fractions the stream reports.
+    pub determinate_progress: bool,
+    /// Manifest-authored option picker. Non-empty makes the button open a
+    /// picker whose entries each dispatch this op with their own params.
+    pub options: Vec<crate::orchestrator::manifest::ButtonOption>,
 }

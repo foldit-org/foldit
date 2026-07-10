@@ -407,6 +407,31 @@ impl Orchestrator {
         self.plugin_registry.drop_plugin(plugin_id);
     }
 
+    /// Deactivate a plugin for the current structure: drop its session and
+    /// evict its ops and queries, so its buttons leave the action catalog and
+    /// its queries stop resolving. The worker stays warm, so a later structure
+    /// that meets the plugin's requirements re-`Init`s it without a respawn.
+    /// Idempotent.
+    ///
+    /// Used for plugins whose entire surface depends on data the loaded
+    /// structure does not carry — a `provides_density` plugin on a puzzle with
+    /// no reflections has nothing to offer but would otherwise advertise every
+    /// button in its manifest.
+    pub fn deactivate_plugin(&mut self, plugin_id: &str) {
+        if let (Some(handle), Some(session)) = (
+            self.plugin_workers.get(plugin_id),
+            self.plugin_sessions.get(plugin_id).copied(),
+        ) {
+            let (reply_tx, _reply_rx) = mpsc::channel();
+            let _ = handle.submit(PluginTask::Drop {
+                session,
+                reply: reply_tx,
+            });
+        }
+        let _ = self.plugin_sessions.remove(plugin_id);
+        self.plugin_registry.drop_plugin(plugin_id);
+    }
+
     /// Drop every plugin's session WITHOUT terminating its (warm) worker.
     /// Sends a best-effort `Drop` to each worker and clears `plugin_sessions`
     /// so the next [`Self::init_plugin_session`] re-`Init`s against the new

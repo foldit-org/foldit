@@ -311,4 +311,19 @@ pub struct ActiveStreamEntry {
     /// only on a commit (a checkpoint or the terminal). Stamped onto every
     /// [`OpEvent`] this stream produces.
     pub(crate) preview: bool,
+    /// Whether the originating op declared `determinate_progress`: its stream
+    /// measures how far through the user's request it is. An open-ended stream
+    /// (wiggle, shake) runs until cancelled, so any fraction it reports counts
+    /// internal cycles rather than the requested work; leaving this `false`
+    /// discards those fractions and keeps the bar indeterminate.
+    pub(crate) determinate_progress: bool,
+    /// Latest advancement the plugin reported, projected onto the GUI as
+    /// [`foldit_gui::state::OpProgress`]. Always `None` unless
+    /// [`Self::determinate_progress`], in which case `None` only until the
+    /// first frame lands. The frontend renders `None` as an indeterminate bar.
+    /// Cleared with the entry on the stream's terminal, so the bar cannot
+    /// outlive its stream.
+    pub(crate) progress: Option<f32>,
+    /// Latest stage label the plugin reported, if any.
+    pub(crate) stage: Option<String>,
 }

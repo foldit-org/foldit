@@ -81,6 +81,25 @@ pub fn param_spec_to_wire(spec: RunnerParamSpec) -> foldit_gui::state::ParamSpec
     }
 }
 
+/// Convert a manifest-declared `[[buttons.options]]` param value onto the wire.
+/// TOML has no 32-bit scalars; an out-of-range integer saturates, never wraps.
+pub fn manifest_param_to_wire(
+    v: foldit_runner::orchestrator::manifest::ManifestParamValue,
+) -> WireParamValue {
+    use foldit_runner::orchestrator::manifest::ManifestParamValue as M;
+    match v {
+        M::Bool(b) => WireParamValue::Bool(b),
+        M::Int(i) => WireParamValue::Int(i32::try_from(i).unwrap_or(if i.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        })),
+        #[allow(clippy::cast_possible_truncation)]
+        M::Float(f) => WireParamValue::Float(f as f32),
+        M::String(s) => WireParamValue::String(s),
+    }
+}
+
 mirror_enum! {
     fn param_type_to_wire(t: RunnerParamType) -> WireParamType {
         Int, Float, Bool, String, Enum, Vec3
