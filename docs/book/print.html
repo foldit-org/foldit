@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-61fe0e40.js";
+            window.path_to_searchindex_js = "searchindex-6e2c5089.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-9ae07f6d.js"></script>
@@ -229,10 +229,13 @@ and <a href="#the-per-frame-tick">The Per-Frame Tick</a>.</li>
 the desktop binary, named <code>foldit</code> (<code>foldit-desktop</code>’s <code>[[bin]]</code> sets
 <code>name = "foldit"</code> and <code>default-run = "foldit"</code>). There is no root <code>src/</code>; the
 entry point is <code>crates/foldit-desktop/src/main.rs</code>.</p>
-<p>A plain <code>cargo build</code> does not build the plugin worker. The worker
-(<code>foldit-worker</code>) lives in the <code>foldit-runner</code> submodule, which is excluded
-from the workspace, and the Python host dylib is loaded at runtime rather than
-linked. Build both of those with:</p>
+<p>A plain <code>cargo build</code> does not build the plugin worker or the Python host.
+<code>default-members</code> is just <code>foldit-desktop</code>, so a bare build compiles only it
+and its dependency graph. The <code>foldit-worker</code> binary and the
+<code>foldit-python-host</code> cdylib are separate targets (both in-tree under
+<code>crates/foldit-runner</code>, which is a workspace member, not a submodule) that
+nothing in that graph pulls in, and the host dylib is loaded at runtime rather
+than linked. Build both of those with:</p>
 <pre><code class="language-bash">cargo xtask build-host
 </code></pre>
 <p><code>build-host</code> puts <code>foldit-worker</code> and the <code>foldit-python-host</code> dylib next to
@@ -341,13 +344,13 @@ The root <code>Cargo.toml</code> carries a <code>[patch]</code> entry for each, 
 default, so a default build resolves all three from their published sources and
 needs no submodule checkout:</p>
 <ul>
-<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.11"</code>). A
+<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.13"</code>). A
 <code>[patch."https://github.com/foldit-org/viso"]</code> block redirects it to the local
 <code>crates/viso</code> checkout when uncommented.</li>
-<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.1.6</code>. A <code>[patch.crates-io]</code>
+<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.2.1</code>. A <code>[patch.crates-io]</code>
 entry redirects it to the local <code>crates/foldit-plugin-sdk</code> checkout when
 uncommented.</li>
-<li><strong>molex</strong>: declared as crates.io <code>0.7.4</code> in every crate that uses it. A
+<li><strong>molex</strong>: declared as crates.io <code>0.8.0</code> in every crate that uses it. A
 <code>[patch.crates-io]</code> entry redirects it to the local <code>crates/molex</code> checkout
 when uncommented.</li>
 </ul>
@@ -936,7 +939,7 @@ takes a molecule assembly and produces a 2D texture; the host decides what to do
 with it (a winit window on desktop, an HTML canvas on web). Foldit constructs a
 <code>VisoEngine</code>, hands it to the <code>App</code> through the engine harness, and the render
 projector republishes geometry to it whenever the scene changes.</p>
-<p>Foldit depends on viso by git tag (<code>v0.3.11</code>). The root <code>Cargo.toml</code> carries a
+<p>Foldit depends on viso by git tag (<code>v0.3.13</code>). The root <code>Cargo.toml</code> carries a
 commented-out <code>[patch]</code> block that redirects it to the local submodule checkout
 when uncommented. See
 <a href="#workspace-layout">Workspace Layout</a>.</p>
@@ -959,7 +962,7 @@ layers on top (clashes, voids, exposed hydrophobics, connections), see the
 as <code>Arc&lt;MoleculeEntity&gt;</code>, history snapshots own them, the render projector hands
 assemblies to viso, and the plugin protocol serializes them across the IPC
 boundary.</p>
-<p>molex is depended on as the published crates.io crate (<code>0.7.4</code>). As with viso and
+<p>molex is depended on as the published crates.io crate (<code>0.8.0</code>). As with viso and
 the plugin SDK, its <code>[patch]</code> entry in the root <code>Cargo.toml</code> is commented out by
 default, so it builds from the release even when the <code>crates/molex</code> submodule is
 checked out. See <a href="#workspace-layout">Workspace Layout</a>.</p>
@@ -973,10 +976,10 @@ under <code>crates/molex/docs/</code>).</li>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="the-plugin-runner"><a class="header" href="#the-plugin-runner">The Plugin Runner</a></h1>
 <p>The molecular backends are not compiled into the client. They run as
-out-of-process plugins hosted by <strong>foldit-runner</strong> (the <code>crates/foldit-runner</code>
-submodule). foldit-runner speaks one protocol to every plugin regardless of the
-language it is written in. Rosetta is itself a plugin under
-<code>crates/foldit-runner/plugins/rosetta/</code>; there is no in-process Rosetta executor.</p>
+out-of-process plugins hosted by <strong>foldit-runner</strong> (in-tree at
+<code>crates/foldit-runner</code>, a workspace member). foldit-runner speaks one protocol
+to every plugin regardless of the language it is written in. Rosetta is itself a
+plugin under <code>plugins/rosetta/</code>; there is no in-process Rosetta executor.</p>
 <h2 id="orchestrator"><a class="header" href="#orchestrator">Orchestrator</a></h2>
 <p><code>foldit_runner::Orchestrator</code> is the host-facing type. The core’s <code>RunnerClient</code>
 holds one (<code>crates/foldit-core/src/runner_client/mod.rs</code>) and reaches into it to
@@ -1029,7 +1032,8 @@ orphaned.</p>
 differently, and only the Python path pulls libpython into the process.</p>
 <h2 id="native-plugins"><a class="header" href="#native-plugins">Native plugins</a></h2>
 <p><code>kind = "native"</code> plugins are shared libraries that export the plugin vtable.
-The worker dlopens the library directly. Rosetta is the native plugin: its
+The worker dlopens the library directly. The native plugins are <code>rosetta</code>,
+<code>design</code>, and <code>xtal</code>. Rosetta is the most involved: its
 manifest names a <code>binary</code> basename that
 <code>PluginManifest::native_binary_name()</code> resolves to the platform-canonical file
 name (<code>librosetta_interactive.dylib</code>, <code>librosetta_interactive.so</code>, or
@@ -1037,13 +1041,13 @@ name (<code>librosetta_interactive.dylib</code>, <code>librosetta_interactive.so
 <code>foldit_plugin_vtable</code> from the existing <code>librosetta_interactive</code> dylib; there is
 no separate plugin dylib.</p>
 <h2 id="python-plugins"><a class="header" href="#python-plugins">Python plugins</a></h2>
-<p><code>kind = "python"</code> plugins (the <code>dummy</code>, <code>foundry</code>, and <code>simplefold</code> plugins
-under <code>crates/foldit-runner/plugins/</code>) run through <strong>foldit-python-host</strong>, a
+<p><code>kind = "python"</code> plugins (the <code>foundry</code> and <code>simplefold</code> plugins
+under <code>plugins/</code>) run through <strong>foldit-python-host</strong>, a
 <code>cdylib</code> that links libpython. The worker dlopens it only when it is about to
 host a Python plugin, so libpython joins the process lazily; a session that uses
 only native plugins never loads it.</p>
-<p><code>foldit-python-host</code> is a root workspace member even though its source lives
-inside the <code>foldit-runner</code> submodule (<code>crates/foldit-runner/python-host</code>). It
+<p><code>foldit-python-host</code> is a root workspace member; its source lives in-tree
+under <code>foldit-runner</code> (<code>crates/foldit-runner/python-host</code>). It
 depends on <code>foldit-runner</code> for the <code>Plugin</code> trait, the proto and orchestrator
 types, and the C-ABI struct definitions, and on <code>foldit-plugin-sdk</code> for the
 <code>PluginError</code> value type its <code>impl Plugin for PyPlugin</code> builds.</p>

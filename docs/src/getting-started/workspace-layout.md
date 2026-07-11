@@ -51,13 +51,13 @@ The root `Cargo.toml` carries a `[patch]` entry for each, all commented out by
 default, so a default build resolves all three from their published sources and
 needs no submodule checkout:
 
-- **viso**: declared as a git dependency (`tag = "v0.3.11"`). A
+- **viso**: declared as a git dependency (`tag = "v0.3.13"`). A
   `[patch."https://github.com/foldit-org/viso"]` block redirects it to the local
   `crates/viso` checkout when uncommented.
-- **foldit-plugin-sdk**: declared as crates.io `0.1.6`. A `[patch.crates-io]`
+- **foldit-plugin-sdk**: declared as crates.io `0.2.1`. A `[patch.crates-io]`
   entry redirects it to the local `crates/foldit-plugin-sdk` checkout when
   uncommented.
-- **molex**: declared as crates.io `0.7.4` in every crate that uses it. A
+- **molex**: declared as crates.io `0.8.0` in every crate that uses it. A
   `[patch.crates-io]` entry redirects it to the local `crates/molex` checkout
   when uncommented.
 

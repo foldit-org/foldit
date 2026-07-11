@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
+            window.path_to_searchindex_js = "../searchindex-6e2c5089.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-9ae07f6d.js"></script>
@@ -182,7 +182,8 @@
 differently, and only the Python path pulls libpython into the process.</p>
 <h2 id="native-plugins"><a class="header" href="#native-plugins">Native plugins</a></h2>
 <p><code>kind = "native"</code> plugins are shared libraries that export the plugin vtable.
-The worker dlopens the library directly. Rosetta is the native plugin: its
+The worker dlopens the library directly. The native plugins are <code>rosetta</code>,
+<code>design</code>, and <code>xtal</code>. Rosetta is the most involved: its
 manifest names a <code>binary</code> basename that
 <code>PluginManifest::native_binary_name()</code> resolves to the platform-canonical file
 name (<code>librosetta_interactive.dylib</code>, <code>librosetta_interactive.so</code>, or
@@ -190,13 +191,13 @@ name (<code>librosetta_interactive.dylib</code>, <code>librosetta_interactive.so
 <code>foldit_plugin_vtable</code> from the existing <code>librosetta_interactive</code> dylib; there is
 no separate plugin dylib.</p>
 <h2 id="python-plugins"><a class="header" href="#python-plugins">Python plugins</a></h2>
-<p><code>kind = "python"</code> plugins (the <code>dummy</code>, <code>foundry</code>, and <code>simplefold</code> plugins
-under <code>crates/foldit-runner/plugins/</code>) run through <strong>foldit-python-host</strong>, a
+<p><code>kind = "python"</code> plugins (the <code>foundry</code> and <code>simplefold</code> plugins
+under <code>plugins/</code>) run through <strong>foldit-python-host</strong>, a
 <code>cdylib</code> that links libpython. The worker dlopens it only when it is about to
 host a Python plugin, so libpython joins the process lazily; a session that uses
 only native plugins never loads it.</p>
-<p><code>foldit-python-host</code> is a root workspace member even though its source lives
-inside the <code>foldit-runner</code> submodule (<code>crates/foldit-runner/python-host</code>). It
+<p><code>foldit-python-host</code> is a root workspace member; its source lives in-tree
+under <code>foldit-runner</code> (<code>crates/foldit-runner/python-host</code>). It
 depends on <code>foldit-runner</code> for the <code>Plugin</code> trait, the proto and orchestrator
 types, and the C-ABI struct definitions, and on <code>foldit-plugin-sdk</code> for the
 <code>PluginError</code> value type its <code>impl Plugin for PyPlugin</code> builds.</p>

@@ -1,10 +1,10 @@
 # The Plugin Runner
 
 The molecular backends are not compiled into the client. They run as
-out-of-process plugins hosted by **foldit-runner** (the `crates/foldit-runner`
-submodule). foldit-runner speaks one protocol to every plugin regardless of the
-language it is written in. Rosetta is itself a plugin under
-`crates/foldit-runner/plugins/rosetta/`; there is no in-process Rosetta executor.
+out-of-process plugins hosted by **foldit-runner** (in-tree at
+`crates/foldit-runner`, a workspace member). foldit-runner speaks one protocol
+to every plugin regardless of the language it is written in. Rosetta is itself a
+plugin under `plugins/rosetta/`; there is no in-process Rosetta executor.
 
 ## Orchestrator
 

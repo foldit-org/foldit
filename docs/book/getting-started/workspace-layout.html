@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
+            window.path_to_searchindex_js = "../searchindex-6e2c5089.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-9ae07f6d.js"></script>
@@ -235,13 +235,13 @@ The root <code>Cargo.toml</code> carries a <code>[patch]</code> entry for each, 
 default, so a default build resolves all three from their published sources and
 needs no submodule checkout:</p>
 <ul>
-<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.11"</code>). A
+<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.13"</code>). A
 <code>[patch."https://github.com/foldit-org/viso"]</code> block redirects it to the local
 <code>crates/viso</code> checkout when uncommented.</li>
-<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.1.6</code>. A <code>[patch.crates-io]</code>
+<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.2.1</code>. A <code>[patch.crates-io]</code>
 entry redirects it to the local <code>crates/foldit-plugin-sdk</code> checkout when
 uncommented.</li>
-<li><strong>molex</strong>: declared as crates.io <code>0.7.4</code> in every crate that uses it. A
+<li><strong>molex</strong>: declared as crates.io <code>0.8.0</code> in every crate that uses it. A
 <code>[patch.crates-io]</code> entry redirects it to the local <code>crates/molex</code> checkout
 when uncommented.</li>
 </ul>

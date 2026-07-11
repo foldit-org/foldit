@@ -11,10 +11,13 @@ the desktop binary, named `foldit` (`foldit-desktop`'s `[[bin]]` sets
 `name = "foldit"` and `default-run = "foldit"`). There is no root `src/`; the
 entry point is `crates/foldit-desktop/src/main.rs`.
 
-A plain `cargo build` does not build the plugin worker. The worker
-(`foldit-worker`) lives in the `foldit-runner` submodule, which is excluded
-from the workspace, and the Python host dylib is loaded at runtime rather than
-linked. Build both of those with:
+A plain `cargo build` does not build the plugin worker or the Python host.
+`default-members` is just `foldit-desktop`, so a bare build compiles only it
+and its dependency graph. The `foldit-worker` binary and the
+`foldit-python-host` cdylib are separate targets (both in-tree under
+`crates/foldit-runner`, which is a workspace member, not a submodule) that
+nothing in that graph pulls in, and the host dylib is loaded at runtime rather
+than linked. Build both of those with:
 
 ```bash
 cargo xtask build-host

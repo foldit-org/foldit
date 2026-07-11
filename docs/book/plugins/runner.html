@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
+            window.path_to_searchindex_js = "../searchindex-6e2c5089.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-9ae07f6d.js"></script>
@@ -179,10 +179,10 @@
                     <main>
                         <h1 id="the-plugin-runner"><a class="header" href="#the-plugin-runner">The Plugin Runner</a></h1>
 <p>The molecular backends are not compiled into the client. They run as
-out-of-process plugins hosted by <strong>foldit-runner</strong> (the <code>crates/foldit-runner</code>
-submodule). foldit-runner speaks one protocol to every plugin regardless of the
-language it is written in. Rosetta is itself a plugin under
-<code>crates/foldit-runner/plugins/rosetta/</code>; there is no in-process Rosetta executor.</p>
+out-of-process plugins hosted by <strong>foldit-runner</strong> (in-tree at
+<code>crates/foldit-runner</code>, a workspace member). foldit-runner speaks one protocol
+to every plugin regardless of the language it is written in. Rosetta is itself a
+plugin under <code>plugins/rosetta/</code>; there is no in-process Rosetta executor.</p>
 <h2 id="orchestrator"><a class="header" href="#orchestrator">Orchestrator</a></h2>
 <p><code>foldit_runner::Orchestrator</code> is the host-facing type. The core’s <code>RunnerClient</code>
 holds one (<code>crates/foldit-core/src/runner_client/mod.rs</code>) and reaches into it to

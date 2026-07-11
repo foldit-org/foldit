@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
+            window.path_to_searchindex_js = "../searchindex-6e2c5089.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-9ae07f6d.js"></script>
@@ -185,10 +185,13 @@
 the desktop binary, named <code>foldit</code> (<code>foldit-desktop</code>’s <code>[[bin]]</code> sets
 <code>name = "foldit"</code> and <code>default-run = "foldit"</code>). There is no root <code>src/</code>; the
 entry point is <code>crates/foldit-desktop/src/main.rs</code>.</p>
-<p>A plain <code>cargo build</code> does not build the plugin worker. The worker
-(<code>foldit-worker</code>) lives in the <code>foldit-runner</code> submodule, which is excluded
-from the workspace, and the Python host dylib is loaded at runtime rather than
-linked. Build both of those with:</p>
+<p>A plain <code>cargo build</code> does not build the plugin worker or the Python host.
+<code>default-members</code> is just <code>foldit-desktop</code>, so a bare build compiles only it
+and its dependency graph. The <code>foldit-worker</code> binary and the
+<code>foldit-python-host</code> cdylib are separate targets (both in-tree under
+<code>crates/foldit-runner</code>, which is a workspace member, not a submodule) that
+nothing in that graph pulls in, and the host dylib is loaded at runtime rather
+than linked. Build both of those with:</p>
 <pre><code class="language-bash">cargo xtask build-host
 </code></pre>
 <p><code>build-host</code> puts <code>foldit-worker</code> and the <code>foldit-python-host</code> dylib next to

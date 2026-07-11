@@ -7,7 +7,7 @@ as `Arc<MoleculeEntity>`, history snapshots own them, the render projector hands
 assemblies to viso, and the plugin protocol serializes them across the IPC
 boundary.
 
-molex is depended on as the published crates.io crate (`0.7.4`). As with viso and
+molex is depended on as the published crates.io crate (`0.8.0`). As with viso and
 the plugin SDK, its `[patch]` entry in the root `Cargo.toml` is commented out by
 default, so it builds from the release even when the `crates/molex` submodule is
 checked out. See [Workspace Layout](../getting-started/workspace-layout.md).

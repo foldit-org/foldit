@@ -6,7 +6,8 @@ differently, and only the Python path pulls libpython into the process.
 ## Native plugins
 
 `kind = "native"` plugins are shared libraries that export the plugin vtable.
-The worker dlopens the library directly. Rosetta is the native plugin: its
+The worker dlopens the library directly. The native plugins are `rosetta`,
+`design`, and `xtal`. Rosetta is the most involved: its
 manifest names a `binary` basename that
 `PluginManifest::native_binary_name()` resolves to the platform-canonical file
 name (`librosetta_interactive.dylib`, `librosetta_interactive.so`, or
@@ -16,14 +17,14 @@ no separate plugin dylib.
 
 ## Python plugins
 
-`kind = "python"` plugins (the `dummy`, `foundry`, and `simplefold` plugins
-under `crates/foldit-runner/plugins/`) run through **foldit-python-host**, a
+`kind = "python"` plugins (the `foundry` and `simplefold` plugins
+under `plugins/`) run through **foldit-python-host**, a
 `cdylib` that links libpython. The worker dlopens it only when it is about to
 host a Python plugin, so libpython joins the process lazily; a session that uses
 only native plugins never loads it.
 
-`foldit-python-host` is a root workspace member even though its source lives
-inside the `foldit-runner` submodule (`crates/foldit-runner/python-host`). It
+`foldit-python-host` is a root workspace member; its source lives in-tree
+under `foldit-runner` (`crates/foldit-runner/python-host`). It
 depends on `foldit-runner` for the `Plugin` trait, the proto and orchestrator
 types, and the C-ABI struct definitions, and on `foldit-plugin-sdk` for the
 `PluginError` value type its `impl Plugin for PyPlugin` builds.
