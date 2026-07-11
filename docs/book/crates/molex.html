@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-70c37fe9.js";
+            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-337fa47a.js"></script>
+        <script src="../toc-9ae07f6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -184,10 +184,10 @@
 as <code>Arc&lt;MoleculeEntity&gt;</code>, history snapshots own them, the render projector hands
 assemblies to viso, and the plugin protocol serializes them across the IPC
 boundary.</p>
-<p>Unlike viso and the plugin SDK, molex is depended on as the published crates.io
-crate (<code>0.7.1</code>) with no <code>[patch]</code> block, so it builds from the release even when
-the <code>crates/molex</code> submodule is checked out. See
-<a href="../getting-started/workspace-layout.html">Workspace Layout</a>.</p>
+<p>molex is depended on as the published crates.io crate (<code>0.7.4</code>). As with viso and
+the plugin SDK, its <code>[patch]</code> entry in the root <code>Cargo.toml</code> is commented out by
+default, so it builds from the release even when the <code>crates/molex</code> submodule is
+checked out. See <a href="../getting-started/workspace-layout.html">Workspace Layout</a>.</p>
 <p>This book does not re-derive molex’s internals (the entity and assembly model,
 the format adapters, analysis, the codec and wire format, the Python bindings).
 Those are documented in molex’s own book.</p>

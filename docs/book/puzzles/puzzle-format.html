@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Workspace Layout - Foldit</title>
+        <title>Puzzle Format and Conversion - Foldit</title>
 
 
         <!-- Custom HTML head -->
@@ -177,93 +177,288 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="workspace-layout"><a class="header" href="#workspace-layout">Workspace Layout</a></h1>
-<p>The root <code>Cargo.toml</code> defines the workspace. Its members are all root-owned:</p>
+                        <h1 id="puzzle-format-and-conversion"><a class="header" href="#puzzle-format-and-conversion">Puzzle Format and Conversion</a></h1>
+<p>A puzzle is a level directory. In the current engine each lives under
+<code>assets/levels/&lt;id&gt;/</code> and is described by a single self-contained
+<code>puzzle.toml</code>, alongside the asset files it names by relative path
+(<code>structure.pdb</code>, a ligand <code>.params</code>, a <code>.cnstr</code> constraints file, density
+maps). The parser is <code>crates/foldit-core/src/puzzle_toml.rs</code> (the serde
+schema is the source of truth) and <code>puzzle.toml</code> is read in one shot by
+<code>load_puzzle</code> (<code>puzzle_toml.rs:221</code>). <code>puzzle_load.rs</code> lifts the parsed
+struct into the runtime <code>LoadedPuzzle</code>.</p>
+<p>This page is both a format reference for <code>puzzle.toml</code> and a guide for
+converting the legacy Rosetta <code>.ir_puzzle.*</code> puzzles into it.</p>
+<h2 id="anatomy-of-a-puzzletoml"><a class="header" href="#anatomy-of-a-puzzletoml">Anatomy of a <code>puzzle.toml</code></a></h2>
+<p>The whole file deserializes into <code>PuzzleLevel</code> (<code>puzzle_toml.rs:10</code>): a
+required <code>[puzzle]</code> table plus optional sub-tables, then the dialogue
+arrays (<code>sequence</code>, <code>sequence_alt</code>, <code>branch</code>, <code>on_event</code>, <code>game_event</code>).</p>
+<h3 id="puzzle--metadata-puzzlemeta-required"><a class="header" href="#puzzle--metadata-puzzlemeta-required"><code>[puzzle]</code> — metadata (<code>PuzzleMeta</code>, required)</a></h3>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Member</th><th>Path</th><th>Kind</th><th>Role</th></tr>
+<tr><th>Key</th><th>Type</th><th>Meaning</th></tr>
 </thead>
 <tbody>
-<tr><td><code>foldit-core</code></td><td><code>crates/foldit-core</code></td><td>lib</td><td>Host-agnostic application logic</td></tr>
-<tr><td><code>foldit-desktop</code></td><td><code>crates/foldit-desktop</code></td><td>bin (<code>foldit</code>)</td><td>winit + wry + wgpu desktop shell</td></tr>
-<tr><td><code>foldit-web</code></td><td><code>crates/foldit-web</code></td><td>cdylib + rlib</td><td>wasm32 entry, canvas-mounted</td></tr>
-<tr><td><code>foldit-gui</code></td><td><code>crates/foldit-gui</code></td><td>lib</td><td>Wire and state types, JS-to-Rust bridge</td></tr>
-<tr><td><code>foldit-runner</code></td><td><code>crates/foldit-runner</code></td><td>rlib + bin (<code>foldit-worker</code>)</td><td>Plugin runner and worker binary</td></tr>
-<tr><td><code>foldit-python-host</code></td><td><code>crates/foldit-runner/python-host</code></td><td>cdylib</td><td>Python plugin host dylib</td></tr>
-<tr><td><code>xtask</code></td><td><code>xtask</code></td><td>bin</td><td>Build and packaging automation</td></tr>
+<tr><td><code>title</code></td><td>string</td><td>Display name (required).</td></tr>
+<tr><td><code>start_energy</code></td><td>float</td><td>Starting Rosetta energy of the pose (required).</td></tr>
+<tr><td><code>completion_score</code></td><td>float</td><td>Game-score threshold that marks the puzzle solved (required).</td></tr>
+<tr><td><code>structure</code></td><td>table</td><td>The starting structure — see <code>[puzzle.structure]</code> (required).</td></tr>
+<tr><td><code>camera</code></td><td>table</td><td>Initial camera — see <code>[puzzle.camera]</code> (required).</td></tr>
+<tr><td><code>view_preset</code></td><td>string</td><td>Optional named view preset from <code>assets/view_presets</code>.</td></tr>
+<tr><td><code>weights</code></td><td>table</td><td>Optional score-term weight patch, <code>term = value</code>.</td></tr>
 </tbody>
 </table>
 </div>
-<p><code>default-members = ["crates/foldit-desktop"]</code>, so bare cargo commands target the
-desktop binary.</p>
-<h2 id="two-non-obvious-members"><a class="header" href="#two-non-obvious-members">Two non-obvious members</a></h2>
+<p><code>PuzzleMeta</code> also carries <code>#[serde(flatten)] extra</code> (<code>puzzle_toml.rs:68</code>),
+so <strong>any unrecognized key under <code>[puzzle]</code> is silently absorbed and has no
+runtime effect</strong>. Real levels carry several such keys as informational or
+not-yet-wired settings: <code>view_setup</code>, <code>scorefxn</code>, <code>min_moves</code>,
+<code>guide_visible</code>, <code>can_align_guide</code>, <code>use_dof_tethers</code>. Do not assume a key
+does something because the game accepts it without error; only the fields
+in the table above (and the sub-tables below) are consumed.</p>
+<h3 id="puzzlestructure--the-starting-pose-structureref"><a class="header" href="#puzzlestructure--the-starting-pose-structureref"><code>[puzzle.structure]</code> — the starting pose (<code>StructureRef</code>)</a></h3>
+<pre><code class="language-toml">[puzzle.structure]
+path = "structure.pdb"   # relative to the level dir; or use `data` for inline
+format = "pdb"           # "pdb", "cif", ...
+ss = "LEEEEEELLLL..."    # optional per-residue secondary-structure string
+</code></pre>
+<p><code>path</code> (a sibling file) or <code>data</code> (inline text) supplies the coordinates;
+<code>format</code> names the parser; <code>ss</code> optionally pins the secondary structure
+that the cartoon renders (<code>puzzle_toml.rs:97</code>).</p>
+<h3 id="puzzlecamera--initial-view-camera"><a class="header" href="#puzzlecamera--initial-view-camera"><code>[puzzle.camera]</code> — initial view (<code>Camera</code>)</a></h3>
+<pre><code class="language-toml">[puzzle.camera]
+center = [-12, -24, -10]
+eye    = [27, 11, 86]
+up     = [-0.75, -0.45, 0.48]
+</code></pre>
+<p>Three <code>[f64; 3]</code> vectors (<code>puzzle_toml.rs:106</code>). Note the type difference
+from the legacy format, where each was a <code>"x y z"</code> string.</p>
+<h3 id="puzzlefilter--win-conditions-and-objectives-filterspec"><a class="header" href="#puzzlefilter--win-conditions-and-objectives-filterspec"><code>[[puzzle.filter]]</code> — win conditions and objectives (<code>FilterSpec</code>)</a></h3>
+<p>Each filter is one array-of-tables entry that folds a raw score bonus into
+the headline game score, mirroring the Rosetta <code>Filter</code> model
+(<code>puzzle_toml.rs:72</code>).</p>
+<pre><code class="language-toml">[[puzzle.filter]]
+type = "ClashCount"       # the filter kind (TOML key is `type`, Rust field `kind`)
+plugin = "rosetta"        # who scores it; omit for a foldit-native filter
+bonus = -200              # every other key is a free parameter
+max_clashes = 1
+</code></pre>
 <ul>
-<li><strong><code>foldit-gui</code> is in-tree, not a submodule.</strong> It is absent from <code>.gitmodules</code>,
-tracked directly in this repository, and its <code>repository</code> field points at this
-repo.</li>
-<li><strong><code>foldit-runner</code> is also in-tree</strong>, likewise absent from <code>.gitmodules</code>. Both
-it and the nested <code>foldit-python-host</code> at <code>crates/foldit-runner/python-host</code>
-are root workspace members; <code>foldit-core</code> depends on the runner by path.</li>
+<li><code>type</code> selects the filter; everything else becomes a flat <code>params</code> map
+and is forwarded verbatim, so no parameter is lost.</li>
+<li><code>plugin</code> is the routing switch (<code>puzzle_toml.rs:87</code>). <code>plugin = "rosetta"</code>
+forwards the filter to the Rosetta bridge; <strong>omitting <code>plugin</code></strong> marks a
+filter scored in-process by foldit’s own evaluator.</li>
+<li>An unknown <code>type</code> parses but evaluates to no bonus (forward-compatible).</li>
 </ul>
-<h2 id="submodules"><a class="header" href="#submodules">Submodules</a></h2>
-<p><code>.gitmodules</code> declares six submodules, each in its own repository:</p>
+<p>Filter kinds shipped in the current campaign, for reference when authoring:
+<code>ClashCount</code> (<code>max_clashes</code>), <code>VoidSize</code> (<code>max_void</code>), <code>HBondCount</code>
+(<code>min_bonds</code>), <code>ExposedCount</code> (<code>max_exposed_hydrophobics</code>, native — no
+<code>plugin</code>), <code>DisulfideCountScore</code>, <code>LayerScore</code>, <code>ResidueCountScore</code>,
+<code>ResidueIEScore</code>, <code>RoScriptScore</code>, <code>DSSPToGuide</code>, <code>Abego</code>. Each carries its
+own parameters; copy a shipped level using the same <code>type</code> as a template
+rather than guessing parameter names. The exhaustive kind vocabulary and
+each kind’s parameters live in the Rosetta <code>Filter</code> sources, not in this
+repo.</p>
+<h3 id="other-puzzle-asset-tables"><a class="header" href="#other-puzzle-asset-tables">Other <code>[puzzle.*]</code> asset tables</a></h3>
+<pre><code class="language-toml">[[puzzle.ligand]]              # LigandRef; repeatable
+params = "ligand.params"       # Rosetta residue-type topology
+conformers = "rotamers.pdb"    # optional conformer library
+
+[puzzle.constraints]           # ConstraintsRef
+file = "catalytic.cnstr"
+
+[puzzle.density]               # DensityRef: a precomputed electron-density map
+path = "map.ccp4"
+format = "ccp4"                # optional
+resolution = 2.5
+grid_spacing = 0.5             # optional
+
+[puzzle.reflns]                # ReflnsRef: structure factors (sf.cif)
+path = "sf.cif"
+space_group = 19               # optional override
+</code></pre>
+<p><code>[puzzle.reflns]</code> (structure factors, computed into a map) supersedes a
+static <code>[puzzle.density]</code> when both are present; the same reflections drive
+both the R-free objective and the <code>elec_dens</code> fit (<code>puzzle_toml.rs:143</code>,
+<code>puzzle_load.rs</code>).</p>
+<h3 id="puzzledesign_mask--designable-residues-designmaskentry"><a class="header" href="#puzzledesign_mask--designable-residues-designmaskentry"><code>[[puzzle.design_mask]]</code> — designable residues (<code>DesignMaskEntry</code>)</a></h3>
+<pre><code class="language-toml">[[puzzle.design_mask]]
+chain = "A"
+can_design = "1-40||55-90||"   # inclusive start-end ranges, `||`-separated
+</code></pre>
+<p>One block per structure <strong>chain</strong> (<code>puzzle_toml.rs:157</code>). A chain with no
+entry (for example, the ligand) is locked. The range syntax is inclusive
+<code>start-end</code> groups joined by <code>||</code>, trailing <code>||</code> allowed.</p>
+<h3 id="dialogue-sequence-branch-and-events"><a class="header" href="#dialogue-sequence-branch-and-events">Dialogue: <code>sequence</code>, <code>branch</code>, and events</a></h3>
+<p>The tutorial flow is arrays of speech bubbles plus scripted events. A
+<code>Bubble</code> (<code>puzzle_toml.rs:169</code>):</p>
+<pre><code class="language-toml">[[sequence]]
+text = "Fold up the tertiary structure."
+point_to = "level"            # what to highlight: "void", "clash", "score", "level", ...
+point_to_index = 12           # optional; integer or string target
+color = "science"             # "science", "game", "yellow", ...
+button = "Next"               # optional custom advance-button label
+alt_button = "Skip"           # optional; presents a choice
+alt_next = "branch_301"       # jump to a [[branch.&lt;name&gt;]] chain on the alt choice
+no_repeat = true              # show at most once
+trigger = "..."               # advance-trigger name
+image = "hint.png"
+link_name = "wiki"
+link_url = "https://..."
+</code></pre>
+<ul>
+<li><code>[[sequence]]</code> is the main flow; <code>[[sequence_alt]]</code> is a secondary chain;
+<code>[[branch.&lt;name&gt;]]</code> are named chains jumped to via a bubble’s <code>alt_next</code>.</li>
+<li><code>[[on_event]]</code> is an <code>EventBubble</code> (<code>puzzle_toml.rs:187</code>): a bubble fired
+on a named <code>event</code> (with optional <code>once</code>, <code>threshold</code>), e.g. a bubble
+shown on <code>"level_complete"</code>.</li>
+<li><code>[[game_event]]</code> is a <code>GameEvent</code> (<code>puzzle_toml.rs:197</code>): a scripted
+action keyed by <code>type</code>, gated by <code>condition</code>/<code>parameter</code>, with any extra
+fields (e.g. <code>type = "show_voids"</code>, <code>show_voids = false</code>).</li>
+</ul>
+<h2 id="the-legacy-format-what-you-convert-from"><a class="header" href="#the-legacy-format-what-you-convert-from">The legacy format (what you convert from)</a></h2>
+<p>Pre-TOML puzzles are <strong>not</strong> one file. A level is a fan of companion files
+sharing the stem <code>&lt;id&gt;.ir_puzzle</code>, distinguished by extension. The sources
+are on disk (944 files) at:</p>
+<pre><code>plugins/rosetta/deps/rosetta-interactive/resources/levels/
+</code></pre>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Submodule</th><th>Path</th></tr>
+<tr><th>Legacy file</th><th>Carries</th><th>New home</th></tr>
 </thead>
 <tbody>
-<tr><td><code>molex</code></td><td><code>crates/molex</code></td></tr>
-<tr><td><code>viso</code></td><td><code>crates/viso</code></td></tr>
-<tr><td><code>foldit-plugin-sdk</code></td><td><code>crates/foldit-plugin-sdk</code></td></tr>
-<tr><td><code>foundry</code></td><td><code>plugins/foundry</code></td></tr>
-<tr><td><code>rosetta</code></td><td><code>plugins/rosetta</code></td></tr>
-<tr><td><code>simplefold</code></td><td><code>plugins/simplefold</code></td></tr>
+<tr><td><code>&lt;id&gt;.ir_puzzle.intro</code></td><td>JSON metadata: title, camera, <code>start_score</code>/<code>start_energy</code>, <code>completion_score</code>, <code>view_setup</code>, dialogue bubbles + events, and <code>*_sum</code> MD5 checksums of the companion files</td><td><code>[puzzle]</code> + <code>[puzzle.camera]</code> + the dialogue arrays</td></tr>
+<tr><td><code>.pdb</code> / <code>.opdb</code></td><td>Starting coordinates (<code>o</code> = encrypted)</td><td><code>[puzzle.structure]</code></td></tr>
+<tr><td><code>.params</code></td><td>Rosetta ligand/residue-type topology</td><td><code>[[puzzle.ligand]]</code></td></tr>
+<tr><td><code>.puzzle_setup</code></td><td>Per-residue lock/design model (see below)</td><td><code>[[puzzle.design_mask]]</code> (only <code>can_design</code>; the rest is dropped)</td></tr>
+<tr><td><code>.filters</code></td><td>Win conditions</td><td><code>[[puzzle.filter]]</code></td></tr>
+<tr><td><code>.wts</code> / <code>.wts_patch</code></td><td>Full scorefunction / weight patch</td><td><code>[puzzle.weights]</code> (patch); a full <code>.wts</code> has no first-class home</td></tr>
+<tr><td><code>.cnstr</code> / <code>.constraints</code></td><td>Catalytic constraints (<code>## VIZTHRESH</code> header)</td><td><code>[puzzle.constraints]</code></td></tr>
+<tr><td><code>.density</code> / <code>.sf</code></td><td>Electron density / structure factors</td><td><code>[puzzle.density]</code> / <code>[puzzle.reflns]</code></td></tr>
+<tr><td><code>.second.pdb</code>, <code>.template.pdb</code>, <code>.align</code>, <code>.sym</code>, <code>.contact_heatmap</code>, …</td><td>Guide poses, threading templates, symmetry, etc.</td><td>No new equivalent (the contact-heatmap channel is already dead in the legacy client)</td></tr>
 </tbody>
 </table>
 </div>
-<p>The three under <code>crates/</code> are listed in the workspace <code>exclude</code> set. Without the
-exclude, cargo’s workspace discovery walks into them from the outside (for
-example when maturin runs <code>cargo metadata</code> on <code>crates/molex/Cargo.toml</code>) and
-errors. They build under their own manifests, not as members here. The three
-under <code>plugins/</code> are Python projects with no Cargo manifest, so cargo never sees
-them.</p>
-<h2 id="how-the-submodule-crates-are-depended-on"><a class="header" href="#how-the-submodule-crates-are-depended-on">How the submodule crates are depended on</a></h2>
-<p>The root crates depend on viso, molex, and the plugin SDK as published crates.
-The root <code>Cargo.toml</code> carries a <code>[patch]</code> entry for each, all commented out by
-default, so a default build resolves all three from their published sources and
-needs no submodule checkout:</p>
+<p>The <code>.puzzle_setup</code> file itself is a versioned dictionary, not Rosetta
+flags: a <code>version: 1</code> line, then a <code>{ ... }</code> block of <code>"key" : "value"</code>
+pairs. Beyond <code>can_design</code> it encodes an entire lock/action/GUI-gating
+layer (<code>backbone_locked</code>, <code>sidechain_locked</code>, <code>banned_actions</code>,
+<code>actions/*</code>, <code>gui/*</code>, tool toggles, length bounds). <strong>None of that layer
+survives into <code>puzzle.toml</code></strong> — the new format expresses only the
+designable-residue mask, not the full lock model.</p>
+<p>A real <code>.filters</code> object looks like:</p>
+<pre><code>version: 1
+{
+ "type" : "RMSDToGuide"
+ "start_res" : "1"
+ "stop_res" : "90"
+ "value_per_distance" : "50000.0"
+ "max_distance" : "20"
+}
+</code></pre>
+<p>(one brace object per filter, values all double-quoted, no commas).</p>
+<h3 id="two-things-the-new-format-cannot-represent"><a class="header" href="#two-things-the-new-format-cannot-represent">Two things the new format cannot represent</a></h3>
 <ul>
-<li><strong>viso</strong>: declared as a git dependency (<code>tag = "v0.3.11"</code>). A
-<code>[patch."https://github.com/foldit-org/viso"]</code> block redirects it to the local
-<code>crates/viso</code> checkout when uncommented.</li>
-<li><strong>foldit-plugin-sdk</strong>: declared as crates.io <code>0.1.6</code>. A <code>[patch.crates-io]</code>
-entry redirects it to the local <code>crates/foldit-plugin-sdk</code> checkout when
-uncommented.</li>
-<li><strong>molex</strong>: declared as crates.io <code>0.7.4</code> in every crate that uses it. A
-<code>[patch.crates-io]</code> entry redirects it to the local <code>crates/molex</code> checkout
-when uncommented.</li>
+<li><strong>Multi-stage puzzles.</strong> A legacy level with <code>.2.puzzle_setup</code>,
+<code>.2.params</code>, etc. is a puzzle with multiple <em>starting structures</em> the
+loader stacked in parallel. <code>puzzle.toml</code>’s <code>structure</code> is a single
+<code>StructureRef</code>, and the <code>sequence</code>/<code>branch</code> system is <em>dialogue</em>, not
+structure staging. Old multi-pose puzzles have no clean target; convert
+the primary stage and handle the rest out-of-band.</li>
+<li><strong>The lock model and action/GUI gating</strong> from <code>.puzzle_setup</code>, and
+<code>narrative_scenes</code> from <code>.intro</code>. Dropped entirely.</li>
 </ul>
-<p>To build a dependency from a local checkout instead of its release, uncomment the
-matching <code>[patch]</code> entry. See
-<a href="submodules.html">Local Development on Submodules</a>.</p>
-<h2 id="workspace-lints"><a class="header" href="#workspace-lints">Workspace lints</a></h2>
-<p><code>[workspace.lints.clippy]</code> mirrors viso’s clippy set but sets every level to
-<code>warn</code> rather than <code>deny</code>: the checks report the technical-debt picture across
-the root members without gating the build. Members opt in with
-<code>[lints]</code> plus <code>workspace = true</code>. The gates that do fail live in the
-<a href="../tooling/quality-gates.html">justfile</a>.</p>
+<h2 id="converting-a-legacy-puzzle"><a class="header" href="#converting-a-legacy-puzzle">Converting a legacy puzzle</a></h2>
+<h3 id="step-1--run-the-automated-transcriber"><a class="header" href="#step-1--run-the-automated-transcriber">Step 1 — run the automated transcriber</a></h3>
+<p><code>cargo xtask transcribe-filters</code> (<code>xtask/src/filters_transcribe.rs</code>)
+handles the two mechanical, error-prone parts across every curated level:</p>
+<ol>
+<li>It parses each <code>&lt;id&gt;.ir_puzzle.filters</code> object and writes a
+<code>[[puzzle.filter]]</code> block into the matching <code>assets/levels/&lt;id&gt;/puzzle.toml</code>.
+<code>type</code> becomes the filter kind; every other key is retained in the
+block. Kinds in <code>NATIVE_TYPES</code> (currently just <code>ExposedCount</code>) are
+emitted with no <code>plugin</code>; all others get <code>plugin = "rosetta"</code>.</li>
+<li>It ports the <code>can_design</code> mask out of <code>&lt;id&gt;.ir_puzzle.puzzle_setup</code> into
+<code>[[puzzle.design_mask]]</code> blocks.</li>
+</ol>
+<p>The pass is idempotent (it clears any existing <code>filter</code> array first, and
+drops the obsolete <code>[[puzzle.objective]]</code> array it replaced) and surgical
+(<code>toml_edit</code> preserves the rest of each file — tables, comments, ordering).</p>
+<blockquote>
+<p><strong>The design-mask numbering subtlety.</strong> Legacy <code>can_design</code> is in Rosetta
+<strong>pose numbering</strong>: one continuous <code>1..N</code> count over every residue in the
+pose, chains concatenated in structure order. The target
+<code>[[puzzle.design_mask]]</code> is <strong>per-chain PDB numbering</strong>. Because the new
+structure PDBs renumber per chain inconsistently, the transcriber maps a
+pose index through the structure’s residue <em>order</em> (the i-th distinct
+residue in <code>structure.pdb</code> is pose index i) — never by arithmetic on PDB
+numbers — then groups the result by chain into <code>start-end||</code> ranges. If
+you hand-convert a design mask, follow the same order-based mapping.</p>
+</blockquote>
+<h3 id="step-2--port-the-rest-by-hand"><a class="header" href="#step-2--port-the-rest-by-hand">Step 2 — port the rest by hand</a></h3>
+<p>The transcriber does not touch metadata, structure, camera, assets, or
+dialogue. Map those from the legacy <code>.intro</code> (and the asset companions)
+using this table:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Legacy source</th><th><code>puzzle.toml</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>.intro</code> <code>title</code></td><td><code>[puzzle] title</code></td></tr>
+<tr><td><code>.intro</code> <code>start_energy</code></td><td><code>[puzzle] start_energy</code></td></tr>
+<tr><td><code>.intro</code> <code>completion_score</code></td><td><code>[puzzle] completion_score</code></td></tr>
+<tr><td><code>.intro</code> camera <code>cam_center</code> / <code>cam_eye</code> / <code>cam_up</code> (<code>"x y z"</code> strings)</td><td><code>[puzzle.camera] center</code> / <code>eye</code> / <code>up</code> (float arrays)</td></tr>
+<tr><td><code>.intro</code> <code>view_setup</code></td><td><code>[puzzle] view_setup</code> — informational only (absorbed into <code>extra</code>)</td></tr>
+<tr><td><code>.pdb</code></td><td><code>[puzzle.structure] path</code> + <code>format</code> (add <code>ss</code> if pinning SS)</td></tr>
+<tr><td><code>.wts_patch</code> term overrides</td><td><code>[puzzle.weights]</code> map</td></tr>
+<tr><td><code>.params</code></td><td><code>[[puzzle.ligand]] params</code></td></tr>
+<tr><td><code>.cnstr</code></td><td><code>[puzzle.constraints] file</code></td></tr>
+<tr><td><code>.density</code> / <code>.sf</code></td><td><code>[puzzle.density]</code> / <code>[puzzle.reflns]</code></td></tr>
+<tr><td><code>.intro</code> <code>text_bubbles[]</code></td><td><code>[[sequence]]</code> (+ <code>[[branch.*]]</code> / <code>[[sequence_alt]]</code>)</td></tr>
+<tr><td><code>.intro</code> <code>puzzle_events[]</code></td><td><code>[[game_event]]</code> / <code>[[on_event]]</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Bubble and event fields map name-for-name from the legacy JSON parsed by
+<code>level_util.cc</code> (in the Rosetta source): a bubble’s <code>text_to_display</code> →
+<code>text</code>, <code>target_to_point_to</code> (an <code>LBL_*</code> enum) → <code>point_to</code> (lowercased
+tail, e.g. <code>LBL_VOID</code> → <code>"void"</code>), <code>color</code> → <code>color</code>,
+<code>unique_button_text</code> → <code>button</code>, <code>goto</code>/param jumps → <code>alt_next</code> naming a
+<code>[[branch.&lt;name&gt;]]</code>. Events map <code>event_condition</code> → <code>condition</code>,
+<code>event_parameter</code> → <code>parameter</code>, <code>event_trigger_once</code> → <code>once</code>.</p>
+<h3 id="step-3--verify"><a class="header" href="#step-3--verify">Step 3 — verify</a></h3>
+<p>Load the level (<code>cargo run --release &lt;id&gt;</code>) and confirm it parses and the
+scene, camera, filters, and dialogue behave. <code>load_puzzle</code> returns a
+<code>PuzzleError::Parse</code> on malformed TOML, but remember that an <em>unrecognized</em>
+<code>[puzzle]</code> key does <strong>not</strong> error — it is silently swallowed by <code>extra</code>, so
+a typo’d table key fails quietly. Cross-check unfamiliar keys against the
+schema in <code>puzzle_toml.rs</code>.</p>
+<h2 id="lossy-and-unverified-points"><a class="header" href="#lossy-and-unverified-points">Lossy and unverified points</a></h2>
+<ul>
+<li><code>start_score</code> (game units) vs <code>start_energy</code> (Rosetta units) collapse to
+a single <code>start_energy</code>; the legacy game-unit start value is not carried.</li>
+<li>A full <code>.wts</code> scorefunction file has no first-class home; only a
+<code>.wts_patch</code>-style term override maps to <code>[puzzle.weights]</code>. How the
+<code>scorefxn</code> string selects a base scorefunction is not documented here.</li>
+<li>The complete legacy filter-kind catalog and each kind’s parameter names
+live in the Rosetta <code>Filter</code> sources, which are not in this repository.
+The transcriber preserves whatever keys a <code>.filters</code> object carries, so
+the round-trip is faithful even for kinds not listed above; to author a
+new filter by hand, copy a shipped level using the same <code>type</code>.</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../getting-started/build-and-run.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../plugins/sdk.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../getting-started/submodules.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../tooling/quality-gates.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -273,11 +468,11 @@ the root members without gating the build. Members opt in with
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../getting-started/build-and-run.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../plugins/sdk.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../getting-started/submodules.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../tooling/quality-gates.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-70c37fe9.js";
+            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-337fa47a.js"></script>
+        <script src="../toc-9ae07f6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -183,8 +183,9 @@ takes a molecule assembly and produces a 2D texture; the host decides what to do
 with it (a winit window on desktop, an HTML canvas on web). Foldit constructs a
 <code>VisoEngine</code>, hands it to the <code>App</code> through the engine harness, and the render
 projector republishes geometry to it whenever the scene changes.</p>
-<p>Foldit depends on viso by git tag (<code>v0.3.6</code>), with a <code>[patch]</code> that currently
-redirects it to the local submodule checkout. See
+<p>Foldit depends on viso by git tag (<code>v0.3.11</code>). The root <code>Cargo.toml</code> carries a
+commented-out <code>[patch]</code> block that redirects it to the local submodule checkout
+when uncommented. See
 <a href="../getting-started/workspace-layout.html">Workspace Layout</a>.</p>
 <p>This book does not re-derive viso’s internals (impostor rendering, the
 post-processing pipeline, GPU picking, the background mesh thread, the camera and

@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-70c37fe9.js";
+            window.path_to_searchindex_js = "../searchindex-61fe0e40.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-337fa47a.js"></script>
+        <script src="../toc-9ae07f6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -178,29 +178,31 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="local-development-on-submodules"><a class="header" href="#local-development-on-submodules">Local Development on Submodules</a></h1>
-<p>A fresh clone does not populate the submodules. The root crates depend on viso
-and the plugin SDK through <code>[patch]</code> blocks that point at the local submodule
-paths, so those paths must exist for a default build. Populate them with the
+<p>A fresh clone does not populate the submodules, and a default build does not need
+them: every <code>[patch]</code> block is commented out, so viso, molex, and the plugin SDK
+all resolve from their published sources. You only need a submodule checked out
+when you want to build that dependency from local source. Populate them with the
 submodule update command:</p>
 <pre><code class="language-bash">git submodule update --init
 </code></pre>
 <p>or pull a single one by passing its path (for example <code>crates/viso</code>).</p>
 <h2 id="switching-a-dependency-between-local-and-published"><a class="header" href="#switching-a-dependency-between-local-and-published">Switching a dependency between local and published</a></h2>
-<p>Two <code>[patch]</code> blocks at the bottom of the root <code>Cargo.toml</code> redirect published
-dependencies to local submodule checkouts:</p>
-<pre><code class="language-toml">[patch."https://github.com/foldit-org/viso"]
-viso = { path = "crates/viso" }
+<p>The <code>[patch]</code> blocks at the bottom of the root <code>Cargo.toml</code> redirect published
+dependencies to local submodule checkouts. All three ship commented out:</p>
+<pre><code class="language-toml"># [patch."https://github.com/foldit-org/viso"]
+# viso = { path = "crates/viso" }
 
-[patch.crates-io]
-foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+# [patch.crates-io]
+# foldit-plugin-sdk = { path = "crates/foldit-plugin-sdk" }
+# molex = { path = "crates/molex" }
 </code></pre>
-<p>While a block is active, cargo builds that dependency from the local checkout,
-so edits there take effect on the next build. Comment a block out to build
-against the published version (the git tag for viso, the crates.io release for
-the plugin SDK); the local checkout is then ignored.</p>
-<p>molex has no patch block. It always resolves to the published <code>0.7.1</code> crate. To
-hack on molex locally, add a <code>[patch.crates-io]</code> entry pointing <code>molex</code> at
-<code>crates/molex</code> after checking that submodule out.</p>
+<p>Uncomment an entry (and its <code>[patch...]</code> header) to build that dependency from
+the local checkout, so edits there take effect on the next build. Leave it
+commented to build against the published version – the git tag for viso, the
+crates.io release for molex and the plugin SDK – and the local checkout is then
+ignored.</p>
+<p>Uncommenting a <code>[patch.crates-io]</code> entry requires the matching submodule to be
+checked out; cargo errors on a missing path.</p>
 <p>Each toggle is independent: viso can build from a local checkout while the
 plugin SDK builds from crates.io, or any other combination.</p>
 

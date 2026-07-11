@@ -31,6 +31,10 @@
 - [Python and Native Plugins](plugins/hosts.md)
 - [Plugin SDK and Protocol](plugins/sdk.md)
 
+# Puzzles
+
+- [Puzzle Format and Conversion](puzzles/puzzle-format.md)
+
 # Build and Tooling
 
 - [Quality Gates](tooling/quality-gates.md)
