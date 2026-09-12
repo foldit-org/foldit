@@ -29,7 +29,7 @@ use crate::history::{CheckpointId, CheckpointKind, EntitySnapshotId, FilterStatu
 /// untouched while changing residue names, elements and bonds; such a frame
 /// must clone. Each check is an allocation-free scan, cheaper than the clone
 /// it guards.
-fn composition_matches(dst: &MoleculeEntity, src: &MoleculeEntity) -> bool {
+pub(crate) fn composition_matches(dst: &MoleculeEntity, src: &MoleculeEntity) -> bool {
     let (cd, cs) = (dst.columns(), src.columns());
     if dst.molecule_type() != src.molecule_type()
         || dst.atom_count() != src.atom_count()

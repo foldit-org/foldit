@@ -30,6 +30,7 @@ mod mutators;
 mod previews;
 
 pub use change::{HeadMoveCause, SessionUpdate, SessionUpdateConsumer};
+pub(crate) use mutators::composition_matches;
 use previews::Previews;
 
 use crate::history::{CheckpointId, History, HistoryError};

@@ -9,7 +9,7 @@
 	url = https://github.com/foldit-org/foldit-plugin-sdk
 [submodule "plugins/foundry"]
     path = plugins/foundry
-    url = https://github.com/foldit-org/foldit-foundry-plugin
+    url = https://github.com/MrBrain295/foldit-foundry-plugin
 [submodule "plugins/rosetta"]
     path = plugins/rosetta
     url = https://github.com/foldit-org/foldit-rosetta-plugin
