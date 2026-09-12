@@ -156,6 +156,17 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn adopt_created_entities(&mut self, assembly: &molex::Assembly) {
         for entity in assembly.entities() {
+            let payload = (**entity).clone().complete(molex::Completion::Heavy);
+            if self
+                .store
+                .head_assembly()
+                .entities()
+                .iter()
+                .any(|existing| crate::session::composition_matches(existing, &payload))
+            {
+                log::debug!("skipping adopted entity with an existing composition");
+                continue;
+            }
             self.adopt_one_entity((**entity).clone());
         }
     }
@@ -165,6 +176,7 @@ impl App {
     /// designable, making the created design itself the designable target.
     #[cfg(not(target_arch = "wasm32"))]
     fn adopt_one_entity(&mut self, payload: molex::MoleculeEntity) {
+        let payload = payload.complete(molex::Completion::Heavy);
         let residue_count = payload.residue_count();
         let id = self.store.insert_design_preview(payload);
         if self.promote_adopted(id) {
