@@ -57,9 +57,9 @@ fn composition_matches(dst: &MoleculeEntity, src: &MoleculeEntity) -> bool {
 /// `position` and `observed`. Guarded by [`composition_matches`], so the
 /// column lengths and atom ordering already match.
 ///
-/// `b_factor` and `occupancy` are deliberately retained, not copied: they are
-/// static crystallographic input metadata the plugin neither consumes nor
-/// produces, so `dst`'s parsed values must survive a value-only frame.
+/// Coordinate-only operations retain `b_factor` and `occupancy` so their
+/// parsed values survive frames with default or stale metadata. Operations
+/// that produce B-factors apply them in [`Session::apply_streaming_assembly`].
 /// [`composition_matches`] has asserted identical atom count and ordering, so
 /// the retained columns stay index-aligned with the incoming positions.
 fn overwrite_value_columns(dst: &mut MoleculeEntity, src: &MoleculeEntity) {
@@ -553,6 +553,15 @@ impl Session {
         raw_score: Option<f64>,
         request_id: u64,
     ) -> bool {
+        // The protocol has no per-column ownership declaration. Only the
+        // known B-factor producer owns B; occupancy remains experimental input.
+        // Read this request's kind so concurrent coordinate ops cannot inherit
+        // another pending action's ownership.
+        let refines_b = matches!(
+            self.history.pending_kind(request_id),
+            Some(CheckpointKind::PluginOp { plugin_id, op_id, .. })
+                if plugin_id == "xtal" && op_id == "refine_b"
+        );
         let mut applied = false;
         let res = self.action_update(request_id, raw_score, raw_score, None, |entity_mut| {
             if let Some(src) = incoming.entity(entity_mut.id()) {
@@ -566,10 +575,17 @@ impl Session {
                     // Identity changed (post-Init adoption adds completion
                     // hydrogens): adopt the incoming entity wholesale, then
                     // carry the parsed crystallographic columns across by
-                    // (residue, atom name) - the plugin does not own them and
-                    // atom indices no longer line up.
+                    // (residue, atom name) since atom indices no longer line up.
                     let old = std::mem::replace(entity_mut, src.clone());
                     carry_crystallographic_columns(entity_mut, &old);
+                }
+                if refines_b {
+                    // Apply after either path so the identity-changing carry
+                    // cannot overwrite refined values with the old B column.
+                    entity_mut
+                        .columns_mut()
+                        .b_factor
+                        .copy_from_slice(&src.columns().b_factor);
                 }
                 applied = true;
             }

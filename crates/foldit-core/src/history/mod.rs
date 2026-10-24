@@ -249,6 +249,12 @@ impl History {
         self.pending.contains_key(&request_id)
     }
 
+    /// The operation identity of the open action under `request_id`.
+    #[must_use]
+    pub(super) fn pending_kind(&self, request_id: u64) -> Option<&CheckpointKind> {
+        self.pending.get(&request_id).map(|edit| &edit.kind)
+    }
+
     /// Topology version - bumped on push / move / evict. Triggers full
     /// reproject on the wire.
     #[must_use]

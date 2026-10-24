@@ -93,6 +93,270 @@ fn wiggle() -> CheckpointKind {
     }
 }
 
+/// Two glycine backbones with distinct experimental values at every index.
+#[allow(clippy::unwrap_used)]
+fn crystallographic_protein() -> MoleculeEntity {
+    let backbone = mk_protein(mk_dummy_id(), 2);
+    let cols = backbone.columns();
+    let atoms = (0..backbone.atom_count())
+        .map(|i| Atom {
+            position: cols.position[i],
+            occupancy: cols.occupancy[i],
+            b_factor: cols.b_factor[i],
+            element: cols.element[i],
+            name: cols.name[i],
+            formal_charge: cols.formal_charge[i],
+            observed: cols.observed[i],
+        })
+        .collect();
+    let mut residues = backbone.residues().unwrap().to_vec();
+    for residue in &mut residues {
+        residue.name = *b"GLY";
+    }
+    let mut entity = MoleculeEntity::Protein(ProteinEntity::new_continuous(
+        mk_dummy_id(),
+        atoms,
+        residues,
+        "A".to_owned(),
+    ));
+    let columns = entity.columns_mut();
+    columns
+        .b_factor
+        .copy_from_slice(&[48.0, 51.0, 46.0, 55.0, 38.0, 41.0, 36.0, 45.0]);
+    columns
+        .occupancy
+        .copy_from_slice(&[1.0, 0.8, 1.0, 1.0, 0.9, 1.0, 0.7, 1.0]);
+    columns.position.copy_from_slice(&[
+        glam::Vec3::new(0.0, 0.0, 0.0),
+        glam::Vec3::new(1.46, 0.0, 0.0),
+        glam::Vec3::new(2.0, 1.42, 0.0),
+        glam::Vec3::new(1.3, 2.43, 0.0),
+        glam::Vec3::new(3.3, 1.49, 0.0),
+        glam::Vec3::new(3.98, 2.78, 0.0),
+        glam::Vec3::new(5.49, 2.6, 0.0),
+        glam::Vec3::new(6.01, 1.48, 0.0),
+    ]);
+    entity
+}
+
+fn plugin_kind(plugin_id: &str, op_id: &str) -> CheckpointKind {
+    CheckpointKind::PluginOp {
+        plugin_id: plugin_id.to_owned(),
+        op_id: op_id.to_owned(),
+        // Ownership must use stable operation identity, not this display label.
+        display: "Refine B".to_owned(),
+    }
+}
+
+#[test]
+#[allow(
+    clippy::float_cmp,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines
+)]
+fn streaming_refine_b_commits_per_atom_values_and_restores_history() {
+    let mut store = Session::new();
+    let ids = store.seed_history_with_entities(
+        [
+            crystallographic_protein(),
+            crystallographic_protein(),
+            crystallographic_protein(),
+        ],
+        PathBuf::from("synthetic.pdb"),
+        "glycine",
+    );
+    let original = store.head_assembly();
+    let refined_a = [26.5, 29.0, 31.5, 27.0, 16.5, 19.0, 21.5, 17.0];
+    let refined_b = [36.5, 39.0, 41.5, 37.0, 46.5, 49.0, 51.5, 47.0];
+    let mut returned: Vec<_> = original.entities().iter().map(|e| (**e).clone()).collect();
+    returned[0]
+        .columns_mut()
+        .b_factor
+        .copy_from_slice(&refined_a);
+    returned[1]
+        .columns_mut()
+        .b_factor
+        .copy_from_slice(&refined_b);
+    returned[2].columns_mut().b_factor.fill(99.0);
+    // Bad/default occupancy in a returned frame must never acquire ownership.
+    for entity in &mut returned {
+        entity.columns_mut().occupancy.fill(0.0);
+    }
+    // Entity order on the wire is not the Session lane order.
+    returned.reverse();
+    let bytes = molex::Assembly::new(returned)
+        .to_bytes()
+        .expect("serialize terminal");
+    let terminal = molex::Assembly::from_bytes(&bytes).expect("decode terminal");
+    assert_eq!(
+        terminal.entity(ids[0]).unwrap().columns().b_factor,
+        refined_a
+    );
+    store
+        .begin_action(
+            [ids[0], ids[1]],
+            plugin_kind("xtal", "refine_b"),
+            "Refine B",
+            71,
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+    // A simultaneous coordinate operation must not inherit the other edit's policy.
+    store
+        .begin_action(
+            [ids[2]],
+            wiggle(),
+            "wiggle",
+            72,
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+    assert!(!store.apply_streaming_assembly(&terminal, None, 999));
+    assert!(store.apply_streaming_assembly(&terminal, None, 71));
+    assert!(store.apply_streaming_assembly(&terminal, None, 72));
+    let coordinate_checkpoint = store.commit_action(72).unwrap();
+    let peer_commit = store
+        .history()
+        .checkpoint_composition_entities(coordinate_checkpoint)
+        .unwrap();
+    assert_eq!(
+        peer_commit[0].columns().b_factor,
+        original.entity(ids[0]).unwrap().columns().b_factor
+    );
+    let refined_checkpoint = store.commit_action(71).unwrap();
+    let committed = store
+        .history()
+        .checkpoint_composition_entities(refined_checkpoint)
+        .unwrap();
+    assert_eq!(committed[0].columns().b_factor, refined_a);
+    assert_eq!(committed[1].columns().b_factor, refined_b);
+    assert_eq!(
+        committed[2].columns().b_factor,
+        original.entity(ids[2]).unwrap().columns().b_factor
+    );
+    for entity in &committed {
+        let old = original.entity(entity.id()).unwrap();
+        assert_eq!(entity.columns().occupancy, old.columns().occupancy);
+        assert_eq!(entity.columns().position, old.columns().position);
+        assert_eq!(entity.columns().name, old.columns().name);
+        assert_eq!(entity.atom_count(), old.atom_count());
+    }
+    assert_eq!(store.entity(ids[0]).unwrap().columns().b_factor, refined_a);
+    assert_eq!(store.undo().unwrap(), Some(coordinate_checkpoint));
+    assert_eq!(
+        store.entity(ids[0]).unwrap().columns().b_factor,
+        original.entity(ids[0]).unwrap().columns().b_factor
+    );
+    assert_eq!(
+        store.redo(Some(refined_checkpoint)).unwrap(),
+        Some(refined_checkpoint)
+    );
+    assert_eq!(store.entity(ids[0]).unwrap().columns().b_factor, refined_a);
+    assert_eq!(store.entity(ids[1]).unwrap().columns().b_factor, refined_b);
+}
+
+#[test]
+#[allow(clippy::float_cmp, clippy::unwrap_used)]
+fn streaming_coordinate_ops_retain_crystallographic_metadata() {
+    for kind in [
+        wiggle(),
+        plugin_kind("unrelated", "refine_b"),
+        plugin_kind("xtal", "other_op"),
+    ] {
+        let mut store = Session::new();
+        let id = store.seed_history_with_entities(
+            [crystallographic_protein()],
+            PathBuf::new(),
+            "glycine",
+        )[0];
+        let old = store.entity(id).unwrap().clone();
+        let mut returned = old.clone();
+        returned.columns_mut().b_factor.fill(0.0);
+        returned.columns_mut().occupancy.fill(0.0);
+        for position in &mut returned.columns_mut().position {
+            *position += glam::Vec3::X;
+        }
+        returned.columns_mut().observed[1] = false;
+        let positions = returned.columns().position.clone();
+        store
+            .begin_action(
+                [id],
+                kind,
+                "Refine B",
+                81,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(store.apply_streaming_assembly(&molex::Assembly::new(vec![returned]), None, 81));
+        store.commit_action(81).unwrap();
+        let entity = store.entity(id).unwrap();
+        assert_eq!(entity.columns().b_factor, old.columns().b_factor);
+        assert_eq!(entity.columns().occupancy, old.columns().occupancy);
+        assert_eq!(entity.columns().position, positions);
+        assert!(!entity.columns().observed[1]);
+    }
+}
+
+#[test]
+#[allow(clippy::float_cmp, clippy::unwrap_used)]
+fn streaming_completion_keeps_atom_name_alignment_and_operation_ownership() {
+    for (kind, refines_b) in [(wiggle(), false), (plugin_kind("xtal", "refine_b"), true)] {
+        let mut store = Session::new();
+        let id = store.seed_history_with_entities(
+            [crystallographic_protein()],
+            PathBuf::new(),
+            "glycine",
+        )[0];
+        let old = store.entity(id).unwrap().clone();
+        let mut returned = old.clone().complete(molex::Completion::AllAtom);
+        assert!(returned.atom_count() > old.atom_count());
+        let mut next_b = 20.5;
+        for b in &mut returned.columns_mut().b_factor {
+            *b = next_b;
+            next_b += 1.0;
+        }
+        returned.columns_mut().occupancy.fill(0.0);
+        let incoming_b = returned.columns().b_factor.clone();
+        let positions = returned.columns().position.clone();
+        let atom_count = returned.atom_count();
+        store
+            .begin_action(
+                [id],
+                kind,
+                "completion",
+                91,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(store.apply_streaming_assembly(&molex::Assembly::new(vec![returned]), None, 91));
+        store.commit_action(91).unwrap();
+        let entity = store.entity(id).unwrap();
+        assert_eq!(entity.atom_count(), atom_count);
+        assert_eq!(entity.columns().position, positions);
+        for (r, residue) in entity.residues().unwrap().iter().enumerate() {
+            for i in residue.atom_range.clone() {
+                // Completion inserts hydrogens between the old residue ranges.
+                // Locate each original atom in its own residue by name.
+                let old_index = old.residues().unwrap()[r]
+                    .atom_range
+                    .clone()
+                    .find(|&j| old.columns().name[j] == entity.columns().name[i]);
+                let expected_b = if refines_b {
+                    incoming_b[i]
+                } else {
+                    old_index.map_or(incoming_b[i], |j| old.columns().b_factor[j])
+                };
+                assert_eq!(entity.columns().b_factor[i], expected_b);
+                assert_eq!(
+                    entity.columns().occupancy[i],
+                    old_index.map_or(0.0, |j| old.columns().occupancy[j])
+                );
+            }
+        }
+    }
+}
+
 // ── Preview lifecycle: insert → promote moves into history ────────
 
 #[test]

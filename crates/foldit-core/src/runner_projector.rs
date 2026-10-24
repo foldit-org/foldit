@@ -128,8 +128,8 @@ fn head_plugin_source(doc: &Session) -> &str {
         })
 }
 
-/// Encode the broadcast for one drain: a coord-only `Delta` when `prior`
-/// and `new` share topology, otherwise a `Full`. Returns `None` only when
+/// Encode the broadcast for one drain: a `Delta` when all changes are
+/// representable as edits, otherwise a `Full`. Returns `None` only when
 /// the Full serialize fails (currently impossible for in-memory
 /// assemblies), at which point the caller skips the broadcast.
 ///
@@ -156,8 +156,8 @@ fn encode_payload(
 /// carry the same entity-id set in the same order, so every entity is
 /// pairwise-diffable; returns `None` when an entity was added, removed, or
 /// reordered, or when any per-entity change isn't representable as an edit
-/// (a residue insert/delete) - at which point the caller broadcasts a full
-/// snapshot. Coord moves ride the delta as `SetEntityCoords`, mutations as
+/// (including crystallographic columns) - at which point the caller broadcasts
+/// a full snapshot. Coord moves ride the delta as `SetEntityCoords`, mutations as
 /// `MutateResidue`.
 fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> {
     let prior_entities = prior.entities();
@@ -168,6 +168,13 @@ fn assembly_diff(prior: &Assembly, new: &Assembly) -> Option<Vec<AssemblyEdit>> 
     let mut edits = Vec::new();
     for (p, n) in prior_entities.iter().zip(new_entities.iter()) {
         if p.id() != n.id() {
+            return None;
+        }
+        // Molex's edit vocabulary deliberately excludes these columns. A
+        // delta would silently leave peer plugins with stale refined values.
+        if p.columns().b_factor != n.columns().b_factor
+            || p.columns().occupancy != n.columns().occupancy
+        {
             return None;
         }
         edits.extend(p.diff(n).ok()?);
@@ -234,6 +241,28 @@ mod tests {
             edits.as_slice(),
             [AssemblyEdit::SetEntityCoords { .. }]
         ));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, clippy::expect_used, clippy::panic)]
+    fn encode_payload_crystallographic_change_is_full() {
+        let (a, _) = two_ids();
+        let mut original = mk_bulk(a, glam::Vec3::ZERO);
+        original.columns_mut().b_factor[0] = 48.0;
+        original.columns_mut().occupancy[0] = 0.8;
+        let prior = Assembly::new(vec![original.clone()]);
+        for (b_factor, occupancy) in [(26.5, 0.8), (48.0, 0.5)] {
+            let mut refined = original.clone();
+            refined.columns_mut().b_factor[0] = b_factor;
+            refined.columns_mut().occupancy[0] = occupancy;
+            let new = Assembly::new(vec![refined]);
+            let Some(BroadcastPayload::Full(bytes)) = encode_payload(Some(&prior), &new) else {
+                panic!("crystallographic columns cannot be represented by a coordinate delta");
+            };
+            let replay = Assembly::from_bytes(&bytes).expect("full snapshot decodes");
+            assert_eq!(replay.entities()[0].columns().b_factor[0], b_factor);
+            assert_eq!(replay.entities()[0].columns().occupancy[0], occupancy);
+        }
     }
 
     #[test]
